@@ -247,6 +247,8 @@ fn trigger_graveyard_type_threshold(condition: &TriggerCondition) -> Option<u32>
             all_graveyard_thresholds_min(conditions.iter().map(trigger_graveyard_type_threshold))
         }
         TriggerCondition::Not { .. } => None,
+        // CR 508.1m: an event-time "while" gate carries its predicate inside.
+        TriggerCondition::EventTime { condition } => trigger_graveyard_type_threshold(condition),
         _ => None,
     }
 }
@@ -375,11 +377,12 @@ fn flip_comparator(comparator: Comparator) -> Comparator {
 /// OWN graveyard, at any nesting depth (Consuming Blob wraps it in `Offset`).
 ///
 /// Only own-graveyard scopes qualify. `CountScope::All` is deliberately
-/// excluded: the policy's `distinct_graveyard_types` counts only the AI's owned
-/// objects, so classifying an all-graveyards payoff (Tarmogoyf-class) as an
-/// own-graveyard plan would let an opponent satisfy it while the policy keeps
-/// rewarding self-mill against a different quantity. Opponent- and
-/// iterated-player scopes are likewise not this deck's own plan.
+/// excluded: the policy's `distinct_graveyard_types` counts only the AI's own
+/// graveyard (the shared pile, in a shared-zone format), so classifying an
+/// all-graveyards payoff (Tarmogoyf-class) as an own-graveyard plan would let
+/// an opponent satisfy it while the policy keeps rewarding self-mill against a
+/// different quantity. Opponent- and iterated-player scopes are likewise not
+/// this deck's own plan.
 fn quantity_reads_own_graveyard_types(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Ref { qty } => matches!(

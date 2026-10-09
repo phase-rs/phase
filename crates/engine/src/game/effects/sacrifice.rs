@@ -316,6 +316,25 @@ pub fn resolve(
         Some(ControllerRef::ParentTargetController)
     ) {
         Vec::new()
+    } else if ability.targets.is_empty()
+        && (crate::game::targeting::is_pure_event_context_filter(filter)
+            || matches!(
+                filter,
+                TargetFilter::ParentTarget | TargetFilter::AttachedTo
+            ))
+    {
+        // CR 603.2 + CR 608.2k: An untargeted object anaphor on a triggered ability
+        // (e.g. Slow Motion's "that player sacrifices that creature") names an object
+        // carried by event context or attached host, not a target the controller chose,
+        // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
+        // without falling back to `source_id` for unresolved ParentTarget.
+        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
     } else {
         // CR 400.7 + CR 603.7c: `effect_object_targets` indexes ParentTargetSlot
         // by DECLARED position, so a pin-filtered slice would renumber every
@@ -583,23 +602,41 @@ pub fn resolve(
         }
 
         // CR 701.21a: Defense-in-depth — a player can only sacrifice permanents
-        // they control. The primary fix is that Sacrifice no longer creates
-        // target slots (see extract_target_filter_from_effect), but if this
-        // path is ever reached, enforce controller ownership.
+        // they control.
         //
-        // CR 701.21a: "To sacrifice a permanent, its controller moves it..." — for an
-        // explicit anaphoric target (ParentTarget/ParentTargetSlot, e.g. Animate
-        // Dead's "that creature's controller sacrifices it"), the acting player is
-        // the object's OWN current controller, unconditionally, even if control
-        // changed since the ability (e.g. a delayed leaves-battlefield trigger) was
-        // created. The equality check below remains a valid defense-in-depth guard
-        // for every OTHER filter shape reaching this path.
-        if obj.controller != ability.controller
-            && !matches!(
-                filter,
-                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-            )
-        {
+        // CR 701.21a + CR 109.5: "To sacrifice a permanent, its controller moves it..."
+        // Determine the player authorized / instructed to perform the sacrifice:
+        // 1. If the filter carries an explicit controller scope (e.g. ParentTargetController,
+        //    Opponent, TargetPlayer, ScopedPlayer), resolve that authorized player scope.
+        // 2. For ParentTarget / ParentTargetSlot (e.g. Slow Motion or Animate Dead):
+        //    - If the ability carries an explicit scoped player from an upkeep/phase trigger
+        //      (e.g. Slow Motion's "At the beginning of the upkeep of enchanted creature's controller,
+        //      that player sacrifices that creature"), that specific player was instructed to sacrifice.
+        //      If that player no longer controls the permanent at resolution time, CR 701.21a prohibits
+        //      them from sacrificing it, and no other player was instructed to do so.
+        //    - If no scoped player is present (e.g. Animate Dead's leaves-battlefield delayed trigger:
+        //      "that creature's controller sacrifices it"), the permanent's current controller is instructed.
+        // 3. For implicit "you" instructions and all other filters (e.g. Breath of Fury's
+        //    TriggeringSource, SelfRef, CostPaidObject), CR 109.5 binds the instruction to
+        //    ability.controller regardless of any event-context scoped player (e.g. a damaged player
+        //    from a combat damage trigger). If the object is not controlled by ability.controller,
+        //    it cannot be sacrificed.
+        let authorized_sacrificers = if sacrifice_controller_scope(filter).is_some() {
+            resolve_sacrifice_scope(state, ability, filter)
+        } else if matches!(
+            filter,
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        ) {
+            if let Some(scoped_player) = ability.scoped_player {
+                vec![scoped_player]
+            } else {
+                vec![obj.controller]
+            }
+        } else {
+            vec![ability.controller]
+        };
+
+        if !authorized_sacrificers.contains(&obj.controller) {
             continue;
         }
 
@@ -655,13 +692,16 @@ mod tests {
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, AggregateFunction, Comparator, ControllerRef, CostPaidObjectSnapshot, Effect,
-        FilterProp, ObjectProperty, PtStat, PtValueScope, QuantityRef, TargetFilter, TypedFilter,
+        AbilityCondition, AbilityKind, AggregateFunction, Comparator, ControllerRef,
+        CostPaidObjectSnapshot, Effect, FilterProp, ObjectProperty, PtStat, PtValue, PtValueScope,
+        QuantityRef, SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
+    use crate::types::StaticDefinition;
 
     fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -2121,6 +2161,83 @@ mod tests {
              (battlefield went from {tokens_before} to {})",
             state.battlefield.len()
         );
+    }
+
+    /// CR 118.12 + CR 608.2c: "Sacrifice it and gain 1 life. If you do, create a
+    /// token." The rider needs the whole compound, so a refused sacrifice keeps it
+    /// false even though the later member performed.
+    #[test]
+    fn compound_if_you_do_needs_every_mandatory_member() {
+        for refuse in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let victim = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Victim".to_string(),
+                Zone::Battlefield,
+            );
+            if refuse {
+                state
+                    .objects
+                    .get_mut(&victim)
+                    .unwrap()
+                    .static_definitions
+                    .push(
+                        StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+                            .affected(TargetFilter::SelfRef),
+                    );
+            }
+            let mut rider = ResolvedAbility::new(
+                Effect::Token {
+                    name: "Test Token".to_string(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec!["Creature".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .condition(AbilityCondition::effect_performed());
+            rider.sub_link = SubAbilityLink::SequentialSibling;
+            let mut gain = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            gain.sub_link = SubAbilityLink::ContinuationStep;
+            gain.sub_ability = Some(Box::new(rider));
+            let mut ability = make_sacrifice_ability(victim);
+            ability.sub_ability = Some(Box::new(gain));
+
+            let life_before = state.players[0].life;
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+            assert_eq!(state.battlefield.contains(&victim), refuse);
+            assert_eq!(state.players[0].life, life_before + 1, "later member ran");
+            let created = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .any(|obj| obj.is_token && obj.name == "Test Token");
+            assert_eq!(created, !refuse, "refuse={refuse}");
+        }
     }
 
     /// Build the LKI carcass a `CostPaidObjectSnapshot` carries. The fields are

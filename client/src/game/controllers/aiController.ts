@@ -2,8 +2,9 @@ import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constan
 import { useGameStore } from "../../stores/gameStore";
 import { profileForSeat, useLlmStore } from "../../stores/llmStore";
 import { executeLlmRequest } from "../../services/llm/llmClient";
+import { loadProviderCatalog } from "../../services/llm/catalog";
 import { reportLlmFailure } from "../../services/llm/diagnostics";
-import { endpointOf } from "../../services/llm/types";
+import { resolvedEndpointOf } from "../../services/llm/endpoint";
 import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
@@ -13,8 +14,9 @@ import {
   recordAiDecisionDiagnostic,
 } from "../aiDecisionDiagnostics";
 import { debugLog } from "../debugLog";
-import { dispatchAiActionProposal } from "../dispatch";
+import { dispatchAiActionProposal, isDispatchIdle, processRemoteUpdate } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
+import { stateFingerprint } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
 
 /**
@@ -128,9 +130,13 @@ async function llmActionProposal(
   difficulty: string,
   llmSeatIndex: number | undefined,
   signal: AbortSignal,
+  isCurrent: () => boolean,
+  onAttempt: () => void,
 ): Promise<AiActionProposal | null> {
   if (llmSeatIndex == null) return null;
-  const profile = profileForSeat(useLlmStore.getState(), llmSeatIndex);
+  const catalog = await loadProviderCatalog();
+  if (signal.aborted || !isCurrent()) return null;
+  const profile = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
   if (!profile) return null;
 
   const { adapter, logHistory } = useGameStore.getState();
@@ -142,9 +148,16 @@ async function llmActionProposal(
   const built = await adapter.buildLlmDecisionRequest(
     difficulty,
     playerId,
-    JSON.stringify(endpointOf(profile)),
+    JSON.stringify(resolvedEndpointOf(profile)),
     JSON.stringify(history),
   );
+  if (signal.aborted || !isCurrent()) return null;
+  // A decision this provider cannot be asked at all (a forced move has no
+  // question to pose) is not the provider failing: the heuristic plays it, and
+  // it does not count toward giving the seat's provider up.
+  if (built?.errorKind?.kind === "unsupportedDecision") return null;
+  // From here the provider is in play, so an outcome without a proposal counts.
+  onAttempt();
   if (!built?.request || !built.fingerprint) {
     // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
     // the game log is prompt-renderable. Only the Phase-authored summary is
@@ -154,6 +167,7 @@ async function llmActionProposal(
   }
 
   const { status, body } = await executeLlmRequest(built.request, { signal });
+  if (signal.aborted || !isCurrent()) return null;
   // Status travels with the body so the engine can refuse a non-2xx reply
   // however it parses — an error page or gateway failure must never be bound to
   // a game action.
@@ -414,6 +428,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     // This turns additive latency (delay + compute) into max(delay, compute),
     // which matters most for deeper engine-owned searches.
     const { adapter, gameState } = useGameStore.getState();
+    let proposalAdapter = adapter;
     // Each seat has its own difficulty — a controller driving three AI players
     // can simultaneously run Easy, Medium, and VeryHard policies.
     const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
@@ -442,15 +457,27 @@ export function createAIController(config: AIControllerConfig): AIController {
     // it exists to recover a seat whose proposals keep failing, and adding a
     // network round trip to a recovery path is the wrong trade.
     const llmSeatIndex = llmSeatIndexByPlayerId.get(playerId);
+    const llmState = useLlmStore.getState();
+    const seatChoice = llmSeatIndex == null ? null : llmState.seatBindings[llmSeatIndex];
+    const candidateId = seatChoice === undefined ? llmState.defaultOpponentProfileId : seatChoice;
     let proposalPromise: Promise<AiActionProposal | null>;
-    if (useTacticalFallback || llmSeatIndex == null || llmDisabled.has(playerId)) {
+    if (useTacticalFallback || llmSeatIndex == null || !candidateId || llmDisabled.has(playerId)) {
       proposalPromise = heuristicProposal();
     } else {
       llmAbort?.abort();
       const abort = new AbortController();
       llmAbort = abort;
-      proposalPromise = llmActionProposal(playerId, difficulty, llmSeatIndex, abort.signal)
+      let attemptedLlm = false;
+      proposalPromise = llmActionProposal(
+        playerId,
+        difficulty,
+        llmSeatIndex,
+        abort.signal,
+        () => isAttemptCurrent(attempt),
+        () => { attemptedLlm = true; },
+      )
         .catch((error) => {
+          if (abort.signal.aborted || !isAttemptCurrent(attempt)) return null;
           reportLlmFailure(
             `LLM opponent (player ${playerId}) failed; using the engine AI`,
             error,
@@ -458,9 +485,10 @@ export function createAIController(config: AIControllerConfig): AIController {
           return null;
         })
         .then((proposal) => {
+          if (!isAttemptCurrent(attempt)) return null;
           // A cancelled call is not the provider's fault — the decision simply
           // moved on — so it must not count toward giving up on the seat.
-          if (!abort.signal.aborted) recordLlmOutcome(playerId, proposal != null);
+          if (!abort.signal.aborted && attemptedLlm) recordLlmOutcome(playerId, proposal != null);
           return proposal ?? heuristicProposal();
         });
     }
@@ -520,6 +548,7 @@ export function createAIController(config: AIControllerConfig): AIController {
               ? retryAdapter?.getAiTacticalActionProposal
               : retryAdapter?.getAiActionProposal;
             if (!retryGetProposal) return;
+            proposalAdapter = retryAdapter;
             proposal = await retryGetProposal.call(retryAdapter, difficulty, playerId);
           } catch (retryErr) {
             if (!isAttemptCurrent(attempt)) return;
@@ -549,6 +578,27 @@ export function createAIController(config: AIControllerConfig): AIController {
             `AI returned no engine-bounded proposal for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"})`,
             "warn",
           );
+          failed = true;
+          return;
+        }
+        if (
+          scheduledWaitingFor.type === "Priority"
+          && proposal.semanticOwner !== scheduledWaitingFor.data.player
+        ) {
+          // The live engine may have advanced beyond the displayed prompt.
+          // Reconcile its atomic snapshot before scheduling another decision.
+          if (!proposalAdapter || useGameStore.getState().adapter !== proposalAdapter) return;
+          const snapshot = await proposalAdapter.getSnapshot();
+          if (!isAttemptCurrent(attempt)) return;
+          const currentStore = useGameStore.getState();
+          if (currentStore.adapter !== proposalAdapter || !currentStore.gameState) return;
+          if (stateFingerprint(snapshot.state) !== stateFingerprint(currentStore.gameState)) {
+            // Do not queue a snapshot that could outlive this game session.
+            // With no events, an idle dispatch commits synchronously.
+            if (!isDispatchIdle()) return;
+            await processRemoteUpdate(snapshot, []);
+            return;
+          }
           failed = true;
           return;
         }
@@ -595,7 +645,7 @@ export function createAIController(config: AIControllerConfig): AIController {
             consecutiveFailures++;
             totalFailures++;
           }
-          if (active) {
+          if (active && useGameStore.getState().gameSessionGeneration === attempt.gameSessionGeneration) {
             checkAndSchedule();
             if (!pending) clearAiDecisionDiagnostic();
           }

@@ -24,6 +24,7 @@ use crate::types::game_state::{
 };
 use std::collections::HashSet;
 
+use crate::types::format::HandEntryOwnership;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -165,7 +166,9 @@ pub struct EntryMods {
     pub attach_to: Option<AttachTarget>,
     /// CR 608.2c: the player performing the instruction that moves the object;
     /// seeded onto `ProposedEvent::ZoneChange.performed_by` so delivery records
-    /// who exiled it (CR 406.6). `None` when no player performs the move.
+    /// who exiled it (CR 406.6). `None` when no player performs the move. A Hand
+    /// delivery out of a shared zone also reads it as the taker who becomes the
+    /// card's owner under `HandEntryOwnership::ReceiverOwns`.
     pub performed_by: Option<PlayerId>,
 }
 
@@ -378,15 +381,23 @@ impl ZoneMoveRequest {
     /// REPLACEMENT's source, not the draw cause. `seed_applied` carries the
     /// outer `ReplacementEvent::Draw` pass's applied set so the inner `Moved`
     /// consult does not double-apply a def that already fired at draw level
-    /// (CR 614.5, PLAN Risk #5).
-    pub fn draw(object_id: ObjectId, seed_applied: HashSet<AppliedReplacementKey>) -> Self {
+    /// (CR 614.5, PLAN Risk #5). `drawer` is the player whose hand receives the
+    /// card (CR 121.1).
+    pub fn draw(
+        object_id: ObjectId,
+        drawer: PlayerId,
+        seed_applied: HashSet<AppliedReplacementKey>,
+    ) -> Self {
         Self {
             object_id,
             to: Zone::Hand,
             cause: ZoneChangeCause::Draw {
                 seed_applied: seed_applied.clone(),
             },
-            mods: EntryMods::default(),
+            mods: EntryMods {
+                performed_by: Some(drawer),
+                ..EntryMods::default()
+            },
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: seed_applied,
@@ -545,6 +556,18 @@ impl ZoneMoveRequest {
     pub fn performed_by(mut self, player: PlayerId) -> Self {
         self.mods.performed_by = Some(player);
         self
+    }
+
+    /// CR 121.1 + CR 608.2c: name the player whose hand receives the card, only
+    /// when the requested destination is Hand, so a requested Exile never gains a
+    /// performer; a Hand request that a `Moved` replacement redirects to Exile
+    /// keeps it.
+    pub fn hand_taker(self, player: PlayerId) -> Self {
+        if self.to == Zone::Hand {
+            self.performed_by(player)
+        } else {
+            self
+        }
     }
 
     /// Record an "exiled with this source" link (CR 614 exile-tracking class).
@@ -1370,11 +1393,10 @@ fn deliver_batch(
             ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
-                // resume path. No batch flow targets a battlefield aura entry
-                // today (mill destinations are graveyard/exile/hand; mass bounce
-                // returns to hand/library), so this arm is unreachable for the
-                // current batch callers; stop and stash the tail so a future
-                // battlefield-entry batch does not silently drop its remainder.
+                // resume path. Battlefield-entry batches (reveal-until kept
+                // delivery, Dig mass put-all) reach this arm when an entering
+                // Aura needs a host; stop and stash the tail so the remainder is
+                // delivered when the attachment choice resumes the batch.
                 //
                 // The stashed tail IS drained correctly on resume: the
                 // `ReturnAsAuraTarget` handler (engine.rs:3608-3611) and its
@@ -3469,6 +3491,33 @@ fn compute_merged_card_component_route(
     })
 }
 
+/// The player who owns `object_id` once it enters `to`, when that differs from
+/// its current owner.
+///
+/// CR 400.3 routes a card to its owner's hand; a format whose hand-entry axis is
+/// `ReceiverOwns` makes the taker the owner of a card that comes out of a zone
+/// both seats read as one container. The origin gate reads the object's current
+/// zone, so a card leaving a per-seat zone keeps its owner.
+fn hand_entry_receiver(
+    state: &GameState,
+    object_id: ObjectId,
+    to: Zone,
+    taker: Option<PlayerId>,
+) -> Option<PlayerId> {
+    let taker = taker?;
+    if to != Zone::Hand {
+        return None;
+    }
+    match state.format_config.format.hand_entry_ownership() {
+        HandEntryOwnership::OwnerKept => return None,
+        HandEntryOwnership::ReceiverOwns => {}
+    }
+    let object = state.objects.get(&object_id)?;
+    let shared_container = state.zone_storage_seat(object.zone, object.owner)
+        == state.zone_storage_seat(object.zone, taker);
+    (object.owner != taker && shared_container).then_some(taker)
+}
+
 /// Deliver a zone-change event that has already passed through replacement.
 ///
 /// `library_placement` (CR 701.24a): when the event's delivered destination is
@@ -3734,12 +3783,14 @@ pub(crate) fn deliver_replaced_zone_change(
                     // `ProposedEvent::ZoneChange.enter_transformed` above; the
                     // flag is inert for any non-battlefield destination (the guard
                     // gates on `to == Battlefield`).
+                    let hand_receiver = hand_entry_receiver(state, object_id, to, performed_by);
                     zones::move_to_zone_with_entry_flags(
                         state,
                         object_id,
                         to,
                         events,
                         should_transform,
+                        hand_receiver,
                     );
                 }
             }
@@ -3930,6 +3981,13 @@ pub(crate) fn deliver_replaced_zone_change(
                     display_source: copy.display_source,
                     printed_ref: copy.printed_ref,
                     token_image_ref: copy.token_image_ref,
+                    // The recipient keeps its own base (Clone is a 0/0
+                    // Shapeshifter underneath), so it rides the source's
+                    // captured descriptor — or the legacy live-field search
+                    // when the source had none — exactly like the exact refs
+                    // above. Created copy-tokens never pass through here;
+                    // their descriptor is derived by the creation injectors.
+                    token_art: copy.token_art,
                     additional_modifications: copy.additional_modifications,
                     effect_kind: EffectKind::BecomeCopy,
                 };
@@ -4507,16 +4565,17 @@ fn execute_zone_move_with_applied_terminal(
             // planeswalker enters with 0 loyalty counters and dies immediately
             // to CR 704.5i. Ravenous (front-face cast-time) does not apply to an
             // effect-driven transformed entry, so only face counters are seeded.
+            // CR 714.3a: a back-face Saga's lore counter comes from its own
+            // replacement via the CR 614.12 projection
+            // (`replacement::stage_transformed_entry_projection`), not from
+            // this seeding.
             let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
-                (true, Some(back)) => {
-                    crate::game::printed_cards::intrinsic_entry_counters_for_face(
-                        back.printed_loyalty,
-                        back.loyalty,
-                        None,
-                        back.defense,
-                        &back.card_types,
-                    )
-                }
+                (true, Some(back)) => crate::game::printed_cards::intrinsic_face_entry_counters(
+                    back.printed_loyalty,
+                    back.loyalty,
+                    None,
+                    back.defense,
+                ),
                 _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
             };
             if !intrinsic.is_empty() {
@@ -7065,5 +7124,205 @@ mod exiling_player_record_tests {
 
         assert_eq!(state.objects[&card].zone, Zone::Exile);
         assert_eq!(state.objects[&card].exiled_by, Some(PlayerId(0)));
+    }
+}
+
+#[cfg(test)]
+mod hand_entry_receiver_tests {
+    use super::*;
+    use crate::game::engine::apply_as_current;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ReplacementDefinition, ReplacementMode, TargetFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolved_commands::ResolvedRulesCommand;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn dandan() -> GameState {
+        GameState::new(FormatConfig::dandan(), 2, 42)
+    }
+
+    fn card_in(state: &mut GameState, id: u64, owner: PlayerId, zone: Zone) -> ObjectId {
+        create_object(state, CardId(id), owner, format!("Card {id}"), zone)
+    }
+
+    fn take(state: &mut GameState, card: ObjectId, taker: PlayerId) {
+        let request = ZoneMoveRequest::effect(card, Zone::Hand, ObjectId(100)).performed_by(taker);
+        move_object(state, request, &mut Vec::new());
+    }
+
+    fn assert_in_hand_of(state: &GameState, card: ObjectId, seat: PlayerId) {
+        assert!(
+            state.players[seat.0 as usize].hand.contains(&card),
+            "{card:?}"
+        );
+        assert!(state.players[1 - seat.0 as usize].hand.is_empty());
+        assert_eq!(state.objects[&card].owner, seat);
+        assert_eq!(state.objects[&card].controller, seat);
+    }
+
+    fn rebound_owners(state: &GameState) -> Vec<Option<PlayerId>> {
+        state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.command.as_ref()? {
+                ResolvedRulesCommand::ZoneChange(command) => Some(command.rebound_from),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_format_without_shared_zones_does_not_rebind() {
+        let mut standard = GameState::new_two_player(42);
+        let card = card_in(&mut standard, 1, P0, Zone::Library);
+        take(&mut standard, card, P1);
+        assert_in_hand_of(&standard, card, P0);
+
+        let mut shared = dandan();
+        let card = card_in(&mut shared, 1, P0, Zone::Library);
+        take(&mut shared, card, P1);
+        assert_in_hand_of(&shared, card, P1);
+        assert_eq!(rebound_owners(&shared), vec![Some(P0)]);
+    }
+
+    #[test]
+    fn a_card_leaving_a_per_seat_zone_keeps_its_owner() {
+        let mut state = dandan();
+        let creature = card_in(&mut state, 1, P1, Zone::Battlefield);
+        state.objects.get_mut(&creature).unwrap().controller = P0;
+
+        take(&mut state, creature, P0);
+
+        assert_in_hand_of(&state, creature, P1);
+        assert_eq!(rebound_owners(&state), vec![None]);
+    }
+
+    #[test]
+    fn a_taker_who_already_owns_the_card_journals_no_rebind() {
+        let mut state = dandan();
+        let card = card_in(&mut state, 1, P0, Zone::Library);
+
+        take(&mut state, card, P0);
+
+        assert_in_hand_of(&state, card, P0);
+        assert_eq!(rebound_owners(&state), vec![None]);
+    }
+
+    #[test]
+    fn a_card_redirected_to_command_keeps_its_owner() {
+        let mut state = dandan();
+        let rebound = card_in(&mut state, 1, P0, Zone::Library);
+        let attraction = card_in(&mut state, 2, P0, Zone::Library);
+        state
+            .objects
+            .get_mut(&attraction)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Attraction".to_string());
+
+        take(&mut state, rebound, P1);
+        take(&mut state, attraction, P1);
+
+        assert_eq!(
+            state.objects[&rebound].owner, P1,
+            "reach: the control rebinds"
+        );
+        assert_eq!(state.objects[&attraction].zone, Zone::Command);
+        assert_eq!(state.objects[&attraction].owner, P0);
+        assert_eq!(rebound_owners(&state), vec![Some(P0)]);
+    }
+
+    /// Two P0-owned pile cards requested into P1's hand, each under an optional
+    /// Hand-to-Exile redirect; returns the state parked on the first member.
+    fn paused_batch() -> (GameState, ObjectId, ObjectId) {
+        let mut state = dandan();
+        let first = card_in(&mut state, 1, P0, Zone::Library);
+        let second = card_in(&mut state, 2, P0, Zone::Library);
+        let source = card_in(&mut state, 90001, P0, Zone::Battlefield);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Hand),
+            );
+        let requests = vec![
+            ZoneMoveRequest::effect(first, Zone::Hand, first).performed_by(P1),
+            ZoneMoveRequest::effect(second, Zone::Hand, second).performed_by(P1),
+        ];
+        assert!(matches!(
+            move_objects_simultaneously(&mut state, requests, &mut Vec::new()),
+            BatchMoveResult::NeedsChoice
+        ));
+        (state, first, second)
+    }
+
+    fn choose(state: &mut GameState, index: usize) {
+        apply_as_current(state, GameAction::ChooseReplacement { index })
+            .expect("replacement choice accepted");
+    }
+
+    #[test]
+    fn the_taker_survives_a_serialized_pause_and_a_redirect_clears_the_rebind() {
+        let (state, first, second) = paused_batch();
+        let mut state: GameState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+
+        choose(&mut state, 0);
+        choose(&mut state, 1);
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&first].owner, P0,
+            "the redirect left the pile owner alone"
+        );
+        assert_eq!(
+            state.objects[&first].exiled_by,
+            Some(P1),
+            "a redirected Hand request keeps the taker as the exiling player"
+        );
+        assert_in_hand_of(&state, second, P1);
+    }
+
+    #[test]
+    fn declining_the_redirect_delivers_both_members_to_the_taker() {
+        let (mut state, first, second) = paused_batch();
+
+        choose(&mut state, 1);
+        choose(&mut state, 1);
+
+        assert!(state.players[1].hand.contains(&first));
+        assert!(state.players[1].hand.contains(&second));
+        assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
     }
 }

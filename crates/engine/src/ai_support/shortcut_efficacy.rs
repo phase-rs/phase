@@ -660,9 +660,11 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         target_choice_timing: _,
         min_x_value: _,
         cant_be_copied: _,
+        illegal_targets_disposition: _, // CR 608.2b resolution disposition; no window
         forward_result: _,
         target_selection_mode: _,
         sub_link: _,
+        target_reads: _, // TargetReadOrigin: which announcement `Target` reads name
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
@@ -672,6 +674,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         // See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
         face_down_in_exile: _,
+        granting_object: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);

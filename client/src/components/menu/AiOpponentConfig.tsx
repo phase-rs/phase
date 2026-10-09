@@ -5,8 +5,8 @@ import type { GameFormat, MatchType } from "../../adapter/types";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
-import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
-import { CEDH_BRACKET } from "../../services/cedhLock";
+import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { restrictAiPoolByBracket } from "../../services/aiRandomPool";
 import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
@@ -14,7 +14,8 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
-import { isProfileUsable, useLlmStore } from "../../stores/llmStore";
+import { isProfileUsable, profileForSeat, useLlmStore } from "../../stores/llmStore";
+import { useLlmProviderCatalog } from "../../hooks/useLlmProviderCatalog";
 import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
@@ -117,21 +118,31 @@ export function AiOpponentConfig({
   // global across all AI seats because they describe which decks are worth
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
+  // The bracket/cEDH restriction is shared with game start
+  // (`restrictAiPoolByBracket`) so both sides apply the same rule;
+  // archetype + coverage apply within that pool.
+  const bracketPool = useMemo(
+    () =>
+      restrictAiPoolByBracket(candidates, {
+        bracketFilter,
+        cedhMode,
+        selectedFormat: selectedFormat ?? null,
+      }),
+    [candidates, bracketFilter, cedhMode, selectedFormat],
+  );
   const filteredDecks = useMemo(() => {
-    // In cEDH mode, restrict the random pool to bracket-5 decks.
-    const cedhFiltered = effectiveCedhMode ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
-    return cedhFiltered.filter((d) => {
+    return bracketPool.filter((d) => {
       if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
-      if (!effectiveCedhMode && bracketFilter.length > 0 && isCedhFormat) {
-        if (d.bracket === null) return false;             // untagged excluded
-        if (!bracketFilter.includes(d.bracket)) return false;
-      }
       return true;
     });
-  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, isCedhFormat, effectiveCedhMode]);
+  }, [bracketPool, coverageFloor, archetypeFilter]);
+  // Soft gate: the catalog is non-empty but the bracket constraint matched
+  // nothing, so game start will fall back to the full legal catalog. Warn
+  // here (Start stays enabled) rather than failing the game.
+  const bracketPoolEmpty = !loading && candidates.length > 0 && bracketPool.length === 0;
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -275,6 +286,11 @@ export function AiOpponentConfig({
             <span className="text-[10px] text-slate-500">
               {t("aiOpponent.bracketHint")}
             </span>
+            {bracketPoolEmpty && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                {effectiveCedhMode ? t("aiOpponent.cedhPoolEmpty") : t("aiOpponent.bracketPoolEmpty")}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -460,15 +476,20 @@ function AiSeatPanel({
  */
 function AiBrainPicker({ index }: { index: number }) {
   const { t } = useTranslation("menu");
+  const catalog = useLlmProviderCatalog();
   const profiles = useLlmStore((s) => s.profiles);
-  const seatBindings = useLlmStore((s) => s.seatBindings);
   const bindSeat = useLlmStore((s) => s.bindSeat);
+  // The same lookup the game loop uses, so a seat that inherits the default
+  // opponent shows it here rather than "built-in engine".
+  const driver = useLlmStore((s) => profileForSeat(s, index, catalog));
 
-  const usable = useMemo(() => profiles.filter(isProfileUsable), [profiles]);
+  const usable = useMemo(
+    () => profiles.filter((profile) => isProfileUsable(profile, catalog)),
+    [profiles, catalog],
+  );
   if (usable.length === 0) return null;
 
-  const bound = seatBindings[index];
-  const selected = usable.some((profile) => profile.id === bound) ? bound : ENGINE_BRAIN;
+  const selected = driver?.id ?? ENGINE_BRAIN;
   const items = [
     { value: ENGINE_BRAIN, label: t("aiOpponent.brainEngine") },
     ...usable.map((profile) => ({

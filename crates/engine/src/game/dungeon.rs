@@ -512,10 +512,12 @@ pub fn dungeon_preview(id: DungeonId) -> DungeonPreview {
 
 /// CR 701.49a / CR 701.49d: Get available dungeons for a new venture.
 /// Normal venture offers the AFR trio; Specific constrains to one dungeon.
-/// When the session allows experimental dungeons, Baldur's Gate Wilderness
+/// In the formats whose own rules positively restrict nothing
+/// (`GameFormat::offers_baldurs_gate_wilderness`), Baldur's Gate Wilderness
 /// joins the normal pool, and an initiative venture offers it as an
 /// alternative to Undercity instead of auto-entering the Undercity.
 pub fn available_dungeons(source: VentureSource, config: &FormatConfig) -> Vec<DungeonId> {
+    let offers_wilderness = config.format.offers_baldurs_gate_wilderness();
     match source {
         VentureSource::Normal => {
             let mut options = vec![
@@ -523,13 +525,13 @@ pub fn available_dungeons(source: VentureSource, config: &FormatConfig) -> Vec<D
                 DungeonId::DungeonOfTheMadMage,
                 DungeonId::TombOfAnnihilation,
             ];
-            if config.allow_experimental_dungeons {
+            if offers_wilderness {
                 options.push(DungeonId::BaldursGateWilderness);
             }
             options
         }
         VentureSource::Specific(id) => {
-            if id == DungeonId::Undercity && config.allow_experimental_dungeons {
+            if id == DungeonId::Undercity && offers_wilderness {
                 vec![DungeonId::Undercity, DungeonId::BaldursGateWilderness]
             } else {
                 vec![id]
@@ -1225,6 +1227,7 @@ pub fn room_effects(
                         bypass_beneficiary: None,
                         protection_does_not_remove: None,
                         room_door: None,
+                        granting_object: None,
                     }],
                     triggers: Vec::new(),
                 },
@@ -2343,9 +2346,8 @@ mod tests {
     }
 
     #[test]
-    fn available_dungeons_experimental_pool_adds_the_wilderness() {
-        let mut config = FormatConfig::standard();
-        config.allow_experimental_dungeons = true;
+    fn available_dungeons_freeform_pool_adds_the_wilderness() {
+        let config = FormatConfig::freeform();
 
         let normal = available_dungeons(VentureSource::Normal, &config);
         assert_eq!(normal.len(), 4);
@@ -2365,6 +2367,21 @@ mod tests {
             &config,
         );
         assert_eq!(other, vec![DungeonId::TombOfAnnihilation]);
+    }
+
+    #[test]
+    fn available_dungeons_freeform_commander_pool_adds_the_wilderness() {
+        let config = FormatConfig::freeform_commander();
+
+        let normal = available_dungeons(VentureSource::Normal, &config);
+        assert_eq!(normal.len(), 4);
+        assert!(normal.contains(&DungeonId::BaldursGateWilderness));
+
+        let specific = available_dungeons(VentureSource::Specific(DungeonId::Undercity), &config);
+        assert_eq!(
+            specific,
+            vec![DungeonId::Undercity, DungeonId::BaldursGateWilderness]
+        );
     }
 
     /// Oracle fidelity: Baldur's Gate Wilderness "Grymforge" is "For each

@@ -680,7 +680,7 @@ fn stage_pending_activation_trigger_events(
 /// final free cast has actually been announced. The drain uses the
 /// stack-announcement boundary so B/C's triggers may be ordered above their
 /// still-stacked spells, rather than the ordinary resolution drain's spell guard.
-fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
+pub(super) fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
     let Some(completion) = state.pending_resolution_completion.as_ref() else {
         return false;
     };

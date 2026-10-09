@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Escolha uma fonte de mana",
     "description": "Esta habilidade de mana exige sacrificar uma permanente.",
+    "baseOutput_one": "Produção base: {{count}} mana",
+    "baseOutput_other": "Produção base: {{count}} manas",
+    "baseOutputVariable": "Quantidade base determinada na ativação",
     "sacrifice": "Sacrificar",
     "back": "Voltar ao pagamento de mana",
     "unknownSource": "Fonte de mana"
@@ -102,6 +105,24 @@
     "subtitle": "Todos os jogadores precisam aprovar antes que o mecanismo resolva um prefixo seguro da pilha.",
     "grant": "Aprovar",
     "decline": "Manter prioridade"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Corrigir vida",
+    "title": "Correção de vida no Sandbox",
+    "description": "Use os controles normais da mão e da pilha para conjurar e resolver uma criatura. Este painel envia a ação SetLife do Sandbox pelo adaptador de jogo existente.",
+    "scopeNote": "A correção usa o caminho de edição de jogador da engine; não representa dano nem um efeito de carta. Este recorte não inclui revelar uma mão oculta, descartar conforme as regras ou desfazer antes de conjurar com acordo prévio.",
+    "target": "Jogador",
+    "player": "{{name}} (jogador {{seat}})",
+    "you": "Você",
+    "opponent": "Oponente",
+    "currentLife": "Total de vida atual",
+    "newLife": "Novo total de vida",
+    "submit": "Aplicar correção",
+    "submitting": "Correção enviada; fechar este painel não a cancela.",
+    "applied": "Total de vida atual confirmado para {{player}}: {{life}}.",
+    "notApplied": "A engine não confirmou esta correção. Confira o snapshot atual antes de tentar novamente.",
+    "failed": "Não foi possível enviar a correção.",
+    "stale": "O jogo mudou durante a edição. Feche e abra este painel novamente para começar pelo snapshot atual."
   },
   "debugCreate": {
     "copies": "Cópias",
@@ -808,6 +829,7 @@
     "titleTargets": "Alvos: {{targets}}",
     "titlePaid": "Pago: {{paid}}",
     "titleContext": "Contexto: {{context}}",
+    "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de mana",
     "paidColorsSpent": "{{count}} cores",
@@ -839,6 +861,7 @@
     "chooseNewTargetForCopy": "Escolha um novo alvo para a cópia",
     "chooseTargetForCopy": "Escolha o alvo da cópia",
     "chooseCreatureToExplore": "Escolha qual criatura explora em seguida",
+    "chooseCreatureToEquip": "Escolha uma criatura para equipar",
     "chooseCreatureTokenToPopulate": "Escolha uma ficha de criatura para popular",
     "chooseReturnAsAuraTarget": "Escolha um permanente para encantar",
     "tapUntappedCreatures_one": "Vire {{count}} criatura desvirada",
@@ -1130,6 +1153,8 @@
       "usePowder": "Usar {{name}}",
       "powderDescription": "Exile todas as cartas na mão, compre o mesmo número — não é um mulligan",
       "powderTooltip": "Exile todas as cartas em sua mão e compre o mesmo número. Não é um mulligan — a contagem e os fundos não são afetados.",
+      "freeReveal": "Revelar e comprar de novo (grátis)",
+      "freeRevealDescription": "Revele sua mão, embaralhe-a e compre 7 — grátis, sem cartas no fundo, não é um mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Mão Inicial · London Mulligan",
       "reviewTitle": "Revise sua mão inicial",
@@ -1347,8 +1372,6 @@
     },
     "config": {
       "startingLife": "Vida Inicial",
-      "experimentalDungeons": "Masmorras experimentais",
-      "experimentalDungeonsHelp": "Oferecer Baldur's Gate Wilderness nas opções de masmorra e ao tomar a iniciativa. Experimental e não oficial.",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
       "firstPlayer": {
@@ -1384,6 +1407,7 @@
       "target": "Alvo",
       "return": "Devolver",
       "discard": "Descartar",
+      "reveal": "Revelar",
       "evidence": "Evidência",
       "manifest": "Manifestar",
       "untap": "Desvirar",
@@ -1696,6 +1720,10 @@
       "title": "Fortalecer Jace",
       "subtitle": "Escolha uma ficha de Jace que você controla para receber +{{count}} de lealdade"
     },
+    "spellCopyOrder": {
+      "title": "Ordenar as cópias",
+      "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
+    },
     "collectEvidence": {
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"
@@ -2006,7 +2034,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Escolher oponente",
-    "subtitle": "Escolha qual oponente faz a escolha."
+    "subtitle": "Escolha qual oponente faz a escolha.",
+    "orderTitle": "Escolher próximo jogador",
+    "orderSubtitle": "Escolha para quem fazer a próxima seleção.",
+    "substituteTitle": "Escolher jogador",
+    "substituteSubtitle": "Escolha quem faz esta escolha."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2264,7 +2296,9 @@
     "accept": "Sim",
     "decline": "Não",
     "sourceFallback": "Efeito",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
+    "replacementChoices": "Escolhas de substituição ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",
@@ -2297,7 +2331,8 @@
       "zoneExile": "o exílio",
       "zoneHand": "sua mão",
       "discard": "Descarte {{count}} {{cards}}",
-      "exile": "Exile {{count}} {{cards}} de {{zone}}"
+      "exile": "Exile {{count}} {{cards}} de {{zone}}",
+      "reveal": "Revele {{count}} {{cards}} de {{zone}}"
     }
   },
   "topOrBottom": {
@@ -2343,6 +2378,8 @@
     "confirm": "Confirmar"
   },
   "replacement": {
+    "remember": "Lembrar esta escolha nesta partida",
+    "savedChoice": "Substituição: {{choice}}",
     "eyebrow": "Ordem de Resolução",
     "title": "Efeitos de Substituição",
     "orderSubtitle": "Todos estes efeitos alteram como este evento acontece. Arraste para definir a ordem de aplicação — o último aplicado é o que prevalece (CR 616.1).",

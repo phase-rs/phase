@@ -278,7 +278,9 @@
     "dataVersion": "Datos: {{version}}",
     "aboutBrackets": "Acerca de los niveles ↗",
     "estimatedChip": "Estimado: B{{tier}}",
-    "estimatedChipFull": "Nivel estimado: B{{tier}} {{label}}"
+    "estimatedChipFull": "Nivel estimado: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Nivel declarado: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Nivel del mazo",

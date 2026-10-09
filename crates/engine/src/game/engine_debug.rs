@@ -163,9 +163,8 @@ pub fn apply_debug_action(
 
         DebugAction::Mill { player_id, count } => {
             validate_player(state, player_id)?;
-            let player = state.players.iter().find(|p| p.id == player_id).unwrap();
-            let top_ids: Vec<ObjectId> = player
-                .library
+            let top_ids: Vec<ObjectId> = state
+                .library_of(player_id)
                 .iter()
                 .take(count as usize)
                 .copied()
@@ -466,6 +465,7 @@ pub fn apply_debug_action(
             if !obj.base_keywords.contains(&keyword) {
                 obj.base_keywords.push(keyword);
             }
+            obj.restore_token_art_baseline();
             crate::game::layers::mark_layers_full(state);
         }
 
@@ -474,6 +474,7 @@ pub fn apply_debug_action(
             // CR 613.1 + CR 613.1f: write the base keyword set (the Layer-6 input)
             // so the removal survives the layer recompute; see GrantKeyword above.
             obj.base_keywords.retain(|k| k != &keyword);
+            obj.restore_token_art_baseline();
             crate::game::layers::mark_layers_full(state);
         }
 
@@ -552,6 +553,9 @@ pub fn apply_debug_action(
             state.priority_player = active_player;
             state.combat = None;
             state.stack.clear();
+            // CR 701.20a: every reveal lease is bound to a stack entry that
+            // this jump just removed.
+            state.release_all_stack_bound_reveals();
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };
@@ -962,6 +966,7 @@ fn route_debug_token_to_battlefield(
         display_source: staged.display_source,
         printed_ref: staged.printed_ref.clone(),
         token_image_ref: staged.token_image_ref.clone(),
+        token_art: None,
         extra_keywords: Vec::new(),
         additional_modifications: Vec::new(),
         tapped: false,

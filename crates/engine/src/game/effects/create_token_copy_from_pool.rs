@@ -142,6 +142,7 @@ pub fn resolve(
             display_source: DisplaySource::Card,
             printed_ref,
             token_image_ref: None,
+            token_art: None,
             extra_keywords: Vec::new(),
             additional_modifications: Vec::new(),
             tapped,

@@ -280,7 +280,7 @@ describe("openPhaseSocket", () => {
   it("rejects with protocol_mismatch when versions diverge and closes the socket", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 99 }));
+    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION + 1 }));
 
     await expect(promise).rejects.toBeInstanceOf(HandshakeError);
     expect(ws.close).toHaveBeenCalled();

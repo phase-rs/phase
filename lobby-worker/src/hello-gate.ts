@@ -126,6 +126,19 @@ function classifyClientHello(
   return { kind: "accept" };
 }
 
+/**
+ * The frame a lobby fan-out delivers to `conn`, or `null`. `forViewer` is the
+ * broker's per-viewer projection, keyed by the accepted hello's build.
+ */
+export function lobbyFrameFor(
+  conn: Pick<ConnAttachment, "subscribed" | "client_hello"> | null,
+  frame: string,
+  forViewer: (frame: string, viewerBuildCommit: string) => string | undefined,
+): string | null {
+  if (conn?.subscribed !== true) return null;
+  return forViewer(frame, conn.client_hello?.build_commit ?? "") ?? null;
+}
+
 export function helloGateErrorMessage(
   outcome: HelloGateOutcome,
 ): string | null {

@@ -210,6 +210,139 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 118 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
+ *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
+ *      and trigger definitions of GameState. A v117 peer cannot deserialize the tagged
+ *      color. Wire 100 moves with it; no lobby frame names it.
+ * 117 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
+ *      shared library and graveyard, omitted for a per-player format. A v116 peer
+ *      drops the key and renders per-seat piles for a state whose other seat's
+ *      containers are empty. Wire 99 moves with it; no lobby frame names it.
+ * 116 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
+ *      serialized in the resolution frames behind RESOLUTION_STATE_WIRE_VERSION 5.
+ *      A v115 peer refuses the version-5 resolution state. Wire 98 moves with it;
+ *      no lobby frame names it.
+ * 115 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
+ *      the Dandan free reveal mulligan, a MulliganDecision action payload and a
+ *      held declaration in GameState.waiting_for. A v114 peer cannot parse the
+ *      choice and would carry out a held free reveal as a regular mulligan.
+ *      Wire 97 moves with it; no lobby frame names it.
+ * 114 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
+ *      in a CR 103.5 declare round until every player has declared. It is
+ *      serialized in GameState.waiting_for, so a v113 peer would drop it
+ *      silently. Wire 96 moves with it; no lobby frame names it.
+ * 113 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
+ *      before a Hand entry from a shared zone rebound it to the taker
+ *      (CR 108.3 as modified by the Dandan announcement). It is serialized
+ *      inside GameState.resolved_rules_journal, so a v112 peer would drop it
+ *      silently. Wire 95 moves with it; no lobby frame names it.
+ * 112 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
+ *      inside GameState's transient continuous effects, so a v111 peer cannot
+ *      parse the tag.
+ * 111 — GameFormat gains `Dandan`. It serializes as its Display string and
+ *      deserializes through FromStr, so a v110 peer cannot parse a GameState or
+ *      a lobby FormatConfig that names it. Wire 93 and lobby 16 move with it;
+ *      see PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs.
+ * 110 — GameState.deferredSpellDelivery holds a resolving spell's move to
+ *       its zone while it is paused on its own free-cast window. Older peers
+ *       would leave the spell on the stack in no zone; P2P moves in lockstep
+ *       (wire 92).
+ * 109 — CR 201.5a granter binding: ObjectScope gains GrantingObject and
+ *      SpecificObject, TargetFilter.GrantingObject gains `bound`, PlayerFilter
+ *      gains GrantingObjectCaster, and ability, trigger, static, replacement, spell and
+ *      trigger-source contexts gain the `granting_object` stamp. A v108 peer
+ *      cannot deserialize the new state. P2P moves in lockstep to wire 91.
+ * 108 — Serialized IllegalTargetsDisposition.StillResolves preserves a root
+ *       ability's printed resolution rule when its chosen target becomes
+ *       illegal. Older peers would silently apply ordinary non-resolution;
+ *       P2P moves in lockstep (wire 90).
+ * 107 — UntilCondition NextMatches gains count ("until you exile two nonland
+ *      cards …" — Invasion of Alara, CR 608.2c), the paused exile loop keeps
+ *      its hits, ZoneChoiceCandidateSource gains ParentTargets, and
+ *      SpellContext gains exile_until_batch. A v106 peer would run a counted
+ *      loop as a one-card loop; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 89); lobby messages are unchanged.
+ * 106 — Full-game replacement-choice preferences, exact source/definition
+ *       identities, remembered ordering/optional actions, and prompt
+ *       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
+ *       messages are unchanged.
+ * 105 — Deferred mana-source selections carry a nominal base quantity.
+ *      Full-game peers must agree on the tagged output shape; P2P moves in
+ *      lockstep (wire 87). Lobby-only messages are unchanged.
+ * 104 — PendingCast gains `delved_cards` and the pending cost-move resume
+ *      swaps DelveManaPayment for the FinalizeDelvedCast completion: delve
+ *      fuel is exiled when the total cost is paid (#9400). A v103 peer
+ *      cannot parse the new state; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 86); lobby is unchanged.
+ * 103 — FormatConfig loses `allow_experimental_dungeons`: the per-session
+ *      flag is gone and the Baldur's Gate Wilderness pool is format-derived
+ *      (Freeform and Freeform Commander only). A v102 peer would parse the
+ *      frame but fail the pool closed; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 85); lobby carriers move too
+ *      (LOBBY_PROTOCOL_VERSION 15).
+ * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
+ *      ability definitions and saved state. Keep this version in lockstep
+ *      with the server and the preceding mana-activation schema.
+ * 101 — GameEvent.AbilityActivated's kind gains "Mana" (mana-ability
+ *      activations now emit it) and an optional departed_source_lki — see
+ *      PROTOCOL_VERSION's own `/// 101` entry in
+ *      crates/lobby-broker/src/protocol.rs. The exact-match version check at
+ *      connect refuses a v100 pairing.
+ * 100 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
+ *      phase, followed_by holds TurnSegments, and recipient, an
+ *      ExtraPhaseRecipient, replaces target — see PROTOCOL_VERSION's own
+ *      `/// 100` entry in crates/lobby-broker/src/protocol.rs. This client
+ *      hands server frames to JSON.parse, so a v99 client would take the new
+ *      shape with no decode error; the exact-match version check at connect
+ *      refuses the pairing instead.
+ * 99 — GraveyardCastPermission gains pool (GraveyardPermissionPool):
+ *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+ *      Work). A v98 peer would default it to the own graveyard and refuse a
+ *      cast the permission allows; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 81); lobby messages are unchanged.
+ * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
+ *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
+ *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
+ *      the parked per-player zone-choice frame gains current and nominee. A v97 peer cannot deserialize them; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 80); lobby messages
+ *      are unchanged.
+ * 97 — ResolvedAbility.target_reads and AbilityDefinition.target_reads
+ *      (TargetReadOrigin) are serialized: a ParentAnnouncement instruction
+ *      reads the object its immediately preceding instruction announced
+ *      (CR 115.1 + CR 608.2c) and announces no target slot of its own. A v96
+ *      peer would default the field; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 79); lobby messages are unchanged.
+ * 96 — QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
+ *      to GameState ability definitions. A v95 peer cannot decode the new tag;
+ *      full-game peers and P2P move in lockstep (wire 78). Lobby messages are
+ *      unchanged.
+ * 95 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
+ *      AttackerBlockStatus } (Blocked | Unblocked), so "blocked creature"
+ *      filters (CR 509.1h: an attacking creature stays blocked for the rest of
+ *      combat once blocked) are expressible. The legacy "Unblocked" tag still
+ *      deserializes via a serde alias with a defaulted status, but a v94 peer
+ *      cannot parse the new "BlockStatus" tag carried in GameState ability
+ *      definitions. Full-game peers and P2P move in lockstep (wire 77); lobby
+ *      messages are unchanged.
+ * 94 — SpellContext.creation_lookback_event carries the battlefield departure a
+ *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
+ *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
+ *      object's layered mana cost (CR 707.2 + CR 708.2a). A v93 peer would drop
+ *      both; the exact-match handshake refuses the pairing. P2P moves in
+ *      lockstep (wire 76); lobby messages are unchanged.
+ * 93 — ReductionProvenance gains SacrificedForCost, the reduction an Emerge
+ *      or Offering sacrifice earns before a deferred target declaration. A
+ *      v92 peer cannot deserialize it. P2P moves in lockstep to wire 75.
+ * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
+ *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
+ *      the reveal-until whiff verdict read by the new
+ *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume, plus
+ *      the CR 701.20a reveal lease (ResolvedInformationLifetime
+ *      UntilStackObjectLeaves and GameState.stack_bound_reveals, presented
+ *      through the new DerivedViews.stack_revealed_cards). A v91
+ *      peer cannot parse the new tags; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 74); lobby messages
+ *      are unchanged.
  * 91 — PendingManaAbility.chosen_counter_count is retyped to the required
  *      chosen_counter_counts array (#9207). A v90 peer cannot deserialize
  *      the new state. P2P moves in lockstep to wire 73.
@@ -613,7 +746,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 91;
+export const PROTOCOL_VERSION = 118;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -644,10 +777,19 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
- * 15 — Tournament deck submission: a new `SubmitTournamentDeck` client message
+ * 17 — Tournament deck submission: a new `SubmitTournamentDeck` client message
  *      (carries a DeckData) and a `deck_submitted` readiness flag on
  *      PlayerSummary. Both additive; MIN_SUPPORTED stays 2. The deck is private
  *      and never projected. Mirrored in types.ts (ClientMessage + PlayerSummary).
+ * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 110). A Rust broker below
+ *      16 rejects a lobby frame naming it; MIN_LOBBY_PROTOCOL_FOR_DANDAN below
+ *      is this client's frozen floor for that pairing.
+ * 15 — FormatConfig loses `allow_experimental_dungeons` on its three lobby
+ *      carriers (CreateGameWithSettings, JoinTargetInfo, PeerInfo): the
+ *      per-session toggle is gone and the Wilderness pool is format-derived.
+ *      A CAPABILITY bump like 13, not a parse bump — a v14 frame carrying
+ *      the stale key and a v15 frame omitting it both parse — so
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2.
  * 14 — PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
  *      new variant), the "a field's type changed" trigger. No broker emits it
  *      until server-authoritative hosting is wired behind
@@ -779,7 +921,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 15;
+export const LOBBY_PROTOCOL_VERSION = 17;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -909,6 +1051,17 @@ export const MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION = 9;
 export const MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS = 11;
 
 /**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `Dandan`; below it a lobby frame naming it is rejected as malformed.
+ *
+ * Frozen at 16 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v16 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_DANDAN = 16;
+
+/**
  * The lowest broker `LOBBY_PROTOCOL_VERSION` that parses `format` in a lobby
  * frame, or `null` when every broker this client connects to parses it (see
  * MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL). Consult it before sending any lobby
@@ -922,6 +1075,8 @@ export function lobbyProtocolRequiredForFormat(format: GameFormat): number | nul
     case "Freeform":
     case "FreeformCommander":
       return MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS;
+    case "Dandan":
+      return MIN_LOBBY_PROTOCOL_FOR_DANDAN;
     case "Standard":
     case "Commander":
     case "Pioneer":
@@ -1154,6 +1309,8 @@ export class WebSocketAdapter implements EngineAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
+  // Aborts a handshake still in flight when the adapter is disposed.
+  private readonly disposeAbort = new AbortController();
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   private gameEnded = false;
@@ -1311,14 +1468,19 @@ export class WebSocketAdapter implements EngineAdapter {
           return;
         }
 
+        if (this.mode === "host" && !this.isNativeSocket()) {
+          reject(new AdapterError("WS_ERROR", "A server game is created through the lobby", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
+
         this.seedNativeReconnectSession();
         const setupFrame =
           this.options.nativeAi
             ? this.nativeAiSetupFrame(this.options.nativeAi)
             : this.options.nativePregame
               ? this.nativePregameSetupFrame(this.options.nativePregame)
-            : this.mode === "host"
-            ? { type: "CreateGame", data: { deck: this.deckData } }
             : this.mode === "spectate"
               ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
               : {
@@ -1416,6 +1578,7 @@ export class WebSocketAdapter implements EngineAdapter {
     try {
       socket = await openPhaseSocket(this.serverUrl, {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
+        signal: this.disposeAbort.signal,
       });
     } catch (err) {
       if (err instanceof HandshakeError) {
@@ -1438,6 +1601,11 @@ export class WebSocketAdapter implements EngineAdapter {
         return;
       }
       this.rejectInitialization(new AdapterError("WS_ERROR", String(err), true));
+      return;
+    }
+    // A handshake that settled before `dispose()` resumes here after it.
+    if (this.disposed) {
+      socket.close();
       return;
     }
 
@@ -1484,6 +1652,7 @@ export class WebSocketAdapter implements EngineAdapter {
     };
 
     socket.ws.onerror = () => {
+      if (this.sessionIdentityRejected) return;
       const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
       if (this.initReject || this.pregameReject || this.gameStartedReject) {
         this.rejectInitialization(err);
@@ -1572,42 +1741,66 @@ export class WebSocketAdapter implements EngineAdapter {
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
+    this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+      throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
     }
 
-    this.emit({ type: "actionPendingChanged", pending: true });
-    return new Promise<SubmitResult>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      // If the frame cannot be sent, the server will never reply, so clear the
-      // pending state and reject now instead of leaving the caller hanging.
-      if (!this.send({ type: "Action", data: { action } })) {
-        this.pendingResolve = null;
-        this.pendingReject = null;
-        this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
-      }
-    });
+    return this.submitGameFrame(
+      { type: "Action", data: { action } },
+      new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
+    );
   }
 
   async submitInteraction(
     submission: InteractionSubmission,
     _actor: PlayerId,
   ): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
-    this.emit({ type: "actionPendingChanged", pending: true });
+    return this.submitGameFrame(
+      { type: "Interaction", data: { submission } },
+      new AdapterError("WS_CLOSED", "Failed to send interaction", true),
+    );
+  }
+
+  private assertNoPendingSubmission(): void {
+    if (this.pendingResolve !== null || this.pendingReject !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "Another game submission is pending; this submission was not sent.",
+        true,
+      );
+    }
+  }
+
+  private submitGameFrame(frame: unknown, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
+      // Claim before emitting: event listeners run synchronously and may submit
+      // again while handling actionPendingChanged.
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      if (!this.send({ type: "Interaction", data: { submission } })) {
+      try {
+        this.emit({ type: "actionPendingChanged", pending: true });
+      } catch (error) {
+        if (this.pendingResolve === resolve) {
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      // A synchronous listener may close/dispose the adapter or otherwise
+      // settle this slot. Do not send after that owner has been released.
+      if (this.pendingResolve !== resolve) return;
+      if (!this.send(frame) && this.pendingResolve === resolve) {
         this.pendingResolve = null;
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send interaction", true));
+        reject(sendFailure);
       }
     });
   }
@@ -1636,7 +1829,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // native sidecar is a local trusted transport rather than a network socket.
     if (
       !this.serverUrl.startsWith("wss://")
-      && !this.serverUrl.startsWith("native-engine://")
+      && !this.isNativeSocket()
     ) {
       throw new AdapterError(
         "WS_ERROR",
@@ -1781,6 +1974,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this.sendConcede();
     }
     this.disposed = true;
+    this.disposeAbort.abort();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

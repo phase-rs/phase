@@ -64,6 +64,12 @@ Return to the orchestrator (do NOT improvise) when:
 - The work no longer fits existing architecture.
 - Verification needs new or repaired machinery. Return the missing evidence and the existing-tool alternative.
 - You'd need to add a sibling enum variant where parameterization is the right answer (CLAUDE.md "Parameterize, don't proliferate").
+- A parity or preservation row's reference reading is wrong for the card, whether you found it or a reviewer (codex, CodeRabbit) did. Don't fix the reference in this candidate, and don't make the row pass by matching the defect. Return:
+  - the card's derived reading;
+  - the measured reference;
+  - the rows affected;
+  - the smallest fix site you can see.
+  The orchestrator takes the [defective-reference route](SKILL.md#defective-reference-route).
 
 A "stop and return" is success, not failure. Bandaids that ship are far worse than a clean handback.
 
@@ -71,39 +77,25 @@ A "stop and return" is success, not failure. Bandaids that ship are far worse th
 
 ### Implementation/fix mode: preparatory evidence only
 
-Run the following only after implementation/fix edits land. Record the commands, starting SHA, ending SHA, and result as `PREPARATORY`; none completes the candidate gate. The orchestrator derives the committed-candidate completion set from these same surface-specific blocks and must rerun the applicable gates at `CANDIDATE_SHA`, retaining the Tilt-first path and isolated direct fallback specified here; it must not treat this preparatory output as their completion result. Existing discriminating-test, maintainer-simulation, selected-authority/provenance, coverage-honesty, and CR-annotation gates below remain single-sourced and mandatory for implementation/fix mode.
+Run the following only after implementation/fix edits land. Record the commands, starting SHA, ending SHA, and result as `PREPARATORY`; none completes the candidate gate. Per-commit checks are formatting and a focused test run only — no clippy, no full suite, no card-data generation; those run once, at the acceptance candidate ([SKILL.md Step 5](SKILL.md#step-5--verify-the-committed-candidate)). Existing discriminating-test, maintainer-simulation, selected-authority/provenance, coverage-honesty, and CR-annotation gates below remain single-sourced and mandatory for implementation/fix mode.
 
-After edits land, derive `RUST_PATHS` from the frozen authorized path list (only `*.rs` entries). If it is empty, skip formatting. Otherwise format only those exact paths; never run workspace-wide formatting in `IMPLEMENTATION_WORKTREE`, because it can create an out-of-scope delta:
-
-```bash
-(cd "$IMPLEMENTATION_WORKTREE" && cargo fmt --all -- "${RUST_PATHS[@]}")
-```
-
-For Rust / engine / parser work:
+After edits land, derive `RUST_PATHS` from the frozen authorized path list (only `*.rs` entries). If it is empty, skip formatting. Otherwise format only those exact paths; never run workspace-wide formatting in `IMPLEMENTATION_WORKTREE`, because it can create an out-of-scope delta. `cargo fmt` formats every workspace target whatever paths follow `--`, and plain `rustfmt` follows `mod` declarations into child files, so call `rustfmt` with `skip_children`:
 
 ```bash
-(cd "$IMPLEMENTATION_WORKTREE" &&
-  if tilt get uiresource clippy >/dev/null 2>&1; then
-    ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
-  else
-    cargo clippy --all-targets -- -D warnings
-    cargo test -p phase-engine
-    ./scripts/gen-card-data.sh
-  fi)
+(cd "$IMPLEMENTATION_WORKTREE" && rustfmt --edition 2021 --config skip_children=true "${RUST_PATHS[@]}")
 ```
 
-For frontend work:
+For Rust / engine / parser work, run the focused set: every test the change adds or edits, the tests in each module the diff touches, and the tests that scan the source tree (named `*census*` by convention), since an edit anywhere can move their counts. Select every package that holds one of those tests (`phase-ai` tests do not run under `-p phase-engine`): `FOCUSED_PACKAGE_ARGS` carries one `-p <package>` per package. `FOCUSED_FEATURES` is `phase-engine/test-support` plus, package-qualified, every feature a selected test needs to be compiled: its target's `required-features` (`oracle-gen` tests need `phase-engine/cli`) or a `#[cfg(feature = …)]` gate on its module (`phase-engine/proptest`). A filter cannot select a test its features leave uncompiled. Building that run is the per-commit compile check. Report the packages, features and `FOCUSED_FILTER` (a nextest filterset) with the result:
 
 ```bash
-(cd "$IMPLEMENTATION_WORKTREE" &&
-  if tilt get uiresource clippy >/dev/null 2>&1; then
-    ./scripts/tilt-wait.sh --timeout 180 check-frontend
-  else
-    (cd client && pnpm run type-check && pnpm lint)
-  fi)
+(cd "$IMPLEMENTATION_WORKTREE" && cargo nextest run "${FOCUSED_PACKAGE_ARGS[@]}" --features "$FOCUSED_FEATURES" -E "$FOCUSED_FILTER")
 ```
 
-After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail 50 --since 2m`. Distinguish your errors from concurrent-agent errors: if an error appears unrelated to your diff, wait several minutes and re-check before intervening — other agents fix their own errors.
+For frontend work, run the test files the change adds, edits, or whose subject it touches. If there are none, skip the run and report why; `vitest run` with no file arguments runs the whole suite:
+
+```bash
+(cd "$IMPLEMENTATION_WORKTREE/client" && pnpm vitest run "${FOCUSED_TEST_FILES[@]}")
+```
 
 ### Parser preparatory gate
 

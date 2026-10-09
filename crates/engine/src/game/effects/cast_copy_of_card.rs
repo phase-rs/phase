@@ -187,6 +187,9 @@ fn cast_one_copy(
     // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.12).
     copy.zone = Zone::Stack;
     copy.is_token = false;
+    // The clone above may carry a token source's descriptor; a nontoken
+    // spell copy has no intrinsic token body.
+    copy.token_art = None;
     // CR 707.12a: the copy is NOT represented by a card, so abilities gated on
     // "if this spell is represented by a card" (e.g. Cipher's encode, CR 702.99a)
     // must not fire for it. `is_token` stays false (this copy goes to the

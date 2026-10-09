@@ -15,6 +15,9 @@
   "manaSourceSelection": {
     "title": "マナ源を選択",
     "description": "このマナ能力にはパーマネントの生け贄が必要です。",
+    "baseOutput_one": "基本生成量：{{count}}マナ",
+    "baseOutput_other": "基本生成量：{{count}}マナ",
+    "baseOutputVariable": "基本量は起動時に決定",
     "sacrifice": "生け贄",
     "back": "マナの支払いに戻る",
     "unknownSource": "マナ源"
@@ -107,6 +110,24 @@
     "subtitle": "安全なスタック先頭部分をエンジンが解決するには、全プレイヤーの承認が必要です。",
     "grant": "承認",
     "decline": "優先権を保持"
+  },
+  "sandboxLifeCorrection": {
+    "open": "ライフを修正",
+    "title": "Sandboxのライフ修正",
+    "description": "通常の手札・スタック操作でクリーチャーを唱えて解決してください。このパネルは既存のゲームアダプター経由でSandboxのSetLife操作を送信します。",
+    "scopeNote": "エンジンのプレイヤー編集経路でライフを修正します。ダメージやカード効果ではありません。手札公開、ルールに沿った捨てる処理、事前合意による唱える前のUndoはこの試作に含みません。",
+    "target": "対象プレイヤー",
+    "player": "{{name}}（プレイヤー{{seat}}）",
+    "you": "あなた",
+    "opponent": "対戦相手",
+    "currentLife": "現在のライフ",
+    "newLife": "修正後のライフ",
+    "submit": "修正を適用",
+    "submitting": "修正を送信しました。このパネルを閉じても処理は取り消されません。",
+    "applied": "反映済みの現在のライフ（{{player}}）：{{life}}。",
+    "notApplied": "エンジンが修正を確認できませんでした。再試行する前に現在のスナップショットを確認してください。",
+    "failed": "修正を送信できませんでした。",
+    "stale": "編集中にゲームが更新されました。現在のスナップショットからやり直すには、パネルを閉じて開き直してください。"
   },
   "debugCreate": {
     "copies": "枚数",
@@ -846,6 +867,7 @@
     "titleTargets": "対象: {{targets}}",
     "titlePaid": "支払い: {{paid}}",
     "titleContext": "文脈: {{context}}",
+    "revealedCards": "公開中: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}}マナ",
     "paidColorsSpent": "{{count}}色",
@@ -879,6 +901,7 @@
     "chooseNewTarget": "呪文の新しい対象を選択",
     "chooseNewTargetForSpell": "{{spell}}の新しい対象を選択",
     "chooseCreatureToExplore": "次に探検するクリーチャーを選択",
+    "chooseCreatureToEquip": "装備するクリーチャーを選択",
     "chooseCreatureTokenToPopulate": "居住でコピーするクリーチャー・トークンを選択",
     "chooseReturnAsAuraTarget": "エンチャントするパーマネントを選択",
     "tapUntappedCreatures_one": "アンタップ状態のクリーチャー{{count}}体をタップ",
@@ -1168,6 +1191,8 @@
       "usePowder": "{{name}}を使う",
       "powderDescription": "手札をすべて追放して同じ枚数を引く（マリガンではない）",
       "powderTooltip": "手札をすべて追放し、同じ枚数を引きます。マリガンではないため、回数や一番下に置く枚数は変わりません。",
+      "freeReveal": "公開して引き直す（無料）",
+      "freeRevealDescription": "手札を公開して切り直し、7枚引く — 無料、ライブラリーの下に置くカードなし、マリガンではない",
       "eyebrowMulligan": "マリガン{{count}}回目・ロンドン方式",
       "eyebrowOpening": "初手・ロンドン・マリガン",
       "reviewTitle": "初手を確認",
@@ -1390,8 +1415,6 @@
     },
     "config": {
       "startingLife": "開始時のライフ",
-      "experimentalDungeons": "実験的ダンジョン",
-      "experimentalDungeonsHelp": "ダンジョン探索とイニシアティブ取得で Baldur's Gate Wilderness を選択可能にします。実験的かつ非公式。",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {
@@ -1427,6 +1450,7 @@
       "target": "対象",
       "return": "戻す",
       "discard": "捨てる",
+      "reveal": "公開",
       "evidence": "証拠",
       "manifest": "予示",
       "untap": "アンタップ",
@@ -1739,6 +1763,10 @@
       "title": "ジェイスを強化する",
       "subtitle": "あなたがコントロールするジェイス・トークンを1つ選び、忠誠度を+{{count}}する"
     },
+    "spellCopyOrder": {
+      "title": "コピーの順番",
+      "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
+    },
     "collectEvidence": {
       "title": "証拠収集",
       "subtitle": "あなたの墓地から、マナ総量の合計が{{minimum}}以上になるようにカードを追放"
@@ -2049,7 +2077,11 @@
   },
   "zoneOpponentChooser": {
     "title": "対戦相手を選択",
-    "subtitle": "選択を行う対戦相手を選択"
+    "subtitle": "選択を行う対戦相手を選択",
+    "orderTitle": "次のプレイヤーを選択",
+    "orderSubtitle": "次に選択を行う対象のプレイヤーを選択",
+    "substituteTitle": "プレイヤーを選択",
+    "substituteSubtitle": "この選択を行うプレイヤーを選択"
   },
   "pileOpponent": {
     "title": "対戦相手を選択",
@@ -2307,7 +2339,9 @@
     "accept": "はい",
     "decline": "いいえ",
     "sourceFallback": "効果",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "任意の誘発型能力（{{count, number}}）",
+    "replacementChoices": "置換効果の選択（{{count, number}}）"
   },
   "optionalEffect": {
     "sourceFallback": "効果",
@@ -2340,7 +2374,8 @@
       "zoneExile": "追放領域",
       "zoneHand": "あなたの手札",
       "discard": "{{count}}{{cards}}を捨てる",
-      "exile": "{{zone}}から{{count}}{{cards}}を追放"
+      "exile": "{{zone}}から{{count}}{{cards}}を追放",
+      "reveal": "{{zone}}から{{count}}{{cards}}を公開する"
     }
   },
   "topOrBottom": {
@@ -2386,6 +2421,8 @@
     "confirm": "確認"
   },
   "replacement": {
+    "remember": "このゲーム中はこの選択を記憶する",
+    "savedChoice": "置換：{{choice}}",
     "eyebrow": "解決順",
     "title": "置換効果",
     "orderSubtitle": "これらの効果はすべてこのイベントの起こり方を変更します。適用順をドラッグで設定してください — 最後に適用されたものが結果になります（CR 616.1）。",

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCardBackImage, useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -76,30 +77,19 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
         {opponent.hand.map((id, i) => {
           const obj = objects ? objects[id] : null;
           const showFace = showCards || (obj?.display_visible_to_viewer ?? false);
-          const rotation = -fan.rotation(i);
           const arcOffset = fan.arc(i);
 
           return (
-            <motion.div
+            <OpponentHandCard
               key={id}
-              initial={{ opacity: 0, y: -60 }}
-              animate={{
-                opacity: 1,
-                y: -(verticalMetrics.restingY + arcOffset),
-                rotate: rotation,
-              }}
-              exit={{ opacity: 0, y: -60 }}
-              transition={{ delay: i * 0.03, duration: 0.25 }}
-              style={{ marginLeft: i > 0 ? fan.overlap : undefined, zIndex: i }}
-              data-opponent-hand-card
-              data-hand-rotation={rotation}
-              data-hand-arc={arcOffset}
-            >
-              <OpponentCardThumbnail
-                cardId={id}
-                card={showFace ? obj ?? null : null}
-              />
-            </motion.div>
+              id={id}
+              index={i}
+              rotation={-fan.rotation(i)}
+              arcOffset={arcOffset}
+              y={-(verticalMetrics.restingY + arcOffset)}
+              marginLeft={i > 0 ? fan.overlap : undefined}
+              card={showFace ? obj ?? null : null}
+            />
           );
         })}
       </AnimatePresence>
@@ -109,6 +99,35 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
         </span>
       )}
     </div>
+  );
+}
+
+interface OpponentHandCardProps {
+  id: ObjectId;
+  index: number;
+  rotation: number;
+  arcOffset: number;
+  y: number;
+  marginLeft: string | undefined;
+  card: GameObject | null;
+}
+
+function OpponentHandCard({ id, index, rotation, arcOffset, y, marginLeft, card }: OpponentHandCardProps) {
+  const flightHidden = useFlightVeil(id);
+
+  return (
+    <motion.div
+      initial={flightHidden ? false : { opacity: 0, y: -60 }}
+      animate={{ opacity: 1, y, rotate: rotation }}
+      exit={{ opacity: 0, y: -60 }}
+      transition={{ delay: index * 0.03, duration: 0.25 }}
+      style={{ marginLeft, zIndex: index, visibility: flightHidden ? "hidden" : undefined }}
+      data-opponent-hand-card={id}
+      data-hand-rotation={rotation}
+      data-hand-arc={arcOffset}
+    >
+      <OpponentCardThumbnail cardId={id} card={card} />
+    </motion.div>
   );
 }
 

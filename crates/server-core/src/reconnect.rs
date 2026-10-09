@@ -32,8 +32,7 @@ impl ReconnectManager {
 
     /// Record a player disconnect for potential reconnection.
     ///
-    /// The `grace` parameter sets the per-disconnect grace period. Existing game
-    /// sessions pass the manager's default; draft sessions pass phase-adaptive durations.
+    /// The `grace` parameter sets the per-disconnect grace period.
     pub fn record_disconnect(&mut self, game_code: &str, player: PlayerId, grace: Duration) {
         let key = format!("{}:{}", game_code, player.0);
         self.disconnected.insert(

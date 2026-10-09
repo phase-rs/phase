@@ -6,14 +6,16 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
     materialize_legacy_printed_trigger_entries, AbilityBlockEntry, AbilityDefinition,
-    AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin, BasicLandType,
-    CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction, ChosenAttribute,
-    ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
-    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
-    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
-    TriggerOccurrenceState, TriggerPrintedOrigin,
+    AbilityProvenance, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
+    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
+    CharacteristicSetRef, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
+    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use crate::types::card::{
+    LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
+};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -21,7 +23,7 @@ use crate::types::game_state::{
     AttackDeclarationRecord, CastOccurrence, GameState, LKISnapshot, TriggerSourceContext,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
-use crate::types::keywords::{Keyword, KeywordKind};
+use crate::types::keywords::{Keyword, KeywordKind, PartnerType};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
@@ -408,6 +410,16 @@ pub struct EmblemSource {
     pub printed_ref: Option<PrintedCardRef>,
 }
 
+/// CR 607.1d + CR 607.5 + CR 400.7: an emblem's pairing identity — the exact
+/// object that created it and the copiable-value set of the ability that
+/// created it. Only exiles made by that object's characteristic abilities of
+/// the same set are "exiled with" it for the emblem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LinkedAbilitySource {
+    pub creator: ObjectIncarnationRef,
+    pub characteristic_set: CharacteristicSetRef,
+}
+
 /// CR 702.16p: Start-time attachment exemption captured for one continuous
 /// protection modification (`static_definitions` index + `modifications` index
 /// on the grant source) and host.
@@ -419,6 +431,242 @@ pub struct ProtectionStartSnapshot {
 
 /// `(static_definitions index, modifications index, host object id)`.
 pub type ProtectionEffectHostKey = (usize, usize, ObjectId);
+
+/// Stable art family name for one printed keyword.
+///
+/// Separate from [`Keyword::kind`]: `kind()` collapses ~60 recognized
+/// variants (Toxic, Storm, Echo, ...) to the catch-all `KeywordKind::Unknown`,
+/// which would conflate distinct bodies into one bogus family. Every
+/// recognized variant spells its own family here; only a truly unknown
+/// keyword carries its raw payload. Deliberately exhaustive with no
+/// wildcard (same maintenance contract as `kind()`): adding a `Keyword`
+/// variant fails compilation here until the author names its art family.
+fn art_keyword_family_name(keyword: &Keyword) -> String {
+    match keyword {
+        Keyword::Flying => "Flying".to_owned(),
+        Keyword::FirstStrike => "FirstStrike".to_owned(),
+        Keyword::DoubleStrike => "DoubleStrike".to_owned(),
+        Keyword::Trample => "Trample".to_owned(),
+        Keyword::TrampleOverPlaneswalkers => "TrampleOverPlaneswalkers".to_owned(),
+        Keyword::Deathtouch => "Deathtouch".to_owned(),
+        Keyword::Lifelink => "Lifelink".to_owned(),
+        Keyword::Vigilance => "Vigilance".to_owned(),
+        Keyword::Haste => "Haste".to_owned(),
+        Keyword::Reach => "Reach".to_owned(),
+        Keyword::Defender => "Defender".to_owned(),
+        Keyword::Menace => "Menace".to_owned(),
+        Keyword::Indestructible => "Indestructible".to_owned(),
+        Keyword::Hexproof | Keyword::HexproofFrom(_) => "Hexproof".to_owned(),
+        Keyword::Shroud => "Shroud".to_owned(),
+        Keyword::Flash => "Flash".to_owned(),
+        Keyword::Fear => "Fear".to_owned(),
+        Keyword::Intimidate => "Intimidate".to_owned(),
+        Keyword::Skulk => "Skulk".to_owned(),
+        Keyword::Shadow => "Shadow".to_owned(),
+        Keyword::Horsemanship => "Horsemanship".to_owned(),
+        Keyword::Wither => "Wither".to_owned(),
+        Keyword::Infect => "Infect".to_owned(),
+        Keyword::Afflict(_) => "Afflict".to_owned(),
+        Keyword::StartingIntensity(_) => "StartingIntensity".to_owned(),
+        Keyword::Prowess => "Prowess".to_owned(),
+        Keyword::Undying => "Undying".to_owned(),
+        Keyword::Persist => "Persist".to_owned(),
+        Keyword::Cascade => "Cascade".to_owned(),
+        Keyword::Exalted => "Exalted".to_owned(),
+        Keyword::Flanking => "Flanking".to_owned(),
+        Keyword::Evolve => "Evolve".to_owned(),
+        Keyword::Extort => "Extort".to_owned(),
+        Keyword::Exploit => "Exploit".to_owned(),
+        Keyword::Explore => "Explore".to_owned(),
+        Keyword::Ascend => "Ascend".to_owned(),
+        Keyword::Storied => "Storied".to_owned(),
+        Keyword::StartYourEngines => "StartYourEngines".to_owned(),
+        Keyword::Dredge(_) => "Dredge".to_owned(),
+        Keyword::Modular(_) => "Modular".to_owned(),
+        Keyword::Renown(_) => "Renown".to_owned(),
+        Keyword::Graft(_) => "Graft".to_owned(),
+        Keyword::Fabricate(_) => "Fabricate".to_owned(),
+        Keyword::Annihilator(_) => "Annihilator".to_owned(),
+        Keyword::Bushido(_) => "Bushido".to_owned(),
+        Keyword::Frenzy(_) => "Frenzy".to_owned(),
+        Keyword::Tribute(_) => "Tribute".to_owned(),
+        Keyword::Soulbond => "Soulbond".to_owned(),
+        Keyword::BandsWithOther(_) => "BandsWithOther".to_owned(),
+        Keyword::Unearth(_) => "Unearth".to_owned(),
+        Keyword::Convoke => "Convoke".to_owned(),
+        Keyword::Waterbend => "Waterbend".to_owned(),
+        Keyword::Delve => "Delve".to_owned(),
+        Keyword::Devoid => "Devoid".to_owned(),
+        Keyword::Changeling => "Changeling".to_owned(),
+        Keyword::Phasing => "Phasing".to_owned(),
+        Keyword::Battlecry => "Battlecry".to_owned(),
+        Keyword::Decayed => "Decayed".to_owned(),
+        Keyword::Unleash => "Unleash".to_owned(),
+        Keyword::Riot => "Riot".to_owned(),
+        Keyword::Afterlife(_) => "Afterlife".to_owned(),
+        Keyword::Enchant(_) => "Enchant".to_owned(),
+        Keyword::EtbCounter { .. } => "EtbCounter".to_owned(),
+        Keyword::Reconfigure(_) => "Reconfigure".to_owned(),
+        Keyword::LivingWeapon => "LivingWeapon".to_owned(),
+        Keyword::JobSelect => "JobSelect".to_owned(),
+        Keyword::TotemArmor => "TotemArmor".to_owned(),
+        Keyword::Bestow(_) => "Bestow".to_owned(),
+        Keyword::Embalm(_) => "Embalm".to_owned(),
+        Keyword::Eternalize(_) => "Eternalize".to_owned(),
+        Keyword::Fading(_) => "Fading".to_owned(),
+        Keyword::Vanishing(_) => "Vanishing".to_owned(),
+        Keyword::Protection(_) => "Protection".to_owned(),
+        Keyword::Kicker(_) => "Kicker".to_owned(),
+        Keyword::Cycling(_) => "Cycling".to_owned(),
+        Keyword::Typecycling { .. } => "Typecycling".to_owned(),
+        Keyword::Flashback(_) => "Flashback".to_owned(),
+        Keyword::Retrace => "Retrace".to_owned(),
+        Keyword::Ward(_) => "Ward".to_owned(),
+        Keyword::Equip(_) => "Equip".to_owned(),
+        Keyword::Landwalk(_) => "Landwalk".to_owned(),
+        Keyword::Rampage(_) => "Rampage".to_owned(),
+        Keyword::Absorb(_) => "Absorb".to_owned(),
+        Keyword::Crew { .. } => "Crew".to_owned(),
+        Keyword::Partner(PartnerType::DoctorsCompanion) => "Doctor".to_owned(),
+        Keyword::Partner(PartnerType::ChooseABackground) => "Background".to_owned(),
+        Keyword::Partner(_) => "Partner".to_owned(),
+        Keyword::Companion(_) => "Companion".to_owned(),
+        Keyword::CommanderNinjutsu(_) => "CommanderNinjutsu".to_owned(),
+        Keyword::Ninjutsu(_) => "Ninjutsu".to_owned(),
+        Keyword::Sneak(_) => "Sneak".to_owned(),
+        Keyword::Mutate(_) => "Mutate".to_owned(),
+        Keyword::Escape(_) => "Escape".to_owned(),
+        Keyword::Morph(_) => "Morph".to_owned(),
+        Keyword::Megamorph(_) => "Megamorph".to_owned(),
+        Keyword::Madness(_) => "Madness".to_owned(),
+        Keyword::Disguise(_) => "Disguise".to_owned(),
+        Keyword::Mayhem(_) => "Mayhem".to_owned(),
+        Keyword::Suspend { .. } => "Suspend".to_owned(),
+        Keyword::Blitz(_) => "Blitz".to_owned(),
+        Keyword::Disturb(_) => "Disturb".to_owned(),
+        Keyword::Foretell(_) => "Foretell".to_owned(),
+        Keyword::Miracle(_) => "Miracle".to_owned(),
+        Keyword::Plot(_) => "Plot".to_owned(),
+        Keyword::Gift(_) => "Gift".to_owned(),
+        Keyword::Outlast(_) => "Outlast".to_owned(),
+        Keyword::Dash(_) => "Dash".to_owned(),
+        Keyword::Craft { .. } => "Craft".to_owned(),
+        Keyword::Harmonize(_) => "Harmonize".to_owned(),
+        Keyword::Warp(_) => "Warp".to_owned(),
+        Keyword::Devour { .. } => "Devour".to_owned(),
+        Keyword::Offspring(_) => "Offspring".to_owned(),
+        Keyword::Splice { .. } => "Splice".to_owned(),
+        Keyword::Bargain => "Bargain".to_owned(),
+        Keyword::Sunburst => "Sunburst".to_owned(),
+        Keyword::Champion(_) => "Champion".to_owned(),
+        Keyword::Training => "Training".to_owned(),
+        Keyword::Assist => "Assist".to_owned(),
+        Keyword::Augment => "Augment".to_owned(),
+        Keyword::Aftermath => "Aftermath".to_owned(),
+        Keyword::JumpStart => "JumpStart".to_owned(),
+        Keyword::Cipher => "Cipher".to_owned(),
+        Keyword::Transmute(_) => "Transmute".to_owned(),
+        Keyword::Transfigure(_) => "Transfigure".to_owned(),
+        Keyword::Cleave(_) => "Cleave".to_owned(),
+        Keyword::Undaunted => "Undaunted".to_owned(),
+        Keyword::Station => "Station".to_owned(),
+        Keyword::Paradigm => "Paradigm".to_owned(),
+        Keyword::Replicate(_) => "Replicate".to_owned(),
+        Keyword::Awaken { .. } => "Awaken".to_owned(),
+        Keyword::ForMirrodin => "ForMirrodin".to_owned(),
+        Keyword::MoreThanMeetsTheEye(_) => "MoreThanMeetsTheEye".to_owned(),
+        Keyword::Freerunning(_) => "Freerunning".to_owned(),
+        Keyword::Increment => "Increment".to_owned(),
+        Keyword::Firebending(_) => "Firebending".to_owned(),
+        Keyword::Specialize(_) => "Specialize".to_owned(),
+        Keyword::Offering(_) => "Offering".to_owned(),
+        Keyword::Escalate(_) => "Escalate".to_owned(),
+        Keyword::Recover(_) => "Recover".to_owned(),
+        Keyword::Fuse => "Fuse".to_owned(),
+        Keyword::Unknown(payload) => payload.clone(),
+        Keyword::Affinity(_) => "Affinity".to_owned(),
+        Keyword::Amplify(_) => "Amplify".to_owned(),
+        Keyword::Backup(_) => "Backup".to_owned(),
+        Keyword::Banding => "Banding".to_owned(),
+        Keyword::Bloodthirst(_) => "Bloodthirst".to_owned(),
+        Keyword::Buyback(_) => "Buyback".to_owned(),
+        Keyword::Casualty(_) => "Casualty".to_owned(),
+        Keyword::Compleated => "Compleated".to_owned(),
+        Keyword::Conspire => "Conspire".to_owned(),
+        Keyword::CumulativeUpkeep(_) => "CumulativeUpkeep".to_owned(),
+        Keyword::Daybound => "Daybound".to_owned(),
+        Keyword::Demonstrate => "Demonstrate".to_owned(),
+        Keyword::Dethrone => "Dethrone".to_owned(),
+        Keyword::Discover(_) => "Discover".to_owned(),
+        Keyword::DoubleTeam => "DoubleTeam".to_owned(),
+        Keyword::Echo(_) => "Echo".to_owned(),
+        Keyword::Emerge(_) => "Emerge".to_owned(),
+        Keyword::Encore(_) => "Encore".to_owned(),
+        Keyword::Enlist => "Enlist".to_owned(),
+        Keyword::Entwine(_) => "Entwine".to_owned(),
+        Keyword::Epic => "Epic".to_owned(),
+        Keyword::Evoke(_) => "Evoke".to_owned(),
+        Keyword::Fortify(_) => "Fortify".to_owned(),
+        Keyword::Gravestorm => "Gravestorm".to_owned(),
+        Keyword::Haunt => "Haunt".to_owned(),
+        Keyword::Hideaway(_) => "Hideaway".to_owned(),
+        Keyword::Impending { .. } => "Impending".to_owned(),
+        Keyword::Improvise => "Improvise".to_owned(),
+        Keyword::Ingest => "Ingest".to_owned(),
+        Keyword::LevelUp(_) => "LevelUp".to_owned(),
+        Keyword::LivingMetal => "LivingMetal".to_owned(),
+        Keyword::Melee => "Melee".to_owned(),
+        Keyword::Mentor => "Mentor".to_owned(),
+        Keyword::Mobilize(_) => "Mobilize".to_owned(),
+        Keyword::Myriad => "Myriad".to_owned(),
+        Keyword::Nightbound => "Nightbound".to_owned(),
+        Keyword::Overload(_) => "Overload".to_owned(),
+        Keyword::Poisonous(_) => "Poisonous".to_owned(),
+        Keyword::Prototype { .. } => "Prototype".to_owned(),
+        Keyword::Provoke => "Provoke".to_owned(),
+        Keyword::Prowl(_) => "Prowl".to_owned(),
+        Keyword::Ravenous => "Ravenous".to_owned(),
+        Keyword::ReadAhead => "ReadAhead".to_owned(),
+        Keyword::Rebound => "Rebound".to_owned(),
+        Keyword::Reinforce { .. } => "Reinforce".to_owned(),
+        Keyword::Ripple(_) => "Ripple".to_owned(),
+        Keyword::Saddle(_) => "Saddle".to_owned(),
+        Keyword::Teamwork(_) => "Teamwork".to_owned(),
+        Keyword::Scavenge(_) => "Scavenge".to_owned(),
+        Keyword::Soulshift(_) => "Soulshift".to_owned(),
+        Keyword::Spectacle(_) => "Spectacle".to_owned(),
+        Keyword::SplitSecond => "SplitSecond".to_owned(),
+        Keyword::Spree => "Spree".to_owned(),
+        Keyword::Tiered => "Tiered".to_owned(),
+        Keyword::Squad(_) => "Squad".to_owned(),
+        Keyword::Storm => "Storm".to_owned(),
+        Keyword::Surge(_) => "Surge".to_owned(),
+        Keyword::Totem => "Totem".to_owned(),
+        Keyword::Toxic(_) => "Toxic".to_owned(),
+        Keyword::WebSlinging(_) => "WebSlinging".to_owned(),
+    }
+}
+
+// Derivation-event counter for the allocation/reuse discrimination test:
+// incremented on every intrinsic-descriptor materialization so tests can
+// prove ordinary layer passes reuse live state. Thread-local so concurrently
+// running tests cannot contribute to another test's measured interval. Test/support only.
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static TOKEN_ART_DERIVATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the derivation counter. Test/support only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_token_art_derivation_count() {
+    TOKEN_ART_DERIVATION_COUNT.with(|count| count.set(0));
+}
+
+/// Read the derivation counter. Test/support only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn token_art_derivation_count() -> usize {
+    TOKEN_ART_DERIVATION_COUNT.with(std::cell::Cell::get)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
@@ -615,6 +863,13 @@ pub struct GameObject {
     /// identify one printed token catalog entry without guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
+    /// Intrinsic token body for shape-based art lookup (see
+    /// `TokenArtDescriptor`). Refreshed by the token creation injectors once
+    /// the base is final, and carried by copy effects alongside
+    /// `token_image_ref`. Absent for cards, non-token objects, and tokens
+    /// from older snapshots — the client falls back to live fields there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_art: Option<TokenArtDescriptor>,
     /// MTGJSON token UUIDs linked from this printed source card. Display/catalog
     /// metadata copied from `CardFace`; game rules never read it directly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1051,6 +1306,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emblem_source: Option<EmblemSource>,
 
+    /// CR 607.1d + CR 607.5 + CR 400.7: for an emblem, the exact object (storage
+    /// id + incarnation) that was the source of the ability that created it — the
+    /// object an emblem ability's "cards exiled with [that object]" refers to —
+    /// and the copiable-value set of that ability, which its exile-performing
+    /// partners must share. `None` for every non-emblem object, and for an emblem
+    /// whose creating ability is not attributable. Written once in `create_emblem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_ability_source: Option<LinkedAbilitySource>,
+
     /// CR 111.1: Whether this object is a token (not a card).
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_token: bool,
@@ -1228,6 +1492,20 @@ pub struct GameObject {
     /// an earlier exception (CR 613.1a timestamp order).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer1_name_origin: Option<crate::types::ability::CopiedNameOrigin>,
+
+    /// CR 613.1f + CR 607.1: index of the first live `abilities` slot that is not
+    /// one of this object's characteristic abilities. Layer 6 appends granted
+    /// abilities after the layer-1 set; an ability-removing effect (CR 613.1f) or a
+    /// basic-land-type set (CR 305.7) empties the characteristic prefix. `None` =
+    /// every live slot is characteristic. Layer-derived: reset with `abilities`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_abilities_from: Option<usize>,
+    /// CR 613.1a + CR 607.5: the winning layer-1 copy effect whose copiable values
+    /// supplied the characteristic `abilities` this pass; `None` = the object's
+    /// own. Layer-derived: set by the layer-1 `CopyValues` arm, cleared by the
+    /// Step-1 seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer1_copy_effect: Option<crate::types::ability::CopyEffectInstanceRef>,
 
     /// CR 707.9b: the BASE name's origin for a MATERIALIZED object (duplicate
     /// conjure / copy-token creation of an exception-named copy) — persistent,
@@ -1445,6 +1723,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         color: _,
         printed_ref: _,
         token_image_ref: _,
+        token_art: _,
         source_related_token_ids: _,
         spellbook: _,
         // OMITTED, SAFE BY WRITE SITE. Every write is a FACE INSTALL:
@@ -1522,6 +1801,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         is_renowned: _,
         is_emblem: _,
         emblem_source: _,
+        // omitted-safe-by-write-site: written once at emblem creation, immutable after.
+        linked_ability_source: _,
         is_token: _,
         is_copy: _,
         display_source: _,
@@ -1550,6 +1831,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         room_unlocks: _,
         copied_room_halves: _,
         layer1_name_origin: _,
+        granted_abilities_from: _,
+        layer1_copy_effect: _,
         base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
@@ -1794,6 +2077,7 @@ impl GameObject {
         self.base_trigger_definitions = definitions;
         self.base_trigger_printed_origins.clear();
         self.materialize_base_trigger_definitions();
+        self.restore_token_art_baseline();
         Ok(())
     }
 
@@ -1812,6 +2096,7 @@ impl GameObject {
         self.base_trigger_definitions = definitions;
         self.base_trigger_printed_origins = printed_origins.as_ref().clone();
         self.materialize_base_trigger_definitions();
+        self.restore_token_art_baseline();
         Ok(())
     }
 
@@ -2024,7 +2309,7 @@ impl GameObject {
                 // construct a `GrantAbility` holding an uninstallable kind
                 // (`PerpetualGrantModification::try_from` is the single gate, and
                 // rejects `classify_quoted_inner`'s other outputs --
-                // `GrantTrigger`, `GrantReplacement` -- closing the whole parse),
+                // `GrantReplacement` -- closing the whole parse),
                 // and widening that gate is a compile error here until the new
                 // kind is installed. A wildcard would let a widened gate record
                 // the modification in `perpetual_mods` while installing nothing.
@@ -2069,12 +2354,25 @@ impl GameObject {
                             // silent no-op -- Blocker 1 (review round on PR
                             // #8494). Mirrors the sibling
                             // `PerpetualModification::ModifyCost` arm above
-                            // verbatim. Scoped to the `ModifyCost` shape only:
-                            // other `StaticMode` kinds this arm installs (a
-                            // granted "can't block" restriction, CR 509.1b)
-                            // are legitimately battlefield-only and must keep
-                            // the empty (battlefield-default) `active_zones`.
-                            if matches!(mode, StaticMode::ModifyCost { .. }) {
+                            // verbatim. Scoped to the self-spell cost shapes only
+                            // (`ModifyCost`, plus the quoted self alternative-cost
+                            // grant "You may pay {N} rather than pay this spell's
+                            // mana cost" — CR 118.9 + CR 113.6e: an ability that
+                            // modifies how that particular object can be played
+                            // or cast functions in any zone from which it could
+                            // be played or cast and also on the stack, so the
+                            // recipient card carries the offer from hand): other
+                            // `StaticMode` kinds this arm installs (a granted
+                            // "can't block" restriction, CR 509.1b) are
+                            // legitimately battlefield-only and must keep the
+                            // empty (battlefield-default) `active_zones`.
+                            // `affected` is forced to `SelfRef` above, so the
+                            // mode match alone identifies the self-cost shape.
+                            if matches!(
+                                mode,
+                                StaticMode::ModifyCost { .. }
+                                    | StaticMode::CastWithAlternativeCost { .. }
+                            ) {
                                 synthetic = synthetic.active_zones(
                                     crate::types::zones::self_spell_cost_mod_active_zones(),
                                 );
@@ -2106,10 +2404,9 @@ impl GameObject {
                         // there is no layer pass to populate it from base) and
                         // `base_abilities` (so it survives the battlefield
                         // layer reset's `abilities = base_abilities.clone()`).
-                        // No `concretize_granting_object` step: unlike an
-                        // aura/equipment donor, a perpetual self-grant has no
-                        // separate granting object to rebind `GrantingObject`
-                        // self-references to. Dedup by structural equality,
+                        // No granter stamp: unlike an aura/equipment donor, a
+                        // perpetual self-grant has no separate granting object
+                        // for `GrantingObject` to name. Dedup by structural equality,
                         // matching every other perpetual-grant arm's
                         // idempotency (this function runs once per
                         // `ApplyPerpetual` resolution).
@@ -2121,11 +2418,39 @@ impl GameObject {
                                 Arc::make_mut(&mut self.base_abilities).push(*definition.clone());
                             }
                         }
+                        // Digital-only Alchemy (no CR entry for "perpetually"):
+                        // the quoted body classified to a triggered ability --
+                        // Jessie Zane's "When this creature enters, draw a
+                        // card." Installed as a PRINTED slot via the single
+                        // authority: perpetual edits are intrinsic, copiable,
+                        // base-set characteristics (CR 707.9a class) that must
+                        // survive the granting source -- not `Granted`, whose
+                        // lifetime ties to the producer. The installed
+                        // trigger's source is the recipient object; the inner
+                        // "~"/"this creature" was normalized card-wide before
+                        // classification, so no pronoun rebinding is needed at
+                        // install. No structural-equality dedup: CR 113.2c (verified:
+                        // "If an object has multiple instances of the same
+                        // ability, each instance functions independently") --
+                        // each `ApplyPerpetual` resolution installs one
+                        // occurrence, so two independent grants of equal bodies
+                        // (Oglor granting the same card twice) yield two
+                        // triggers. `push_printed_trigger` mints a distinct
+                        // `Printed` occurrence ref per call, and layer
+                        // re-materialization rebuilds the live list
+                        // slot-for-slot, so one recorded grant stays exactly
+                        // one occurrence while independent grants stack.
+                        PerpetualGrantModification::GrantTrigger { trigger } => {
+                            self.push_printed_trigger(trigger.as_ref().clone());
+                        }
                     }
                 }
             }
         }
         self.perpetual_mods.push(modification.clone());
+        // Every arm above rewrites printed-base inputs: restore the derived
+        // art baseline so the layer reseed can reuse live state.
+        self.restore_token_art_baseline();
     }
 
     pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
@@ -2390,6 +2715,7 @@ impl GameObject {
                 printed_ref: self.printed_ref.clone(),
                 is_token: self.is_token,
                 face_down: self.face_down,
+                mana_cost: self.mana_cost.clone(),
                 transformed: self.transformed,
                 is_renowned: self.is_renowned,
                 is_saddled: self.is_saddled,
@@ -2431,6 +2757,7 @@ impl GameObject {
                 additional_cost_payment_count: self.additional_cost_payment_count,
                 additional_cost_payments: self.additional_cost_payments.clone(),
                 cast_cost_paid_object: self.cast_cost_paid_object.clone(),
+                granting_object: None,
             }),
             power: self.power,
             toughness: self.toughness,
@@ -2551,6 +2878,9 @@ impl GameObject {
         }
 
         self.base_characteristics_initialized = true;
+        // Base inputs may have been back-filled above: restore the derived
+        // art baseline so later reseeds reuse coherent live state.
+        self.restore_token_art_baseline();
     }
 
     /// Test-fixture-only construction seam for pre-identity unit fixtures.
@@ -2625,6 +2955,7 @@ impl GameObject {
             printed_ref: None,
             base_printed_ref: None,
             token_image_ref: None,
+            token_art: None,
             source_related_token_ids: Vec::new(),
             spellbook: Vec::new(),
             parse_warnings: Vec::new(),
@@ -2692,6 +3023,7 @@ impl GameObject {
             is_renowned: false,
             is_emblem: false,
             emblem_source: None,
+            linked_ability_source: None,
             is_token: false,
             is_copy: false,
             display_source: DisplaySource::Card,
@@ -2720,6 +3052,8 @@ impl GameObject {
             room_unlocks: None,
             copied_room_halves: None,
             layer1_name_origin: None,
+            granted_abilities_from: None,
+            layer1_copy_effect: None,
             base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
@@ -3005,6 +3339,31 @@ impl GameObject {
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
     }
 
+    /// CR 613.1a + CR 607.5: the copiable-value set that supplies this object's
+    /// characteristic abilities this layer pass — the winning layer-1 copy
+    /// effect's, else the object's own.
+    pub fn characteristic_set(&self) -> CharacteristicSetRef {
+        self.layer1_copy_effect
+            .map_or(CharacteristicSetRef::Own, CharacteristicSetRef::Copied)
+    }
+
+    /// CR 607.1 + CR 607.5 + CR 613.1f: whether the live activated-ability slot
+    /// `index` is one of this object's characteristic abilities (of its current
+    /// copiable-value set) or one gained in layer 6. An index past the live
+    /// `abilities` (a runtime-granted cycling/graveyard/plot/equip slot, or no
+    /// such slot at all) is `Granted` — fail closed.
+    pub fn activated_ability_provenance(&self, index: usize) -> AbilityProvenance {
+        if index >= self.abilities.len()
+            || self
+                .granted_abilities_from
+                .is_some_and(|from| index >= from)
+        {
+            AbilityProvenance::Granted
+        } else {
+            AbilityProvenance::Characteristic(self.characteristic_set())
+        }
+    }
+
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's
     /// printed baseline. Mirrors the per-object reset in `evaluate_layers` Step 1
     /// (layers.rs) but runs at zone-exit time so off-battlefield objects — e.g. a
@@ -3025,6 +3384,8 @@ impl GameObject {
         self.mana_cost = self.base_mana_cost.clone();
         self.keywords = self.base_keywords.clone();
         self.abilities = Arc::clone(&self.base_abilities);
+        self.granted_abilities_from = None;
+        self.layer1_copy_effect = None;
         self.materialize_base_trigger_definitions();
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
@@ -3034,6 +3395,64 @@ impl GameObject {
         self.assigns_damage_from_toughness = false;
         self.assigns_damage_as_though_unblocked = false;
         self.assigns_no_combat_damage = false;
+        // The copy marker is cleared above; restore the art baseline with it
+        // so a departed copy never carries its source's descriptor with no
+        // marker flagging the overwrite.
+        self.restore_token_art_baseline();
+    }
+
+    /// Derive this token's intrinsic art body from its printed (`base_*`)
+    /// characteristics. Grants never contribute: pumps, color setters, and
+    /// anthem keyword grants live on the mutable axes, while every store read
+    /// here is a printed baseline.
+    ///
+    /// This is the ONE source of intrinsic art metadata. The live `token_art`
+    /// cache is restored from here: eagerly by every authority that mutates
+    /// the printed base (token creation injectors, perpetual modifications,
+    /// face-down install/uninstall, face application, base sync/install
+    /// entry points, zone-exit reset), and by the layer baseline reseed only
+    /// when live state cannot still be valid (absent, or overwritten by a
+    /// copy last pass). No other derivation site may exist; parallel caches
+    /// drift.
+    ///
+    /// `token_rules_text` is deliberately NOT consulted: it can mirror catalog
+    /// text for abilities that were suppressed from functional injection (the
+    /// Pilot-crew display-mirror case), which would misreport a functionally
+    /// vanilla token as ability-bearing.
+    pub(crate) fn intrinsic_token_art(&self) -> TokenArtDescriptor {
+        #[cfg(any(test, feature = "test-support"))]
+        TOKEN_ART_DERIVATION_COUNT.with(|count| count.set(count.get() + 1));
+        let mut keywords = Vec::new();
+        for keyword in self.base_keywords.iter() {
+            let name = art_keyword_family_name(keyword);
+            if !name.is_empty() && !keywords.contains(&name) {
+                keywords.push(name);
+            }
+        }
+        TokenArtDescriptor {
+            power: self.base_power,
+            toughness: self.base_toughness,
+            colors: self.base_color.clone(),
+            subtypes: self.base_card_types.subtypes.clone(),
+            keywords,
+            has_abilities: !self.base_keywords.is_empty()
+                || !self.base_abilities.is_empty()
+                || !self.base_trigger_definitions.is_empty()
+                || !self.base_replacement_definitions.is_empty()
+                || !self.base_static_definitions.is_empty(),
+        }
+    }
+
+    /// Eagerly restore `token_art` to this object's own intrinsic baseline:
+    /// the derived body for a true token, `None` for everything else. Called
+    /// by every baseline authority that mutates the printed base, so the
+    /// layer reseed can reuse live state on ordinary passes.
+    pub(crate) fn restore_token_art_baseline(&mut self) {
+        if self.is_token {
+            self.token_art = Some(self.intrinsic_token_art());
+        } else {
+            self.token_art = None;
+        }
     }
 
     /// CR 400.7: Clear battlefield-only designations when a permanent leaves the battlefield.

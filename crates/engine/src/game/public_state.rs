@@ -444,7 +444,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *object_id);
                 mark_public_state_player_dirty(state, *player_id);
             }
-            GameEvent::CreatureDestroyed { object_id } => {
+            GameEvent::CreatureDestroyed { object_id, .. } => {
                 // Paired `ZoneChanged` to graveyard handles battlefield display.
                 mark_public_state_object_dirty(state, *object_id);
             }

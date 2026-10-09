@@ -23,6 +23,14 @@ interface ScryfallDataEntry {
   colors: string[];
   color_identity: string[];
   keywords: string[];
+  /**
+   * Emitted only for `token:` entries by `scripts/gen-scryfall-images.sh`
+   * (P/T as printed, so `"*"`-valued printings stay distinguishable).
+   * Read by the local token-hit validator — never a card lookup key.
+   */
+  power?: string | null;
+  toughness?: string | null;
+  oracle_text?: string | null;
 }
 
 /**
@@ -1118,6 +1126,11 @@ export interface TokenSearchFilters {
    *  vanilla printing — never an arbitrary same-shape printing that carries
    *  extra abilities (e.g. a Doctor Who 1/1 Human token with Ward 2). */
   hasAbilities?: boolean;
+  /** Printed keyword base names, lowercased (`["flying"]`, `["first strike"]`).
+   *  Narrow the most specific query rung with `kw:` clauses and validate the
+   *  local hit, so same-shape tokens with different keywords resolve to
+   *  distinct art. Absent for vanilla and rules-text-only tokens. */
+  keywords?: string[];
 }
 
 export async function fetchTokenImageUrl(
@@ -1125,13 +1138,14 @@ export async function fetchTokenImageUrl(
   size: ImageSize = "normal",
   filters?: TokenSearchFilters,
 ): Promise<string> {
-  const localUrl = await fetchTokenImageFromLocal(tokenName, size);
+  const localUrl = await fetchTokenImageFromLocal(tokenName, size, filters);
   if (localUrl) return localUrl;
 
   const colorClause = buildTokenColorClause(filters?.colors);
   const subtypes = filters?.subtypes ?? [];
 
   // Progressive fallback ladder:
+  //   0. (keywords present only) Full shape plus `kw:` clauses.
   //   1. Most specific: name + P/T + colors + every subtype.
   //   2. Drop trailing subtypes one at a time (keeps the leading subtype
   //      longest — for MTG creature tokens the first subtype is the race
@@ -1149,7 +1163,25 @@ export async function fetchTokenImageUrl(
   // pre-fix behavior) for a token type whose only printings carry abilities,
   // rather than producing no image at all. See issue #502.
   const vanillaOnly = filters?.hasAbilities === false;
+  const keywords = filters?.keywords ?? [];
   const queries: string[] = [];
+  if (keywords.length > 0) {
+    // Most specific rung: full shape plus `kw:` clauses, so same-shape
+    // tokens with different keywords resolve to distinct art. A miss (an
+    // engine keyword Scryfall does not know, or no such printing) costs one
+    // query and degrades to the ladder below — never to no image.
+    queries.push(
+      buildTokenQuery(
+        tokenName,
+        filters?.power,
+        filters?.toughness,
+        colorClause,
+        subtypes,
+        vanillaOnly,
+        keywords,
+      ),
+    );
+  }
   for (let n = subtypes.length; n >= 0; n--) {
     queries.push(
       buildTokenQuery(
@@ -1231,13 +1263,73 @@ export async function fetchTokenImageByRef(
 async function fetchTokenImageFromLocal(
   tokenName: string,
   size: ImageSize,
+  filters?: TokenSearchFilters,
 ): Promise<string | null> {
   const data = await loadScryfallData();
   const key = `token:${tokenName.toLowerCase()}`;
   const entry = data?.[key];
   if (!entry) return null;
+  // The local map holds ONE printing per token name (last bulk row wins),
+  // so the hit is only usable when it matches the requested shape — a 1/1
+  // Goblin must not serve the stored 2/1-haste art, nor a white Spirit the
+  // stored blue one. On any mismatch, fall through to the remote ladder.
+  if (filters && !tokenLocalEntryMatches(entry, filters)) return null;
   const face = entry.faces[0];
   return localFaceImageUrl(face, size) ?? null;
+}
+
+/**
+ * Whether a local `token:` entry may serve a filtered token lookup. Every
+ * axis the filters constrain must agree; unconstrained axes (null power for
+ * a noncreature token, absent colors, no keywords) are skipped. Unknown
+ * filter values never match — they fall through to the remote ladder rather
+ * than serving possibly-wrong art.
+ */
+function tokenLocalEntryMatches(
+  entry: ScryfallDataEntry,
+  filters: TokenSearchFilters,
+): boolean {
+  if (filters.power != null && String(entry.power ?? "") !== String(filters.power)) {
+    return false;
+  }
+  if (
+    filters.toughness != null
+    && String(entry.toughness ?? "") !== String(filters.toughness)
+  ) {
+    return false;
+  }
+  if (filters.colors != null) {
+    const wanted = new Set(
+      filters.colors.map((c) => (MANA_COLOR_TO_SCRYFALL[c] ?? "").toLowerCase()),
+    );
+    wanted.delete("");
+    const actual = new Set((entry.colors ?? []).map((c) => c.toLowerCase()));
+    if (wanted.size !== actual.size || ![...wanted].every((c) => actual.has(c))) {
+      return false;
+    }
+  }
+  if (filters.subtypes != null && filters.subtypes.length > 0) {
+    const typeLine = (entry.type_line ?? "").toLowerCase();
+    if (!filters.subtypes.every((s) => typeLine.includes(s.toLowerCase()))) {
+      return false;
+    }
+  }
+  if (filters.hasAbilities === false && !tokenEntryIsVanilla(entry)) {
+    return false;
+  }
+  if (filters.keywords != null && filters.keywords.length > 0) {
+    const entryKeywords = new Set((entry.keywords ?? []).map((k) => k.toLowerCase()));
+    if (!filters.keywords.every((k) => entryKeywords.has(k.toLowerCase()))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function tokenEntryIsVanilla(entry: ScryfallDataEntry): boolean {
+  return (
+    (entry.keywords?.length ?? 0) === 0 && (entry.oracle_text?.trim() ?? "") === ""
+  );
 }
 
 function buildTokenQuery(
@@ -1247,6 +1339,7 @@ function buildTokenQuery(
   colorClause: string,
   subtypes: string[],
   vanillaOnly: boolean,
+  keywords: string[] = [],
 ): string {
   let query = `t:token !"${name}"`;
   if (power != null) query += ` pow=${power}`;
@@ -1257,6 +1350,11 @@ function buildTokenQuery(
     // Quote to defend against subtypes with spaces (e.g. multi-word
     // creature types from supplemental sets).
     query += ` t:"${s.toLowerCase()}"`;
+  }
+  for (const k of keywords) {
+    // `kw:` matches a printing carrying the keyword (any parameterization).
+    // Quoted for multi-word keywords ("first strike").
+    query += ` kw:"${k.toLowerCase().replace(/"/g, "")}"`;
   }
   // `is:vanilla` (a documented Scryfall predicate — a card with no abilities)
   // narrows the search to ability-less printings so an ability-less engine

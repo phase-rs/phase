@@ -48,6 +48,7 @@ import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
+import { CardAnimationStylePicker } from "./CardAnimationStylePicker.tsx";
 import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
@@ -191,6 +192,7 @@ export function PreferencesModal({
   const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
+  const cardAnimationStyle = usePreferencesStore((s) => s.cardAnimationStyle);
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
@@ -205,6 +207,7 @@ export function PreferencesModal({
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
   const setCustomBackgroundUrl = usePreferencesStore((s) => s.setCustomBackgroundUrl);
   const setVfxQuality = usePreferencesStore((s) => s.setVfxQuality);
+  const setCardAnimationStyle = usePreferencesStore((s) => s.setCardAnimationStyle);
   const setPacingMultiplier = usePreferencesStore((s) => s.setPacingMultiplier);
   const resetPacing = usePreferencesStore((s) => s.resetPacing);
   const resetAllPreferences = usePreferencesStore((s) => s.resetAllPreferences);
@@ -547,6 +550,10 @@ export function PreferencesModal({
                       onChange={setVfxQuality}
                       renderLabel={(opt) => t(`visual.vfxQualityOptions.${opt}`)}
                     />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.cardAnimationStyle")}>
+                    <CardAnimationStylePicker value={cardAnimationStyle} onChange={setCardAnimationStyle} />
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.keywordStrip")}>

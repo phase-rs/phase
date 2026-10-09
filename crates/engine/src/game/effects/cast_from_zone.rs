@@ -36,21 +36,24 @@ fn extract_controller_ref(filter: &TargetFilter) -> Option<&crate::types::abilit
 }
 
 /// CR 701.20e + CR 400.2: A private self-library peek keeps its looked-at
-/// cards in the controller-owned library while publishing their identities only
-/// through the resolving effect's `last_revealed_ids` window.
+/// cards in the controller's library while publishing their identities only
+/// through the resolving effect's `last_revealed_ids` window. CR 400.1 as a
+/// shared-library format modifies it: a card is in that library when its
+/// owner's library is the controller's, so the shared pile holds every owner's.
 pub(crate) fn looked_at_controller_library_cards(
     state: &GameState,
     controller: crate::types::player::PlayerId,
 ) -> Vec<ObjectId> {
+    let library = state.zone_storage_seat(Zone::Library, controller);
     state
         .last_revealed_ids
         .iter()
         .copied()
         .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|object| object.zone == Zone::Library && object.owner == controller)
+            state.objects.get(id).is_some_and(|object| {
+                object.zone == Zone::Library
+                    && state.zone_storage_seat(Zone::Library, object.owner) == library
+            })
         })
         .collect()
 }
@@ -578,6 +581,13 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 601.2c + CR 608.2g: the head slot of a multi-slot free cast (Finale of
+    // Promise) resolves every slot of its instruction as one cast window.
+    let slot_links = cast_slot_group(ability);
+    if !slot_links.is_empty() {
+        return resolve_cast_slot_group(state, ability, target_ids, &slot_links, events);
+    }
+
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora) inject the legal
     // looked-at library cards as targets at the chain seam
     // (`inject_last_revealed_targets`), already filtered through this cast
@@ -905,15 +915,15 @@ pub fn resolve(
     // (Bring to Light, `target != source` but in the controller's own exile)
     // must reach this path.
     //
-    // FOLLOW-UP (#1520 twin): Rebound (CR 702.88a) is still a
-    // `LingeringPermission` driver because its recast permission legitimately
-    // needs `duration: Some(UntilEndOfTurn)` to prune on decline (see the
-    // `consuming_vapors_rebound` suite). A rebounding SORCERY recast at upkeep
-    // therefore still passes through the lingering path; whether it hits the
-    // sorcery-speed gate is tracked separately. Routing Rebound through
-    // `DuringResolution` would regress that durational-prune contract, so it is
-    // intentionally left on the permission path under the explicit `driver`
-    // signal rather than forced through during-resolution here.
+    // CR 702.88a + CR 608.2g: Rebound's next-upkeep recast offer (issue
+    // #6461) is a `DuringResolution` driver like Suspend's last-counter
+    // cast — the "you may cast this card from exile" instruction names no
+    // duration, so it executes AS the delayed trigger resolves. The
+    // `UntilEndOfTurn` lingering permission this used to grant let the
+    // recast happen at any later priority window, and left rebounding
+    // SORCERY recasts to face the sorcery-speed gate at upkeep; both are
+    // fixed by routing through this path (the CR 608.2g timing bypass is
+    // armed by the resolution-cast cleanup marker).
     //
     // Nashi/Jeleva-style "you may cast [other] exiled cards" (target != source,
     // `ExiledBySource` filter, or an `alt_ability_cost`) are also
@@ -1122,6 +1132,127 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 601.2c + CR 608.2g: the further target slots of one "you may cast up to
+/// one target A and/or up to one target B … without paying their mana costs"
+/// instruction (Finale of Promise), in printed order, when `ability` is that
+/// instruction's head slot; empty otherwise.
+///
+/// The parser lowers each slot as its own free `CastFromZone` link so every slot
+/// keeps its own filter and target count (CR 601.2c: each "target" is a separate
+/// instance). They are still one instruction: the player casts the chosen cards
+/// during the resolution, in either order, or declines any of them — so the head
+/// resolves all of them through one cast window and the chain skips the slot
+/// links that follow it.
+pub(crate) fn cast_slot_group(ability: &ResolvedAbility) -> Vec<&ResolvedAbility> {
+    fn is_free_cast_slot(link: &ResolvedAbility) -> bool {
+        link.multi_target.is_some()
+            && matches!(
+                link.effect,
+                Effect::CastFromZone {
+                    without_paying_mana_cost: true,
+                    alt_ability_cost: None,
+                    duration: None,
+                    ..
+                }
+            )
+    }
+    if !is_free_cast_slot(ability) {
+        return Vec::new();
+    }
+    std::iter::successors(ability.sub_ability.as_deref(), |link| {
+        link.sub_ability.as_deref()
+    })
+    .take_while(|link| is_free_cast_slot(link))
+    .collect()
+}
+
+/// CR 608.2g + CR 601.2c: resolve a multi-slot free cast (see
+/// [`cast_slot_group`]) as one free-cast window over exactly the cards chosen
+/// for its slots. A card chosen for two slots (a split card that is both an
+/// instant and a sorcery) is offered once: once cast, it can't be cast again.
+/// Each candidate must still satisfy the filter of a slot it was chosen for,
+/// frozen as the effect is applied (CR 608.2h), and the graveyard rider after
+/// the last slot travels with every cast. The chosen cards are published as
+/// the chain's tracked set, which is what a following "those spells" reads.
+fn resolve_cast_slot_group(
+    state: &mut GameState,
+    head: &ResolvedAbility,
+    head_targets: Vec<ObjectId>,
+    slot_links: &[&ResolvedAbility],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut pool = head_targets;
+    for link in slot_links {
+        for target in link.live_object_targets(state) {
+            if let TargetRef::Object(id) = target {
+                if !pool.contains(&id) {
+                    pool.push(id);
+                }
+            }
+        }
+    }
+    let filters = std::iter::once(head)
+        .chain(slot_links.iter().copied())
+        .filter_map(|link| match &link.effect {
+            Effect::CastFromZone { target, .. } => Some(freeze_resolution_cast_filter(
+                state,
+                link,
+                target.clone(),
+                None,
+            )),
+            _ => None,
+        })
+        .collect();
+    let filter = TargetFilter::Or { filters };
+    super::publish_tracked_set(state, pool.clone());
+
+    let mut zones: Vec<Zone> = Vec::new();
+    for zone in pool
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|obj| obj.zone))
+    {
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+    }
+    let count = u8::try_from(pool.len()).ok();
+    let graveyard_replacement = slot_links
+        .last()
+        .and_then(|last| cast_from_zone_graveyard_destination(last));
+    let constraint = match &head.effect {
+        Effect::CastFromZone { constraint, .. } => constraint.clone(),
+        _ => None,
+    };
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        filter.clone(),
+        head.source_id,
+        head.controller,
+        freeze_cast_permission_constraint(state, head, constraint),
+    );
+    let mut window = head.clone();
+    window.effect = Effect::FreeCastFromZones {
+        count,
+        max_total_mv: None,
+        filter,
+        zones: zones.clone(),
+        graveyard_replacement: graveyard_replacement.clone(),
+    };
+    window.sub_ability = None;
+    window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    super::free_cast_from_zones::resolve_with_face_policy(
+        state,
+        &window,
+        super::free_cast_from_zones::FreeCastWindowRequest {
+            count,
+            max_total_mv: None,
+            zones,
+            graveyard_replacement,
+            face_policy,
+        },
+        events,
+    )
+}
+
 /// CR 400.1 + CR 601.2a: The zones a resolution-scoped batch window may cast
 /// from. CR 601.2a moves the card "from where it is to the stack", and a batch
 /// produced by an exile / mill / reveal step lands in one of these four (exile
@@ -1170,10 +1301,16 @@ fn open_resolution_cast_window(
     // concrete member pool already proves it, while re-evaluating it later
     // would read a different linked-exile snapshot.  The residual filter and
     // fixed constraint are the one policy every projected face must satisfy.
+    //
+    // CR 608.2c: a bare `ParentTarget` anaphor ("one of those two cards" —
+    // Invasion of Alara) is discharged the same way: the pool IS the batch the
+    // chain handed over, and the persisted window has no parent to re-read.
     let window_filter = if target_filter.references_exiled_by_source() {
         target_filter
             .without_exile_anaphor()
             .unwrap_or(TargetFilter::Any)
+    } else if matches!(target_filter, TargetFilter::ParentTarget) {
+        TargetFilter::Any
     } else {
         target_filter.clone()
     };
@@ -1465,7 +1602,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -1868,19 +2005,10 @@ pub(crate) fn graveyard_destination_rider(
             target: TargetFilter::ParentTarget,
             ..
         } => Some(SpellStackToGraveyardReplacement::Exile),
-        // ISSUE #8721, MEASURED AND REJECTED: this arm also swallows Invasion of
-        // Alara's printed "Put one of them into your hand." — an unconditional
-        // move of the OTHER exiled card, not a graveyard replacement. Gating the
-        // arm on the "if you don't cast it" condition (which the four genuine
-        // members carry and Invasion of Alara does not) does let that
-        // instruction run — and it then moves the WRONG object: with no chosen
-        // target on the head, `ParentTarget` binds to the source, and the Siege
-        // returns itself to its owner's hand. Measured end-to-end through
-        // `GameScenario`/`GameRunner`, both accept and decline.
-        //
-        // So the classification stays as it is and the swallowed instruction is
-        // carried as a named gap: repairing it needs the `ParentTarget` binding
-        // fixed first, which is a separate unit with its own gate run.
+        // Invasion of Alara's "Put one of them into your hand." is not such a
+        // rider: it lowers to a choice from the cards its exile loop found
+        // (`ZoneChoiceCandidateSource::ParentTargets`) and never reaches this arm
+        // (issue #8750).
         Effect::ChangeZone {
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,
@@ -2317,10 +2445,9 @@ fn record_lingering_permissions(
                     granted_to,
                     resolution_cleanup: None,
                     // CR 611.2a: continuous-effect duration plumbing.
-                    // CR 702.88a: Rebound's upkeep recast permission expires.
                     // Forward `duration` from the `Effect::CastFromZone` so
-                    // durational grants (Rebound's `UntilEndOfTurn` upkeep
-                    // recast offer) are pruned at the correct boundary.
+                    // durational grants (Emry-class "you may cast that card
+                    // this turn" offers) are pruned at the correct boundary.
                     // `None` (the common case) preserves the standing
                     // semantics used by Discover, Suspend, Nashi, etc., whose
                     // cards are exiled and stay castable until they leave exile
@@ -4799,6 +4926,7 @@ mod tests {
             Zone::Hand,
             Zone::Graveyard,
             PlayerId(0),
+            None,
             crate::types::game_state::ZoneChangeRecord::test_minimal(
                 card,
                 Some(Zone::Hand),
@@ -4863,6 +4991,7 @@ mod tests {
             Zone::Graveyard,
             Zone::Exile,
             PlayerId(0),
+            None,
             crate::types::game_state::ZoneChangeRecord::test_minimal(
                 card,
                 Some(Zone::Graveyard),
@@ -5117,5 +5246,44 @@ mod tests {
                 ..
             } if *found == constraint
         )));
+    }
+
+    fn looked_at_window(format: crate::types::format::FormatConfig) -> Vec<ObjectId> {
+        let mut state = GameState::new(format, 2, 42);
+        let mine = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Library,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Library,
+        );
+        state.last_revealed_ids = vec![mine, theirs];
+        let looked = looked_at_controller_library_cards(&state, PlayerId(0));
+        assert!(
+            looked.contains(&mine),
+            "reach: the controller's own card is looked at"
+        );
+        looked.into_iter().filter(|id| *id == theirs).collect()
+    }
+
+    #[test]
+    fn looked_at_cards_follow_the_library_the_controller_reads() {
+        use crate::types::format::FormatConfig;
+        assert!(
+            looked_at_window(FormatConfig::standard()).is_empty(),
+            "another player's library is not the controller's"
+        );
+        assert_eq!(
+            looked_at_window(FormatConfig::dandan()).len(),
+            1,
+            "the shared pile is the controller's library whoever owns a card"
+        );
     }
 }

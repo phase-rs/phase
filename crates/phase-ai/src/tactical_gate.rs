@@ -947,6 +947,7 @@ fn definition_is_componentwise_known_zero(
         || definition.announced_x.is_some()
         || definition.min_x_value != 0
         || definition.cant_be_copied
+        || !definition.illegal_targets_disposition.is_does_not_resolve()
         || definition.cost_reduction.is_some()
         || definition.forward_result
         || definition.player_scope.is_some()
@@ -1692,7 +1693,8 @@ mod tests {
         TurnJournalKind, REMOVE_COUNTER_COST_X,
     };
     use engine::types::ability::{
-        QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
+        IllegalTargetsDisposition, QuantityModification, ReplacementDefinition,
+        ReplacementPlayerScope,
     };
     use engine::types::card::{CardFace, CleaveVariant, LayoutKind};
     use engine::types::counter::{CounterMatch, CounterType};
@@ -5904,6 +5906,28 @@ mod tests {
             true,
             false,
         ));
+
+        // CR 608.2b + CR 101.1: a definition that still resolves with illegal
+        // targets is not the plain zero shape. Reach guard: the unmutated
+        // definition IS known-zero, so the refusal belongs to the disposition.
+        assert!(definition_is_componentwise_known_zero(
+            state,
+            &zero_gain_definition(),
+            P0,
+            source,
+            true,
+            false,
+        ));
+        let mut still_resolves = zero_gain_definition();
+        still_resolves.illegal_targets_disposition = IllegalTargetsDisposition::StillResolves;
+        assert!(!definition_is_componentwise_known_zero(
+            state,
+            &still_resolves,
+            P0,
+            source,
+            true,
+            false,
+        ));
     }
 
     #[test]
@@ -6205,7 +6229,10 @@ mod tests {
                 .any(|selection| {
                     selection.source.object_id == slagheap
                         && selection.ability_index == Some(2)
-                        && selection.output == ManaSourceOutput::DeferredColorChoice
+                        && matches!(
+                            selection.output,
+                            ManaSourceOutput::DeferredColorChoice { .. }
+                        )
                 }),
             "the production source census includes the tapped, indexed deferred Slagheap ability"
         );
@@ -6562,7 +6589,10 @@ mod tests {
                 .any(|selection| {
                     selection.source.object_id == slagheap
                         && selection.ability_index == Some(2)
-                        && selection.output == ManaSourceOutput::DeferredColorChoice
+                        && matches!(
+                            selection.output,
+                            ManaSourceOutput::DeferredColorChoice { .. }
+                        )
                 }),
             "the funded archive context retains the indexed Slagheap source"
         );

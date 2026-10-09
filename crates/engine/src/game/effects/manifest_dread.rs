@@ -24,7 +24,7 @@ pub fn resolve(
         .find(|p| p.id == player)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    let count = player_state.library.len().min(2);
+    let count = state.library_of(player_state.id).len().min(2);
     if count == 0 {
         // CR 701.62a: Nothing to manifest if library is empty
         events.push(GameEvent::EffectResolved {
@@ -36,8 +36,8 @@ pub fn resolve(
     }
 
     // CR 701.62a: Look at top 2 (or fewer) cards
-    let cards: Vec<_> = player_state
-        .library
+    let cards: Vec<_> = state
+        .library_of(player_state.id)
         .iter()
         .take(count)
         .copied()

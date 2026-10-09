@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Exclure les decks en dessous de ce seuil de prise en charge par le moteur",
     "bracket": "Palier",
     "bracketHint": "L'IA aléatoire choisit parmi ces paliers. Les decks non étiquetés sont exclus lors du filtrage.",
+    "bracketPoolEmpty": "Aucun deck ne correspond aux paliers sélectionnés. L'IA aléatoire choisira parmi tous les decks légaux.",
+    "cedhPoolEmpty": "Aucun deck de palier 5 disponible. Aucun deck ne peut être assigné à l'IA aléatoire.",
     "opponentLabel": "Adversaire {{number}}",
     "deck": "Deck",
     "difficulty": "Difficulté",

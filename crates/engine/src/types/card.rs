@@ -113,6 +113,37 @@ pub struct TokenImageRef {
     pub preset_id: String,
 }
 
+/// Intrinsic token body for art selection, derived engine-side.
+///
+/// When no exact [`TokenImageRef`] matched, the client falls back to a
+/// shape-based token search. That search must be keyed by the token's
+/// PRINTED (base) characteristics — never live values, which pumps, color
+/// setters, and anthem grants distort. This descriptor is the single
+/// authority for that intrinsic body: it is refreshed whenever a token's
+/// base is installed (creation injectors) and rides copy effects alongside
+/// [`TokenImageRef`], reverting with them.
+///
+/// Display metadata only: it carries no game state and old snapshots
+/// (where it is absent) degrade to the legacy live-field lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenArtDescriptor {
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub colors: Vec<crate::types::mana::ManaColor>,
+    pub subtypes: Vec<String>,
+    /// Keyword family names (one per printed keyword, e.g.
+    /// `"FirstStrike"`; the art mapping names every recognized variant
+    /// explicitly because `Keyword::kind` collapses ~60 of them to
+    /// `Unknown`); the client formats them into `kw:` predicates. Truly
+    /// unknown keywords carry their raw payload instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Whether the printed body carries any abilities at all (keywords,
+    /// activated/triggered abilities, replacement/static definitions).
+    /// Grants never contribute: only `base_*` stores are read.
+    pub has_abilities: bool,
+}
+
 /// CR 306.5b + CR 107.3m: A supported printed planeswalker-loyalty value.
 ///
 /// `CardFace::loyalty` deliberately remains raw source data because card data

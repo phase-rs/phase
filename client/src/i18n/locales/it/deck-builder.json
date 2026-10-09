@@ -278,7 +278,9 @@
     "dataVersion": "Dati: {{version}}",
     "aboutBrackets": "Informazioni sui bracket ↗",
     "estimatedChip": "Stimato: B{{tier}}",
-    "estimatedChipFull": "Bracket stimato: B{{tier}} {{label}}"
+    "estimatedChipFull": "Bracket stimato: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Bracket dichiarato: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Bracket del mazzo",

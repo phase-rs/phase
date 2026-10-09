@@ -502,7 +502,6 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::DoublePTAll { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::RemoveAllDamage { target, .. }
-        | Effect::PreventDamage { target, .. }
         // Harmful effects
         | Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
@@ -530,6 +529,13 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         // which fell through to `None`).
         Effect::SetTapState {
             scope: EffectScope::Single,
+            target,
+            ..
+        } => Some(target),
+        // CR 115.1a + CR 115.10a: only a declared prevention recipient exposes a
+        // selectable target; the mass (`All`) scope is an untargeted population.
+        Effect::PreventDamage {
+            recipient_scope: EffectScope::Single,
             target,
             ..
         } => Some(target),
@@ -930,7 +936,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // Runtime-bound object references. The filter names no type line, so the
         // object axis stays open and the player axis is closed.
         TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::AttachedTo
@@ -1274,6 +1280,7 @@ fn exact_pending_node_is_eligible(node: &ResolvedAbility) -> bool {
         && node.min_x_value == 0
         && node.announced_x.is_none()
         && !node.cant_be_copied
+        && node.illegal_targets_disposition == Default::default()
         && node.copy_count_status == Default::default()
         && !node.forward_result
         && node.unless_pay.is_none()
@@ -1889,6 +1896,7 @@ mod lethality_tests {
 #[cfg(test)]
 mod suspect_scope_tests {
     use super::*;
+    use engine::types::ability::{PreventionAmount, PreventionScope, TypedFilter};
 
     // CR 701.60a: mass un-designation ("all suspected creatures are no longer
     // suspected", Absolving Lammasu) is a non-targeting population effect. The
@@ -1913,6 +1921,29 @@ mod suspect_scope_tests {
         assert!(
             extract_target_filter(&all_suspect).is_none(),
             "mass Suspect{{All}} is a population effect, not target-filtered"
+        );
+    }
+
+    // CR 115.10a: a mass prevention recipient is an untargeted population; the
+    // AI's target-filter extraction must mirror the engine's `target_filter()`.
+    #[test]
+    fn extract_target_filter_only_for_single_scope_prevent_damage() {
+        let prevent = |recipient_scope| Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            recipient_scope,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter(&prevent(EffectScope::Single)).is_some(),
+            "declared-recipient PreventDamage must expose a selectable target"
+        );
+        assert!(
+            extract_target_filter(&prevent(EffectScope::All)).is_none(),
+            "mass PreventDamage{{All}} is a population effect, not target-filtered"
         );
     }
 
@@ -2073,10 +2104,11 @@ mod live_quantity_targeting_tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ControllerRef,
-        CopyCountStatus, DetachedRemainder, Duration, EffectKind, FilterProp, ModalChoice,
-        MultiTargetSpec, OpponentMayScope, ParentTargetMissingReason, PlayerFilter, PlayerScope,
-        QuantityRef, RepeatContinuation, ResolvedAbility, SiblingCondition, SubAbilityLink,
-        TargetChoiceTiming, TargetRef, TargetSelectionMode, TypedFilter, UnlessPayModifier,
+        CopyCountStatus, DetachedRemainder, Duration, EffectKind, FilterProp,
+        IllegalTargetsDisposition, ModalChoice, MultiTargetSpec, OpponentMayScope,
+        ParentTargetMissingReason, PlayerFilter, PlayerScope, QuantityRef, RepeatContinuation,
+        ResolvedAbility, SiblingCondition, SubAbilityLink, TargetChoiceTiming, TargetRef,
+        TargetSelectionMode, TypedFilter, UnlessPayModifier,
     };
     use engine::types::actions::GameAction;
     use engine::types::card_type::CoreType;
@@ -3136,6 +3168,14 @@ mod live_quantity_targeting_tests {
             "cant_be_copied",
             |node: &mut ResolvedAbility| {
                 node.cant_be_copied = true;
+            }
+        );
+        // CR 608.2b + CR 101.1: a node that still resolves with illegal targets is
+        // not the plain shape the exact classifier models.
+        assert_ineligible_on_root_and_fixed_child!(
+            "illegal_targets_disposition",
+            |node: &mut ResolvedAbility| {
+                node.illegal_targets_disposition = IllegalTargetsDisposition::StillResolves;
             }
         );
         assert_ineligible_on_root_and_fixed_child!(

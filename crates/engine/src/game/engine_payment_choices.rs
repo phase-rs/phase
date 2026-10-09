@@ -96,6 +96,7 @@ pub(super) fn handle_resolution_optional_payment_choice(
         .find(|option| option.index == index && option.cost == advertised_cost.cost)
         .ok_or_else(|| EngineError::InvalidAction("payment branch is no longer payable".into()))?;
 
+    let granting_object = frame.ability.context.granting_object;
     let Effect::PayCost { cost, .. } = &mut frame.ability.effect else {
         return Err(EngineError::InvalidAction(
             "optional payment root is not PayCost".into(),
@@ -113,6 +114,7 @@ pub(super) fn handle_resolution_optional_payment_choice(
             state,
             live_player,
             advertised_source,
+            granting_object,
             &cost.target,
         );
         state.waiting_for = WaitingFor::PayCost {
@@ -791,7 +793,7 @@ fn pay_top_library_exile_cost(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| p.library.len())
+        .map(|p| state.library_of(p.id).len())
         .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
     if library_len < count as usize {
         return Ok(false);
@@ -802,7 +804,8 @@ fn pay_top_library_exile_cost(
         .iter()
         .find(|p| p.id == player)
         .map(|p| {
-            p.library
+            state
+                .library_of(p.id)
                 .iter()
                 .copied()
                 .take(count as usize)
@@ -1288,6 +1291,7 @@ pub(super) fn handle_unless_payment(
                     state,
                     player,
                     pending_effect.source_id,
+                    pending_effect.context.granting_object,
                     filter.as_ref(),
                 );
                 // CR 702.24a: partial payments aren't allowed — if the controller
@@ -1295,6 +1299,14 @@ pub(super) fn handle_unless_payment(
                 // the effect happens.
                 if (hand_cards.len() as u32) < count {
                     payment_failed = true;
+                } else if count == 0 {
+                    // Deliberately class-wide for every Discard unless-cost: a
+                    // resolved count of zero (a whole-hand discard with an empty
+                    // hand, per the Perplex 2005-10-01 ruling) needs no resource
+                    // to discard (cf. CR 118.3), so the cost is
+                    // paid with nothing to discard. Falls through to the paid
+                    // path; prompting `WardDiscardChoice` with no cards would
+                    // soft-lock the payer.
                 } else if selection.is_random() {
                     // CR 701.9b: a RANDOM discard offers the payer no choice —
                     // the game picks. Pay it inline through the shared
@@ -1622,7 +1634,7 @@ pub(super) fn handle_unless_payment(
                     .players
                     .iter()
                     .find(|p| p.id == player)
-                    .map(|p| p.library.len())
+                    .map(|p| state.library_of(p.id).len())
                     .ok_or_else(|| {
                         EngineError::InvalidAction("Player not found".to_string())
                     })?;
@@ -2285,6 +2297,7 @@ pub(super) fn handle_ward_discard_choice(
             state,
             player,
             pending_effect.source_id,
+            pending_effect.context.granting_object,
             filter.as_ref(),
         );
         state.waiting_for = WaitingFor::WardDiscardChoice {
@@ -2512,7 +2525,7 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// The exhaustive `match` on `CostMoveDrainBoundary` is kept as an ELIGIBILITY
 /// ASSERTION, not a verdict producer. It holds `PriorityBoundary` at
 /// `unreachable!` — `drain_pending_cost_move_resume` admits only
-/// `DelveManaPayment`/`ManaAbilityPayment` at that boundary and dispatches both
+/// a Delve-commit `Cast`/`ManaAbilityPayment` at that boundary and dispatches both
 /// ahead of this root — and it turns any future widening of the boundary enum or
 /// of that eligibility table into a compile error at the one site whose rules
 /// reasoning would have to be re-derived.
@@ -4915,6 +4928,91 @@ mod tests {
             ),
             "the prompt must advance to the second round with the payable pick recorded, got {:?}",
             state.waiting_for
+        );
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    const P1: PlayerId = PlayerId(1);
+
+    fn pile_game(cards: u64) -> GameState {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        for i in 0..cards {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                P1,
+                format!("Pile {i}"),
+                Zone::Library,
+            );
+        }
+        state
+    }
+
+    /// CR 118.3 + CR 400.1: a cumulative-upkeep style "exile the top card of
+    /// your library" cost is paid from the shared pile by the non-canonical seat.
+    #[test]
+    fn top_library_exile_cost_pays_from_the_shared_pile() {
+        let mut state = pile_game(2);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Cost Source".into(),
+            Zone::Battlefield,
+        );
+        let top = state.library_of(P1)[0];
+
+        let paid = pay_top_library_exile_cost(&mut state, P1, 1, source, &mut Vec::new())
+            .expect("cost resolves");
+
+        assert!(paid, "the pile pays the cost");
+        assert_eq!(state.objects[&top].zone, Zone::Exile);
+        assert_eq!(state.library_of(P1).len(), 1);
+    }
+
+    /// CR 701.17b + CR 118.12: an unless-mill payment counts and mills the pile.
+    #[test]
+    fn unless_mill_payment_mills_the_shared_pile() {
+        let mut state = pile_game(3);
+        let top_two: Vec<_> = state.library_of(P1).iter().take(2).copied().collect();
+        let pending = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(999),
+            P1,
+        );
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: P1,
+            cost: AbilityCost::Mill { count: 2 },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let waiting = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting, true, &mut Vec::new())
+            .expect("payment resolves");
+
+        assert_eq!(
+            state.graveyard_of(P1).iter().copied().collect::<Vec<_>>(),
+            top_two
+        );
+        assert_eq!(state.library_of(P1).len(), 1);
+        assert_eq!(
+            state.players[1].life, 20,
+            "the payment suppressed the effect"
         );
     }
 }

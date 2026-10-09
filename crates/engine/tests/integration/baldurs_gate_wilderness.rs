@@ -1,10 +1,10 @@
-//! Baldur's Gate Wilderness as the experimental dungeon pool.
+//! Baldur's Gate Wilderness as the freeform dungeon pool.
 //!
-//! With `FormatConfig.allow_experimental_dungeons`, a normal venture offers
-//! Baldur's Gate Wilderness alongside the AFR trio (CR 701.49a), and taking
-//! the initiative (CR 726.2) offers it as an alternative to Undercity instead
-//! of auto-entering the Undercity. With the flag off, both flows behave
-//! exactly as before.
+//! In the formats whose own rules positively restrict nothing (Freeform,
+//! Freeform Commander), a normal venture offers Baldur's Gate Wilderness
+//! alongside the AFR trio (CR 701.49a), and taking the initiative (CR 726.2)
+//! offers it as an alternative to Undercity instead of auto-entering the
+//! Undercity. Every other format offers only the printed pool.
 //!
 //! The room tests below then walk every one of the Wilderness's 19 rooms and
 //! resolve its trigger through the production pipeline, asserting the real
@@ -22,14 +22,12 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::WaitingFor;
 use engine::types::player::PlayerId;
 
-fn experimental_config() -> FormatConfig {
-    let mut config = FormatConfig::standard();
-    config.allow_experimental_dungeons = true;
-    config
+fn freeform_config() -> FormatConfig {
+    FormatConfig::freeform()
 }
 
-fn experimental_scenario() -> GameScenario {
-    GameScenario::new_with_format(experimental_config(), 2, 42)
+fn freeform_scenario() -> GameScenario {
+    GameScenario::new_with_format(freeform_config(), 2, 42)
 }
 
 /// A synthetic driver ability for invoking the venture pipeline directly.
@@ -93,8 +91,8 @@ fn choose_dungeon_option_ids(runner: &GameRunner) -> Vec<DungeonId> {
 // ─── Choice-level behavior ───────────────────────────────────────────────
 
 #[test]
-fn experimental_venture_offers_the_wilderness_alongside_the_afr_trio() {
-    let scenario = experimental_scenario();
+fn freeform_venture_offers_the_wilderness_alongside_the_afr_trio() {
+    let scenario = freeform_scenario();
     let mut runner = scenario.build();
 
     resolve_venture(&mut runner, P0);
@@ -163,7 +161,7 @@ fn current_room(runner: &GameRunner) -> Option<u8> {
 fn wilderness_crash_landing_branches_three_ways() {
     use engine::types::card_type::{CoreType, Supertype};
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let plains = scenario.add_card_to_library_top(P0, "Plains");
     scenario.add_card_to_library_top(P0, "Card C");
     scenario.add_card_to_library_top(P0, "Card B");
@@ -238,7 +236,7 @@ fn wilderness_crash_landing_branches_three_ways() {
 /// branch prompt, no Auntie's Teahouse detour.
 #[test]
 fn wilderness_goblin_camp_has_a_single_exit() {
-    let scenario = experimental_scenario();
+    let scenario = freeform_scenario();
     let mut runner = scenario.build();
     position_marker(&mut runner, 1);
 
@@ -260,7 +258,7 @@ fn wilderness_goblin_camp_has_a_single_exit() {
 #[test]
 fn wilderness_bottom_row_rooms_each_complete_the_dungeon() {
     for bottommost in [16, 17, 18] {
-        let scenario = experimental_scenario();
+        let scenario = freeform_scenario();
         let mut runner = scenario.build();
         position_marker(&mut runner, bottommost);
 
@@ -297,8 +295,8 @@ fn wilderness_bottom_row_rooms_each_complete_the_dungeon() {
 }
 
 #[test]
-fn experimental_initiative_offers_wilderness_or_undercity() {
-    let scenario = experimental_scenario();
+fn freeform_initiative_offers_wilderness_or_undercity() {
+    let scenario = freeform_scenario();
     let mut runner = scenario.build();
 
     resolve_take_initiative(&mut runner, P0);
@@ -370,7 +368,7 @@ fn enter_room(runner: &mut GameRunner, room: u8) {
         resolve_venture(runner, P0);
         assert!(
             choose_dungeon_option_ids(runner).contains(&DungeonId::BaldursGateWilderness),
-            "room 0 test requires the experimental pool"
+            "room 0 test requires the freeform pool"
         );
         runner
             .act(GameAction::ChooseDungeon {
@@ -438,7 +436,7 @@ fn p0_tokens(runner: &GameRunner) -> Vec<engine::types::identifiers::ObjectId> {
 
 #[test]
 fn room_01_goblin_camp_creates_a_treasure() {
-    let mut runner = experimental_scenario().build();
+    let mut runner = freeform_scenario().build();
     enter_room(&mut runner, 1);
     drain(&mut runner);
 
@@ -450,7 +448,7 @@ fn room_01_goblin_camp_creates_a_treasure() {
 
 #[test]
 fn room_02_emerald_grove_creates_a_2_2_white_knight() {
-    let mut runner = experimental_scenario().build();
+    let mut runner = freeform_scenario().build();
     enter_room(&mut runner, 2);
     drain(&mut runner);
 
@@ -465,7 +463,7 @@ fn room_02_emerald_grove_creates_a_2_2_white_knight() {
 
 #[test]
 fn room_06_ebonlake_grotto_creates_two_faerie_dragons() {
-    let mut runner = experimental_scenario().build();
+    let mut runner = freeform_scenario().build();
     enter_room(&mut runner, 6);
     drain(&mut runner);
 
@@ -486,7 +484,7 @@ fn room_06_ebonlake_grotto_creates_two_faerie_dragons() {
 
 #[test]
 fn room_09_last_light_inn_draws_two_cards() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     scenario.add_card_to_library_top(P0, "Plains");
     scenario.add_card_to_library_top(P0, "Forest");
     scenario.add_card_to_library_top(P0, "Mountain");
@@ -504,7 +502,7 @@ fn room_09_last_light_inn_draws_two_cards() {
 
 #[test]
 fn room_12_gauntlet_of_shar_drains_each_opponent_for_5() {
-    let mut runner = experimental_scenario().build();
+    let mut runner = freeform_scenario().build();
     let p0_life = runner.state().players[0].life;
     let p1_life = runner.state().players[1].life;
     enter_room(&mut runner, 12);
@@ -516,7 +514,7 @@ fn room_12_gauntlet_of_shar_drains_each_opponent_for_5() {
 
 #[test]
 fn room_15_undercity_ruins_creates_three_skeletons() {
-    let mut runner = experimental_scenario().build();
+    let mut runner = freeform_scenario().build();
     enter_room(&mut runner, 15);
     drain(&mut runner);
 
@@ -536,7 +534,7 @@ fn room_15_undercity_ruins_creates_three_skeletons() {
 
 #[test]
 fn room_10_reithwin_tollhouse_creates_2d4_treasures() {
-    let mut runner = experimental_scenario().build();
+    let mut runner = freeform_scenario().build();
     enter_room(&mut runner, 10);
     drain(&mut runner);
 
@@ -558,7 +556,7 @@ fn room_10_reithwin_tollhouse_creates_2d4_treasures() {
 
 #[test]
 fn room_16_steel_watch_foundry_emblem_pumps_your_team() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let bear = scenario.add_creature(P0, "Emblem Bear", 2, 2).id();
     let mut runner = scenario.build();
     enter_room(&mut runner, 16);
@@ -574,7 +572,7 @@ fn room_16_steel_watch_foundry_emblem_pumps_your_team() {
 
 #[test]
 fn room_18_temple_of_bhaal_shrinks_only_opponents_creatures() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let foe = scenario.add_creature(P1, "Doomed Giant", 6, 6).id();
     let friend = scenario.add_creature(P0, "Safe Bear", 2, 2).id();
     let mut runner = scenario.build();
@@ -593,7 +591,7 @@ fn room_18_temple_of_bhaal_shrinks_only_opponents_creatures() {
 fn room_17_ansurs_sanctum_draws_four_and_drains_their_mana_value() {
     use engine::types::mana::ManaCost;
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     // Top four cost 1+2+3+4: the drain must be exactly 10. (Added top-down:
     // each call pushes onto library[0], so add the bottom card first.)
     for (index, cost) in [5u32, 4, 3, 2, 1].into_iter().enumerate() {
@@ -630,7 +628,7 @@ fn room_17_ansurs_sanctum_draws_four_and_drains_their_mana_value() {
 fn room_00_crash_landing_tutors_a_basic_land_to_hand() {
     use engine::types::card_type::{CoreType, Supertype};
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let plains = scenario.add_card_to_library_top(P0, "Plains");
     let mut runner = scenario.build();
     let object = runner.state_mut().objects.get_mut(&plains).unwrap();
@@ -674,7 +672,7 @@ fn room_00_crash_landing_tutors_a_basic_land_to_hand() {
 
 #[test]
 fn room_03_aunties_teahouse_scries_3() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let bottom_filler = scenario.add_card_to_library_top(P0, "Bottom Filler");
     let card_c = scenario.add_card_to_library_top(P0, "Card C");
     let card_b = scenario.add_card_to_library_top(P0, "Card B");
@@ -713,7 +711,7 @@ fn room_03_aunties_teahouse_scries_3() {
 
 #[test]
 fn room_04_defiled_temple_sacrifices_to_draw() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let fodder = scenario.add_creature(P0, "Sac Fodder", 1, 1).id();
     scenario.add_card_to_library_top(P0, "Draw Me");
     let mut runner = scenario.build();
@@ -759,7 +757,7 @@ fn room_04_defiled_temple_sacrifices_to_draw() {
 
 #[test]
 fn room_04_defiled_temple_decline_draws_nothing() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let fodder = scenario.add_creature(P0, "Sac Fodder", 1, 1).id();
     scenario.add_card_to_library_top(P0, "Draw Me");
     let mut runner = scenario.build();
@@ -798,7 +796,7 @@ fn room_04_defiled_temple_decline_draws_nothing() {
 
 #[test]
 fn room_05_mountain_pass_puts_a_land_onto_the_battlefield() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let land = scenario.add_land_to_hand(P0, "Hand Land").id();
     let mut runner = scenario.build();
 
@@ -830,7 +828,7 @@ fn room_05_mountain_pass_puts_a_land_onto_the_battlefield() {
 
 #[test]
 fn room_05_mountain_pass_decline_leaves_the_hand_alone() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let land = scenario.add_land_to_hand(P0, "Hand Land").id();
     let mut runner = scenario.build();
     let hand_before = runner.state().players[0].hand.len();
@@ -866,7 +864,7 @@ fn room_05_mountain_pass_decline_leaves_the_hand_alone() {
 fn room_07_grymforge_goads_the_opponents_creature() {
     use engine::types::ability::TargetRef;
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let bear = scenario.add_creature(P1, "Victim Bear", 2, 2).id();
     let mut runner = scenario.build();
 
@@ -899,7 +897,7 @@ fn room_07_grymforge_goads_the_opponents_creature() {
 
 #[test]
 fn room_07_grymforge_decline_goads_nothing() {
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let bear = scenario.add_creature(P1, "Victim Bear", 2, 2).id();
     let mut runner = scenario.build();
 
@@ -930,8 +928,7 @@ fn room_07_grymforge_decline_goads_nothing() {
 
 #[test]
 fn room_07_grymforge_goads_one_creature_per_opponent_at_three_players() {
-    let mut config = FormatConfig::commander();
-    config.allow_experimental_dungeons = true;
+    let config = FormatConfig::freeform_commander();
     let mut scenario = GameScenario::new_with_format(config, 3, 42);
     let p2 = PlayerId(2);
     let bear1 = scenario.add_creature(P1, "Victim Bear One", 2, 2).id();
@@ -980,7 +977,7 @@ fn room_08_githyanki_creche_distributes_three_counters() {
     use engine::types::ability::TargetRef;
     use engine::types::counter::CounterType;
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let bear1 = scenario.add_creature(P0, "Counter Bear One", 2, 2).id();
     let bear2 = scenario.add_creature(P0, "Counter Bear Two", 2, 2).id();
     let mut runner = scenario.build();
@@ -1045,7 +1042,7 @@ fn room_11_moonrise_towers_discounts_only_instant_and_sorcery_spells() {
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::phase::Phase;
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     scenario.at_phase(Phase::PreCombatMain);
     let bolt = scenario
         .add_spell_to_hand(P0, "Moonrise Bolt", true)
@@ -1122,7 +1119,7 @@ fn room_11_moonrise_towers_discounts_only_instant_and_sorcery_spells() {
 fn room_13_balthazars_lab_returns_two_creatures_from_graveyard() {
     use engine::types::ability::TargetRef;
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let body1 = scenario
         .add_creature_to_graveyard(P0, "Grave Body One", 2, 2)
         .id();
@@ -1177,7 +1174,7 @@ fn room_14_circus_copies_your_commander_without_legendary() {
     use engine::types::card_type::Supertype;
     use engine::types::keywords::Keyword;
 
-    let mut scenario = experimental_scenario();
+    let mut scenario = freeform_scenario();
     let commander = scenario
         .add_creature(P0, "Circus Commander", 3, 3)
         .commander()

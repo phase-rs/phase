@@ -8,6 +8,7 @@ use engine::types::ability::{
 };
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::resolved_commands::ResolvedContinuousEffectEdit;
 use engine::types::resolved_commands::{ResolvedContinuousEffectCommand, ResolvedRulesCommand};
 use engine::types::zones::Zone;
 
@@ -22,9 +23,10 @@ fn recorded_installs_since(
         .skip(journal_start)
         .filter_map(|entry| entry.command.as_ref())
         .filter_map(|command| match command {
-            ResolvedRulesCommand::ContinuousEffectInstall(command) => {
-                Some(command.as_ref().clone())
-            }
+            ResolvedRulesCommand::ContinuousEffect(command) => match command.as_ref() {
+                ResolvedContinuousEffectEdit::Install(install) => Some(install.clone()),
+                ResolvedContinuousEffectEdit::Retire(_) => None,
+            },
             _ => None,
         })
         .collect()

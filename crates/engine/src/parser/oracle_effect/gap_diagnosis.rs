@@ -940,19 +940,17 @@ mod tests {
 
     #[test]
     fn quantity_acceptance_consults_only_the_markers_own_authorities() {
-        // Goblin Charbelcher's operand. `parse_for_each_clause_expr` and
+        // A bare "for each" operand. `parse_for_each_clause_expr` and
         // `parse_where_x_quantity_expression` accept it, but an `EqualTo` marker asks
         // only `parse_event_context_quantity` / `parse_cda_quantity` — which reject it.
         // This is what makes the per-marker authority split load-bearing.
-        const OPERAND: &str = "the number of nonland cards revealed this way";
+        const OPERAND: &str = "nonland card revealed this way";
         assert!(!QuantityMarker::EqualTo.accepts(OPERAND));
         assert!(
             QuantityMarker::ForEach.accepts(OPERAND) || QuantityMarker::WhereX.accepts(OPERAND)
         );
         assert_eq!(
-            diagnose_clause_gap(
-                "deal damage equal to the number of nonland cards revealed this way"
-            ),
+            diagnose_clause_gap("deal damage equal to nonland card revealed this way"),
             ClauseGap::Quantity {
                 operand: OPERAND.to_string()
             }
@@ -1598,11 +1596,11 @@ mod tests {
         assert_eq!(
             swallowed_clause_gap(
                 SwallowedAxis::Quantity,
-                "pirates you control get +1/+1 until end of turn for each time you've cast \
-                 a commander from the command zone this game."
+                "creatures you control get +1/+0 until end of turn for each lore counter \
+                 among sagas you control."
             ),
             Some(ClauseGap::Quantity {
-                operand: "time you've cast a commander from the command zone this game".to_string()
+                operand: "lore counter among sagas you control".to_string()
             })
         );
     }

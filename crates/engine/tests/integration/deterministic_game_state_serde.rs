@@ -574,6 +574,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ("PostReplacementDrain", None, "applied", "HashSet", HASH_SET),
         ("PendingDrawDelivery", None, "applied", "HashSet", HASH_SET),
         ("DrawSequenceFrame", None, "applied", "HashSet", HASH_SET),
+        ("DrawDealerSeat", None, "applied", "HashSet", HASH_SET),
     ] {
         add_spec(
             &mut specs,
@@ -1714,6 +1715,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 activator: PlayerId(0),
                 source: ObjectId(1),
                 source_lki: first_lki.clone(),
+                source_zone: engine::types::zones::Zone::Battlefield,
                 ability_tag: None,
                 is_loyalty_ability: false,
                 targets: vec![ActivationTargetFact::Object {
@@ -1728,6 +1730,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 activator: PlayerId(1),
                 source: ObjectId(2),
                 source_lki: second_lki.clone(),
+                source_zone: engine::types::zones::Zone::Battlefield,
                 ability_tag: None,
                 is_loyalty_ability: true,
                 targets: vec![ActivationTargetFact::Player(PlayerId(0))],

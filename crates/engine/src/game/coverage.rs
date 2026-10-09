@@ -20,16 +20,16 @@ use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, AttackedYouScope,
-    CardTypeSetSource, ChoiceType, CoinFlipResult, CombatHistoryScope, CommanderOwnership,
-    Comparator, ContinuousModification, ControllerRef, CountScope, CounterKindChooser,
-    CounterKindDomain, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
-    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction,
-    MassLibraryShuffleMode, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult, CombatHistoryScope,
+    CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
+    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
+    ManaProduction, MassLibraryShuffleMode, NameStickerSet, ObjectProperty, ObjectScope,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, ParsedCondition, PerpetualModification,
+    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
     SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
     TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
@@ -37,7 +37,7 @@ use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{Keyword, ProtectionTarget};
-use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
@@ -720,7 +720,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         // CR 201.5a: a granted body's by-name reference to its granting object.
-        TargetFilter::GrantingObject => "granting object".into(),
+        TargetFilter::GrantingObject { .. } => "granting object".into(),
         // CR 608.2c: the ability's pre-rebind source (reanimator-Aura keyword swap).
         TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
@@ -866,7 +866,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
-            FilterProp::Unblocked => parts.push("unblocked".into()),
+            FilterProp::BlockStatus { status } => parts.push(
+                match status {
+                    AttackerBlockStatus::Blocked => "blocked",
+                    AttackerBlockStatus::Unblocked => "unblocked",
+                }
+                .into(),
+            ),
             FilterProp::AttackingAlone => parts.push("attacking alone".into()),
             FilterProp::BlockingAlone => parts.push("blocking alone".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
@@ -1503,6 +1509,36 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
     }
 }
 
+/// CR 123.6d + CR 123.6e: "unique vowels on that sticker", "letter 'o' in name
+/// stickers on self".
+fn fmt_name_sticker_letter_count(stickers: &NameStickerSet, letters: &LetterQuery) -> String {
+    let statistic = match letters {
+        LetterQuery::UniqueVowels => "unique vowels".to_string(),
+        LetterQuery::Letter { letter } => format!("letter '{letter}'"),
+    };
+    let set = match stickers {
+        NameStickerSet::ThatSticker => "on that sticker",
+        NameStickerSet::OnObject { scope } => match scope {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "in name stickers on self"
+            }
+            ObjectScope::Target => "in name stickers on target",
+            ObjectScope::Recipient => "in name stickers on recipient",
+            ObjectScope::EventSource => "in name stickers on event source",
+            ObjectScope::EventTarget => "in name stickers on event target",
+            ObjectScope::CostPaidObject => "in name stickers on cost-paid object",
+            ObjectScope::OtherRevealedCard => "in name stickers on other revealed card",
+            ObjectScope::OwnedLinkedExileCard => "in name stickers on owned linked-exiled card",
+            ObjectScope::AmassedArmy => "in name stickers on amassed Army",
+            ObjectScope::BatchSource => "in name stickers on batch source",
+            ObjectScope::ChainRootTarget => "in name stickers on chain-root target",
+            ObjectScope::GrantingObject => "in name stickers on granting object",
+            ObjectScope::SpecificObject { .. } => "in name stickers on bound object",
+        },
+    };
+    format!("{statistic} {set}")
+}
+
 fn fmt_quantity_ref(qty: &QuantityRef) -> String {
     match qty {
         QuantityRef::HandSize { player } => {
@@ -1579,6 +1615,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
                 ObjectScope::ChainRootTarget => "chain-root target",
+                ObjectScope::GrantingObject => "granting object",
+                ObjectScope::SpecificObject { .. } => "bound object",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1608,6 +1646,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
             ObjectScope::BatchSource => "batch source's power".into(),
             ObjectScope::ChainRootTarget => "chain-root target's power".into(),
+            ObjectScope::GrantingObject => "granting object's power".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's power".into(),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1623,6 +1663,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's base power".into(),
             ObjectScope::BatchSource => "batch source's base power".into(),
             ObjectScope::ChainRootTarget => "chain-root target's base power".into(),
+            ObjectScope::GrantingObject => "granting object's base power".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's base power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1638,6 +1680,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
             ObjectScope::BatchSource => "batch source's toughness".into(),
             ObjectScope::ChainRootTarget => "chain-root target's toughness".into(),
+            ObjectScope::GrantingObject => "granting object's toughness".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1653,6 +1697,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
             ObjectScope::BatchSource => "batch source's mana value".into(),
             ObjectScope::ChainRootTarget => "chain-root target's mana value".into(),
+            ObjectScope::GrantingObject => "granting object's mana value".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1669,6 +1715,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
             ObjectScope::BatchSource => "batch source's colors".into(),
             ObjectScope::ChainRootTarget => "chain-root target's colors".into(),
+            ObjectScope::GrantingObject => "granting object's colors".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1686,6 +1734,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
             ObjectScope::BatchSource => "typeline components on batch source".into(),
             ObjectScope::ChainRootTarget => "typeline components on chain-root target".into(),
+            ObjectScope::GrantingObject => "typeline components on granting object".into(),
+            ObjectScope::SpecificObject { .. } => "typeline components on bound object".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1701,7 +1751,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
             ObjectScope::BatchSource => "words in batch source's name".into(),
             ObjectScope::ChainRootTarget => "words in chain-root target's name".into(),
+            ObjectScope::GrantingObject => "words in granting object's name".into(),
+            ObjectScope::SpecificObject { .. } => "words in bound object's name".into(),
         },
+        QuantityRef::NameStickerLetterCount { stickers, letters } => {
+            fmt_name_sticker_letter_count(stickers, letters)
+        }
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
                 ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => "self",
@@ -1715,6 +1770,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
                 ObjectScope::ChainRootTarget => "chain-root target",
+                ObjectScope::GrantingObject => "granting object",
+                ObjectScope::SpecificObject { .. } => "bound object",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -1769,6 +1826,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 )
             }
         },
+        QuantityRef::SharedCardTypes { source } => {
+            format!(
+                "card types they share with {}",
+                fmt_characteristic_population_bounded(source)
+            )
+        }
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
                 crate::types::ability::SubtypeExclusion::CreatureTypes => {
@@ -2177,6 +2240,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             return format!("the chosen player {index}");
         }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
+        PlayerFilter::GrantingObjectCaster => "the player who cast the granting object",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
         PlayerFilter::ControlsCount {
@@ -3701,12 +3765,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::PreventDamage {
             amount,
             target,
+            recipient_scope,
             scope,
             damage_source_filter,
             ..
         } => {
             d.push(("amount".into(), format!("{amount:?}")));
-            d.push(("target".into(), fmt_target(target)));
+            // CR 115.10a: a declared recipient is a `target`; an untargeted
+            // population is a `filter` (mirrors `ForceAttack`'s subject key).
+            let recipient_key = match recipient_scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((recipient_key.into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
             // CR 615 + CR 614.1a: the source-restriction qualifier (#5492). Omitting
             // it made a change from unqualified `ChosenDamageSource` to
@@ -3918,8 +3989,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileFromTopUntil { player, until } => {
             d.push(("player".into(), fmt_target(player)));
             match until {
-                crate::types::ability::UntilCondition::NextMatches { filter } => {
+                crate::types::ability::UntilCondition::NextMatches { filter, count } => {
                     d.push(("until".into(), fmt_target(filter)));
+                    // Mirrors the serde default: a one-card loop shows no count.
+                    if *count != (crate::types::ability::QuantityExpr::Fixed { value: 1 }) {
+                        d.push(("count".into(), fmt_quantity(count)));
+                    }
                 }
                 crate::types::ability::UntilCondition::CumulativeThreshold {
                     property,
@@ -4120,15 +4195,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::AdditionalPhase {
-            target,
-            phase,
+            recipient,
+            segment,
             after,
             followed_by,
             count,
             attacker_restriction,
         } => {
-            d.push(("player".into(), fmt_target(target)));
-            d.push(("phase".into(), format!("{phase:?}")));
+            d.push(("player".into(), fmt_target(recipient.as_target_filter())));
+            d.push(("segment".into(), format!("{segment:?}")));
             d.push(("after".into(), format!("{after:?}")));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
@@ -4469,7 +4544,7 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
         d.push(("constraint".into(), fmt_trigger_constraint(constraint)));
     }
     if let Some(cond) = &trig.condition {
-        d.push(("condition".into(), fmt_trigger_condition(cond)));
+        d.push(("condition".into(), fmt_trigger_condition(cond, &trig.mode)));
     }
     d
 }
@@ -4509,6 +4584,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
             "trigger event target was damaged by source this turn".into()
         }
+        AbilityCondition::TriggerEventTargetExploitedBySource => {
+            "trigger event target was exploited by source".into()
+        }
         AbilityCondition::AdditionalCostPaid { .. } => "additional cost was paid".into(),
         AbilityCondition::AdditionalCostPaidInstead => "additional cost was paid (instead)".into(),
         AbilityCondition::AlternativeManaCostPaid => "alternative mana cost was paid".into(),
@@ -4529,7 +4607,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::CastTimingPermission { .. } => "cast with timing permission".into(),
         AbilityCondition::ManaColorSpent { color, minimum } => {
-            format!("{}+ {} spent", minimum, fmt_mana_color_full(color))
+            format!("{}+ {} spent", minimum, fmt_mana_color_full(&color.color()))
         }
         AbilityCondition::RevealedHasCardType { card_types, .. } => {
             let parts: Vec<&str> = card_types.iter().map(fmt_core_type).collect();
@@ -4672,8 +4750,15 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
 }
 
 /// Format a `TriggerCondition` as a human-readable string for the parse-details overlay.
-fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> String {
+/// `mode` is the owning trigger's mode: it decides how an `EventTime` read is labelled.
+fn fmt_trigger_condition(
+    cond: &crate::types::ability::TriggerCondition,
+    mode: &TriggerMode,
+) -> String {
     use crate::types::ability::TriggerCondition as TC;
+    let fmt_nested = |condition: &crate::types::ability::TriggerCondition| {
+        fmt_trigger_condition(condition, mode)
+    };
     match cond {
         TC::GainedLife { minimum } => format!("gained {minimum}+ life this turn"),
         TC::LostLife => "lost life this turn".into(),
@@ -4768,7 +4853,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::CastTimingPermission { .. } => "cast with timing permission".into(),
         TC::ManaColorSpent { color, minimum } => {
-            format!("{}+ {} spent", minimum, fmt_mana_color_full(color))
+            format!("{}+ {} spent", minimum, fmt_mana_color_full(&color.color()))
         }
         TC::ManaSpentCondition { .. } => "mana spent condition".into(),
         TC::HadCounters { .. } => "had counters".into(),
@@ -4811,14 +4896,20 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             format!("triggering spell is {}", fmt_target(filter))
         }
         TC::And { conditions } => {
-            let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
+            let parts: Vec<String> = conditions.iter().map(fmt_nested).collect();
             parts.join(" and ")
         }
         TC::Or { conditions } => {
-            let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
+            let parts: Vec<String> = conditions.iter().map(fmt_nested).collect();
             parts.join(" or ")
         }
-        TC::Not { condition } => format!("not ({})", fmt_trigger_condition(condition)),
+        TC::Not { condition } => format!("not ({})", fmt_nested(condition)),
+        // CR 603.8: a state trigger has no triggering event — its `EventTime`
+        // head is the game state read when the ability triggers.
+        TC::EventTime { condition } if *mode == TriggerMode::StateCondition => {
+            format!("when it triggers: {}", fmt_nested(condition))
+        }
+        TC::EventTime { condition } => format!("at the event: {}", fmt_nested(condition)),
     }
 }
 
@@ -5137,6 +5228,14 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         }
         ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
         ContinuousModification::SetChosenName => "set chosen name".into(),
+        ContinuousModification::SubstituteTextWord { substitution } => match substitution {
+            crate::types::ability::TextSubstitutionSpec::Fixed(sub) => {
+                format!("substitute text word {}", sub.label())
+            }
+            crate::types::ability::TextSubstitutionSpec::Chosen { .. } => {
+                "substitute chosen text word".into()
+            }
+        },
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -5205,6 +5304,21 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     let mut d = Vec::new();
     if let Some(affected) = &stat.affected {
         d.push(("affects".into(), fmt_target(affected)));
+    }
+    // CR 601.2f: a cost modifier's dynamic multiplier is parse-significant but
+    // invisible to the `StaticMode` Display label ("ReduceCost"), so a change
+    // from a bare population count to an intersection count (Cemetery Prowler's
+    // `SharedCardTypes` vs an `ObjectCount`, #6898) would otherwise surface as a
+    // false "no card-parse changes detected" in the coverage parse-diff. Both
+    // cost-modifier variants that carry the axis (`ModifyCost` and
+    // `ReduceAbilityCost`) share it, so both are surfaced here.
+    let dynamic_count = match &stat.mode {
+        StaticMode::ModifyCost { dynamic_count, .. }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count.as_ref(),
+        _ => None,
+    };
+    if let Some(dynamic_count) = dynamic_count {
+        d.push(("dynamic_count".into(), fmt_quantity_ref(dynamic_count)));
     }
     // Composable modifications (GrantTrigger / GrantAbility) are emitted as
     // children, so list only the simple ones here as a joined pill.
@@ -9629,6 +9743,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
             ("TriggerEventTargetDamagedBySourceThisTurn", Handled)
         }
+        AbilityCondition::TriggerEventTargetExploitedBySource => {
+            ("TriggerEventTargetExploitedBySource", Handled)
+        }
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
         AbilityCondition::AlternativeManaCostPaid => ("AlternativeManaCostPaid", Handled),
@@ -9640,6 +9757,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
                 ("EffectOutcomeCurrentScopeSucceeded", Handled)
             }
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
+            EffectOutcomeSignal::RevealUntilMatched => ("EffectOutcomeRevealUntilMatched", Handled),
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
@@ -9798,6 +9916,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetPower", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectPower", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectPower", Handled),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9816,6 +9936,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetBasePower", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectBasePower", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectBasePower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9834,6 +9956,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetToughness", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectToughness", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9852,6 +9976,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetManaValue", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectManaValue", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -9874,6 +10000,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetObjectColorCount", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectObjectColorCount", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9892,6 +10020,47 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetObjectNameWordCount", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectObjectNameWordCount", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectObjectNameWordCount", Handled),
+        },
+        // CR 608.2c: `game/quantity.rs` reads the resolution's placed-sticker record.
+        QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: _,
+        } => ("ThatStickerNameStickerLetterCount", Handled),
+        // CR 123.6d: `game/quantity.rs` reads the live object `object_for_scope`
+        // returns.
+        QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        } => match scope {
+            ObjectScope::Source => ("SourceNameStickerLetterCount", Handled),
+            ObjectScope::Target => ("TargetNameStickerLetterCount", Handled),
+            ObjectScope::Recipient => ("RecipientNameStickerLetterCount", Handled),
+            ObjectScope::EventSource => ("EventSourceNameStickerLetterCount", Handled),
+            ObjectScope::EventTarget => ("EventTargetNameStickerLetterCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceNameStickerLetterCount", Handled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::CostPaidObject => ("CostPaidObjectNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::Anaphoric => ("AnaphoricNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::Demonstrative => ("DemonstrativeNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::OtherRevealedCard => {
+                ("OtherRevealedCardNameStickerLetterCount", Unhandled)
+            }
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::OwnedLinkedExileCard => {
+                ("OwnedLinkedExileCardNameStickerLetterCount", Unhandled)
+            }
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::AmassedArmy => ("AmassedArmyNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::ChainRootTarget => ("ChainRootTargetNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::GrantingObject => ("GrantingObjectNameStickerLetterCount", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectNameStickerLetterCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9914,6 +10083,12 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::ChainRootTarget => {
                 ("ChainRootTargetObjectTypelineComponentCount", Unhandled)
             }
+            ObjectScope::GrantingObject => {
+                ("GrantingObjectObjectTypelineComponentCount", Unhandled)
+            }
+            ObjectScope::SpecificObject { .. } => {
+                ("SpecificObjectObjectTypelineComponentCount", Handled)
+            }
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9934,11 +10109,14 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetManaSymbolsInManaCost", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectManaSymbolsInManaCost", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
+        QuantityRef::SharedCardTypes { .. } => ("SharedCardTypes", Handled),
         QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
@@ -10073,6 +10251,8 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // target owner anchors for villainous-choice choosers).
         PlayerFilter::ChosenPlayer { .. } => ("ChosenPlayer", Handled),
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
+        // CR 201.5a: installing the grant replaces it with the caster's `SpecificPlayer`.
+        PlayerFilter::GrantingObjectCaster => ("GrantingObjectCaster", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
@@ -10149,7 +10329,13 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // `combat::attacker_can_attack_target` rather than guess. The board census is
         // `filter::player_controls_matching` (CR 109.2 + CR 108.4).
         StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Handled),
-        StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Unhandled),
+        // CR 506.5: resolved by `layers::evaluate_condition_inner` against the live
+        // `combat.attackers` set. Every static-condition consumer (layers, combat's
+        // `evaluate_condition_with_recipient` callers, `functioning_abilities`)
+        // routes through that evaluator, and combat membership edits mark layers
+        // dirty. `OpponentPoisonAtLeast` / `CompletedADungeon` stay `Unhandled`:
+        // poison and dungeon-completion writes do not mark layers dirty.
+        StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Handled),
         // CR 508.1k / 509.1g / 509.1h: runtime-evaluated against the live combat
         // attacker/blocker sets (conditions.rs:81 / layers.rs:1118 / layers.rs:1123).
         StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Handled),
@@ -10304,6 +10490,31 @@ fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -
         } => enter_with_counters.iter().any(|(ct, _)| ct == counter_type),
         _ => false,
     }
+}
+
+/// Whether this single ability node carries a duration, for the per-line
+/// `DroppedDuration` audit. Tree walking stays with `ability_tree_any`.
+///
+/// Most durations live on `AbilityDefinition.duration`, but a mana ability's
+/// "it gains haste until end of turn" rider lives on the produced mana's
+/// keyword grant instead: the mana ability itself has no duration, and casting
+/// applies the grant's duration when the mana is spent. A `Permanent` grant
+/// (Hall of the Bandit Lord) expresses no duration, so it never satisfies
+/// duration text on the line.
+fn ability_carries_duration(def: &AbilityDefinition) -> bool {
+    if def.duration.is_some() {
+        return true;
+    }
+    let Effect::Mana { grants, .. } = &*def.effect else {
+        return false;
+    };
+    grants.iter().any(|grant| {
+        matches!(
+            grant,
+            ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. }
+                if **duration != Duration::Permanent
+        )
+    })
 }
 
 fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) -> bool {
@@ -10875,11 +11086,11 @@ impl<'a> ParsedElement<'a> {
     /// Check if this element (or any nested ability) has a duration set.
     fn has_duration(&self) -> bool {
         match self {
-            ParsedElement::Ability(a) => ability_tree_any(a, &|d| d.duration.is_some()),
+            ParsedElement::Ability(a) => ability_tree_any(a, &ability_carries_duration),
             ParsedElement::Trigger(t) => t
                 .execute
                 .as_ref()
-                .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some())),
+                .is_some_and(|e| ability_tree_any(e, &ability_carries_duration)),
             ParsedElement::Static(s) => s.condition.is_some(), // ForAsLongAs uses condition
             ParsedElement::Replacement(_) => false,
         }
@@ -11963,16 +12174,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 matched.iter().all(|e| e.has_duration())
             } else {
                 matched.iter().any(|e| e.has_duration())
-                    || modal_any(&|d: &AbilityDefinition| d.duration.is_some())
-                    || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
-                        d.duration.is_some()
-                    })
+                    || modal_any(&ability_carries_duration)
+                    || covered_ability_effect_type_any(&ability_carries_duration)
                     // Fallback: for saga chapter lines, the matched element may be a static
                     // but the duration lives on the trigger's execute ability. Check all triggers.
                     || face.triggers.iter().any(|t| {
                         t.execute
                             .as_ref()
-                            .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some()))
+                            .is_some_and(|e| ability_tree_any(e, &ability_carries_duration))
                     })
             };
             if !any_has_duration {
@@ -13439,6 +13648,7 @@ mod tests {
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
                     room_door: None,
+                    granting_object: None,
                 }],
                 ..Default::default()
             }
@@ -13543,6 +13753,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// CR 601.2f: a cost modifier's `dynamic_count` is parse-significant but
+    /// invisible to the `StaticMode` Display label ("ReduceCost"). The coverage
+    /// receipt must surface it, or a fix that changes Cemetery Prowler's bare
+    /// `ObjectCount` to the spell/exile `SharedCardTypes` intersection (#6898)
+    /// renders as a false "no card-parse changes detected" in the parse-diff.
+    ///
+    /// Discriminating by construction: the two counts render differently, and
+    /// the no-count form emits no `dynamic_count` detail at all.
+    #[test]
+    fn modify_cost_dynamic_count_is_surfaced_in_static_details() {
+        let with_shared = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
+            dynamic_count: Some(QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }),
+        });
+        let with_object_count = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::card()),
+            }),
+        });
+        let no_dynamic_count = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
+            dynamic_count: None,
+        });
+        // CR 601.2f + CR 118.7: the ability-cost sibling carries the same axis.
+        let reduce_ability = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: Some(QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }),
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+            targets: None,
+            frequency: None,
+        });
+
+        let dyn_shared = super::static_details(&with_shared)
+            .into_iter()
+            .find(|(k, _)| k == "dynamic_count")
+            .expect("SharedCardTypes dynamic_count must be surfaced");
+        let dyn_object = super::static_details(&with_object_count)
+            .into_iter()
+            .find(|(k, _)| k == "dynamic_count")
+            .expect("ObjectCount dynamic_count must be surfaced");
+        assert_ne!(
+            dyn_shared.1, dyn_object.1,
+            "SharedCardTypes and ObjectCount render identically — the parse-diff \
+             would miss the change between them"
+        );
+        assert!(
+            super::static_details(&no_dynamic_count)
+                .iter()
+                .all(|(k, _)| k != "dynamic_count"),
+            "a ModifyCost with no dynamic_count must not emit the field"
+        );
+        assert!(
+            super::static_details(&reduce_ability)
+                .iter()
+                .any(|(k, _)| k == "dynamic_count"),
+            "ReduceAbilityCost carries the same dynamic_count axis and must surface it too"
+        );
     }
 
     /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
@@ -14317,6 +14604,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: dsf,
                 prevention_duration: None,
@@ -14337,6 +14625,33 @@ mod tests {
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
         );
+    }
+
+    /// CR 115.10a: the parse-diff signature keys a declared recipient as
+    /// `target` and an untargeted population as `filter`, so a Single -> All
+    /// reclassification is visible to `coverage-parse-diff`.
+    #[test]
+    fn prevent_damage_signature_keys_recipient_by_scope() {
+        let keys = |recipient_scope: EffectScope| -> Vec<String> {
+            effect_details(&Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                recipient_scope,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        let single = keys(EffectScope::Single);
+        assert!(single.iter().any(|k| k == "target"));
+        assert!(!single.iter().any(|k| k == "filter"));
+        let all = keys(EffectScope::All);
+        assert!(all.iter().any(|k| k == "filter"));
+        assert!(!all.iter().any(|k| k == "target"));
     }
 
     #[test]
@@ -14465,6 +14780,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 prevention_duration: None,
@@ -15101,6 +15417,23 @@ mod tests {
         }
     }
 
+    /// CR 603.8: a state trigger has no triggering event, so its `EventTime`
+    /// head must not be labelled as an event read; an event trigger's must.
+    #[test]
+    fn event_time_condition_label_follows_trigger_mode() {
+        let condition = crate::types::ability::TriggerCondition::EventTime {
+            condition: Box::new(crate::types::ability::TriggerCondition::LostLife),
+        };
+        assert_eq!(
+            fmt_trigger_condition(&condition, &TriggerMode::StateCondition),
+            "when it triggers: lost life this turn"
+        );
+        assert_eq!(
+            fmt_trigger_condition(&condition, &TriggerMode::Phase),
+            "at the event: lost life this turn"
+        );
+    }
+
     /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
     /// so the two ownership arms must never print the same string — in ANY of
     /// the condition-vocabulary formatters.
@@ -15115,6 +15448,7 @@ mod tests {
                     &crate::types::ability::TriggerCondition::ControlsCommander {
                         ownership: CommanderOwnership::Own,
                     },
+                    &TriggerMode::Phase,
                 ),
                 fmt_static_condition(&StaticCondition::ControlsCommander {
                     ownership: CommanderOwnership::Own,
@@ -15128,6 +15462,7 @@ mod tests {
                     &crate::types::ability::TriggerCondition::ControlsCommander {
                         ownership: CommanderOwnership::Any,
                     },
+                    &TriggerMode::Phase,
                 ),
                 fmt_static_condition(&StaticCondition::ControlsCommander {
                     ownership: CommanderOwnership::Any,
@@ -15564,6 +15899,62 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .into_iter()
             .find(|card| card.card_name == card_name)
             .expect("coverage should include test card")
+    }
+
+    #[test]
+    fn parser_generated_unsupported_emblem_has_canonical_red_coverage() {
+        for (oracle, supported) in [
+            (
+                "You get an emblem with \"Whenever the moon sings, draw a card.\"",
+                false,
+            ),
+            (
+                "You get an emblem with \"Your destiny is written in starlight.\"",
+                false,
+            ),
+            ("You get an emblem with \"\"", false),
+            (
+                "You get an emblem with \"Creatures you control get +1/+1.\"",
+                true,
+            ),
+        ] {
+            let parsed = crate::parser::parse_oracle_text(
+                oracle,
+                "Coverage Emblem Probe",
+                &[],
+                &["Sorcery".to_string()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1, "{oracle:?}");
+            let mut face = make_face();
+            face.name = "Coverage Emblem Probe".to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities = parsed.abilities;
+            face.triggers = parsed.triggers;
+            face.static_abilities = parsed.statics;
+            face.parse_warnings = parsed.parse_warnings;
+            let card = coverage_result_for_face(face);
+            assert_eq!(card.supported, supported, "{oracle:?}: {card:?}");
+            let item = card
+                .parse_details
+                .iter()
+                .find(|item| item.category == ParseCategory::Ability)
+                .expect("parser-generated ability reaches face/database coverage");
+            assert_eq!(item.supported, supported, "{oracle:?}");
+            if supported {
+                assert_eq!(item.label, "CreateEmblem");
+                assert!(card.gap_details.is_empty());
+                assert!(item
+                    .children
+                    .iter()
+                    .any(|child| child.category == ParseCategory::Static && child.supported));
+            } else {
+                assert_eq!(item.label, "emblem_creation");
+                assert_eq!(card.gap_details.len(), 1, "{oracle:?}");
+                assert_eq!(card.gap_details[0].handler, "Effect:emblem_creation");
+                assert!(item.children.is_empty());
+            }
+        }
     }
 
     /// Build an `AtomicCard` for a FIN Tiered spell with its real MTGJSON
@@ -16353,6 +16744,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature(),
@@ -18447,6 +18839,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
                     room_door: None,
+                    granting_object: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -18497,6 +18890,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
                     room_door: None,
+                    granting_object: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -18734,6 +19128,70 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// A mana ability's "it gains haste until end of turn" rider stores its
+    /// duration on the produced mana's keyword grant, not on the ability. The
+    /// audit must credit that grant, and must still flag the line when the
+    /// grant's duration is `Permanent` (the "until end of turn" was dropped).
+    #[test]
+    fn test_audit_per_line_credits_mana_grant_duration() {
+        const NAME: &str = "Carnelian Orb of Dragonkind";
+        const ORACLE: &str = "{T}: Add {R}. If that mana is spent on a Dragon creature spell, \
+                              it gains haste until end of turn.";
+        let parsed =
+            crate::parser::parse_oracle_text(ORACLE, NAME, &[], &["Artifact".to_string()], &[]);
+        let mut face = make_face();
+        face.name = NAME.to_string();
+        face.oracle_text = Some(ORACLE.to_string());
+        face.abilities = parsed.abilities;
+
+        let grant_durations = |face: &CardFace| -> Vec<Duration> {
+            let mut durations = Vec::new();
+            for ability in &face.abilities {
+                assert!(
+                    ability.duration.is_none(),
+                    "the rider's duration must live only on the grant: {ability:?}",
+                );
+                let Effect::Mana { grants, .. } = &*ability.effect else {
+                    continue;
+                };
+                for grant in grants {
+                    if let ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. } = grant {
+                        durations.push((**duration).clone());
+                    }
+                }
+            }
+            durations
+        };
+        let has_dropped_duration = |face: &CardFace| {
+            audit_card_lines(ORACLE, face)
+                .iter()
+                .any(|finding| matches!(finding, SemanticFinding::DroppedDuration { .. }))
+        };
+
+        // Reach guard: the line parses to a mana ability whose only duration is
+        // the grant's, so the audit can only pass by reading the grant.
+        assert_eq!(grant_durations(&face), vec![Duration::UntilEndOfTurn]);
+        assert!(
+            !has_dropped_duration(&face),
+            "an until-end-of-turn mana grant must satisfy the line's duration text",
+        );
+
+        for ability in &mut face.abilities {
+            if let Effect::Mana { grants, .. } = &mut *ability.effect {
+                for grant in grants {
+                    if let ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. } = grant {
+                        **duration = Duration::Permanent;
+                    }
+                }
+            }
+        }
+        assert_eq!(grant_durations(&face), vec![Duration::Permanent]);
+        assert!(
+            has_dropped_duration(&face),
+            "a Permanent grant drops the line's \"until end of turn\" and must be flagged",
+        );
+    }
+
     #[test]
     fn test_audit_split_line_accepts_duration_and_pump_on_matching_clause() {
         let mut face = make_face();
@@ -18760,6 +19218,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Any,
+                    recipient_scope: EffectScope::Single,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,
                     prevention_duration: None,
@@ -19960,6 +20419,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -20004,6 +20464,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(
@@ -20045,6 +20506,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -20080,6 +20542,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -20315,7 +20778,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// intentionally NOT asserted here so a future stub does not silently pass.
     #[test]
     fn source_state_static_conditions_are_marked_handled() {
-        let conditions: [(StaticCondition, &str); 6] = [
+        let conditions: [(StaticCondition, &str); 7] = [
+            (
+                StaticCondition::SourceAttackingAlone,
+                "SourceAttackingAlone",
+            ),
             (StaticCondition::SourceIsEquipped, "SourceIsEquipped"),
             (StaticCondition::SourceIsEnchanted, "SourceIsEnchanted"),
             (StaticCondition::SourceIsMonstrous, "SourceIsMonstrous"),
@@ -20754,6 +21221,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(
@@ -20788,6 +21256,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(
@@ -20832,6 +21301,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -20867,6 +21337,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -20904,6 +21375,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -20947,6 +21419,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             });
         }
 
@@ -21176,6 +21649,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(

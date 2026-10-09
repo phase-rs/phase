@@ -854,6 +854,7 @@ mod tests {
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
             scoped_player: None,
@@ -878,6 +879,7 @@ mod tests {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -898,6 +900,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
@@ -978,6 +981,7 @@ mod tests {
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
             scoped_player: None,
@@ -1002,6 +1006,7 @@ mod tests {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -1022,6 +1027,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
@@ -1255,6 +1261,25 @@ mod tests {
         let options = vec!["choice".to_string()];
         let ballots = crate::im::Vector::from(vec![(controller, 0), (opponent, 0)]);
         let mut events = Vec::new();
+        crate::game::stack::begin_resolving_stack_entry(
+            &mut state,
+            crate::types::game_state::StackEntry {
+                id: ObjectId(91_710),
+                source_id: source,
+                controller,
+                kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(crate::types::ability::ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        source,
+                        controller,
+                    )),
+                },
+            },
+            None,
+        )
+        .expect("the vote resolves inside its own carrier");
 
         resolve_tally(
             &mut state,
@@ -1285,15 +1310,24 @@ mod tests {
             "the remaining ballot owner must be below its complete child stack"
         );
 
-        for expected in [first, second, first, second] {
+        for _ballot in 0..2 {
+            // CR 101.4c: the controller orders each ballot body's two choices.
             crate::game::engine::apply(
                 &mut state,
                 controller,
-                GameAction::SelectCards {
-                    cards: vec![expected],
-                },
+                GameAction::ChooseZoneOpponentChooser { opponent },
             )
-            .expect("each production choice action advances the per-ballot body");
+            .expect("the controller orders the opponent's graveyard first");
+            for expected in [second, first] {
+                crate::game::engine::apply(
+                    &mut state,
+                    controller,
+                    GameAction::SelectCards {
+                        cards: vec![expected],
+                    },
+                )
+                .expect("each production choice action advances the per-ballot body");
+            }
         }
 
         assert_eq!(state.players[0].life, 22, "one tail per resolved ballot");
@@ -1430,6 +1464,7 @@ mod tests {
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
             scoped_player: None,
@@ -1454,6 +1489,7 @@ mod tests {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -1474,6 +1510,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
@@ -1611,6 +1648,7 @@ mod tests {
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
             scoped_player: None,
@@ -1635,6 +1673,7 @@ mod tests {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -1655,6 +1694,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],

@@ -408,6 +408,7 @@ mod tests {
             .expect("the production move captured the victim record");
         let event = GameEvent::CreatureExploited {
             exploiter: actor,
+            exploiter_incarnation: None,
             sacrificed: victim,
             record,
         };
@@ -446,6 +447,7 @@ mod tests {
             .expect("the production move captured the friendly victim record");
         let friendly_event = GameEvent::CreatureExploited {
             exploiter: actor,
+            exploiter_incarnation: None,
             sacrificed: friendly_victim,
             record: friendly_record,
         };

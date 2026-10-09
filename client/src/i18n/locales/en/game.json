@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Choose a mana source",
     "description": "This mana ability requires sacrificing a permanent.",
+    "baseOutput_one": "Base output: {{count}} mana",
+    "baseOutput_other": "Base output: {{count}} mana",
+    "baseOutputVariable": "Base amount determined on activation",
     "sacrifice": "Sacrifice",
     "back": "Back to mana payment",
     "unknownSource": "Mana source"
@@ -102,6 +105,24 @@
     "subtitle": "All players must approve before the engine resolves a safe stack prefix.",
     "grant": "Approve",
     "decline": "Keep priority"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Life correction",
+    "title": "Sandbox life correction",
+    "description": "Use the normal hand and stack controls to cast and resolve a creature. This panel submits the sandbox SetLife action through the existing game adapter.",
+    "scopeNote": "This corrects life through the engine's player edit path; it is not damage or a card effect. Hidden-hand reveal, semantic discard, and pre-agreed pre-cast Undo are outside this slice.",
+    "target": "Player",
+    "player": "{{name}} (Player {{seat}})",
+    "you": "You",
+    "opponent": "Opponent",
+    "currentLife": "Current life total",
+    "newLife": "New life total",
+    "submit": "Apply correction",
+    "submitting": "Correction submitted; closing this panel will not cancel it.",
+    "applied": "Current committed life for {{player}}: {{life}}.",
+    "notApplied": "The engine did not confirm this correction. Check the current snapshot before trying again.",
+    "failed": "The correction could not be submitted.",
+    "stale": "The game changed while editing. Close and reopen this panel to start from the current snapshot."
   },
   "debugCreate": {
     "copies": "Copies",
@@ -841,6 +862,7 @@
     "titleTargets": "Targets: {{targets}}",
     "titlePaid": "Paid: {{paid}}",
     "titleContext": "Context: {{context}}",
+    "revealedCards": "Revealed: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
     "paidColorsSpent": "{{count}} colors",
@@ -874,6 +896,7 @@
     "chooseNewTarget": "Choose the spell's new target",
     "chooseNewTargetForSpell": "Choose a new target for {{spell}}",
     "chooseCreatureToExplore": "Choose which creature explores next",
+    "chooseCreatureToEquip": "Choose a creature to equip",
     "chooseCreatureTokenToPopulate": "Choose a creature token to populate",
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
@@ -1163,6 +1186,8 @@
       "usePowder": "Use {{name}}",
       "powderDescription": "Exile every card in hand, draw the same number — not a mulligan",
       "powderTooltip": "Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected.",
+      "freeReveal": "Reveal and redraw (free)",
+      "freeRevealDescription": "Reveal your hand, shuffle it back and draw 7 — free, no cards to the bottom, not a mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Opening Hand · London Mulligan",
       "reviewTitle": "Review your opening hand",
@@ -1385,8 +1410,6 @@
     },
     "config": {
       "startingLife": "Starting Life",
-      "experimentalDungeons": "Experimental Dungeons",
-      "experimentalDungeonsHelp": "Offer Baldur's Gate Wilderness on ventures and when taking the initiative. Experimental and unofficial.",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
       "firstPlayer": {
@@ -1422,6 +1445,7 @@
       "target": "Target",
       "return": "Return",
       "discard": "Discard",
+      "reveal": "Reveal",
       "evidence": "Evidence",
       "manifest": "Manifest",
       "untap": "Untap",
@@ -1734,6 +1758,10 @@
       "title": "Empower Jace",
       "subtitle": "Choose a Jace token you control to gain +{{count}} loyalty"
     },
+    "spellCopyOrder": {
+      "title": "Order the copies",
+      "subtitle": "Choose the spell whose copy goes on the stack next"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
@@ -2044,7 +2072,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Choose Opponent",
-    "subtitle": "Choose which opponent makes the choice."
+    "subtitle": "Choose which opponent makes the choice.",
+    "orderTitle": "Choose Next Player",
+    "orderSubtitle": "Choose whose selection to make next.",
+    "substituteTitle": "Choose Player",
+    "substituteSubtitle": "Choose who makes this choice."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2302,7 +2334,9 @@
     "accept": "Yes",
     "decline": "No",
     "sourceFallback": "Effect",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Optional triggers ({{count, number}})",
+    "replacementChoices": "Replacement choices ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effect",
@@ -2335,7 +2369,8 @@
       "zoneExile": "exile",
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
-      "exile": "Exile {{count}} {{cards}} from {{zone}}"
+      "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },
   "topOrBottom": {
@@ -2381,6 +2416,8 @@
     "confirm": "Confirm"
   },
   "replacement": {
+    "remember": "Remember this choice this game",
+    "savedChoice": "Replacement: {{choice}}",
     "eyebrow": "Resolution Order",
     "title": "Replacement Effects",
     "orderSubtitle": "These effects all change how this event happens. Drag to set the order they apply in — the last one applied is the one that takes effect (CR 616.1).",

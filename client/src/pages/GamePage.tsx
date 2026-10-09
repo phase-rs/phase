@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
@@ -190,16 +191,16 @@ import {
 import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
-  getCastableZoneViewerTarget,
   getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
+  getSharedPileHolder,
   getWaitingForObjectChoiceIds,
+  getZoneViewerPile,
   isSplitBoardActive,
   resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
   shouldRenderFocusedOpponentTopRow,
-  type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { GAME_Z_LAYER } from "../constants/ui.ts";
@@ -208,10 +209,6 @@ type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
   "--card-h": string;
 };
-
-function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
-  return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
-}
 
 function isDirectSoloRouteMode(rawMode: string | null): boolean {
   return ![
@@ -910,11 +907,9 @@ function GamePageContent({
   const draftMatchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
   const submitIntergameCommand = useMultiplayerDraftStore((s) => s.submitIntergameCommand);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
-  // Store `waitingFor`, not `gameState.waiting_for`: this is paired below with
-  // the store-slice `legalActionsByObject`, and only the store's own field is
-  // committed atomically with the legal actions.
+  // Store `waitingFor`, not `gameState.waiting_for`: only the store's own field is
+  // committed atomically with the waiting state.
   const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
@@ -959,9 +954,7 @@ function GamePageContent({
   const [viewingZone, setViewingZone] = useState<{
     zone: "graveyard" | "exile" | "library";
     playerId: number;
-    autoOpenKey?: string;
   } | null>(null);
-  const dismissedCastableZoneViewerKeyRef = useRef<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
     null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
   >(null);
@@ -1236,11 +1229,9 @@ function GamePageContent({
   }, []);
 
   // Auto-open graveyard/exile viewer when the engine is waiting for an object
-  // choice in that zone, or when Priority surfaces cast/play actions on cards
-  // in a single graveyard/exile pile (Retrace, Flashback, etc.).
+  // choice in that zone (e.g. SelectObjects for Reanimate / Regrowth).
   useEffect(() => {
     if (!objects) {
-      dismissedCastableZoneViewerKeyRef.current = null;
       return;
     }
     const wf = engineWaitingFor;
@@ -1255,47 +1246,22 @@ function GamePageContent({
     for (const objectId of getWaitingForObjectChoiceIds(wf)) {
       const obj = objects[objectId];
       if (!obj) continue;
-      if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
-      const zone: "graveyard" | "exile" = obj.zone === "Graveyard" ? "graveyard" : "exile";
-      groups.add(`${zone}:${obj.owner}`);
-      if (!firstHit) firstHit = { zone, playerId: obj.owner };
+      const pile = getZoneViewerPile(gameState, obj);
+      if (!pile) continue;
+      groups.add(`${pile.zone}:${pile.playerId}`);
+      if (!firstHit) firstHit = pile;
     }
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
-      dismissedCastableZoneViewerKeyRef.current = null;
       zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
       setViewingZone(firstHit);
-      return;
     }
-
-    const castableTarget = getCastableZoneViewerTarget(
-      wf,
-      objects,
-      legalActionsByObject,
-    );
-    if (castableTarget) {
-      const autoOpenKey = castableZoneViewerAutoOpenKey(castableTarget);
-      if (dismissedCastableZoneViewerKeyRef.current !== autoOpenKey) {
-        zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
-        setViewingZone({
-          zone: castableTarget.zone,
-          playerId: castableTarget.playerId,
-          autoOpenKey,
-        });
-      }
-      return;
-    }
-
-    dismissedCastableZoneViewerKeyRef.current = null;
-  }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
+  }, [canActForWaitingState, engineWaitingFor, objects, gameState]);
 
   const handleZoneViewerClose = useCallback(() => {
-    if (viewingZone?.autoOpenKey) {
-      dismissedCastableZoneViewerKeyRef.current = viewingZone.autoOpenKey;
-    }
     setViewingZone(null);
-  }, [viewingZone]);
+  }, []);
 
   const prepareZoneViewerActionClose = useCallback(() => {
     // A cast/play action can remove the final card only after its asynchronous
@@ -1318,12 +1284,20 @@ function GamePageContent({
     [dispatch],
   );
 
-  // CR 103.5 + 103.5b: `id` encodes the three branches of MulliganChoice.
+  // CR 103.5 + 103.5b: `id` encodes the four branches of MulliganChoice.
   // "keep"           → MulliganChoice::Keep
   // "mulligan"       → MulliganChoice::Mulligan
+  // "freeReveal"     → MulliganChoice::FreeReveal
   // "powder:<oid>"   → MulliganChoice::UseSerumPowder { object_id: <oid> }
   const handleMulliganChoice = useCallback(
     (id: string) => {
+      if (id === "freeReveal") {
+        dispatch({
+          type: "MulliganDecision",
+          data: { choice: { type: "FreeReveal" } },
+        });
+        return;
+      }
       if (id.startsWith("powder:")) {
         const objectId = Number(id.slice("powder:".length));
         dispatch({
@@ -1582,20 +1556,24 @@ function GamePageContent({
                         handleViewZone("exile", activeOpponentId, launcher)
                       }
                     />
-                    <LibraryPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onView={(launcher) =>
-                        handleViewZone("library", activeOpponentId, launcher)
-                      }
-                    />
-                    <GraveyardPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onClick={(launcher) =>
-                        handleViewZone("graveyard", activeOpponentId, launcher)
-                      }
-                    />
+                    {getSharedPileHolder(gameState, "library") == null && (
+                      <LibraryPile
+                        playerId={activeOpponentId}
+                        size={pileSize}
+                        onView={(launcher) =>
+                          handleViewZone("library", activeOpponentId, launcher)
+                        }
+                      />
+                    )}
+                    {getSharedPileHolder(gameState, "graveyard") == null && (
+                      <GraveyardPile
+                        playerId={activeOpponentId}
+                        size={pileSize}
+                        onClick={(launcher) =>
+                          handleViewZone("graveyard", activeOpponentId, launcher)
+                        }
+                      />
+                    )}
                   </>
                 ) : null}
               </DraggableWidget>
@@ -1804,548 +1782,555 @@ function GamePageContent({
         showReportCard={canReportCard}
         onReportCardClick={() => useUiStore.getState().openCardReportDialog()}
       />
-      <HelpSheet />
-      <CardReportDialog returnFocusRef={gameMenuTriggerRef} />
+      {/* Share the viewport stacking order with arrow portals while keeping
+          the board's paint containment and the overlay subtree mounted. */}
+      {createPortal(
+        <div className="game-no-select text-white" style={gamePageStyle}>
+          <HelpSheet />
+          <CardReportDialog returnFocusRef={gameMenuTriggerRef} />
 
-      {/* The page's toast surface, not an online-only one: solo games raise
-          toasts too (the native-engine fallback notice). Only online games get
-          a Retry — reloading re-dials the server, but a solo game has nothing
-          to re-dial and would just restart itself. */}
-      <ConnectionToast
-        onRetry={isOnlineMode ? () => window.location.reload() : undefined}
-        onSettings={() => openPreferences()}
-      />
-
-
-
-      {/*
-        Opponent-disconnected overlay for server (WS) games. The live
-        "N seconds to forfeit" countdown lives on `ConnectionToast`, keyed
-        by player — this modal just communicates the blocking/paused state
-        of the game screen. P2P games use `DisconnectChoiceDialog` +
-        `PausedBanner` instead (see adapter §4).
-      */}
-      {opponentDisconnected && !pauseReason && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60" />
-          <div className="relative z-10 w-full max-w-sm rounded-[12px] border border-yellow-400/30 bg-[#0b1020] p-6 text-center shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
-            <h2 className="mb-2 text-lg font-bold text-yellow-400">
-              {t("gamePage.opponentDisconnected.title")}
-            </h2>
-            <p className="text-sm text-gray-300">
-              {t("gamePage.opponentDisconnected.body")}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* P2P pause banner — visible to everyone while paused. */}
-      <PausedBanner
-        isVisible={pauseReason !== null}
-        reason={pauseReason ?? ""}
-        onResume={isP2PHost && adapter instanceof P2PHostAdapter ? handleResumeP2P : undefined}
-      />
-
-      {/* P2P host-only disconnect decision modal. */}
-      {isP2PHost && disconnectChoice !== null && (
-        <DisconnectChoiceDialog
-          isOpen
-          playerLabel={getOpponentDisplayName(disconnectChoice.playerId)}
-          gracePeriodMs={disconnectChoice.gracePeriodMs}
-          onPauseAndWait={() => {
-            const adapter = useGameStore.getState().adapter as
-              | { holdForReconnect?: (pid: number) => void }
-              | null;
-            adapter?.holdForReconnect?.(disconnectChoice.playerId);
-          }}
-          onContinueWithout={() => {
-            const adapter = useGameStore.getState().adapter as
-              | { concedeDisconnected?: (pid: number) => Promise<void> }
-              | null;
-            void adapter?.concedeDisconnected?.(disconnectChoice.playerId);
-          }}
-          onDismiss={onDismissDisconnectChoice}
-        />
-      )}
-
-      {/* Pre-game lobby progress (3-4p P2P only). */}
-      {lobbyProgress !== null && (
-        <LobbyProgress
-          joined={lobbyProgress.joined}
-          total={lobbyProgress.total}
-          roomCode={hostGameCode ?? undefined}
-        />
-      )}
-
-      {/* Card data missing modal */}
-      {showCardDataMissing && (
-        <CardDataMissingModal onContinue={onDismissCardDataMissing} />
-      )}
-
-      {/* cEDH bracket-violation blocking modal.
-          Shown when the engine refuses game init because one or more decks
-          are not declared cEDH (bracket 5) at a cEDH table.
-          Covers the entire page — no game state is accessible behind it
-          because the engine never initialised. */}
-      {bracketViolationError && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("gameSetup.bracketViolation.title")}
-          data-testid="bracket-violation-modal"
-        >
-          <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
-            <h2 className="mb-2 text-lg font-bold text-rose-400">
-              {t("gameSetup.bracketViolation.title")}
-            </h2>
-            <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
-            <p className="mb-6 text-xs text-gray-500">
-              {t("gameSetup.bracketViolation.body")}
-            </p>
-            <button
-              onClick={onDismissBracketViolation}
-              className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
-            >
-              {t("gameSetup.bracketViolation.returnToSetup")}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Resume-failed banner */}
-      <AnimatePresence>
-        {resumeResetReason && (
-          <motion.div
-            className="fixed top-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg bg-amber-950 px-4 py-3 shadow-2xl ring-1 ring-amber-700/50"
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            transition={{ duration: 0.25 }}
-          >
-            <span className="text-sm text-amber-200">
-              {t("gamePage.resumeReset.message", { reason: resumeResetReason })}
-            </span>
-            <button
-              onClick={onDismissResumeReset}
-              className="rounded bg-amber-800 px-2.5 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-700"
-            >
-              {t("gamePage.actions.ok")}
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Overlay layers */}
-      <DebugPanel
-        aiDecisionDiagnosticsAvailable={supportsAiDecisionDiagnostics(adapter)}
-      />
-      <AiDecisionOverlay
-        receipt={aiDecisionReceipt}
-        visible={aiDecisionCaptureEnabled}
-        onClose={() => setAiDecisionCaptureEnabled(false)}
-      />
-      <ResolutionProgressOverlay />
-
-      {preferencesOpen && (
-        <PreferencesModal
-          onClose={() => setPreferencesOpen(null)}
-          initialTab={preferencesOpen.tab}
-          highlight={preferencesOpen.highlight}
-          returnFocusRef={preferencesReturnFocusRef}
-        />
-      )}
-
-      {boardContextMenu && (
-        <BoardContextMenu
-          x={boardContextMenu.x}
-          y={boardContextMenu.y}
-          onClose={() => setBoardContextMenu(null)}
-          onChangeBackground={() =>
-            openPreferences({ tab: "gameplay", highlight: "board-background" })
-          }
-          onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
-          onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
-          onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
-          onReportCard={
-            canReportCard ? () => useUiStore.getState().openCardReportDialog() : undefined
-          }
-        />
-      )}
-
-      <DebugCardContextMenu surface="game" />
-      <DebugLibraryViewer returnFocusRef={gameMenuTriggerRef} />
-
-      {/* Animation overlay (above board, below modals) */}
-      <AnimationOverlay containerRef={containerRef} />
-      {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
-      <RevealOverlay />
-      <TurnBanner />
-      <DiceRollOverlay />
-      <ScryOutcomeOverlay />
-
-      {/* Combat SVG overlays: blocker assignments + attack target arrows */}
-      <BlockAssignmentLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
-      <AttackTargetLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
-      {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
-          Self-gates: renders nothing unless the local player is assigning blockers
-          to attackers that carry a minimum-blocker requirement. */}
-      <BlockRequirementBadges />
-
-      {/* Per-creature must-attack / can't-attack and must-block / can't-block
-          badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
-          unless the local player is at the matching declare step and the engine
-          supplied constraints. Display-only. */}
-      <AttackRequirementBadges />
-      <BlockerConstraintBadges />
-
-      {/* WaitingFor-driven prompt overlays (only for human player).
-          Wrapped in DialogHost so any active dialog can be peeked away to
-          reveal the battlefield underneath; peek state resets on every
-          new WaitingFor so a fresh prompt is always visible. */}
-      <DialogHost>
-        {waitingFor != null &&
-          isClickThroughWaitingFor(waitingFor, objects) &&
-          canActForWaitingState && <TargetingOverlay />}
-        {waitingFor != null &&
-          MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
-          canActForWaitingState && <ManaPaymentUI />}
-        {waitingFor?.type === "ManaSourceSelection" &&
-          canActForWaitingState && <ManaSourceSelectionUI />}
-        {waitingFor?.type === "ChooseXValue" &&
-          canActForWaitingState && <ChooseXValueUI />}
-        {waitingFor?.type === "PayAmountChoice" &&
-          canActForWaitingState && <PayAmountChoiceUI />}
-        {waitingFor?.type === "AssistPayment" &&
-          canActForWaitingState && <AssistPaymentUI />}
-        {waitingFor?.type === "ReplacementChoice" &&
-          canActForWaitingState && <ReplacementModal />}
-        {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
-        {waitingFor?.type === "OrderTriggers" &&
-          canActForWaitingState && <TriggerOrderModal />}
-        {waitingFor?.type === "OrderCostReductions" &&
-          canActForWaitingState && <CostReductionOrderModal />}
-        <BattleProtectorModal />
-        <MeldChoiceModal />
-        <AssistChoosePlayerModal />
-        <ClashOpponentModal />
-        <ZoneOpponentChooserModal />
-        <PileOpponentModal />
-        <AnnouncingOpponentModal />
-        <GiftRecipientModal />
-        <EntryControllerModal />
-        <TributeModal />
-        <CombatTaxModal />
-        <AlternativeCostModal />
-        <CastingVariantModal />
-        <PermanentTypeSlotModal />
-        <ModeChoiceModal />
-        <DeclareShortcutModal />
-        <RespondToShortcutModal />
-        <PrecastCopyShortcutOfferModal />
-        <RespondToPrecastCopyShortcutModal />
-        <ChooseOneOfBranchModal />
-        <LifeRedistributionModal />
-        <AdventureCastModal />
-        <CascadeChoiceModal />
-        <RippleRevealChoiceModal />
-        <SpellbookDraftModal />
-        <FreeCastWindowModal />
-        <ModalFaceModal />
-        <MiracleRevealModal />
-        {waitingFor?.type === "SpliceOffer" &&
-          canActForWaitingState && (
-            <SpliceOfferModal />
-          )}
-
-        {/* Scry/Dig/Surveil card choice modal */}
-        <CardChoiceModal />
-
-        {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
-        <AbilityChoiceModal />
-
-        {/* Player-attached Aura viewer (Curse cycle, Paradox Haze, etc.).
-            Mounted here — not from inside HudPlate where the badge lives —
-            so the dialog's `fixed inset-0` shell anchors to the viewport
-            instead of HudPlate's transform-CB bounding box. */}
-        <PlayerEnchantmentsDialog />
-
-        {/* Permanent-attachment fan (Equipment / Aura / Fortification on a
-            battlefield object): a centered spread of the host + attachments,
-            each with its live selection affordance. Opened by clicking a
-            permanent-with-attachments during a target/board-choice prompt or by
-            the host's ⧉ badge. Self-portals to document.body, so its mount point
-            here is incidental. */}
-        <AttachmentFan />
-
-        {/* Optional additional cost choice (kicker, blight, "or pay") */}
-        {waitingFor?.type === "OptionalCostChoice" &&
-          canActForWaitingState && (
-            <OptionalCostModal />
-          )}
-
-        {/* Defiler cycle — optional life payment for mana reduction */}
-        {waitingFor?.type === "DefilerPayment" &&
-          canActForWaitingState && (
-            <DefilerPaymentModal />
-          )}
-
-        {/* Optional effect choice ("You may X") / Opponent may choice */}
-        {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
-          canActForWaitingState && (
-            <OptionalEffectModal />
-          )}
-
-        {/* Optional immediate payment branch ("discard a card or pay {2}") */}
-        {waitingFor?.type === "ResolutionOptionalPaymentChoice" && (
-          <ResolutionOptionalPaymentModal />
-        )}
-
-        {/* CR 401.4: Owner puts permanent on top or bottom of library */}
-        {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
-          canActForWaitingState && (
-            <TopOrBottomModal />
-          )}
-
-        {/* CR 702.140c + CR 730.2a: mutate spell controller chooses top/bottom */}
-        {waitingFor?.type === "MutateMergeChoice" &&
-          canActForWaitingState && (
-            <MutateMergeModal />
-          )}
-
-        {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
-        {waitingFor?.type === "CipherEncodeChoice" &&
-          canActForWaitingState && (
-            <CipherEncodeModal />
-          )}
-
-        {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
-        {waitingFor?.type === "ExertChoice" &&
-          canActForWaitingState && (
-            <ExertChoiceModal />
-          )}
-
-        {/* CR 702.154a: Optional Enlist tap choice during declare attackers. */}
-        {waitingFor?.type === "EnlistChoice" &&
-          canActForWaitingState && (
-            <EnlistChoiceModal />
-          )}
-
-        {/* Unless payment choice ("Counter unless you pay {X}") */}
-        {waitingFor?.type === "UnlessPayment" &&
-          canActForWaitingState && (
-            <UnlessPaymentPanel />
-          )}
-
-        {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
-        {waitingFor?.type === "UnlessPaymentChooseCost" &&
-          canActForWaitingState && (
-            <UnlessPaymentChooseCostModal />
-          )}
-        {waitingFor?.type === "ActivationCostOneOfChoice" &&
-          canActForWaitingState && (
-            <ActivationCostOneOfChoiceModal />
-          )}
-      </DialogHost>
-
-      {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
-          paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
-      {viewingZone && (
-        <ZoneViewer
-          zone={viewingZone.zone}
-          playerId={viewingZone.playerId}
-          onClose={handleZoneViewerClose}
-          onPrepareActionClose={prepareZoneViewerActionClose}
-          returnFocusRef={resolvedZoneViewerReturnFocusRef}
-        />
-      )}
-
-      {waitingFor?.type === "CompanionReveal" &&
-        waitingFor.data.player === playerId && (
-          <CompanionRevealPrompt
-            eligibleCompanions={waitingFor.data.eligible_companions}
-            onChoose={handleDeclareCompanion}
+          {/* The page's toast surface, not an online-only one: solo games raise
+              toasts too (the native-engine fallback notice). Only online games get
+              a Retry — reloading re-dials the server, but a solo game has nothing
+              to re-dial and would just restart itself. */}
+          <ConnectionToast
+            onRetry={isOnlineMode ? () => window.location.reload() : undefined}
+            onSettings={() => openPreferences()}
           />
-        )}
 
-      {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
-          they are in the pending set. Each player decides independently.
-          Held back until the CR 103.1 starting-player contest finishes so the
-          dice aren't hidden behind this modal. */}
-      {waitingFor?.type === "MulliganDecision" &&
-        !startingContestActive &&
-        (() => {
-          const entry = waitingFor.data.pending.find(
-            (e) => e.player === playerId,
-          );
-          if (!entry) return null;
-          // CR 103.5b: bottoming is folded into the MulliganDecision variant as
-          // a per-entry BottomCards sub-phase resolved at this player's own
-          // declare point.
-          if (entry.phase.type === "BottomCards") {
-            return (
-              <MulliganBottomCardsPrompt
-                playerId={entry.player}
-                count={entry.phase.count}
-                openingHandBottom={false}
-                excludedCardId={
-                  entry.phase.then.type === "UseSerumPowder"
-                    ? entry.phase.then.object_id
+
+
+          {/*
+            Opponent-disconnected overlay for server (WS) games. The live
+            "N seconds to forfeit" countdown lives on `ConnectionToast`, keyed
+            by player — this modal just communicates the blocking/paused state
+            of the game screen. P2P games use `DisconnectChoiceDialog` +
+            `PausedBanner` instead (see adapter §4).
+          */}
+          {opponentDisconnected && !pauseReason && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center">
+              <div className="absolute inset-0 bg-black/60" />
+              <div className="relative z-10 w-full max-w-sm rounded-[12px] border border-yellow-400/30 bg-[#0b1020] p-6 text-center shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
+                <h2 className="mb-2 text-lg font-bold text-yellow-400">
+                  {t("gamePage.opponentDisconnected.title")}
+                </h2>
+                <p className="text-sm text-gray-300">
+                  {t("gamePage.opponentDisconnected.body")}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* P2P pause banner — visible to everyone while paused. */}
+          <PausedBanner
+            isVisible={pauseReason !== null}
+            reason={pauseReason ?? ""}
+            onResume={isP2PHost && adapter instanceof P2PHostAdapter ? handleResumeP2P : undefined}
+          />
+
+          {/* P2P host-only disconnect decision modal. */}
+          {isP2PHost && disconnectChoice !== null && (
+            <DisconnectChoiceDialog
+              isOpen
+              playerLabel={getOpponentDisplayName(disconnectChoice.playerId)}
+              gracePeriodMs={disconnectChoice.gracePeriodMs}
+              onPauseAndWait={() => {
+                const adapter = useGameStore.getState().adapter as
+                  | { holdForReconnect?: (pid: number) => void }
+                  | null;
+                adapter?.holdForReconnect?.(disconnectChoice.playerId);
+              }}
+              onContinueWithout={() => {
+                const adapter = useGameStore.getState().adapter as
+                  | { concedeDisconnected?: (pid: number) => Promise<void> }
+                  | null;
+                void adapter?.concedeDisconnected?.(disconnectChoice.playerId);
+              }}
+              onDismiss={onDismissDisconnectChoice}
+            />
+          )}
+
+          {/* Pre-game lobby progress (3-4p P2P only). */}
+          {lobbyProgress !== null && (
+            <LobbyProgress
+              joined={lobbyProgress.joined}
+              total={lobbyProgress.total}
+              roomCode={hostGameCode ?? undefined}
+            />
+          )}
+
+          {/* Card data missing modal */}
+          {showCardDataMissing && (
+            <CardDataMissingModal onContinue={onDismissCardDataMissing} />
+          )}
+
+          {/* cEDH bracket-violation blocking modal.
+              Shown when the engine refuses game init because one or more decks
+              are not declared cEDH (bracket 5) at a cEDH table.
+              Covers the entire page — no game state is accessible behind it
+              because the engine never initialised. */}
+          {bracketViolationError && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("gameSetup.bracketViolation.title")}
+              data-testid="bracket-violation-modal"
+            >
+              <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
+                <h2 className="mb-2 text-lg font-bold text-rose-400">
+                  {t("gameSetup.bracketViolation.title")}
+                </h2>
+                <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
+                <p className="mb-6 text-xs text-gray-500">
+                  {t("gameSetup.bracketViolation.body")}
+                </p>
+                <button
+                  onClick={onDismissBracketViolation}
+                  className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
+                >
+                  {t("gameSetup.bracketViolation.returnToSetup")}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Resume-failed banner */}
+          <AnimatePresence>
+            {resumeResetReason && (
+              <motion.div
+                className="fixed top-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg bg-amber-950 px-4 py-3 shadow-2xl ring-1 ring-amber-700/50"
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                transition={{ duration: 0.25 }}
+              >
+                <span className="text-sm text-amber-200">
+                  {t("gamePage.resumeReset.message", { reason: resumeResetReason })}
+                </span>
+                <button
+                  onClick={onDismissResumeReset}
+                  className="rounded bg-amber-800 px-2.5 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-700"
+                >
+                  {t("gamePage.actions.ok")}
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Overlay layers */}
+          <DebugPanel
+            aiDecisionDiagnosticsAvailable={supportsAiDecisionDiagnostics(adapter)}
+          />
+          <AiDecisionOverlay
+            receipt={aiDecisionReceipt}
+            visible={aiDecisionCaptureEnabled}
+            onClose={() => setAiDecisionCaptureEnabled(false)}
+          />
+          <ResolutionProgressOverlay />
+
+          {preferencesOpen && (
+            <PreferencesModal
+              onClose={() => setPreferencesOpen(null)}
+              initialTab={preferencesOpen.tab}
+              highlight={preferencesOpen.highlight}
+              returnFocusRef={preferencesReturnFocusRef}
+            />
+          )}
+
+          {boardContextMenu && (
+            <BoardContextMenu
+              x={boardContextMenu.x}
+              y={boardContextMenu.y}
+              onClose={() => setBoardContextMenu(null)}
+              onChangeBackground={() =>
+                openPreferences({ tab: "gameplay", highlight: "board-background" })
+              }
+              onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
+              onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
+              onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
+              onReportCard={
+                canReportCard ? () => useUiStore.getState().openCardReportDialog() : undefined
+              }
+            />
+          )}
+
+          <DebugCardContextMenu surface="game" />
+          <DebugLibraryViewer returnFocusRef={gameMenuTriggerRef} />
+
+          {/* Animation overlay (above board, below modals) */}
+          <AnimationOverlay containerRef={containerRef} />
+          {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
+          <RevealOverlay />
+          <TurnBanner />
+          <DiceRollOverlay />
+          <ScryOutcomeOverlay />
+
+          {/* Combat SVG overlays: blocker assignments + attack target arrows */}
+          <BlockAssignmentLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+          <AttackTargetLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+          {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
+              Self-gates: renders nothing unless the local player is assigning blockers
+              to attackers that carry a minimum-blocker requirement. */}
+          <BlockRequirementBadges />
+
+          {/* Per-creature must-attack / can't-attack and must-block / can't-block
+              badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
+              unless the local player is at the matching declare step and the engine
+              supplied constraints. Display-only. */}
+          <AttackRequirementBadges />
+          <BlockerConstraintBadges />
+
+          {/* WaitingFor-driven prompt overlays (only for human player).
+              Wrapped in DialogHost so any active dialog can be peeked away to
+              reveal the battlefield underneath; peek state resets on every
+              new WaitingFor so a fresh prompt is always visible. */}
+          <DialogHost>
+            {waitingFor != null &&
+              isClickThroughWaitingFor(waitingFor, objects) &&
+              canActForWaitingState && <TargetingOverlay />}
+            {waitingFor != null &&
+              MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
+              canActForWaitingState && <ManaPaymentUI />}
+            {waitingFor?.type === "ManaSourceSelection" &&
+              canActForWaitingState && <ManaSourceSelectionUI />}
+            {waitingFor?.type === "ChooseXValue" &&
+              canActForWaitingState && <ChooseXValueUI />}
+            {waitingFor?.type === "PayAmountChoice" &&
+              canActForWaitingState && <PayAmountChoiceUI />}
+            {waitingFor?.type === "AssistPayment" &&
+              canActForWaitingState && <AssistPaymentUI />}
+            {waitingFor?.type === "ReplacementChoice" &&
+              canActForWaitingState && <ReplacementModal />}
+            {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
+            {waitingFor?.type === "OrderTriggers" &&
+              canActForWaitingState && <TriggerOrderModal />}
+            {waitingFor?.type === "OrderCostReductions" &&
+              canActForWaitingState && <CostReductionOrderModal />}
+            <BattleProtectorModal />
+            <MeldChoiceModal />
+            <AssistChoosePlayerModal />
+            <ClashOpponentModal />
+            <ZoneOpponentChooserModal />
+            <PileOpponentModal />
+            <AnnouncingOpponentModal />
+            <GiftRecipientModal />
+            <EntryControllerModal />
+            <TributeModal />
+            <CombatTaxModal />
+            <AlternativeCostModal />
+            <CastingVariantModal />
+            <PermanentTypeSlotModal />
+            <ModeChoiceModal />
+            <DeclareShortcutModal />
+            <RespondToShortcutModal />
+            <PrecastCopyShortcutOfferModal />
+            <RespondToPrecastCopyShortcutModal />
+            <ChooseOneOfBranchModal />
+            <LifeRedistributionModal />
+            <AdventureCastModal />
+            <CascadeChoiceModal />
+            <RippleRevealChoiceModal />
+            <SpellbookDraftModal />
+            <FreeCastWindowModal />
+            <ModalFaceModal />
+            <MiracleRevealModal />
+            {waitingFor?.type === "SpliceOffer" &&
+              canActForWaitingState && (
+                <SpliceOfferModal />
+              )}
+
+            {/* Scry/Dig/Surveil card choice modal */}
+            <CardChoiceModal />
+
+            {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
+            <AbilityChoiceModal />
+
+            {/* Player-attached Aura viewer (Curse cycle, Paradox Haze, etc.).
+                Mounted here — not from inside HudPlate where the badge lives —
+                so the dialog's `fixed inset-0` shell anchors to the viewport
+                instead of HudPlate's transform-CB bounding box. */}
+            <PlayerEnchantmentsDialog />
+
+            {/* Permanent-attachment fan (Equipment / Aura / Fortification on a
+                battlefield object): a centered spread of the host + attachments,
+                each with its live selection affordance. Opened by clicking a
+                permanent-with-attachments during a target/board-choice prompt or by
+                the host's ⧉ badge. Self-portals to document.body, so its mount point
+                here is incidental. */}
+            <AttachmentFan />
+
+            {/* Optional additional cost choice (kicker, blight, "or pay") */}
+            {waitingFor?.type === "OptionalCostChoice" &&
+              canActForWaitingState && (
+                <OptionalCostModal />
+              )}
+
+            {/* Defiler cycle — optional life payment for mana reduction */}
+            {waitingFor?.type === "DefilerPayment" &&
+              canActForWaitingState && (
+                <DefilerPaymentModal />
+              )}
+
+            {/* Optional effect choice ("You may X") / Opponent may choice */}
+            {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
+              canActForWaitingState && (
+                <OptionalEffectModal />
+              )}
+
+            {/* Optional immediate payment branch ("discard a card or pay {2}") */}
+            {waitingFor?.type === "ResolutionOptionalPaymentChoice" && (
+              <ResolutionOptionalPaymentModal />
+            )}
+
+            {/* CR 401.4: Owner puts permanent on top or bottom of library */}
+            {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
+              canActForWaitingState && (
+                <TopOrBottomModal />
+              )}
+
+            {/* CR 702.140c + CR 730.2a: mutate spell controller chooses top/bottom */}
+            {waitingFor?.type === "MutateMergeChoice" &&
+              canActForWaitingState && (
+                <MutateMergeModal />
+              )}
+
+            {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
+            {waitingFor?.type === "CipherEncodeChoice" &&
+              canActForWaitingState && (
+                <CipherEncodeModal />
+              )}
+
+            {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
+            {waitingFor?.type === "ExertChoice" &&
+              canActForWaitingState && (
+                <ExertChoiceModal />
+              )}
+
+            {/* CR 702.154a: Optional Enlist tap choice during declare attackers. */}
+            {waitingFor?.type === "EnlistChoice" &&
+              canActForWaitingState && (
+                <EnlistChoiceModal />
+              )}
+
+            {/* Unless payment choice ("Counter unless you pay {X}") */}
+            {waitingFor?.type === "UnlessPayment" &&
+              canActForWaitingState && (
+                <UnlessPaymentPanel />
+              )}
+
+            {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
+            {waitingFor?.type === "UnlessPaymentChooseCost" &&
+              canActForWaitingState && (
+                <UnlessPaymentChooseCostModal />
+              )}
+            {waitingFor?.type === "ActivationCostOneOfChoice" &&
+              canActForWaitingState && (
+                <ActivationCostOneOfChoiceModal />
+              )}
+          </DialogHost>
+
+          {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
+              paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
+          {viewingZone && (
+            <ZoneViewer
+              zone={viewingZone.zone}
+              playerId={viewingZone.playerId}
+              onClose={handleZoneViewerClose}
+              onPrepareActionClose={prepareZoneViewerActionClose}
+              returnFocusRef={resolvedZoneViewerReturnFocusRef}
+            />
+          )}
+
+          {waitingFor?.type === "CompanionReveal" &&
+            waitingFor.data.player === playerId && (
+              <CompanionRevealPrompt
+                eligibleCompanions={waitingFor.data.eligible_companions}
+                onChoose={handleDeclareCompanion}
+              />
+            )}
+
+          {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
+              they are in the pending set. Each player decides independently.
+              Held back until the CR 103.1 starting-player contest finishes so the
+              dice aren't hidden behind this modal. */}
+          {waitingFor?.type === "MulliganDecision" &&
+            !startingContestActive &&
+            (() => {
+              const entry = waitingFor.data.pending.find(
+                (e) => e.player === playerId,
+              );
+              if (!entry) return null;
+              // CR 103.5b: bottoming is folded into the MulliganDecision variant as
+              // a per-entry BottomCards sub-phase resolved at this player's own
+              // declare point.
+              if (entry.phase.type === "BottomCards") {
+                return (
+                  <MulliganBottomCardsPrompt
+                    playerId={entry.player}
+                    count={entry.phase.count}
+                    openingHandBottom={false}
+                    excludedCardId={
+                      entry.phase.then.type === "UseSerumPowder"
+                        ? entry.phase.then.object_id
+                        : undefined
+                    }
+                    onChoose={handleBottomCards}
+                  />
+                );
+              }
+              return (
+                <MulliganDecisionPrompt
+                  playerId={entry.player}
+                  mulliganCount={entry.mulligan_count}
+                  freeFirstMulligan={waitingFor.data.free_first_mulligan}
+                  onChoose={handleMulliganChoice}
+                />
+              );
+            })()}
+
+          {waitingFor?.type === "MulliganDecision" &&
+            !startingContestActive &&
+            !waitingFor.data.pending.some((e) => e.player === playerId) && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+                <div className="relative text-center">
+                  <p className="text-base font-semibold text-white">
+                    {t("gamePage.mulligan.opponentDeciding")}
+                  </p>
+                </div>
+              </div>
+            )}
+
+          {waitingFor?.type === "OpeningHandBottomCards" &&
+            (() => {
+              const entry = waitingFor.data.pending.find(
+                (e) => e.player === playerId,
+              );
+              if (!entry) return null;
+              return (
+                <MulliganBottomCardsPrompt
+                  playerId={entry.player}
+                  count={entry.count}
+                  openingHandBottom
+                  onChoose={handleBottomCards}
+                />
+              );
+            })()}
+
+          {waitingFor?.type === "BetweenGamesSideboard" &&
+            waitingFor.data.player === playerId &&
+            (() => {
+              const pool = deckPools?.find((p) => p.player === playerId);
+              if (!pool) return null;
+              return (
+                <BetweenGamesSideboardModal
+                  pool={pool}
+                  gameNumber={waitingFor.data.game_number}
+                  score={waitingFor.data.score}
+                  minMainDeckSize={waitingFor.data.min_main_deck_size}
+                  maxSideboardSize={waitingFor.data.max_sideboard_size}
+                  onSubmit={handleSubmitSideboard}
+                />
+              );
+            })()}
+
+          {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
+            waitingFor.data.player === playerId && (
+              <ChoiceModal
+                title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
+                subtitle={t("gamePage.playDraw.matchScore", {
+                  p0Wins: waitingFor.data.score.p0_wins,
+                  p1Wins: waitingFor.data.score.p1_wins,
+                })}
+                options={[
+                  {
+                    id: "play",
+                    label: t("gamePage.playDraw.playFirst"),
+                    description: t("gamePage.playDraw.playFirstDescription"),
+                  },
+                  {
+                    id: "draw",
+                    label: t("gamePage.playDraw.drawFirst"),
+                    description: t("gamePage.playDraw.drawFirstDescription"),
+                  },
+                ]}
+                onChoose={(id) => handleChoosePlayDraw(id === "play")}
+              />
+            )}
+
+          {/* Multiplayer UX overlays */}
+          {isOnlineMode && (
+            <>
+              <ConcedeDialog
+                isOpen={showConcedeDialog}
+                gameAction={{
+                  kind: "game",
+                  consequence: isBestOfThree ? "best-of-three-game" : "ordinary-game",
+                  onConfirm: handleConcede,
+                }}
+                matchAction={
+                  supportsMatchConcede(adapter) && isBestOfThree
+                    ? { kind: "match", onConfirm: handleMatchConcede }
                     : undefined
                 }
-                onChoose={handleBottomCards}
+                onCancel={onHideConcedeDialog}
+                returnFocusRef={gameMenuTriggerRef}
               />
-            );
-          }
-          return (
-            <MulliganDecisionPrompt
-              playerId={entry.player}
-              mulliganCount={entry.mulligan_count}
-              freeFirstMulligan={waitingFor.data.free_first_mulligan}
-              onChoose={handleMulliganChoice}
-            />
-          );
-        })()}
+              <TakebackRequestDialog
+                isOpen={pendingTakeback !== null}
+                requesterName={pendingTakeback?.requesterName ?? ""}
+                isOwnRequest={pendingTakeback?.requester === playerId}
+                onApprove={() => handleRespondTakeback(true)}
+                onDecline={() => handleRespondTakeback(false)}
+                onCancel={handleCancelTakeback}
+              />
+              {!isSpectatorMode && (
+                <EmoteOverlay
+                  onSendEmote={handleSendEmote}
+                  receivedEmote={receivedEmote}
+                />
+              )}
+              {/* Per-player timer display */}
+              {Object.entries(timerRemaining).map(([pid, secs]) =>
+                secs > 0 ? (
+                  <div
+                    key={pid}
+                    className={`fixed z-30 text-xs font-mono font-bold ${
+                      Number(pid) === playerId
+                        ? "bottom-40 left-1/2 -translate-x-1/2 text-amber-400"
+                        : "top-16 left-1/2 -translate-x-1/2 text-red-400"
+                    }`}
+                  >
+                    {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")}
+                  </div>
+                ) : null,
+              )}
+            </>
+          )}
 
-      {waitingFor?.type === "MulliganDecision" &&
-        !startingContestActive &&
-        !waitingFor.data.pending.some((e) => e.player === playerId) && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
-            <div className="relative text-center">
-              <p className="text-base font-semibold text-white">
-                {t("gamePage.mulligan.opponentDeciding")}
-              </p>
-            </div>
-          </div>
-        )}
-
-      {waitingFor?.type === "OpeningHandBottomCards" &&
-        (() => {
-          const entry = waitingFor.data.pending.find(
-            (e) => e.player === playerId,
-          );
-          if (!entry) return null;
-          return (
-            <MulliganBottomCardsPrompt
-              playerId={entry.player}
-              count={entry.count}
-              openingHandBottom
-              onChoose={handleBottomCards}
-            />
-          );
-        })()}
-
-      {waitingFor?.type === "BetweenGamesSideboard" &&
-        waitingFor.data.player === playerId &&
-        (() => {
-          const pool = deckPools?.find((p) => p.player === playerId);
-          if (!pool) return null;
-          return (
-            <BetweenGamesSideboardModal
-              pool={pool}
-              gameNumber={waitingFor.data.game_number}
-              score={waitingFor.data.score}
-              minMainDeckSize={waitingFor.data.min_main_deck_size}
-              maxSideboardSize={waitingFor.data.max_sideboard_size}
-              onSubmit={handleSubmitSideboard}
-            />
-          );
-        })()}
-
-      {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
-        waitingFor.data.player === playerId && (
-          <ChoiceModal
-            title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
-            subtitle={t("gamePage.playDraw.matchScore", {
-              p0Wins: waitingFor.data.score.p0_wins,
-              p1Wins: waitingFor.data.score.p1_wins,
-            })}
-            options={[
-              {
-                id: "play",
-                label: t("gamePage.playDraw.playFirst"),
-                description: t("gamePage.playDraw.playFirstDescription"),
-              },
-              {
-                id: "draw",
-                label: t("gamePage.playDraw.drawFirst"),
-                description: t("gamePage.playDraw.drawFirstDescription"),
-              },
-            ]}
-            onChoose={(id) => handleChoosePlayDraw(id === "play")}
-          />
-        )}
-
-      {/* Multiplayer UX overlays */}
-      {isOnlineMode && (
-        <>
-          <ConcedeDialog
-            isOpen={showConcedeDialog}
-            gameAction={{
-              kind: "game",
-              consequence: isBestOfThree ? "best-of-three-game" : "ordinary-game",
-              onConfirm: handleConcede,
-            }}
-            matchAction={
-              supportsMatchConcede(adapter) && isBestOfThree
-                ? { kind: "match", onConfirm: handleMatchConcede }
-                : undefined
-            }
-            onCancel={onHideConcedeDialog}
-            returnFocusRef={gameMenuTriggerRef}
-          />
-          <TakebackRequestDialog
-            isOpen={pendingTakeback !== null}
-            requesterName={pendingTakeback?.requesterName ?? ""}
-            isOwnRequest={pendingTakeback?.requester === playerId}
-            onApprove={() => handleRespondTakeback(true)}
-            onDecline={() => handleRespondTakeback(false)}
-            onCancel={handleCancelTakeback}
-          />
-          {!isSpectatorMode && (
-            <EmoteOverlay
-              onSendEmote={handleSendEmote}
-              receivedEmote={receivedEmote}
+          {waitingFor?.type === "GameOver" && (
+            <GameOverScreen
+              winner={waitingFor.data.winner}
+              mode={mode}
+              isOnlineMode={isOnlineMode}
+              gameStartedAt={gameStartedAt}
+              terminalReason={terminalReason}
             />
           )}
-          {/* Per-player timer display */}
-          {Object.entries(timerRemaining).map(([pid, secs]) =>
-            secs > 0 ? (
-              <div
-                key={pid}
-                className={`fixed z-30 text-xs font-mono font-bold ${
-                  Number(pid) === playerId
-                    ? "bottom-40 left-1/2 -translate-x-1/2 text-amber-400"
-                    : "top-16 left-1/2 -translate-x-1/2 text-red-400"
-                }`}
-              >
-                {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")}
-              </div>
-            ) : null,
-          )}
-        </>
-      )}
 
-      {waitingFor?.type === "GameOver" && (
-        <GameOverScreen
-          winner={waitingFor.data.winner}
-          mode={mode}
-          isOnlineMode={isOnlineMode}
-          gameStartedAt={gameStartedAt}
-          terminalReason={terminalReason}
-        />
+          {/* Issue #311: Fail-loud safety net for orphan WaitingFor states.
+              Renders only when (a) the engine is waiting on the local player
+              and (b) the WaitingFor type has no UI handler in the frontend.
+              Without this, an unknown WaitingFor would silently hang the game
+              with no way to escape — see UnhandledWaitingForModal for details. */}
+          <UnhandledWaitingForModal
+            onExit={handleUnhandledExit}
+            exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
+          />
+        </div>,
+        document.body,
       )}
-
-      {/* Issue #311: Fail-loud safety net for orphan WaitingFor states.
-          Renders only when (a) the engine is waiting on the local player
-          and (b) the WaitingFor type has no UI handler in the frontend.
-          Without this, an unknown WaitingFor would silently hang the game
-          with no way to escape — see UnhandledWaitingForModal for details. */}
-      <UnhandledWaitingForModal
-        onExit={handleUnhandledExit}
-        exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
-      />
       </div>
       <GameLogPanel />
       {/* This is a peer of the board and log columns: a preview opened from a
@@ -2493,6 +2478,13 @@ function MulliganDecisionPrompt({
     )
     .filter((oid): oid is number => oid !== null);
 
+  // CR 103.5 as modified by the Dandan free-reveal rule: the engine
+  // (`mulligan::free_reveal_offered`) decides whether the hand qualifies and
+  // enumerates the action; the FE only shows the button for an issued action.
+  const freeRevealOffered = legalActions.some(
+    (a) => a.type === "MulliganDecision" && a.data.choice.type === "FreeReveal",
+  );
+
   if (!player || !objects) {
     const fallbackOptions = [
       {
@@ -2512,6 +2504,15 @@ function MulliganDecisionPrompt({
           ? t("gamePage.mulligan.shuffleDrawSevenFree")
           : t("gamePage.mulligan.shuffleDrawSevenAgain"),
       },
+      ...(freeRevealOffered
+        ? [
+            {
+              id: "freeReveal",
+              label: t("gamePage.mulligan.freeReveal"),
+              description: t("gamePage.mulligan.freeRevealDescription"),
+            },
+          ]
+        : []),
       // CR 103.5b: A Powder option per legal `UseSerumPowder` candidate the
       // engine emitted. The button label uses the object's engine-provided
       // name so the FE never re-evaluates which hand objects qualify.
@@ -2567,6 +2568,15 @@ function MulliganDecisionPrompt({
                   ? t("gamePage.mulligan.freeMulligan")
                   : t("gamePage.mulligan.mulliganTo", { count: nextHandSize })}
               </button>
+              {freeRevealOffered && (
+                <button
+                  onClick={() => onChoose("freeReveal")}
+                  className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                  title={t("gamePage.mulligan.freeRevealDescription")}
+                >
+                  {t("gamePage.mulligan.freeReveal")}
+                </button>
+              )}
               {/* CR 103.5b: One button per legal `UseSerumPowder` candidate
                   the engine surfaced. Name comes from engine-provided state. */}
               {serumPowderIds.map((oid) => (

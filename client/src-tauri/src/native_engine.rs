@@ -592,16 +592,17 @@ pub(crate) fn native_engine_bridge_sender(
 }
 
 pub(crate) fn close_native_engine_bridge(bridge_id: u64) -> bool {
-    let bridge = engine_state()
+    engine_state()
         .lock()
-        .ok()
-        .and_then(|mut state| state.bridges.remove(&bridge_id));
-    if let Some(bridge) = bridge {
-        bridge.abort();
-        true
-    } else {
-        false
-    }
+        .is_ok_and(|mut state| close_registered_bridge(&mut state.bridges, bridge_id))
+}
+
+fn close_registered_bridge(bridges: &mut BTreeMap<u64, BridgeHandle>, bridge_id: u64) -> bool {
+    let Some(bridge) = bridges.remove(&bridge_id) else {
+        return false;
+    };
+    bridge.close();
+    true
 }
 
 pub(crate) fn remove_native_engine_bridge(bridge_id: u64) {
@@ -2238,6 +2239,9 @@ fn emit_progress(app: &AppHandle, phase: NativeEngineProgressPhase, detail: Opti
 mod tests {
     use std::{cell::RefCell, fs, time::Duration};
 
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio_tungstenite::tungstenite::Message;
+
     use super::*;
 
     const TEST_PUBLIC_KEY: &str = "RWRkGDPsxuBykSbl2mdODJL2Wa/o8ow/1LHjD7Vg8ucmQEM4loTWhAyw";
@@ -3551,15 +3555,36 @@ mod tests {
         let (abort, registration) = futures_util::future::AbortHandle::new_pair();
         let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = NativeEngineState::default();
-        state.bridges.insert(1, BridgeHandle::new(abort, outbound));
+        state
+            .bridges
+            .insert(1, BridgeHandle::new(abort.clone(), outbound));
 
         abort_all_native_engine_bridges(&mut state.bridges);
 
         assert!(state.running.is_none());
         assert!(state.bridges.is_empty());
+        assert!(abort.is_aborted());
         let result = tauri::async_runtime::block_on(async {
             futures_util::future::Abortable::new(std::future::pending::<()>(), registration).await
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn closing_a_registered_bridge_closes_its_queue_without_aborting() {
+        let (abort, _registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut bridges = BTreeMap::from([(1, BridgeHandle::new(abort.clone(), outbound))]);
+        bridges[&1]
+            .outbound()
+            .send(Message::Text("queued".into()))
+            .unwrap();
+
+        assert!(close_registered_bridge(&mut bridges, 1));
+
+        assert!(!close_registered_bridge(&mut bridges, 1));
+        assert!(!abort.is_aborted());
+        assert_eq!(receiver.try_recv().unwrap(), Message::Text("queued".into()));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }
 }

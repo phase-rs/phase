@@ -9,7 +9,37 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+
+/// CR 608.2d: Use the same private-zone candidates for optional feasibility
+/// and the resolution-time selection prompt.
+pub(super) fn private_zone_selection<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    target: &'a TargetFilter,
+) -> Option<(PlayerId, Zone, impl Iterator<Item = ObjectId> + 'a)> {
+    let source_zone = target.extract_in_zone()?;
+    if !matches!(source_zone, Zone::Hand | Zone::Library) {
+        return None;
+    }
+    let choosing_player =
+        crate::game::effects::controller_for_relative_filter(state, ability, target);
+    let player = &state.players[choosing_player.0 as usize];
+    let candidates = match source_zone {
+        Zone::Hand => &player.hand,
+        Zone::Library => state.library_of(choosing_player),
+        Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => {
+            return None;
+        }
+    };
+    let ctx =
+        crate::game::filter::FilterContext::from_ability_with_controller(ability, choosing_player);
+    let eligible = candidates.iter().copied().filter(move |&id| {
+        crate::game::filter::matches_target_filter_for_zone(state, id, source_zone, target, &ctx)
+    });
+    Some((choosing_player, source_zone, eligible))
+}
 
 /// Place target card at a specific position in its owner's library. Unlike
 /// ChangeZone { destination: Library } which shuffles the destination library,
@@ -119,20 +149,76 @@ pub fn resolve(
     // bare form (Chaos Wand's "put the rest on the bottom") or an `And`-composed
     // form (Jodah's "put the rest" = `And { ExiledBySource, DistinctFrom
     // { ParentTarget } }`, which excludes a declined-and-still-exiled hit) —
-    // scans the exile zone. `matches_target_filter` evaluates the full filter,
-    // so every `And` leg (`ExiledBySource` membership + `DistinctFrom` exclusion)
-    // is applied together.
+    // reads the exiled cards: the batch an exile-until loop handed down, or else
+    // a scan of the exile zone. With a batch, batch membership stands in for the
+    // `ExiledBySource` leg and the other legs are applied to it; the scan
+    // evaluates the full filter, every `And` leg together.
     if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        collected_targets = state
-            .objects
-            .iter()
-            .filter(|(id, obj)| {
-                obj.zone == Zone::Exile
-                    && crate::game::filter::matches_target_filter(state, **id, &target_filter, &ctx)
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        // CR 400.7j + CR 608.2c: after an "exile cards … until …" loop, "the
+        // other cards exiled this way" (Invasion of Alara) and "put the rest"
+        // (Jodah, the Unifier) are found among the exact batch that loop handed
+        // down (`SpellContext::exile_until_batch`), with the filter's other legs
+        // applied to it. A triggered ability's `ExiledBySource` would otherwise
+        // read the linked-exile snapshot taken when it triggered, before this
+        // resolution exiled anything. Without a batch the scan below is
+        // unchanged.
+        //
+        // CR 607.2a: Possibility Storm's "all cards exiled with this
+        // enchantment" is every card currently exiled with the source, which
+        // adds the spell its trigger exiled before the loop. The other bare
+        // form, "the exiled cards that weren't cast this way" (Gríma,
+        // Saruman's Footman; CR 608.2c), names this resolution's cards; with
+        // the engine's per-source link ledger that is the same set, because no
+        // card of these forms leaves a linked card in exile, unlike a found
+        // card the rest-forms keep.
+        let resolution_batch = (!ability.context.exile_until_batch.is_empty()).then(|| {
+            ability
+                .context
+                .exile_until_batch
+                .iter()
+                .filter(|pin| pin.is_current(state))
+                .map(|pin| pin.object_id)
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+                })
+                .collect::<Vec<_>>()
+        });
+        collected_targets = match resolution_batch {
+            Some(mut batch) => match target_filter.without_exile_anaphor() {
+                None => {
+                    for id in cards_exiled_with_source_now(state, ability.source_id) {
+                        if !batch.contains(&id) {
+                            batch.push(id);
+                        }
+                    }
+                    batch
+                }
+                Some(residual) => batch
+                    .into_iter()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, &residual, &ctx)
+                    })
+                    .collect(),
+            },
+            None => state
+                .objects
+                .iter()
+                .filter(|(id, obj)| {
+                    obj.zone == Zone::Exile
+                        && crate::game::filter::matches_target_filter(
+                            state,
+                            **id,
+                            &target_filter,
+                            &ctx,
+                        )
+                })
+                .map(|(id, _)| *id)
+                .collect(),
+        };
         // CR 701.20e: Look-then-cast tails put uncast looked-at cards on the
         // bottom via `ExiledBySource`, but those cards remain in the library.
         if collected_targets.is_empty() && !state.last_revealed_ids.is_empty() {
@@ -275,92 +361,52 @@ pub fn resolve(
             });
             return Ok(());
         }
-        if let Some(source_zone) = target_filter.extract_in_zone() {
-            if matches!(source_zone, Zone::Hand | Zone::Library) {
-                let choosing_player = crate::game::effects::controller_for_relative_filter(
-                    state,
-                    ability,
-                    &target_filter,
-                );
-                // CR 608.2d: a choice offered while an effect resolves is made
-                // while applying that effect. For "target opponent puts", the
-                // relative filter identifies that instructed opponent as the
-                // player who chooses their card.
-                let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
-                    ability,
-                    choosing_player,
-                );
-                let eligible: Vec<_> = match source_zone {
-                    Zone::Hand => state.players[choosing_player.0 as usize]
-                        .hand
-                        .iter()
-                        .copied()
-                        .filter(|&id| {
-                            crate::game::filter::matches_target_filter_for_zone(
-                                state,
-                                id,
-                                source_zone,
-                                &target_filter,
-                                &ctx,
-                            )
-                        })
-                        .collect(),
-                    Zone::Library => state.players[choosing_player.0 as usize]
-                        .library
-                        .iter()
-                        .copied()
-                        .filter(|&id| {
-                            crate::game::filter::matches_target_filter_for_zone(
-                                state,
-                                id,
-                                source_zone,
-                                &target_filter,
-                                &ctx,
-                            )
-                        })
-                        .collect(),
-                    _ => unreachable!(),
-                };
-                let eligible_count = eligible.len();
-                if eligible.is_empty() {
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::PutAtLibraryPosition,
-                        source_id: ability.source_id,
-                        subject: None,
-                    });
-                    return Ok(());
-                }
-                state.waiting_for = WaitingFor::EffectZoneChoice {
-                    player: choosing_player,
-                    cards: eligible,
-                    count: expected.min(eligible_count),
-                    min_count: 0,
-                    // load-bearing: the any-number placement prompt.
-                    up_to: count_is_up_to,
+        let private_selection = private_zone_selection(state, ability, &target_filter)
+            .map(|(player, zone, eligible)| (player, zone, eligible.collect::<Vec<_>>()));
+        if let Some((choosing_player, source_zone, eligible)) = private_selection {
+            let eligible_count = eligible.len();
+            if eligible.is_empty() {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::PutAtLibraryPosition,
                     source_id: ability.source_id,
-                    effect_kind: EffectKind::PutAtLibraryPosition,
-                    zone: source_zone,
-                    destination: None,
-                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                    enter_transformed: false,
-                    enters_under_player: None,
-                    enters_attacking: false,
-                    owner_library: false,
-                    track_exiled_by_source: false,
-                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
-                    // CR 708.2a: library-position selection is not a face-down entry.
-                    face_down_profile: None,
-                    enter_with_counters: vec![],
-                    conditional_enter_with_counters: vec![],
-                    count_param: 0,
-                    library_position: Some(position.clone()),
-                    mass_library_order: None,
-                    is_cost_payment: false,
-                    enters_modified_if: None,
-                    duration: None,
-                };
+                    subject: None,
+                });
                 return Ok(());
             }
+            state.waiting_for = WaitingFor::EffectZoneChoice {
+                player: choosing_player,
+                cards: eligible,
+                count: expected.min(eligible_count),
+                min_count: if count_is_up_to {
+                    0
+                } else {
+                    expected.min(eligible_count)
+                },
+                // load-bearing: the any-number placement prompt.
+                up_to: count_is_up_to,
+                source_id: ability.source_id,
+                effect_kind: EffectKind::PutAtLibraryPosition,
+                zone: source_zone,
+                destination: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_transformed: false,
+                enters_under_player: None,
+                enters_attacking: false,
+                owner_library: false,
+                track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                // CR 708.2a: library-position selection is not a face-down entry.
+                face_down_profile: None,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                count_param: 0,
+                library_position: Some(position.clone()),
+                mass_library_order: None,
+                is_cost_payment: false,
+                enters_modified_if: None,
+                duration: None,
+            };
+            return Ok(());
         }
         // CR 701.23b: A search/forward continuation that found nothing — fail to
         // find, or no instant/sorcery left in the library for a top-of-library
@@ -389,7 +435,7 @@ pub fn resolve(
             player: ability.controller,
             cards: collected_targets,
             count: expected,
-            min_count: 0,
+            min_count: if count_is_up_to { 0 } else { expected },
             // Set for parity with the eligible-pool prompt so the two constructions
             // cannot drift; no any-number placement reaches this prompt today.
             up_to: count_is_up_to,
@@ -519,6 +565,27 @@ pub fn resolve(
     );
 
     Ok(())
+}
+
+/// CR 607.2a: the cards in exile linked to `source_id` right now (the live
+/// ledger, not a trigger's snapshot). A bare exiled-cards cleanup after an
+/// exile-until loop adds these to the loop's batch, so the cards the ability
+/// exiled before its loop (Possibility Storm's "exiles it") are included; see
+/// the bare-form note in `resolve` for why that is safe for "this way".
+pub(super) fn cards_exiled_with_source_now(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    crate::game::players::linked_exile_cards_for_source(state, source_id)
+        .into_iter()
+        .map(|entry| entry.exiled_id)
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Exile)
+        })
+        .collect()
 }
 
 #[cfg(test)]

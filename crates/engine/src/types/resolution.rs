@@ -861,6 +861,14 @@ impl ResolutionStack {
         self.frames.capture_depth()
     }
 
+    /// Whether the frame at the captured `child_stack_start` is a `CopyToken` owner.
+    pub fn copy_token_at_child_boundary(&self, child_stack_start: ChildStackDepth) -> bool {
+        self.frames
+            .slot_at_captured_depth(child_stack_start)
+            .and_then(|slot| self.frames.get(slot))
+            .is_some_and(|frame| matches!(frame, ResolutionFrame::CopyToken(_)))
+    }
+
     pub fn last(&self) -> Option<&ResolutionFrame> {
         self.frames.last()
     }
@@ -3677,8 +3685,10 @@ impl ResolutionStack {
 /// The full-state resolution wire version for typed [`ResolutionStack`] frames.
 ///
 /// Version 3 distinguishes the current exploited-trigger source/victim roles
-/// from the legacy actor fallback stored in `valid_card`.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 3;
+/// from the legacy actor fallback stored in `valid_card`. Version 4 requires
+/// every draw frame to carry its result owner explicitly, including `null`.
+/// Version 5 adds the simultaneous-draw dealer to the draw frame.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3688,6 +3698,14 @@ const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
 
 /// Historical typed-frame wire version accepted only for migration.
 const LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
+
+/// Last typed-frame wire version written before draw result ownership became
+/// part of the required persisted shape.
+const LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION: u64 = 3;
+
+/// Last wire version written before a draw frame could carry a simultaneous-draw
+/// dealer. It is also the first version that requires `delivery_owner`.
+const LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
 
 /// The `GameState` fields whose serialized form is UNCONDITIONAL: each carries
 /// `#[serde(default …)]` but NO `skip_serializing_if`, so the derived
@@ -3756,6 +3774,211 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
         .all(|field| !object.contains_key(*field))
 }
 
+/// Presence-aware view of the one runtime field whose serde default would
+/// otherwise erase the distinction between an omitted owner and an explicit
+/// ownerless (`null`) value at the persistence boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DrawSequenceDeliveryOwnerPresence {
+    #[default]
+    Missing,
+    Present(Option<crate::types::game_state::DrawSequenceFrameId>),
+}
+
+impl<'de> Deserialize<'de> for DrawSequenceDeliveryOwnerPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::Present(Option::<
+            crate::types::game_state::DrawSequenceFrameId,
+        >::deserialize(deserializer)?))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DrawSequenceBoundaryFrame {
+    #[serde(default)]
+    delivery_owner: DrawSequenceDeliveryOwnerPresence,
+    #[serde(default)]
+    remaining: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct DrawSequenceBoundaryStack {
+    #[serde(default)]
+    frames: Vec<DrawSequenceBoundaryFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiDrawBoundaryFrame {
+    draw_sequences: DrawSequenceBoundaryStack,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ResolutionBoundaryFrame {
+    MultiDraw {
+        data: MultiDrawBoundaryFrame,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolutionBoundaryStack {
+    #[serde(default)]
+    frames: Vec<ResolutionBoundaryFrame>,
+}
+
+fn typed_draw_sequence_frames(value: &Value) -> Result<Vec<DrawSequenceBoundaryFrame>, String> {
+    let stack = serde_json::from_value::<ResolutionBoundaryStack>(value.clone())
+        .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
+    Ok(stack
+        .frames
+        .into_iter()
+        .filter_map(|frame| match frame {
+            ResolutionBoundaryFrame::MultiDraw { data: frame } => Some(frame.draw_sequences.frames),
+            ResolutionBoundaryFrame::Other => None,
+        })
+        .flatten()
+        .collect())
+}
+
+fn typed_carrier_draw_sequence_frames(
+    value: &Value,
+    carrier: &str,
+) -> Result<Vec<DrawSequenceBoundaryFrame>, String> {
+    value
+        .get(carrier)
+        .map(typed_draw_sequence_frames)
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+fn has_draw_sequence_delivery_owner(value: &Value) -> Result<bool, String> {
+    Ok(typed_draw_sequence_frames(value)?.iter().any(|frame| {
+        matches!(
+            frame.delivery_owner,
+            DrawSequenceDeliveryOwnerPresence::Present(_)
+        )
+    }))
+}
+
+fn validate_draw_sequence_delivery_owner_fields(
+    value: &Value,
+    version: u64,
+    legacy_frames: Option<&[Value]>,
+) -> Result<(), String> {
+    let frames = if let Some(legacy_frames) = legacy_frames {
+        legacy_frames
+            .iter()
+            .map(|frame| {
+                serde_json::from_value::<DrawSequenceBoundaryFrame>(frame.clone())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        typed_carrier_draw_sequence_frames(value, "resolution_frames")?
+    };
+    for frame in frames {
+        let has_delivery_owner = matches!(
+            frame.delivery_owner,
+            DrawSequenceDeliveryOwnerPresence::Present(_)
+        );
+        if version >= LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION && !has_delivery_owner {
+            return Err(format!(
+                "resolution_state_version {version} draw sequence frame is missing required delivery_owner"
+            ));
+        }
+        if version < LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION && has_delivery_owner {
+            return Err(format!(
+                "draw sequence delivery_owner requires resolution_state_version {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}; found {version}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Result<(), String> {
+    if !matches!(
+        version,
+        LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
+    ) {
+        return Ok(());
+    }
+    let state = value.get("state").unwrap_or(value);
+    let is_waiting_for_replacement = state
+        .get("waiting_for")
+        .and_then(|waiting_for| waiting_for.get("type"))
+        .and_then(Value::as_str)
+        == Some("ReplacementChoice");
+    if !is_waiting_for_replacement {
+        return Ok(());
+    }
+
+    let pending_draw_has_applied_count_change = state
+        .get("pending_replacement")
+        .and_then(|pending| pending.get("proposed"))
+        .and_then(|proposed| proposed.get("Draw"))
+        .is_some_and(|draw| {
+            draw.get("count")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 1)
+                && draw
+                    .get("applied")
+                    .and_then(Value::as_array)
+                    .is_some_and(|applied| !applied.is_empty())
+        });
+    if !pending_draw_has_applied_count_change {
+        return Ok(());
+    }
+
+    let Some(frames) = state
+        .get("resolution_frames")
+        .and_then(|stack| stack.get("frames"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    let has_related_post_replacement_continuation = frames.windows(2).any(|pair| {
+        let has_ready_rider = pair[0].get("type").and_then(Value::as_str)
+            == Some("PostReplacement")
+            && pair[0]
+                .get("data")
+                .and_then(|data| data.get("drains"))
+                .and_then(Value::as_array)
+                .is_some_and(|drains| {
+                    drains.iter().any(|drain| {
+                        drain
+                            .get("status")
+                            .and_then(Value::as_object)
+                            .is_some_and(|status| status.contains_key("Ready"))
+                    })
+                });
+        if !has_ready_rider || pair[1].get("type").and_then(Value::as_str) != Some("MultiDraw") {
+            return false;
+        }
+
+        let Ok(ResolutionBoundaryFrame::MultiDraw { data: frame }) =
+            serde_json::from_value::<ResolutionBoundaryFrame>(pair[1].clone())
+        else {
+            return false;
+        };
+        frame.draw_sequences.frames.iter().any(|frame| {
+            matches!(
+                frame.delivery_owner,
+                DrawSequenceDeliveryOwnerPresence::Missing
+            ) && frame.remaining == 0
+        })
+    });
+    if has_related_post_replacement_continuation {
+        return Err(format!(
+            "legacy resolution_state_version {version} cannot safely restore a paused multi-draw replacement with a pending post-replacement continuation and no delivery_owner"
+        ));
+    }
+    Ok(())
+}
+
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
 /// payload. The only place in the engine permitted to infer a wire version.
 ///
@@ -3795,11 +4018,11 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 /// in `types/game_state.rs` pins that the shared fail-closed redaction removes
 /// the private stack and emits the marker.
 ///
-/// The version stamped below is the same kind of mutable premise: the mapping
-/// is to the current typed-frame shape, whose carrier is `resolution_frames`
-/// and which deserializes the same `ResolutionStack` that `resolution_stack`
-/// does. It must be RE-DERIVED, not merely recompiled, if the current wire
-/// changes shape.
+/// The current derived writer emits `delivery_owner` on every draw frame,
+/// including an explicit `null`; historical unversioned `resolution_stack`
+/// payloads omit that key. That marker selects v4 versus the compatible v3
+/// typed-frame reader before the carrier is renamed. Re-derive this mapping if
+/// either writer changes shape.
 ///
 /// An undeclared payload carrying BOTH carriers is refused rather than
 /// inferred: choosing one would discard the other with no error, at an ingress
@@ -3809,15 +4032,16 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 /// through `ResolutionStateWire::to_value`, which always declares the current
 /// version.
 ///
-/// The mapping is exact, not heuristic. #6269 (`f4a6f32b85`, 2026-07-21) added
-/// `resolution_stack` and removed all 29 legacy `pending_*` /
+/// The mapping is structural, not heuristic. #6269 (`f4a6f32b85`, 2026-07-21)
+/// added `resolution_stack` and removed all 29 legacy `pending_*` /
 /// `post_replacement_*` fields in ONE commit, and no legacy field has been
 /// re-added since, so a payload carrying `resolution_stack` is necessarily
-/// post-#6269 and never a v1 save. A payload WITHOUT it is either pre-#6269 or
-/// post-#6269 with an empty frame stack; both project to the same empty frame
-/// stack through the v1 branch. (The three `ResolutionStack` allocators are a
-/// separate, pre-existing matter: `is_empty` reads only `frames`, so an
-/// empty-frames save omits the whole field and loses them either way.)
+/// post-#6269 and never a v1 save. Presence of `delivery_owner` then
+/// distinguishes v4 from an older unversioned typed-frame payload, which is
+/// read as v3. A payload WITHOUT `resolution_stack` keeps the v1 path. (The
+/// three `ResolutionStack` allocators are a separate, pre-existing matter:
+/// `is_empty` reads only `frames`, so an empty-frames save omits the whole field
+/// and loses them either way.)
 ///
 /// A payload that already declares a version keeps it, and receives exactly the
 /// treatment that version gets through any other ingress — there is no
@@ -3837,6 +4061,11 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
     if object.contains_key("resolution_state_version") {
         return Ok(());
     }
+    let unversioned_stack_has_delivery_owner = object
+        .get("resolution_stack")
+        .map(has_draw_sequence_delivery_owner)
+        .transpose()?
+        .unwrap_or(false);
     // An undeclared payload carrying BOTH carriers is ambiguous, and inferring
     // from one would move `resolution_stack` onto the `resolution_frames` key
     // and discard the declared `resolution_frames` silently. Refuse instead.
@@ -3913,7 +4142,11 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             object.insert("resolution_frames".to_string(), frames);
             object.insert(
                 "resolution_state_version".to_string(),
-                Value::from(RESOLUTION_STATE_WIRE_VERSION),
+                Value::from(if unversioned_stack_has_delivery_owner {
+                    LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+                } else {
+                    LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
+                }),
             );
         }
         None => {
@@ -3959,8 +4192,8 @@ const LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS: &[&str] = &[
 ///
 /// This adapter is the persistence seam between v1's legacy-only payloads and
 /// typed frames. v1 decoding converts migrated family payloads into the
-/// runtime stack; v2/v3 decoding restores those frames directly while retaining
-/// legacy slots solely for unmigrated families. Both supported versions refuse
+/// runtime stack; v2-v4 decoding restores those frames directly while retaining
+/// legacy slots solely for unmigrated families. The typed-frame versions refuse
 /// `CreatureExploited` events that predate authoritative victim records; the
 /// version distinguishes frame layouts and cannot safely synthesize event facts.
 #[derive(Debug, Clone)]
@@ -4007,7 +4240,9 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; only version 3 is written.
+    /// 2 and 3 share the typed-frame reader; versions 4 and 5 use the same frame
+    /// layout with an explicit draw-result-owner presence check, and a version-4
+    /// draw frame simply has no dealer.
     fn from_value(mut value: Value) -> Result<Self, String> {
         let version = {
             let object = value
@@ -4027,13 +4262,22 @@ impl ResolutionStateWire {
             LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV2
             }
-            RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV3,
+            LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
+                GameStateDecodeMode::ResolutionWireV3
+            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
+                GameStateDecodeMode::ResolutionWireV4
+            }
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
+        if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+            validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
+        }
+        reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
@@ -4043,7 +4287,9 @@ impl ResolutionStateWire {
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
         let additional_live_event_roots = match decode_mode {
             GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
-            GameStateDecodeMode::ResolutionWireV2 | GameStateDecodeMode::ResolutionWireV3 => &[],
+            GameStateDecodeMode::ResolutionWireV2
+            | GameStateDecodeMode::ResolutionWireV3
+            | GameStateDecodeMode::ResolutionWireV4 => &[],
             GameStateDecodeMode::PersistedRaw
             | GameStateDecodeMode::TrustedEnvelope
             | GameStateDecodeMode::DirectCurrentRaw => {
@@ -4059,6 +4305,17 @@ impl ResolutionStateWire {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             GameStateDecodeMode::ResolutionWireV1 => {
+                let legacy_draw_sequence_frames = value
+                    .get("draw_sequences")
+                    .and_then(|stack| stack.get("frames"))
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                validate_draw_sequence_delivery_owner_fields(
+                    &value,
+                    version,
+                    Some(legacy_draw_sequence_frames),
+                )?;
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
                     LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
@@ -4231,7 +4488,9 @@ impl ResolutionStateWire {
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
             }
-            GameStateDecodeMode::ResolutionWireV2 | GameStateDecodeMode::ResolutionWireV3 => {
+            GameStateDecodeMode::ResolutionWireV2
+            | GameStateDecodeMode::ResolutionWireV3
+            | GameStateDecodeMode::ResolutionWireV4 => {
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
                     &[],
@@ -5360,6 +5619,7 @@ mod tests {
             .expect("the fixture emits an authoritative departure record");
         let exploit = GameEvent::CreatureExploited {
             exploiter,
+            exploiter_incarnation: None,
             sacrificed: victim,
             record,
         };
@@ -5367,8 +5627,26 @@ mod tests {
         (state, exploit)
     }
 
+    fn strip_delivery_owner_fields(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("delivery_owner");
+                for child in object.values_mut() {
+                    strip_delivery_owner_fields(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    strip_delivery_owner_fields(item);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
     fn v1_wire_value(state: GameState) -> Value {
         let mut value = serde_json::to_value(state).expect("state serializes");
+        strip_delivery_owner_fields(&mut value);
         let object = value.as_object_mut().expect("state is an object");
         object.remove("resolution_stack");
         object.insert(
@@ -5382,9 +5660,22 @@ mod tests {
         let mut value = ResolutionStateWire::from_game_state(state)
             .to_value()
             .expect("current wire serializes before fixture downgrade");
+        strip_delivery_owner_fields(&mut value);
         value["resolution_state_version"] =
             Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         value
+    }
+
+    #[test]
+    fn malformed_unversioned_draw_carrier_preserves_boundary_error() {
+        let mut value = serde_json::json!({
+            "resolution_stack": {
+                "frames": [{"type": "MultiDraw", "data": {"draw_sequences": {"frames": "invalid"}}}]
+            }
+        });
+        let error = declare_raw_resolution_wire(&mut value).unwrap_err();
+        assert!(error.contains("typed resolution frame boundary is malformed"));
+        assert!(value.get("resolution_state_version").is_none());
     }
 
     #[test]
@@ -6075,6 +6366,7 @@ mod tests {
         v2["resolution_state_version"] =
             Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         v2["resolution_frames"] = serde_json::to_value(frames).expect("fixture frames serialize");
+        strip_delivery_owner_fields(&mut v2);
         v2
     }
 
@@ -6610,10 +6902,12 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v3_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 3);
+    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
+        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
+        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
 
         let mut v1 =
             serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
@@ -6764,8 +7058,10 @@ mod tests {
             .expect("legacy paired state serializes");
         v1["post_replacement_drains"] =
             serde_json::to_value(drains).expect("paused drain serializes");
-        v1["draw_sequences"] =
+        let mut draw_sequences =
             serde_json::to_value(draw.draw_sequences).expect("active draw serializes");
+        strip_delivery_owner_fields(&mut draw_sequences);
+        v1["draw_sequences"] = draw_sequences;
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
 
         let wire: ResolutionStateWire =
@@ -7154,6 +7450,7 @@ mod tests {
                 iterated_counter_kinds: Vec::new(),
                 next_iteration: 0,
                 total_iterations: 0,
+                copy_order_fixed: None,
             },
         ));
         assert!(repeat_for.active_repeat_for().is_none());
@@ -7450,6 +7747,8 @@ mod tests {
                 ability: Box::new(choose_from_zone),
                 remaining_players: Vec::new(),
                 accumulated: false,
+                current: None,
+                nominee: None,
             },
         );
         crate::game::effects::choose_from_zone::drain_active_per_player_zone_choice(
@@ -7500,6 +7799,7 @@ mod tests {
         );
         let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("v2 active draw fixture serializes");
+        strip_delivery_owner_fields(&mut v2);
         v2["resolution_state_version"] =
             Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         let mut with_outer_allocator = v2.clone();
@@ -8067,6 +8367,7 @@ mod tests {
 
         let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("current writer serializes the fixture before its v2 downgrade");
+        strip_delivery_owner_fields(&mut v2);
         v2["resolution_state_version"] =
             Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         let restored = serde_json::from_value::<ResolutionStateWire>(v2)
@@ -8092,8 +8393,10 @@ mod tests {
         let inner = draw_sequences.push(PlayerId(0), 0);
         let mut multi_draw = serde_json::to_value(GameState::new_two_player(140))
             .expect("legacy multi-draw fixture serializes");
-        multi_draw["draw_sequences"] =
+        let mut draw_wire =
             serde_json::to_value(draw_sequences).expect("legacy draw sequences serialize");
+        strip_delivery_owner_fields(&mut draw_wire);
+        multi_draw["draw_sequences"] = draw_wire;
         multi_draw["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         let mut multi_draw = serde_json::from_value::<ResolutionStateWire>(multi_draw)
             .expect("v1 nested multi-draw fixture restores")
@@ -8282,8 +8585,10 @@ mod tests {
             .expect("legacy paired fixture serializes");
         paired["post_replacement_drains"] =
             serde_json::to_value(drains).expect("paused drain serializes");
-        paired["draw_sequences"] =
+        let mut draw_sequences =
             serde_json::to_value(draw.draw_sequences).expect("active draw serializes");
+        strip_delivery_owner_fields(&mut draw_sequences);
+        paired["draw_sequences"] = draw_sequences;
         paired["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         let mut paired = serde_json::from_value::<ResolutionStateWire>(paired)
             .expect("v1 paired fixture restores")
@@ -8416,8 +8721,10 @@ mod tests {
             serde_json::to_value(GameState::new_two_player(154)).expect("v1 serializes");
         ambiguous_legacy_pair["post_replacement_drains"] =
             serde_json::to_value(ready_drains).expect("ready drain serializes");
-        ambiguous_legacy_pair["draw_sequences"] =
+        let mut draw_sequences =
             serde_json::to_value(draw.draw_sequences).expect("draw serializes");
+        strip_delivery_owner_fields(&mut draw_sequences);
+        ambiguous_legacy_pair["draw_sequences"] = draw_sequences;
         ambiguous_legacy_pair["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         let error = serde_json::from_value::<ResolutionStateWire>(ambiguous_legacy_pair)
@@ -8432,8 +8739,9 @@ mod tests {
         let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
             unreachable!("fixture constructs a multi-draw frame")
         };
-        let draw_sequences =
+        let mut draw_sequences =
             serde_json::to_value(draw.draw_sequences).expect("draw sequences serialize");
+        strip_delivery_owner_fields(&mut draw_sequences);
 
         let mut draw_with_life_tail =
             serde_json::to_value(GameState::new_two_player(155)).expect("v1 serializes");
@@ -8539,5 +8847,95 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    fn state_with_dealer_frame(dealer: bool) -> GameState {
+        use crate::types::game_state::{
+            DrawDealer, DrawDealerSeat, DrawDealerStage, DrawSequenceOrigin,
+        };
+        let mut state = GameState::new_two_player(42);
+        let id = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            2,
+            std::collections::HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        if dealer {
+            let seat = |player, accumulated| DrawDealerSeat {
+                player: PlayerId(player),
+                count: 2,
+                applied: std::collections::HashSet::new(),
+                accumulated,
+            };
+            state.draw_sequence_frame_mut(id).expect("frame").dealer = Some(DrawDealer {
+                stage: DrawDealerStage::Dealing {
+                    schedule: vec![PlayerId(0), PlayerId(1)],
+                },
+                seats: vec![seat(0, 0), seat(1, 1)],
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn a_parked_dealer_frame_survives_the_resolution_wire() {
+        let state = state_with_dealer_frame(true);
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("wire serializes");
+        assert_eq!(
+            wire["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(wire.to_string().contains("\"dealer\""), "reach: written");
+
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("current wire restores")
+            .into_game_state();
+        assert_eq!(
+            restored.active_draw_sequence().map(|frame| &frame.dealer),
+            state.active_draw_sequence().map(|frame| &frame.dealer),
+            "the dealer's stage, schedule and seats round-trip"
+        );
+        assert!(restored
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.dealer.is_some()));
+    }
+
+    #[test]
+    fn a_frame_without_a_dealer_writes_no_dealer_key() {
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+            state_with_dealer_frame(false),
+        ))
+        .expect("wire serializes");
+        assert!(
+            wire.to_string().contains("delivery_owner"),
+            "reach: a draw frame"
+        );
+        assert!(!wire.to_string().contains("\"dealer\""));
+    }
+
+    #[test]
+    fn the_dealerless_version_still_decodes_and_the_next_one_is_refused() {
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(
+            state_with_dealer_frame(false),
+        ))
+        .expect("wire serializes");
+
+        let mut dealerless = current.clone();
+        dealerless["resolution_state_version"] =
+            Value::from(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION);
+        let restored = serde_json::from_value::<ResolutionStateWire>(dealerless)
+            .expect("a version-4 payload decodes")
+            .into_game_state();
+        assert!(restored
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.dealer.is_none()));
+
+        let mut future = current;
+        future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
+        let error = serde_json::from_value::<ResolutionStateWire>(future)
+            .expect_err("an unknown version is refused")
+            .to_string();
+        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
     }
 }

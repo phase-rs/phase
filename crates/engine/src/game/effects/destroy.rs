@@ -57,7 +57,10 @@ pub fn apply_destroy_after_replacement(
                     return false;
                 }
             }
-            events.push(GameEvent::CreatureDestroyed { object_id });
+            events.push(GameEvent::CreatureDestroyed {
+                object_id,
+                source_id: source,
+            });
             true
         }
         ProposedEvent::ZoneChange { .. } => {
@@ -849,6 +852,7 @@ mod tests {
             .any(|obj| obj.is_token && obj.name == "Destroy Rider Token"));
     }
 
+    /// CR 701.8a: the destruction names the object whose instruction destroyed it.
     #[test]
     fn destroy_emits_creature_destroyed_event() {
         let mut state = GameState::new_two_player(42);
@@ -872,9 +876,11 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == obj_id)
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CreatureDestroyed { object_id, source_id }
+                if *object_id == obj_id && *source_id == Some(ObjectId(100))
+        )));
     }
 
     #[test]

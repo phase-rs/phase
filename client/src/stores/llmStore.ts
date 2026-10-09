@@ -2,7 +2,9 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { LLM_ENDPOINTS_KEY } from "../constants/storage";
-import type { LlmProfile, LlmProviderId } from "../services/llm/types";
+import { defaultJevRelayOrigin } from "../services/llm/relayOrigin";
+import type { LlmProfile, LlmProviderCatalogEntry, LlmProviderId } from "../services/llm/types";
+import { useMultiplayerStore } from "./multiplayerStore";
 
 /**
  * How a profile is persisted: everything except the credential.
@@ -49,9 +51,18 @@ export interface LlmState {
   profiles: LlmProfile[];
   /**
    * AI seat index (0 = first AI opponent, matching `preferencesStore.aiSeats`)
-   * -> profile id. A seat with no entry uses the heuristic AI.
+   * -> the player's explicit choice for that seat: a profile id, or `null` for
+   * the built-in engine AI. A seat with NO entry has not been chosen and takes
+   * {@link defaultOpponentProfileId}, which is why "engine" is stored rather
+   * than deleted.
    */
-  seatBindings: Record<number, string>;
+  seatBindings: Record<number, string | null>;
+  /**
+   * Profile every AI seat uses unless the player chose otherwise for it.
+   * `null` (the default) keeps unchosen seats on the built-in engine AI, so
+   * LLM opponents stay opt-in.
+   */
+  defaultOpponentProfileId: string | null;
   /** Whether bot seats in a draft pod use the bound profile. Off by default. */
   draftEnabled: boolean;
   /** Profile id used by LLM drafters. `null` = the first enabled profile. */
@@ -61,6 +72,7 @@ export interface LlmState {
   updateProfile(id: string, patch: Partial<LlmProfile>): void;
   removeProfile(id: string): void;
   bindSeat(seatIndex: number, profileId: string | null): void;
+  setDefaultOpponentProfileId(id: string | null): void;
   setDraftEnabled(enabled: boolean): void;
   setDraftProfileId(id: string | null): void;
 }
@@ -82,6 +94,7 @@ const KNOWN_PROVIDERS: readonly LlmProviderId[] = [
   "Gemini",
   "DeepSeek",
   "OpenAiCompatible",
+  "Jev",
 ] as const;
 
 /**
@@ -174,14 +187,16 @@ function readPersistedProfiles(value: unknown): LlmProfile[] {
  * A key must look like a seat index and a value must be a profile id; anything
  * else is dropped, since a binding that names neither is usable either way.
  */
-function readPersistedSeatBindings(value: unknown): Record<number, string> {
+function readPersistedSeatBindings(value: unknown): Record<number, string | null> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-  const bindings: Record<number, string> = {};
+  const bindings: Record<number, string | null> = {};
   for (const [key, profileId] of Object.entries(value as Record<string, unknown>)) {
     const seatIndex = Number(key);
     if (!Number.isInteger(seatIndex) || seatIndex < 0) continue;
-    if (typeof profileId !== "string" || !profileId) continue;
-    bindings[seatIndex] = profileId;
+    // `null` is a real choice (the built-in engine); anything else that is not
+    // a non-empty profile id is dropped.
+    if (profileId === null) bindings[seatIndex] = null;
+    else if (typeof profileId === "string" && profileId) bindings[seatIndex] = profileId;
   }
   return bindings;
 }
@@ -196,7 +211,10 @@ function readPersistedSeatBindings(value: unknown): Record<number, string> {
  */
 function readPersistedState(
   value: unknown,
-): Pick<LlmState, "profiles" | "seatBindings" | "draftEnabled" | "draftProfileId"> {
+): Pick<
+  LlmState,
+  "profiles" | "seatBindings" | "defaultOpponentProfileId" | "draftEnabled" | "draftProfileId"
+> {
   const record =
     typeof value === "object" && value !== null && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -204,6 +222,10 @@ function readPersistedState(
   return {
     profiles: readPersistedProfiles(record.profiles),
     seatBindings: readPersistedSeatBindings(record.seatBindings),
+    defaultOpponentProfileId:
+      typeof record.defaultOpponentProfileId === "string" && record.defaultOpponentProfileId
+        ? record.defaultOpponentProfileId
+        : null,
     // Strict: only a real `true` enables drafting, so a truthy string cannot
     // silently switch an LLM into a pod.
     draftEnabled: record.draftEnabled === true,
@@ -233,11 +255,33 @@ function retargetsCredential(profile: LlmProfile, patch: Partial<LlmProfile>): b
   return providerMoved || endpointMoved;
 }
 
-/** A profile is usable only when the player explicitly enabled it AND it names
- *  a model. The key check is the engine's (`LlmEndpointConfig::validate`), which
- *  runs before any request is built; this is the cheap UI-side gate. */
-export function isProfileUsable(profile: LlmProfile | undefined): profile is LlmProfile {
-  return Boolean(profile?.enabled && profile.model.trim());
+/** An enabled profile that names a model but lacks the key its provider needs. */
+export function isMissingApiKey(
+  profile: LlmProfile,
+  catalog: readonly LlmProviderCatalogEntry[],
+): boolean {
+  return catalog.find((row) => row.provider === profile.provider)?.requiresApiKey === true
+    && profile.apiKey.trim() === "";
+}
+
+/**
+ * A profile is usable only when the player explicitly enabled it, it names a
+ * model, and it carries the key its provider requires.
+ *
+ * The key matters because keys live in memory only: every page load rehydrates
+ * an enabled profile with an empty key. The engine refuses to build a request
+ * for it (`LlmEndpointConfig::validate`), and the caller then falls back to the
+ * built-in AI -- so a profile this gate admitted would be offered for a seat or
+ * a draft and then silently do nothing, with no request ever sent. Gating here
+ * keeps it out of both until the key is entered again.
+ */
+export function isProfileUsable(
+  profile: LlmProfile | undefined,
+  catalog: readonly LlmProviderCatalogEntry[],
+): profile is LlmProfile {
+  return Boolean(profile?.enabled && profile.model.trim()
+    && catalog.some((row) => row.provider === profile.provider)
+    && !isMissingApiKey(profile, catalog));
 }
 
 export const useLlmStore = create<LlmState>()(
@@ -245,6 +289,7 @@ export const useLlmStore = create<LlmState>()(
     (set, get) => ({
       profiles: [],
       seatBindings: {},
+      defaultOpponentProfileId: null,
       draftEnabled: false,
       draftProfileId: null,
 
@@ -259,9 +304,12 @@ export const useLlmStore = create<LlmState>()(
           model: "",
           maxOutputTokens: null,
           temperature: null,
-          // New profiles start disabled: a half-filled endpoint must never be
-          // reachable from a seat picker.
-          enabled: false,
+          // New profiles start ENABLED: the player has just asked for a provider,
+          // so making them find the switch afterwards is a step that only
+          // produces a configured-but-inert profile. A half-filled one is still
+          // never reachable -- `isProfileUsable` also requires a model and, for
+          // a provider that needs one, a key.
+          enabled: true,
           ...partial,
         };
         set((state) => ({ profiles: [...state.profiles, profile] }));
@@ -279,10 +327,12 @@ export const useLlmStore = create<LlmState>()(
             // OpenAI key to Anthropic, and editing the base URL would send it to
             // whatever host was typed — including one the player does not
             // control. The key is therefore dropped on either change, unless
-            // this very patch supplies its replacement.
+            // this very patch supplies its replacement. `enabled` is left as the
+            // player set it: with the key gone, a provider that needs one is
+            // unusable until it is re-entered, and one that needs none has no
+            // credential to misdirect.
             if (retargetsCredential(profile, patch)) {
               next.apiKey = patch.apiKey ?? "";
-              next.enabled = patch.enabled ?? false;
             }
             return next;
           }),
@@ -290,7 +340,7 @@ export const useLlmStore = create<LlmState>()(
       },
 
       removeProfile(id) {
-        const { seatBindings, draftProfileId } = get();
+        const { seatBindings, draftProfileId, defaultOpponentProfileId } = get();
         // Drop every binding to the removed profile in the same commit, so no
         // seat is left pointing at a profile that no longer exists.
         const remainingBindings = Object.fromEntries(
@@ -299,17 +349,20 @@ export const useLlmStore = create<LlmState>()(
         set((state) => ({
           profiles: state.profiles.filter((profile) => profile.id !== id),
           seatBindings: remainingBindings,
+          defaultOpponentProfileId: defaultOpponentProfileId === id ? null : defaultOpponentProfileId,
           draftProfileId: draftProfileId === id ? null : draftProfileId,
         }));
       },
 
       bindSeat(seatIndex, profileId) {
-        set((state) => {
-          const next = { ...state.seatBindings };
-          if (profileId == null) delete next[seatIndex];
-          else next[seatIndex] = profileId;
-          return { seatBindings: next };
-        });
+        // `null` is stored, not deleted: it records that the player chose the
+        // built-in engine for this seat, which must keep overriding the default
+        // opponent.
+        set((state) => ({ seatBindings: { ...state.seatBindings, [seatIndex]: profileId } }));
+      },
+
+      setDefaultOpponentProfileId(defaultOpponentProfileId) {
+        set({ defaultOpponentProfileId });
       },
 
       setDraftEnabled(draftEnabled) {
@@ -329,6 +382,7 @@ export const useLlmStore = create<LlmState>()(
       partialize: (state) => ({
         profiles: state.profiles.map(withoutCredential),
         seatBindings: state.seatBindings,
+        defaultOpponentProfileId: state.defaultOpponentProfileId,
         draftEnabled: state.draftEnabled,
         draftProfileId: state.draftProfileId,
       }),
@@ -380,18 +434,69 @@ export const useLlmStore = create<LlmState>()(
   ),
 );
 
-/** The profile bound to an AI seat, or `undefined` when the seat is heuristic. */
-export function profileForSeat(state: LlmState, seatIndex: number): LlmProfile | undefined {
-  const id = state.seatBindings[seatIndex];
+/**
+ * The profile driving an AI seat, or `undefined` when the seat is heuristic.
+ *
+ * The seat's own choice wins, including an explicit choice of the built-in
+ * engine; only a seat the player never chose falls through to the default
+ * opponent. This is the single authority the setup picker and the game loop
+ * both read, so what the picker shows is what the game will do.
+ */
+export function profileForSeat(
+  state: LlmState,
+  seatIndex: number,
+  catalog: readonly LlmProviderCatalogEntry[],
+): LlmProfile | undefined {
+  const choice = state.seatBindings[seatIndex];
+  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
   if (!id) return undefined;
   const profile = state.profiles.find((candidate) => candidate.id === id);
-  return isProfileUsable(profile) ? profile : undefined;
+  return isProfileUsable(profile, catalog) ? profile : undefined;
 }
 
 /** The profile LLM drafters use, or `undefined` when drafting stays heuristic. */
-export function draftProfile(state: LlmState): LlmProfile | undefined {
+export function draftProfile(
+  state: LlmState,
+  catalog: readonly LlmProviderCatalogEntry[],
+): LlmProfile | undefined {
   if (!state.draftEnabled) return undefined;
   const explicit = state.profiles.find((profile) => profile.id === state.draftProfileId);
-  if (isProfileUsable(explicit)) return explicit;
-  return state.profiles.find(isProfileUsable);
+  if (isProfileUsable(explicit, catalog)) return explicit;
+  return state.profiles.find((profile) => isProfileUsable(profile, catalog));
 }
+
+/**
+ * A key is scoped to the endpoint it was entered for. A Jev profile with no
+ * endpoint of its own relays through the hosting server, so that server IS the
+ * key's destination, and `updateProfile`'s retarget rule cannot see it move: the
+ * profile does not change when the player picks another server. Without this, a
+ * key typed while hosting on server A would be sent to a custom server B on the
+ * next probe, game or draft.
+ *
+ * So the key is dropped whenever the derived relay origin changes, the same
+ * consequence `updateProfile` applies when the provider or an explicit endpoint
+ * changes. A profile with an explicit endpoint is unaffected: its destination
+ * does not depend on the hosting server. Subscribing here, beside the store the
+ * keys live in, means it holds whichever surface holds the key.
+ */
+function dropRelayKeysOnOriginChange(): void {
+  // Test doubles for the multiplayer store may not implement `subscribe`.
+  if (typeof useMultiplayerStore?.subscribe !== "function") return;
+  useMultiplayerStore.subscribe((state, previous) => {
+    if (
+      defaultJevRelayOrigin(state.hostingServer) === defaultJevRelayOrigin(previous.hostingServer)
+    ) {
+      return;
+    }
+    const derivesRelay = (profile: LlmProfile) =>
+      profile.provider === "Jev" && !profile.baseUrl?.trim() && profile.apiKey !== "";
+    if (!useLlmStore.getState().profiles.some(derivesRelay)) return;
+    useLlmStore.setState((current) => ({
+      profiles: current.profiles.map((profile) =>
+        derivesRelay(profile) ? { ...profile, apiKey: "" } : profile,
+      ),
+    }));
+  });
+}
+
+dropRelayKeysOnOriginChange();

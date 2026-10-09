@@ -164,9 +164,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.17.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -174,14 +174,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.41.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -665,7 +666,7 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
 name = "draft-core"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "phase-engine",
  "rand 0.9.4",
@@ -677,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
@@ -744,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "engine-inventory-gen"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -757,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
@@ -810,7 +811,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feed-scraper"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "clap",
  "reqwest",
@@ -1563,7 +1564,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lobby-broker"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "phase-engine",
  "serde",
@@ -1600,7 +1601,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "manabrew-compat"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "manabrew-protocol",
  "phase-engine",
@@ -1933,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "flate2",
  "mimalloc",
@@ -1952,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "phase-engine"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "assert_matches",
  "flate2",
@@ -1987,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "phase-llm"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "draft-core",
  "phase-ai",
@@ -1999,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "phase-server"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "axum",
  "clap",
@@ -2166,7 +2167,7 @@ dependencies = [
 
 [[package]]
 name = "probe-pin"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2556,9 +2557,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -2616,9 +2617,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -2691,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "phase-ai",
  "phase-engine",
@@ -2858,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.96.0"
+version = "0.104.0"
 dependencies = [
  "draft-core",
  "lobby-broker",

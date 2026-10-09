@@ -18,7 +18,6 @@ import {
   partitionByType,
   type GroupedPermanent,
 } from "./battlefieldProps";
-import { playOrCastActionsForObject } from "./cardActionChoice.ts";
 
 export interface PlayerBattlefieldView {
   creatures: GroupedPermanent[];
@@ -136,6 +135,35 @@ export function getVisibleBoardPlayerIds(
   return focusedId == null ? [viewerId] : [viewerId, focusedId];
 }
 
+/** The seat whose container stores the shared `zone`, as published by the engine; null when per-player. */
+export function getSharedPileHolder(
+  gameState: GameState | null | undefined,
+  zone: "graveyard" | "library",
+): PlayerId | null {
+  return gameState?.derived?.shared_piles?.[zone] ?? null;
+}
+
+/** Selects between two engine-provided seats: the shared pile's holder, else `seat`. */
+export function resolvePileSeat(
+  gameState: GameState | null | undefined,
+  zone: "graveyard" | "library",
+  seat: PlayerId,
+): PlayerId {
+  return getSharedPileHolder(gameState, zone) ?? seat;
+}
+
+/** The zone viewer pile a Graveyard/Exile object belongs to; exile stays per-seat. */
+export function getZoneViewerPile(
+  gameState: GameState | null | undefined,
+  obj: Pick<GameObject, "zone" | "owner">,
+): { zone: "graveyard" | "exile"; playerId: PlayerId } | null {
+  if (obj.zone === "Graveyard") {
+    return { zone: "graveyard", playerId: resolvePileSeat(gameState, "graveyard", obj.owner) };
+  }
+  if (obj.zone === "Exile") return { zone: "exile", playerId: obj.owner };
+  return null;
+}
+
 export function getPlayerZoneIds(
   gameState: GameState | null,
   zone: "graveyard" | "exile" | "library",
@@ -143,13 +171,13 @@ export function getPlayerZoneIds(
 ): ObjectId[] {
   if (!gameState) return [];
   if (zone === "graveyard") {
-    return gameState.players[playerId]?.graveyard ?? [];
+    return gameState.players[resolvePileSeat(gameState, "graveyard", playerId)]?.graveyard ?? [];
   }
   if (zone === "library") {
     // library[0] = top of library (engine convention from zones.rs). Returns
     // the full ordered library; the library viewer consumes each object's
     // engine-projected display visibility before rendering it.
-    return gameState.players[playerId]?.library ?? [];
+    return gameState.players[resolvePileSeat(gameState, "library", playerId)]?.library ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 }
@@ -639,6 +667,7 @@ export function getBoardChoiceView(
         },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "StationTarget":
       return {
@@ -648,6 +677,7 @@ export function getBoardChoiceView(
         selection: { type: "single", immediate: true },
         response: { type: "ActivateStation", spacecraftId: waitingFor.data.spacecraft_id },
         sourceId: waitingFor.data.spacecraft_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "BlightChoice":
       return {
@@ -857,52 +887,6 @@ export function getBattlefieldSacrificeChoice(
     minCount: choice.selection.min,
     upTo: true,
   };
-}
-
-export type ZoneViewerTarget = {
-  zone: "graveyard" | "exile";
-  playerId: PlayerId;
-  objectIds: ObjectId[];
-};
-
-/**
- * When the player has Priority and the engine surfaces play/cast actions on
- * graveyard or exile cards (Retrace, Flashback, Adventure, etc.), return the
- * sole zone pile to auto-open in `ZoneViewer`. Mirrors the object-choice
- * auto-open grouping: only auto-open when every castable card lives in one
- * zone+owner pile so we don't trap the player in the wrong graveyard.
- */
-export function getCastableZoneViewerTarget(
-  waitingFor: WaitingFor | null | undefined,
-  objects: Record<ObjectId, GameObject> | undefined,
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
-): ZoneViewerTarget | null {
-  if (waitingFor?.type !== "Priority" || !objects || !legalActionsByObject) {
-    return null;
-  }
-
-  const groups = new Set<string>();
-  let firstHit: ZoneViewerTarget | null = null;
-  const objectIds: ObjectId[] = [];
-
-  for (const key of Object.keys(legalActionsByObject)) {
-    const objectId = Number(key) as ObjectId;
-    if (playOrCastActionsForObject(legalActionsByObject, objectId).length === 0) {
-      continue;
-    }
-    const obj = objects[objectId];
-    if (!obj) continue;
-    if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
-
-    const zone: ZoneViewerTarget["zone"] =
-      obj.zone === "Graveyard" ? "graveyard" : "exile";
-    groups.add(`${zone}:${obj.owner}`);
-    objectIds.push(objectId);
-    if (!firstHit) firstHit = { zone, playerId: obj.owner, objectIds };
-  }
-
-  objectIds.sort((a, b) => a - b);
-  return groups.size === 1 ? firstHit : null;
 }
 
 export function buildPlayerBattlefieldView(

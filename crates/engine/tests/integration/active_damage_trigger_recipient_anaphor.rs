@@ -26,8 +26,9 @@
 
 use super::rules::{GameScenario, Phase, P0, P1};
 use engine::game::combat::AttackTarget;
-use engine::types::ability::{Effect, TargetFilter};
+use engine::types::ability::{Effect, ReplacementDefinition, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const TOXIN_SLIVER: &str = "Whenever a Sliver deals combat damage to a creature, destroy that creature. It can't be regenerated.";
@@ -102,6 +103,14 @@ fn active_damage_trigger_demonstrative_binds_the_damage_recipient() {
         (
             "Quest for the Gemblades class",
             "Whenever a creature you control deals combat damage to a creature, exile that creature.",
+        ),
+        (
+            "Mephitic Ooze (ASCII)",
+            "Whenever Mephitic Ooze deals combat damage to a creature, destroy that creature. The creature can't be regenerated.",
+        ),
+        (
+            "Mephitic Ooze (typographic)",
+            "Whenever Mephitic Ooze deals combat damage to a creature, destroy that creature. The creature can’t be regenerated.",
         ),
     ] {
         let effect = trigger_body_effect(oracle, card);
@@ -350,5 +359,90 @@ fn toxin_sliver_destroys_a_creature_damaged_by_another_sliver() {
         outcome.zone_of(toxin),
         Zone::Battlefield,
         "the trigger source is not its own referent"
+    );
+}
+
+#[test]
+fn mephitic_ooze_trigger_parses_cant_regenerate() {
+    for (label, text) in [
+        (
+            "ASCII apostrophe",
+            "Whenever Mephitic Ooze deals combat damage to a creature, destroy that creature. The creature can't be regenerated.",
+        ),
+        (
+            "typographic apostrophe",
+            "Whenever Mephitic Ooze deals combat damage to a creature, destroy that creature. The creature can’t be regenerated.",
+        ),
+    ] {
+        let effect = trigger_body_effect(text, "Mephitic Ooze");
+        assert_eq!(
+            effect,
+            Effect::Destroy {
+                target: TargetFilter::EventTarget,
+                cant_regenerate: true,
+            },
+            "{label}: must parse as Destroy EventTarget with cant_regenerate=true"
+        );
+    }
+}
+
+/// CR 120.1 + CR 701.8a + CR 701.19c: Mephitic Ooze deals combat damage to a creature
+/// and destroys it via trigger at runtime, preventing regeneration.
+#[test]
+fn mephitic_ooze_destroys_creature_dealt_combat_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    const MEPHITIC_OOZE: &str = "Mephitic Ooze gets +1/+0 for each artifact you control.\nWhenever Mephitic Ooze deals combat damage to a creature, destroy that creature. The creature can’t be regenerated.";
+
+    assert_eq!(
+        trigger_body_effect(MEPHITIC_OOZE, "Mephitic Ooze"),
+        Effect::Destroy {
+            target: TargetFilter::EventTarget,
+            cant_regenerate: true,
+        },
+        "the full Oracle text must carry the regeneration prohibition"
+    );
+
+    let ooze = {
+        let mut b = scenario.add_creature(P0, "Mephitic Ooze", 0, 5);
+        b.from_oracle_text(MEPHITIC_OOZE);
+        b.id()
+    };
+    // Add an artifact so Mephitic Ooze has 1/5 and deals combat damage.
+    scenario.add_artifact_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.");
+
+    let blocker = scenario
+        .add_creature(P1, "Colossal Dreadmaw", 6, 6)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .regeneration_shield(),
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(ooze, AttackTarget::Player(P1))])
+        .expect("declare attackers");
+    for _ in 0..8 {
+        if runner.waiting_for_kind() == "DeclareBlockers" {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority into the declare-blockers step");
+    }
+    runner
+        .declare_blockers(&[(blocker, ooze)])
+        .expect("declare blockers");
+
+    let outcome = runner.combat_damage();
+
+    assert_eq!(
+        outcome.zone_of(blocker),
+        Zone::Graveyard,
+        "CR 701.8a: the creature dealt combat damage by Mephitic Ooze must be destroyed by its trigger"
     );
 }

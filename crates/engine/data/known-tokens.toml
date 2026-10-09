@@ -8623,6 +8623,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -17914,6 +17915,11 @@ colors = ["Red"]
 keywords = []
 
 [[token.source_card_refs]]
+card_name = "Goblin Rabblemaster"
+scryfall_oracle_id = "24661b81-6bee-4ad8-b3ab-53cb65005c51"
+scryfall_id = "cba7f673-4dde-4165-80ef-be3ad967a6a6"
+
+[[token.source_card_refs]]
 card_name = "Sling-Gang Lieutenant"
 scryfall_oracle_id = "4e93b23c-a7f7-4bdd-bbca-0dc48bb5c223"
 scryfall_id = "36633f10-ea38-421c-ab80-9862eb18d6da"
@@ -22236,6 +22242,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -22269,11 +22276,6 @@ subtypes = [
 supertypes = []
 colors = ["Black"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Nettlecyst"
-scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
-scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
 
 [[token.source_card_refs]]
 card_name = "Bonehoard"
@@ -22384,11 +22386,6 @@ scryfall_id = "62f449cc-461e-4e89-8cd2-83e539bb40f4"
 card_name = "Batterskull"
 scryfall_oracle_id = "d12e5ce0-5705-4c35-9a93-b883db52c80c"
 scryfall_id = "2abc5ac8-b944-4b71-b022-c78183eb92c3"
-
-[[token.source_card_refs]]
-card_name = "Tangleweave Armor"
-scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
-scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
 
 [[token.source_card_refs]]
 card_name = "Batterskull"
@@ -54553,6 +54550,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -88638,6 +88636,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -99178,6 +99177,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -101107,6 +101107,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -152500,9 +152501,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Loot Dispute",
     "Rite of the Dragoncaller",
@@ -162039,6 +162042,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -170941,6 +170945,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -173300,6 +173305,11 @@ keywords = ["Decayed"]
 [[token.source_card_refs]]
 card_name = "Wilhelt, the Rotcleaver"
 scryfall_oracle_id = "eada96a1-4964-4ad0-b0e3-2df08d6ae188"
+scryfall_id = "a90a9691-b131-44e9-b39a-c68ef10b18d3"
+
+[[token.source_card_refs]]
+card_name = "Wilhelt, the Rotcleaver"
+scryfall_oracle_id = "eada96a1-4964-4ad0-b0e3-2df08d6ae188"
 scryfall_id = "82471687-46fa-4ccf-a792-180db0a5dd22"
 
 [[token.source_card_refs]]
@@ -175211,6 +175221,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -181140,26 +181151,62 @@ preset_id = "c8ed3fa4-d351-5519-8864-725442d760a3"
 id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Phyrexian Germ"]
+source_card_names = [
+    "Batterbone",
+    "Batterskull",
+    "Bitterthorn, Nissa's Animus",
+    "Bonehoard",
+    "Colossal Dreadmask",
+    "Cranial Ram",
+    "Drossclaw",
+    "Ekthi, Contaminator Priest",
+    "Flayer Husk",
+    "Germ",
+    "Grip of Phyresis",
+    "Kaldra Compleat",
+    "Lashwrithe",
+    "Mandibular Kite",
+    "Mortarpod",
+    "Necropouncer",
+    "Nettlecyst",
+    "Scytheclaw",
+    "Sickleslicer",
+    "Skinwing",
+    "Strandwalker",
+    "Tangleweave Armor",
+]
 set_code = "FDC"
 set_name = "Foundations Commander"
 collector_number = "4"
 released_at = "2024-11-15"
-type_line = "Token Creature — Germ"
+type_line = "Token Creature — Phyrexian Germ"
 
 [token.body]
-display_name = "Germ"
+display_name = "Phyrexian Germ"
 power = 0
 toughness = 0
 core_types = ["Creature"]
-subtypes = ["Germ"]
+subtypes = [
+    "Phyrexian",
+    "Germ",
+]
 supertypes = []
 colors = ["Black"]
 keywords = []
 
+[[token.source_card_refs]]
+card_name = "Nettlecyst"
+scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
+scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
+
+[[token.source_card_refs]]
+card_name = "Tangleweave Armor"
+scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
+scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
+
 [token.token_image_ref]
 scryfall_id = "53c05e53-84c7-4796-ae02-d778faa5afa6"
-scryfall_oracle_id = "bb549594-35f6-4ac6-9f1f-cfb35784d99e"
+scryfall_oracle_id = "a1c2af93-83c0-4974-b4db-abf95981d4e3"
 preset_id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 
 [[token]]
@@ -185156,6 +185203,11 @@ card_name = "Field of the Dead"
 scryfall_oracle_id = "aa959340-c869-4caa-92c7-572bd8d23eef"
 scryfall_id = "0b7acd81-1fcb-4758-95f4-e64cb696c9d2"
 
+[[token.source_card_refs]]
+card_name = "Varina, Lich Queen"
+scryfall_oracle_id = "9859fbca-60c3-4a57-a377-51b56f03894f"
+scryfall_id = "9ad062ce-9ab3-4d40-8ec7-ce95e8ce318f"
+
 [token.token_image_ref]
 scryfall_id = "8150833a-9c83-4d00-ae2f-470088700fdb"
 scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
@@ -186281,6 +186333,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -188395,9 +188448,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -195299,6 +195355,11 @@ scryfall_id = "b2d1219f-fadb-4427-8627-e5aef3589600"
 [[token.source_card_refs]]
 card_name = "Swan Song"
 scryfall_oracle_id = "8ddfc283-c9b4-41a5-af88-cf0068e986cc"
+scryfall_id = "6c156edc-bc88-431c-901b-fda8d4804d20"
+
+[[token.source_card_refs]]
+card_name = "Swan Song"
+scryfall_oracle_id = "8ddfc283-c9b4-41a5-af88-cf0068e986cc"
 scryfall_id = "40fc6412-df1c-4bfa-842b-8c3a6f14e19d"
 
 [[token.source_card_refs]]
@@ -198218,6 +198279,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -205396,6 +205458,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -220452,6 +220515,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -223237,9 +223301,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",

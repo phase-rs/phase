@@ -36,11 +36,12 @@ use std::sync::Arc;
 use crate::game::combat::AttackTarget;
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
+use crate::game::layers::transient_effect_is_live;
 use crate::game::{casting, casting_costs, keywords, turn_control};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, FilterProp,
-    ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
+    Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition,
+    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
@@ -902,8 +903,6 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::Suspected
         | FilterProp::Renowned
-        // CR 701.15b/c: reads only the candidate's own `goaded_by` fingerprint field.
-        | FilterProp::Goaded
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -940,7 +939,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
@@ -958,6 +957,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::SaddledSource
         | FilterProp::ConvokedSource
+        // CR 701.15b: A live designation may come from a TCE or printed source
+        // outside the candidate fingerprint.
+        | FilterProp::Goaded
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
@@ -1239,12 +1241,12 @@ impl LegalityPoisonGates {
                     | StaticMode::CantAttackOrBlock
                     | StaticMode::MustAttack
                     | StaticMode::MustAttackDefender { .. }
-                    | StaticMode::Goaded
                     | StaticMode::MustAttackAwayFromSource
                     | StaticMode::CanAttackWithDefender
                     | StaticMode::MaxAttackersEachCombat { .. }
                     | StaticMode::CombatAlone { .. }
-            ) {
+            ) || crate::game::combat::static_designates_goad(def)
+            {
                 g.has_declare_attacker = true;
             }
             // CR 509.1: declare-blocker restrictions / requirements.
@@ -1282,6 +1284,23 @@ impl LegalityPoisonGates {
             ) {
                 g.has_activation = true;
             }
+        }
+
+        // CR 701.15b: Exact-recipient resolution-created designations are
+        // absent from ObjectFingerprint and must force fresh combat legality.
+        if state.transient_continuous_effects.iter().any(|tce| {
+            matches!(tce.affected, TargetFilter::SpecificObject { .. })
+                && tce.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                })
+                && transient_effect_is_live(state, tce)
+        }) {
+            g.has_declare_attacker = true;
         }
 
         // One battlefield scan: goaded creatures (CR 508.1d remote
@@ -1468,6 +1487,10 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::candidate_actions;
+    use crate::game::layers::evaluate_layers;
+    use crate::game::scenario::GameScenario;
+    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::identifiers::ObjectIncarnationRef;
 
     /// Matrix rows 9a + 9b — the mana-role POISON scan is a PURE EXTENSION.
     ///
@@ -2042,8 +2065,9 @@ mod tests {
     use crate::game::combat::{AttackTarget, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Comparator, Effect, FilterProp, ParitySource,
-        ParsedCondition, QuantityExpr, QuantityRef, TargetFilter, TargetRef, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, Comparator, ContinuousModification, Duration,
+        Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, QuantityRef, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterMatch;
@@ -2671,5 +2695,122 @@ mod tests {
             ..clear
         };
         assert!(legality_equivalence_key(&state, &action, &gated, &mut interner).is_none());
+    }
+
+    #[test]
+    fn registered_goad_designation_poisons_single_attacker_memoization() {
+        // The two attackers have equal object fingerprints. Only the live,
+        // exact-recipient designation distinguishes their legal declarations.
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let designated = scenario.add_creature(PlayerId(0), "Bear", 2, 2).id();
+        let plain = scenario.add_creature(PlayerId(0), "Bear", 2, 2).id();
+        let mut runner = scenario.build();
+        let recipient = ObjectIncarnationRef::from_object(&runner.state().objects[&designated]);
+        runner
+            .state_mut()
+            .add_transient_continuous_effect_with_bindings(
+                designated,
+                PlayerId(1),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: designated },
+                vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Goaded,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient),
+                    duration_subject: None,
+                    granting_object: None,
+                },
+            );
+        runner.state_mut().layers_dirty.mark_full();
+        evaluate_layers(runner.state_mut());
+        runner.advance_to_combat();
+        assert_eq!(runner.waiting_for_kind(), "DeclareAttackers");
+        let state = runner.state();
+        assert_eq!(state.players.len(), 3);
+        for id in [designated, plain] {
+            let object = &state.objects[&id];
+            assert!(!object.summoning_sick && !object.tapped);
+            assert!(object.goaded_by.is_empty());
+            assert!(object.attached_to.is_none() && object.attachments.is_empty());
+        }
+        let fingerprint = object_fingerprint(state, designated);
+        assert!(fingerprint.is_some());
+        assert_eq!(fingerprint, object_fingerprint(state, plain));
+        assert!(!filterprop_reads_only_candidate_fp(&FilterProp::Goaded));
+        assert!(LegalityPoisonGates::compute(state).has_declare_attacker);
+
+        // CR 508.1d + CR 701.15b: attacking P2 with the designated Bear
+        // obeys both goad requirements; sending only the plain Bear omits the
+        // eligible required attacker.
+        let target = AttackTarget::Player(PlayerId(2));
+        let candidates = vec![
+            cand(GameAction::DeclareAttackers {
+                attacks: vec![(designated, target)],
+                bands: vec![],
+            }),
+            cand(GameAction::DeclareAttackers {
+                attacks: vec![(plain, target)],
+                bands: vec![],
+            }),
+        ];
+        let pipeline = FilterPipeline::default_pipeline();
+        let fresh: Vec<bool> = candidates
+            .iter()
+            .map(|candidate| pipeline.accepts(state, candidate))
+            .collect();
+        assert_eq!(fresh, vec![true, false]);
+        crate::game::perf_counters::reset();
+        let accepted = pipeline.apply(state, candidates.clone());
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].action, candidates[0].action);
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            2,
+            "live designation must force a fresh simulation for each candidate"
+        );
+
+        // With the designation removed, the same two fingerprints are safe
+        // to memoize and both ordinary attacks are legal.
+        let mut control = state.clone();
+        control.transient_continuous_effects.clear();
+        control.layers_dirty.mark_full();
+        evaluate_layers(&mut control);
+        assert!(!LegalityPoisonGates::compute(&control).has_declare_attacker);
+        assert_eq!(
+            object_fingerprint(&control, designated),
+            object_fingerprint(&control, plain)
+        );
+        assert!(candidates
+            .iter()
+            .all(|candidate| pipeline.accepts(&control, candidate)));
+        crate::game::perf_counters::reset();
+        let accepted = pipeline.apply(&control, candidates);
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            1,
+            "equal ordinary attackers should share a legality simulation"
+        );
+    }
+
+    #[test]
+    fn printed_continuous_goad_source_poisons_attacker_memoization() {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let host = scenario.add_creature(PlayerId(1), "Bear", 2, 2).id();
+        let aura = scenario
+            .add_enchantment_from_oracle(PlayerId(0), "The Sound of Drums", "")
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text("Enchant creature\nEnchanted creature is goaded.\nIf enchanted creature would deal combat damage to a permanent or player, it deals double that damage instead.\n{2}{R}: Return this card from your graveyard to your hand.")
+            .id();
+        let mut runner = scenario.build();
+        crate::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+        assert_eq!(runner.state().objects[&aura].attached_to, Some(host.into()));
+        assert!(runner.state().objects[&host].attachments.contains(&aura));
+        evaluate_layers(runner.state_mut());
+        assert!(runner.state().objects[&host].goaded_by.is_empty());
+        assert!(LegalityPoisonGates::compute(runner.state()).has_declare_attacker);
     }
 }

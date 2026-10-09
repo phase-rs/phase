@@ -5,8 +5,8 @@ use engine::game::{effects, zones::create_object};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{
-    AbilityCondition, Comparator, DamageChannel, Effect, PreventionAmount, PreventionScope,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
+    AbilityCondition, Comparator, DamageChannel, Effect, EffectScope, PreventionAmount,
+    PreventionScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -100,6 +100,7 @@ fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,

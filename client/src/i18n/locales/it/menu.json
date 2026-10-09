@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Escludi i mazzi sotto questa soglia di supporto del motore",
     "bracket": "Bracket",
     "bracketHint": "L'IA casuale sceglie da questi bracket. I mazzi senza etichetta sono esclusi durante il filtraggio.",
+    "bracketPoolEmpty": "Nessun mazzo corrisponde ai bracket selezionati. L'IA casuale sceglierà tra tutti i mazzi legali.",
+    "cedhPoolEmpty": "Nessun mazzo bracket 5 disponibile. Non è possibile assegnare mazzi all'IA casuale.",
     "opponentLabel": "Avversario {{number}}",
     "deck": "Mazzo",
     "difficulty": "Difficoltà",

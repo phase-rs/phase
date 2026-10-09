@@ -1,6 +1,6 @@
 import type * as RealModule from "../../src/hooks/useCardImage";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 
 /**
  * Story double for `src/hooks/useCardImage.ts`.
@@ -75,11 +75,17 @@ export const useCardImage: typeof RealModule.useCardImage = (cardName, options) 
   return { src: resolved, isLoading, isRotated: false, isFlip: false };
 };
 
-/** Stories render the app's own `CardBackFallback`, so no back art is needed. */
-export const useCardBackImage: typeof RealModule.useCardBackImage = () => ({
-  src: null,
-  isLoading: false,
-});
+/**
+ * The card back a story shows, as the app would load it. Unset, stories render
+ * the app's own `CardBackFallback`, so no back art is needed; a story that
+ * needs the real back (the card VFX flips cards over) provides its URL.
+ */
+export const StoryCardBack = createContext<string | null>(null);
+
+export const useCardBackImage: typeof RealModule.useCardBackImage = () => {
+  const src = useContext(StoryCardBack);
+  return { src, isLoading: false, source: src === null ? null : { kind: "remote", src } };
+};
 
 /** Localised art is a preference-store concern the catalog does not exercise. */
 export const useLocaleArt: typeof RealModule.useLocaleArt = () => "en";

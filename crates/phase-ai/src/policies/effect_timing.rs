@@ -606,8 +606,8 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
-        ControllerRef, Duration, ExtraPhaseAnchor, MultiTargetSpec, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ControllerRef, Duration, ExtraPhaseAnchor, ExtraPhaseRecipient, MultiTargetSpec,
+        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
@@ -1651,10 +1651,10 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::AdditionalPhase {
-                        target: TargetFilter::Controller,
-                        phase: Phase::BeginCombat,
+                        recipient: ExtraPhaseRecipient::Controller,
+                        segment: TurnSegment::Phase(PhaseGroup::Combat),
                         after: ExtraPhaseAnchor::this_main_phase(),
-                        followed_by: vec![Phase::PostCombatMain],
+                        followed_by: vec![TurnSegment::Phase(PhaseGroup::PostcombatMain)],
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         attacker_restriction: None,
                     },
@@ -1857,10 +1857,10 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::AdditionalPhase {
-                        target: TargetFilter::Controller,
-                        phase: Phase::BeginCombat,
+                        recipient: ExtraPhaseRecipient::Controller,
+                        segment: TurnSegment::Phase(PhaseGroup::Combat),
                         after: ExtraPhaseAnchor::this_main_phase(),
-                        followed_by: vec![Phase::PostCombatMain],
+                        followed_by: vec![TurnSegment::Phase(PhaseGroup::PostcombatMain)],
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         attacker_restriction: None,
                     },

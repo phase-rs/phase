@@ -396,6 +396,9 @@ pub(crate) fn apply_flipped_face_to_object(obj: &mut GameObject, face: BackFaceD
     // normal half's casting properties (`modal`, `additional_cost`,
     // `strive_cost`, `casting_restrictions`, `casting_options`) are deliberately
     // left untouched.
+
+    // Flip rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 #[cfg(test)]

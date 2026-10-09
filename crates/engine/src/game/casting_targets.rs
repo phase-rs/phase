@@ -11,6 +11,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
@@ -217,10 +218,10 @@ pub(crate) fn handle_select_modes(
                 &pending.target_constraints,
             )?;
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
                 events,
@@ -237,10 +238,10 @@ pub(crate) fn handle_select_modes(
             &pending.target_constraints,
         )? {
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
                 events,
@@ -388,7 +389,7 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
     let mut pending = pending;
-    let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+    let announced_targets = super::ability_utils::declared_targets_in_chain(&ability);
     pending.crime_candidate =
         super::casting::targets_commit_crime(state, &announced_targets, pending.ability.controller);
 
@@ -493,7 +494,7 @@ pub(crate) fn handle_choose_target(
             // inbound per-slot `player` (the opponent) would pay and stack the spell.
             let controller = pending.ability.controller;
             let mut pending = pending;
-            let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+            let announced_targets = super::ability_utils::declared_targets_in_chain(&ability);
             pending.crime_candidate =
                 super::casting::targets_commit_crime(state, &announced_targets, controller);
 
@@ -676,6 +677,46 @@ pub(super) fn extract_distribution_total(
     let (inner, _) = count_expr.peel_up_to();
     let total = super::quantity::resolve_quantity_with_targets(state, inner, ability).max(0) as u32;
     (total > 0).then_some(total)
+}
+
+/// CR 602.2b + CR 601.2i + CR 605.3: the single authority for publishing that an
+/// activated ability became activated (all costs paid), for every kind —
+/// stack-using, loyalty, and mana abilities. Returns the event's index in
+/// `events`. The event is published `Pending`; a mana-ability caller then
+/// observes it at the activation boundary
+/// (`triggers::collect_activation_event_at_boundary`, CR 603.10), which marks
+/// it collected.
+///
+/// `announced_zone` is the zone the source was in when the ability was
+/// announced. CR 113.7 + CR 113.7a: if the source was announced from the
+/// battlefield and a cost has since moved it (a sacrificed Treasure), the event
+/// carries its last known information, taken when it left. A source announced
+/// from another zone (embalm, cycling) never takes battlefield LKI, so a stale
+/// entry from an earlier departure can't answer for it.
+pub(crate) fn emit_ability_activated(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    kind: crate::types::events::ActivatedAbilityKind,
+    announced_zone: crate::types::zones::Zone,
+    events: &mut Vec<GameEvent>,
+) -> usize {
+    let departed = announced_zone == Zone::Battlefield
+        && state
+            .objects
+            .get(&source_id)
+            .is_none_or(|object| object.zone != Zone::Battlefield);
+    let departed_source_lki = departed
+        .then(|| state.lki_cache.get(&source_id).cloned().map(Box::new))
+        .flatten();
+    events.push(GameEvent::AbilityActivated {
+        player_id: player,
+        source_id,
+        kind,
+        departed_source_lki,
+        trigger_state: crate::types::events::ActivationTriggerState::Pending,
+    });
+    events.len() - 1
 }
 
 /// CR 702.142b + CR 702.177a: If the activated ability at `ability_index` on

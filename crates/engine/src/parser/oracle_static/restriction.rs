@@ -1,5 +1,8 @@
 // CR 601.3 — casting/activation restriction statics.
 
+use nom::combinator::opt;
+use nom::sequence::{pair, preceded};
+
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
@@ -201,6 +204,42 @@ fn legend_rule_permanent_type(word: &str) -> Option<crate::types::ability::TypeF
     .parse(word)
     .ok()?;
     rest.is_empty().then_some(tf)
+}
+
+/// CR 604.1 + CR 207.2c: split a leading "if <condition>, " gate off a static line,
+/// returning the condition text (original case) and the remaining clause. A line
+/// with no leading "if" yields `(None, tp)` unchanged. The condition ends at the
+/// first ", " — the same clause boundary the leading-conditional grammar uses.
+pub(crate) fn split_leading_if_gate<'a>(tp: &TextPair<'a>) -> (Option<&'a str>, TextPair<'a>) {
+    let split = preceded(
+        tag::<_, _, OracleError<'_>>("if "),
+        pair(take_until(", "), tag(", ")),
+    )
+    .parse(tp.lower);
+    let Ok((body_lower, (condition_lower, _))) = split else {
+        return (None, *tp);
+    };
+    // ASCII lowercasing preserves byte lengths, so the lowercase offsets index
+    // the original-case text.
+    let body_start = tp.lower.len() - body_lower.len();
+    let condition_start = body_start - ", ".len() - condition_lower.len();
+    (
+        Some(&tp.original[condition_start..condition_start + condition_lower.len()]),
+        TextPair::new(&tp.original[body_start..], body_lower),
+    )
+}
+
+/// CR 101.2: true when `lower` is exactly "<subject> can't be countered[.]" with
+/// nothing after the phrase, so no unmodeled tail ("and the damage can't be
+/// prevented") can ride along.
+pub(crate) fn is_bare_cant_be_countered_clause(lower: &str) -> bool {
+    all_consuming((
+        take_until::<_, _, OracleError<'_>>("can't be countered"),
+        tag("can't be countered"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
 }
 
 /// Parse the subject of "X can't be countered" lines.
@@ -1993,6 +2032,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(affected)
             .condition(StaticCondition::DuringYourTurn)
@@ -2258,6 +2298,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         extra_cost,
         enters_with_counter,
         required_cast_keyword,
+        pool: GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(affected)
     .description(text.to_string());
@@ -2783,6 +2824,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         extra_cost: None,
         enters_with_counter: None,
         required_cast_keyword: None,
+        pool: GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(affected)
     .description(text.to_string());
@@ -2829,6 +2871,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(affected)
         .description(text.to_string()),
@@ -2860,7 +2903,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::Not { .. }
         | TargetFilter::StackAbility { .. }
@@ -3283,7 +3326,7 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     // alongside the cast permission (Azula, Cunning Usurper). Parse them in
     // order off the tail so any leftover proves an unmodeled shape.
     let (after_riders, grants_flash, mana_spend_permission) =
-        strip_exile_cast_concession_riders(after_clause);
+        strip_exile_cast_concession_riders(after_clause)?;
 
     // CR 118.9: Optional trailing ALTERNATIVE-cost rider sentence — "If you cast
     // a spell this way, pay life equal to its mana value rather than pay its mana
@@ -3344,20 +3387,25 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     Some(definition)
 }
 
-/// CR 601.3b + CR 609.4b: Strip the optional flash-grant and any-type-mana
+/// CR 601.3b + CR 609.4b: Strip the optional flash-grant and mana-spend
 /// concession riders that follow the core exile-cast clause (Azula, Cunning
 /// Usurper: "… and you may cast them as though they had flash. Mana of any type
-/// can be spent to cast those spells."). Returns the remainder plus the parsed
-/// `(grants_flash, mana_spend_permission)` pair. Each rider is optional and
-/// recognized independently so future cards mixing only one of the two still
-/// parse. Riders not present leave the defaults `(false, None)`.
+/// can be spent to cast those spells."; Tibalt's emblem / Rogue Class: "…, and
+/// you may spend mana as though it were mana of any color to cast those
+/// spells."). The mana rider comes from the shared rider grammar
+/// (`oracle_effect::parse_mana_spend_rider`). Returns the remainder plus the
+/// parsed `(grants_flash, mana_spend_permission)` pair. Each rider is optional
+/// and recognized independently so future cards mixing only one of the two
+/// still parse. Riders not present leave the defaults `(false, None)`. `None`
+/// means a recognized single-kind rider: it has no `ManaSpendPermission` shape,
+/// so the whole permission declines.
 fn strip_exile_cast_concession_riders(
     input: &str,
-) -> (
+) -> Option<(
     &str,
     bool,
     Option<crate::types::ability::ManaSpendPermission>,
-) {
+)> {
     let mut rest = input.trim_start();
     let mut grants_flash = false;
     let mut mana_spend_permission = None;
@@ -3374,17 +3422,28 @@ fn strip_exile_cast_concession_riders(
         rest = trimmed.strip_prefix('.').unwrap_or(trimmed).trim_start(); // allow-noncombinator: punctuation cleanup between riders, not parsing dispatch.
     }
 
-    // CR 609.4b: "Mana of any type can be spent to cast those spells[.]"
-    if let Some(after) = nom_tag_lower(
-        rest,
-        rest,
-        "mana of any type can be spent to cast those spells",
-    ) {
-        mana_spend_permission = Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor);
-        rest = after;
+    // CR 609.4b + CR 118.14: the any-color / any-type spend rider is the
+    // shared rider grammar (`parse_mana_spend_rider`), joined by an optional
+    // ", and " / "and " connective (Tibalt's emblem, Rogue Class: "…exiled
+    // with ~, and you may spend mana as though it were mana of any color to
+    // cast those spells"; Azula: "Mana of any type can be spent to cast those
+    // spells"). A single-kind rider has no `ManaSpendPermission` shape, so the
+    // whole permission declines rather than widen to every mana.
+    match preceded(
+        opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
+        super::oracle_effect::parse_mana_spend_rider,
+    )
+    .parse(rest)
+    {
+        Ok((after, super::oracle_effect::ManaSpendRider::Concession(permission))) => {
+            mana_spend_permission = Some(permission);
+            rest = after;
+        }
+        Ok((_, super::oracle_effect::ManaSpendRider::SingleKind)) => return None,
+        Err(_) => {}
     }
 
-    (rest, grants_flash, mana_spend_permission)
+    Some((rest, grants_flash, mana_spend_permission))
 }
 
 fn strip_leading_permission_condition(input: &str) -> Option<(&str, StaticCondition)> {
@@ -3395,8 +3454,18 @@ fn strip_leading_permission_condition(input: &str) -> Option<(&str, StaticCondit
 
 fn strip_exile_play_source_reference(rest: &str, grantee: ExileCastGrantee) -> Option<&str> {
     let after_anchor = match grantee {
-        ExileCastGrantee::SourceController => nom_tag_lower(rest, rest, "cards exiled with ")
-            .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?,
+        ExileCastGrantee::SourceController => {
+            // CR 607.2a: "the exiled card[s]" names the same linked pool as
+            // "cards exiled with [this object]" (Null Summoner), so it needs no
+            // self-reference after it.
+            if let Some(after) = nom_tag_lower(rest, rest, "the exiled cards")
+                .or_else(|| nom_tag_lower(rest, rest, "the exiled card"))
+            {
+                return Some(after);
+            }
+            nom_tag_lower(rest, rest, "cards exiled with ")
+                .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?
+        }
         // CR 406.6: "cards they exiled with <self>" — the per-player share of
         // the source's pool, bound to the "each player" subject.
         ExileCastGrantee::EachPlayerOwnExiles => {

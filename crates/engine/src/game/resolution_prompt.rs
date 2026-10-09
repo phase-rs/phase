@@ -597,6 +597,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         target_incarnations: _, // CR 400.7 referent pins, no choice
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -614,6 +615,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         detached_remainder: _,
         min_x_value: _,                  // u32
         cant_be_copied: _,               // bool
+        illegal_targets_disposition: _,  // CR 608.2b resolution disposition, offers no choice
         copy_count_status: _,            // status tag
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
@@ -627,6 +629,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _, // SubAbilityLink kind tag
+        target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
@@ -1086,6 +1089,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(base.waiting_for, WaitingFor::ReplacementChoice { .. }),

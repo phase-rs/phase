@@ -1,8 +1,8 @@
-use crate::game::game_object::EmblemSource;
+use crate::game::game_object::{EmblemSource, LinkedAbilitySource};
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition,
-    TriggerDefinition,
+    AbilityDefinition, AbilityProvenance, Effect, EffectError, EffectKind, ResolvedAbility,
+    StaticDefinition, TriggerDefinition,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -66,6 +66,32 @@ pub fn grant_emblem(
     emblem_id
 }
 
+/// CR 607.1d + CR 607.5 + CR 113.7a: the pairing identity the new emblem
+/// latches — the creating object's exact incarnation (push-time capture, else
+/// live) and the copiable set of the ability that created the emblem: that
+/// ability's own provenance when it has one, else (an "As ~ enters"
+/// replacement, CR 614.1c, or a spell) the creator's set as the emblem is
+/// created. An emblem created by a layer-6 granted ability (CR 607.1a
+/// self-grants included), or by a trigger whose occurrence carries no
+/// attributable set, is not attributed and pairs with nothing (fail closed).
+fn emblem_link_binding(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<LinkedAbilitySource> {
+    let source = state.objects.get(&ability.source_id)?;
+    let creator = ability.source_ref(state)?;
+    let characteristic_set = match ability.source_ability_provenance() {
+        Some(AbilityProvenance::Characteristic(set)) => set,
+        Some(AbilityProvenance::Granted) => return None,
+        None if ability.trigger_definition_ref.is_some() => return None,
+        None => source.characteristic_set(),
+    };
+    Some(LinkedAbilitySource {
+        creator,
+        characteristic_set,
+    })
+}
+
 /// CR 114.1 + CR 114.4: Create an emblem in the command zone with the given
 /// abilities (statics and triggers). Emblems are not permanents — they cannot
 /// be destroyed, exiled, bounced, or sacrificed. Per CR 114.4, both static
@@ -93,6 +119,10 @@ pub fn resolve(
             printed_ref: src.printed_ref.clone(),
         });
 
+    // CR 607.1d + CR 607.5 + CR 400.7: latch the creating object's exact
+    // incarnation and the copiable set of the ability creating the emblem.
+    let linked_ability_source = emblem_link_binding(state, ability);
+
     // CR 114.1: Create the emblem via the single-authority helper. No activated
     // abilities for the planeswalker/spell emblem path — only statics + triggers.
     let emblem_id = grant_emblem(
@@ -103,8 +133,11 @@ pub fn resolve(
         Vec::new(),
     );
     // CR 114: set display-only provenance captured above (grant_emblem leaves it
-    // unset because it has no ability source of its own).
-    state.objects.get_mut(&emblem_id).unwrap().emblem_source = emblem_source;
+    // unset because it has no ability source of its own), and the CR 607.1d
+    // pairing identity latched above.
+    let emblem = state.objects.get_mut(&emblem_id).unwrap();
+    emblem.emblem_source = emblem_source;
+    emblem.linked_ability_source = linked_ability_source;
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -118,10 +151,10 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        BounceSelection, ContinuousModification, ControllerRef, StaticDefinition, TargetFilter,
-        TypedFilter,
+        BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
+        StaticDefinition, TargetFilter, TypedFilter,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
 
@@ -152,6 +185,7 @@ mod tests {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         }
     }
 
@@ -164,6 +198,7 @@ mod tests {
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(TargetFilter::Typed(TypedFilter::new(
             crate::types::ability::TypeFilter::Land,
@@ -507,5 +542,223 @@ mod tests {
             Some((emblem_id, CastFrequency::Unlimited)),
             "permission source should be the created emblem"
         );
+    }
+
+    /// CR 607.1d + CR 400.7 + CR 113.7a: the emblem latches the exact object that
+    /// created it — the ability's push-time incarnation capture when present,
+    /// else the live incarnation (an as-enters replacement drain has no stack
+    /// capture).
+    #[test]
+    fn create_emblem_latches_creator_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Tibalt, Cosmic Impostor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().incarnation = 3;
+        let mut ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let live = state.command_zone[0];
+        assert_eq!(
+            state.objects[&live].linked_ability_source,
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source_id, 3),
+                characteristic_set: CharacteristicSetRef::Own,
+            }),
+            "no stack capture: the live incarnation is latched"
+        );
+
+        ability.source_incarnation = Some(2);
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let captured = state.command_zone[1];
+        assert_eq!(
+            state.objects[&captured].linked_ability_source,
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source_id, 2),
+                characteristic_set: CharacteristicSetRef::Own,
+            }),
+            "the push-time capture wins over the live incarnation"
+        );
+    }
+
+    /// CR 607.1d + CR 607.5 + CR 113.7a: the emblem latches the copiable set of
+    /// the ability that created it — the ability's own provenance when it has
+    /// one, else the creator's live layer-1 set — and an emblem created by a
+    /// granted or unattributable ability pairs with nothing.
+    #[test]
+    fn create_emblem_latches_characteristic_set() {
+        use crate::types::ability::{
+            CopyEffectInstanceRef, Duration, TriggerBaseSetInstanceRef,
+            TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerGrantInstanceRef,
+        };
+
+        fn setup() -> (GameState, ObjectId, ResolvedAbility) {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(7),
+                PlayerId(0),
+                "Creator".to_string(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::CreateEmblem {
+                    statics: vec![ninja_pump_static()],
+                    triggers: Vec::new(),
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            );
+            (state, source_id, ability)
+        }
+        fn latched(state: &GameState) -> Option<LinkedAbilitySource> {
+            let emblem = *state.command_zone.last().expect("an emblem was created");
+            state.objects[&emblem].linked_ability_source
+        }
+        let mut events = Vec::new();
+
+        // (i) Reach guard: no provenance, no copy effect → the object's own set.
+        let (mut state, source_id, ability) = setup();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            latched(&state),
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::from_object(&state.objects[&source_id]),
+                characteristic_set: CharacteristicSetRef::Own,
+            })
+        );
+
+        // (ii) The creator is under an applied layer-1 copy effect → that set.
+        let (mut state, source_id, ability) = setup();
+        let donor = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(0),
+            "Donor".to_string(),
+            Zone::Battlefield,
+        );
+        let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
+        let copy_id = state
+            .add_transient_continuous_effect(
+                source_id,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: source_id },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.objects[&source_id].name, "Donor",
+            "reach: copy applied"
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let copy_set = CharacteristicSetRef::Copied(CopyEffectInstanceRef {
+            continuous_effect_id: copy_id,
+            modification_index: 0,
+        });
+        assert_eq!(
+            latched(&state).map(|link| link.characteristic_set),
+            Some(copy_set)
+        );
+
+        // (iii) The creating ability's own provenance wins over the live set.
+        let (mut state, _, mut ability) = setup();
+        let own_copy = CharacteristicSetRef::Copied(CopyEffectInstanceRef {
+            continuous_effect_id: 91,
+            modification_index: 0,
+        });
+        ability.set_source_ability_provenance_recursive(Some(AbilityProvenance::Characteristic(
+            own_copy,
+        )));
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            latched(&state).map(|link| link.characteristic_set),
+            Some(own_copy)
+        );
+
+        // (iv) A granted creating ability is not attributed.
+        let (mut state, _, mut ability) = setup();
+        ability.set_source_ability_provenance_recursive(Some(AbilityProvenance::Granted));
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(latched(&state), None);
+
+        // (v) A trigger whose occurrence carries no attributable set is not
+        // attributed either.
+        let (mut state, source_id, mut ability) = setup();
+        ability.trigger_definition_ref = Some(TriggerDefinitionRef {
+            source: ObjectIncarnationRef::from_object(&state.objects[&source_id]),
+            occurrence: TriggerDefinitionOccurrenceRef::CopyRetained {
+                grant_instance: TriggerGrantInstanceRef(1),
+                source_base_set: TriggerBaseSetInstanceRef::INITIAL,
+                source_printed_index: 0,
+            },
+        });
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(latched(&state), None);
+    }
+
+    /// Serialized surface: persisted emblems written before the creator field
+    /// existed load with `None`, and a set field round-trips.
+    #[test]
+    fn emblem_creator_field_defaults_when_absent() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Tibalt, Cosmic Impostor".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let emblem = &state.objects[&state.command_zone[0]];
+        let expected = Some(LinkedAbilitySource {
+            creator: ObjectIncarnationRef::from_object(&state.objects[&source_id]),
+            characteristic_set: CharacteristicSetRef::Own,
+        });
+        assert_eq!(emblem.linked_ability_source, expected);
+
+        let mut json = serde_json::to_value(emblem).unwrap();
+        let round_trip: crate::game::GameObject = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(round_trip.linked_ability_source, expected);
+
+        let removed = json
+            .as_object_mut()
+            .unwrap()
+            .remove("linked_ability_source");
+        assert!(removed.is_some(), "the set field is serialized");
+        let legacy: crate::game::GameObject = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.linked_ability_source, None);
     }
 }

@@ -148,6 +148,142 @@ it("returns unavailable without constructing peers in unsupported browsers", asy
   expect(credentials).not.toHaveBeenCalled(); expect(mocks.create).not.toHaveBeenCalled();
 });
 
+it("selects a genuine guest/host factory pair with one normalized host target", async () => {
+  vi.resetModules();
+  const transport = await import("../transport");
+  const connection = await import("../connection");
+  const diagnostics = await import("../connectivityDiagnostics");
+  vi.mocked(connection.fetchFreshTurnConfig).mockResolvedValue({
+    iceServers: [{ urls: "turn:SECRET", username: "SECRET", credential: "SECRET" }],
+  });
+
+  const contexts: Array<{ role: "guest" | "host"; hostPeerId: string }> = [];
+  const creations: Array<{ role: "guest" | "host"; id?: string; options?: { config: RTCConfiguration } }> = [];
+  const factoryFor = (role: "guest" | "host") => ({
+    create(id?: string, options?: { config: RTCConfiguration }) {
+      creations.push({ role, id, options });
+      const peer = new TestPeer();
+      peer.connect.mockReturnValue(outgoing);
+      peers.push(peer);
+      return peer as never;
+    },
+  });
+  const guestFactory = factoryFor("guest");
+  const hostFactory = factoryFor("host");
+  transport.installPeerTransportSelector((context) => {
+    contexts.push(context);
+    return context.role === "guest" ? guestFactory : hostFactory;
+  });
+
+  const pending = diagnostics.runConnectivityDiagnostics(controller.signal);
+  await registered();
+  incoming.peer = creations[0].id!;
+  peers[1].emit("connection", incoming);
+  outgoing.send.mockImplementation((payload) => { incoming.emit("data", payload); });
+  incoming.send.mockImplementation((payload) => { outgoing.emit("data", payload); });
+  outgoing.emit("open");
+  const results = await pending;
+
+  expect(creations.map(({ role }) => role)).toEqual(["guest", "host"]);
+  expect(creations[0].id).toMatch(/^phase-diagnostics-/);
+  expect(creations[1].id).toMatch(/^phase-diagnostics-/);
+  expect(creations[0].id).not.toBe(creations[1].id);
+  expect(contexts).toEqual([
+    { role: "guest", hostPeerId: creations[1].id },
+    { role: "host", hostPeerId: creations[1].id },
+  ]);
+  expect(creations.map(({ options }) => options?.config.iceTransportPolicy)).toEqual(["relay", "relay"]);
+  expect(peers[0].connect).toHaveBeenCalledWith(creations[1].id, PEER_CONNECT_OPTIONS);
+  expect(results.map((result) => result.reason)).toEqual(["credentialsReady", "signalingReady", "relayReady"]);
+  expect(mocks.create).not.toHaveBeenCalled();
+  assertClean();
+});
+
+it("contains a selector failure as signaling failure and cleans an earlier selected peer", async () => {
+  vi.resetModules();
+  const transport = await import("../transport");
+  const connection = await import("../connection");
+  const diagnostics = await import("../connectivityDiagnostics");
+  vi.mocked(connection.fetchFreshTurnConfig).mockResolvedValue({
+    iceServers: [{ urls: "turn:SECRET", username: "SECRET", credential: "SECRET" }],
+  });
+  const factory = {
+    create: vi.fn(() => {
+      const peer = new TestPeer();
+      peer.connect.mockReturnValue(outgoing);
+      peers.push(peer);
+      return peer as never;
+    }),
+  };
+  const selector = vi.fn((context: { role: "guest" | "host" }) => {
+    if (context.role === "host") throw new Error("timeout");
+    return factory;
+  });
+  transport.installPeerTransportSelector(selector);
+
+  const pending = diagnostics.runConnectivityDiagnostics(controller.signal);
+  await vi.advanceTimersByTimeAsync(0);
+  const results = await pending;
+
+  expect(selector).toHaveBeenCalledTimes(2);
+  expect(factory.create).toHaveBeenCalledTimes(1);
+  expect(results.map(({ reason }) => reason)).toEqual(["credentialsReady", "signalingFailed", "prerequisiteFailed"]);
+  expect(results[1].evidence?.peerError).toBe("unknown");
+  expect(JSON.stringify(results)).not.toContain("SECRET");
+  expect(mocks.create).not.toHaveBeenCalled();
+  assertClean();
+});
+
+it("contains a second selected-factory construction failure and destroys the first peer", async () => {
+  vi.resetModules();
+  const transport = await import("../transport");
+  const connection = await import("../connection");
+  const diagnostics = await import("../connectivityDiagnostics");
+  vi.mocked(connection.fetchFreshTurnConfig).mockResolvedValue({
+    iceServers: [{ urls: "turn:SECRET", username: "SECRET", credential: "SECRET" }],
+  });
+  const factory = {
+    create: vi.fn()
+      .mockImplementationOnce(() => {
+        const peer = new TestPeer();
+        peer.connect.mockReturnValue(outgoing);
+        peers.push(peer);
+        return peer as never;
+      })
+      .mockImplementationOnce(() => { throw new Error("SECRET constructor failure"); }),
+  };
+  const selector = vi.fn(() => factory);
+  transport.installPeerTransportSelector(selector);
+
+  const pending = diagnostics.runConnectivityDiagnostics(controller.signal);
+  await vi.advanceTimersByTimeAsync(0);
+  const results = await pending;
+
+  expect(selector).toHaveBeenCalledTimes(2);
+  expect(factory.create).toHaveBeenCalledTimes(2);
+  expect(peers[0].destroy).toHaveBeenCalledTimes(1);
+  expect(results.map(({ reason }) => reason)).toEqual(["credentialsReady", "signalingFailed", "prerequisiteFailed"]);
+  expect(results[1].evidence?.peerError).toBe("unknown");
+  expect(JSON.stringify(results)).not.toContain("SECRET");
+  expect(mocks.create).not.toHaveBeenCalled();
+  assertClean();
+});
+
+it("does not install or lock a transport selector for unsupported diagnostics", async () => {
+  vi.resetModules();
+  const transport = await import("../transport");
+  const diagnostics = await import("../connectivityDiagnostics");
+  vi.stubGlobal("RTCPeerConnection", undefined);
+
+  const results = await diagnostics.runConnectivityDiagnostics(controller.signal);
+  const selector = vi.fn(() => transport.peerTransportFactory);
+
+  expect(results.every((result) => result.status === "unavailable")).toBe(true);
+  expect(() => transport.installPeerTransportSelector(selector)).not.toThrow();
+  expect(selector).not.toHaveBeenCalled();
+  expect(mocks.create).not.toHaveBeenCalled();
+});
+
 it.each(["network", "webrtc"])("distinguishes %s peer errors during relay from signaling outages", async (type) => {
   const pending = runConnectivityDiagnostics(controller.signal); await registered();
   peers[0].emit("error", { type, message: "SECRET" });

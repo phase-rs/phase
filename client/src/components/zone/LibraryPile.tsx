@@ -7,6 +7,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
@@ -14,7 +15,7 @@ import {
   playOrCastActionsForObject,
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
-import { isLibraryCardRevealedToViewer } from "../../viewmodel/gameStateView.ts";
+import { isLibraryCardRevealedToViewer, resolvePileSeat } from "../../viewmodel/gameStateView.ts";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { CardBackFallback } from "../card/CardBackFallback.tsx";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
@@ -76,15 +77,22 @@ function HiddenTopCard() {
 export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const { t } = useTranslation("game");
   const myId = usePlayerId();
+  const pileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", playerId));
+  const myPileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", myId));
   const count = useGameStore(
-    (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
+    (s) => s.gameState?.players[pileSeat]?.library?.length ?? 0,
   );
   const topObjectId = useGameStore((s) => {
-    const lib = s.gameState?.players[playerId]?.library;
+    const lib = s.gameState?.players[pileSeat]?.library;
     if (!lib || lib.length === 0) return null;
     // library[0] = top of library (engine convention from zones.rs)
     return lib[0];
   });
+  // A card flight is presenting the top card itself, so the pile shows a back
+  // in its place.
+  const topInFlight = useAnimationStore(
+    (s) => topObjectId != null && s.flightVeiledObjectIds.has(topObjectId),
+  );
   const isRevealed = useGameStore((s) => {
     if (topObjectId == null) return false;
     return s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
@@ -109,7 +117,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
 
-  const isMyLibrary = playerId === myId;
+  const isMyLibrary = pileSeat === myPileSeat;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
   // CR 401.5 + CR 118.9 + CR 305.9: cast/play-action surfacing is engine-
@@ -159,7 +167,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     <div
       className="relative"
       title={canPlay ? playLabel : libraryLabel}
-      data-library-pile={playerId}
+      data-library-pile={pileSeat}
       style={{ width: w, height: h }}
     >
       {/* Stack layers */}
@@ -204,8 +212,8 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
                 : "border-gray-600 cursor-default"
         }`}
       >
-        {visibleTopObject ? (
-          <VisibleTopCard object={visibleTopObject!} />
+        {visibleTopObject && !topInFlight ? (
+          <VisibleTopCard object={visibleTopObject} />
         ) : (
           <HiddenTopCard />
         )}

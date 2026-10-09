@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Wybierz źródło many",
     "description": "Ta zdolność many wymaga poświęcenia permanenta.",
+    "baseOutput_one": "Podstawowa ilość: {{count}} mana",
+    "baseOutput_other": "Podstawowa ilość: {{count}} many",
+    "baseOutputVariable": "Podstawowa ilość ustalana przy aktywacji",
     "sacrifice": "Poświęć",
     "back": "Wróć do płatności many",
     "unknownSource": "Źródło many"
@@ -102,6 +105,24 @@
     "subtitle": "Wszyscy gracze muszą zatwierdzić, zanim silnik rozpatrzy bezpieczny prefiks stosu.",
     "grant": "Zatwierdź",
     "decline": "Zachowaj priorytet"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Koryguj życie",
+    "title": "Korekta życia w trybie piaskownicy",
+    "description": "Użyj zwykłych kontrolek ręki i stosu, aby rzucić i rozpatrzyć stwora. Ten panel wysyła piaskownicową akcję SetLife przez istniejący adapter gry.",
+    "scopeNote": "Korekta przechodzi przez ścieżkę edycji gracza w silniku; nie oznacza obrażeń ani efektu karty. Ten zakres nie obejmuje ujawniania ukrytej ręki, odrzucania zgodnie z regułami ani uzgodnionego wcześniej cofnięcia przed rzuceniem.",
+    "target": "Gracz",
+    "player": "{{name}} (gracz {{seat}})",
+    "you": "Ty",
+    "opponent": "Przeciwnik",
+    "currentLife": "Obecna liczba punktów życia",
+    "newLife": "Nowa liczba punktów życia",
+    "submit": "Zastosuj korektę",
+    "submitting": "Korekta została wysłana; zamknięcie tego panelu jej nie anuluje.",
+    "applied": "Potwierdzone aktualne życie gracza {{player}}: {{life}}.",
+    "notApplied": "Silnik nie potwierdził tej korekty. Przed ponowną próbą sprawdź bieżący snapshot.",
+    "failed": "Nie udało się wysłać korekty.",
+    "stale": "Stan gry zmienił się podczas edycji. Zamknij i otwórz ponownie panel, aby zacząć od bieżącego snapshotu."
   },
   "debugCreate": {
     "copies": "Kopie",
@@ -808,6 +829,7 @@
     "titleTargets": "Cele: {{targets}}",
     "titlePaid": "Zapłacono: {{paid}}",
     "titleContext": "Kontekst: {{context}}",
+    "revealedCards": "Odkryta: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} many",
     "paidColorsSpent": "{{count}} kolorów",
@@ -841,6 +863,7 @@
     "chooseNewTarget": "Wybierz nowy cel czaru",
     "chooseNewTargetForSpell": "Wybierz nowy cel dla {{spell}}",
     "chooseCreatureToExplore": "Wybierz, który stwór eksploruje jako następny",
+    "chooseCreatureToEquip": "Wybierz stwora do wyposażenia",
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
@@ -1130,6 +1153,8 @@
       "usePowder": "Użyj {{name}}",
       "powderDescription": "Wygnaj każdą kartę z ręki, dobierz tyle samo — to nie mulligan",
       "powderTooltip": "Wygnaj każdą kartę z ręki i dobierz tyle samo. To nie mulligan — liczba i karty na spodzie pozostają bez zmian.",
+      "freeReveal": "Pokaż i dobierz ponownie (za darmo)",
+      "freeRevealDescription": "Pokaż rękę, przetasuj ją i dobierz 7 — za darmo, bez kart na spód, to nie mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londyński",
       "eyebrowOpening": "Ręka startowa · Mulligan londyński",
       "reviewTitle": "Przejrzyj swoją rękę startową",
@@ -1347,8 +1372,6 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
-      "experimentalDungeons": "Eksperymentalne lochy",
-      "experimentalDungeonsHelp": "Oferuj Baldur's Gate Wilderness w opcjach lochów i przy przejmowaniu inicjatywy. Eksperymentalne i nieoficjalne.",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {
@@ -1384,6 +1407,7 @@
       "target": "Cel",
       "return": "Zwróć",
       "discard": "Odrzuć",
+      "reveal": "Ujawnij",
       "evidence": "Dowody",
       "manifest": "Manifest",
       "untap": "Odkręć",
@@ -1696,6 +1720,10 @@
       "title": "Wzmocnij Jace'a",
       "subtitle": "Wybierz kontrolowany przez siebie żeton Jace'a, aby zyskał +{{count}} lojalności"
     },
+    "spellCopyOrder": {
+      "title": "Ustal kolejność kopii",
+      "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
@@ -2006,7 +2034,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Wybierz przeciwnika",
-    "subtitle": "Wybierz, który przeciwnik dokonuje wyboru."
+    "subtitle": "Wybierz, który przeciwnik dokonuje wyboru.",
+    "orderTitle": "Wybierz następnego gracza",
+    "orderSubtitle": "Wybierz, dla kogo dokonać następnego wyboru.",
+    "substituteTitle": "Wybierz gracza",
+    "substituteSubtitle": "Wybierz, kto dokona tego wyboru."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2264,7 +2296,9 @@
     "accept": "Tak",
     "decline": "Nie",
     "sourceFallback": "Efekt",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Opcjonalne zdolności wyzwalane ({{count, number}})",
+    "replacementChoices": "Wybory zastępowania ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efekt",
@@ -2297,7 +2331,8 @@
       "zoneExile": "wygnania",
       "zoneHand": "twojej ręki",
       "discard": "Odrzuć {{count}} {{cards}}",
-      "exile": "Wygnaj {{count}} {{cards}} z {{zone}}"
+      "exile": "Wygnaj {{count}} {{cards}} z {{zone}}",
+      "reveal": "Ujawnij {{count}} {{cards}} z {{zone}}"
     }
   },
   "topOrBottom": {
@@ -2343,6 +2378,8 @@
     "confirm": "Potwierdź"
   },
   "replacement": {
+    "remember": "Zapamiętaj ten wybór w tej grze",
+    "savedChoice": "Zastąpienie: {{choice}}",
     "eyebrow": "Kolejność rozpatrywania",
     "title": "Efekty zastępujące",
     "orderSubtitle": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustalić kolejność — ostatni zastosowany efekt jest tym, który zadziała (CR 616.1).",

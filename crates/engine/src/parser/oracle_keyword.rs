@@ -9,6 +9,7 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
+use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
 use super::oracle_quantity::parse_cda_quantity;
@@ -658,15 +659,11 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 
     let filters: Vec<TargetFilter> = legs
         .into_iter()
-        .map(|leg| {
-            let mut f = TypedFilter::new(leg.type_filter);
-            if !leg.properties.is_empty() {
-                f = f.properties(leg.properties);
-            }
+        .map(|mut leg| {
             if let Some(ref c) = controller {
-                f = f.controller(c.clone());
+                leg = leg.controller(c.clone());
             }
-            TargetFilter::Typed(f)
+            TargetFilter::Typed(leg)
         })
         .collect();
 
@@ -1962,6 +1959,20 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         }
     }
 
+    // CR 207.2d: an ability/flavor word label ("Echo of the Lost — …" on Hades,
+    // Sorcerer of Eld) is not a keyword declaration. The generic name/parameter
+    // split below would read the label's first word as a keyword name and
+    // fabricate a keyword from the label ("Echo" with an empty mana cost),
+    // silently swallowing the labeled ability. Decline so the line survives for
+    // the static/trigger parsers. See
+    // `keyword_candidate_ability_word_label` for the measurement behind the
+    // seam; every genuine keyword-cost line with this shape is claimed by an arm
+    // above (Suspend/Awaken/Reinforce/Prototype/em-dash cost families) or by a
+    // router slot before this function is reached.
+    if keyword_candidate_ability_word_label(text).is_some() {
+        return None;
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -2978,12 +2989,133 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
             .is_some_and(|w| w.ends_with("cycling") && w != "cycling")
 }
 
+/// CR 207.2d: the `(label, rest)` split when `line` is a keyword-cost candidate
+/// whose leading spaced-dash label is a short ability/flavor word.
+///
+/// Some ability and flavor words begin with a word that is also a keyword-cost
+/// prefix — "Echo of the Lost — During your turn, you may play cards from your
+/// graveyard." (Hades, Sorcerer of Eld) matches `is_keyword_cost_line` because
+/// "echo" is a candidate prefix at a word boundary, and the label is short
+/// enough for `split_short_label_prefix` to read as a keyword-plus-parameter
+/// declaration. The label has no rules meaning (CR 207.2d), so a line shaped
+/// this way must not be claimed by the generic name/parameter split.
+///
+/// MEASURED, not assumed: a scan of the `client/public/card-data.json` export's
+/// unique `oracle_text` lines (2026-09-30) finds 58 lines that are
+/// `is_keyword_cost_line` candidates and carry a spaced dash; 36 of them carry a
+/// ≤4-word label per `split_short_label_prefix(text, 4)`. Every one of those 36
+/// except Hades is claimed by a dedicated arm BEFORE the decline site (Suspend/
+/// Awaken/Reinforce/Prototype/em-dash cost families) or by a router slot before
+/// `parse_keyword_line_core` is reached (ability-word-prefixed trigger lines at
+/// priority 6b, Strive's pre-loop scan), so declining here removes exactly the
+/// fabricated parse and leaves the genuine keyword lines untouched. The brace
+/// guard inside `split_short_label_prefix` is what keeps "Prototype {1}{U}{U} —
+/// 2/1" out of this class.
+pub(crate) fn keyword_candidate_ability_word_label(line: &str) -> Option<(&str, &str)> {
+    let lower = line.to_lowercase();
+    if !is_keyword_cost_line(&lower) {
+        return None;
+    }
+    split_short_label_prefix(line, 4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCost, SacrificeCost};
+    use crate::types::ability::{AbilityCost, Effect, SacrificeCost};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
+
+    // SHAPE: CR 702.5a: public full-card ingestion preserves each printed
+    // Enchant restriction; unrelated sibling abilities are not claimed fixed.
+    #[test]
+    fn enchant_negated_subtype_full_oracle_shape() {
+        let cards = [
+            ("Puppet Crafting", "Enchant artifact or non-Aura enchantment\nEnchanted permanent is a Construct creature with base power and toughness 5/5 in addition to its other types.\n{4}{G}: Return this card from your graveyard to your hand."),
+            ("Aggression", "Enchant non-Wall creature\nEnchanted creature has first strike and trample.\nAt the beginning of the end step of enchanted creature's controller, destroy that creature if it didn't attack this turn."),
+            ("Consuming Ferocity", "Enchant non-Wall creature\nEnchanted creature gets +1/+0.\nAt the beginning of your upkeep, put a +1/+0 counter on enchanted creature. If that creature has three or more +1/+0 counters on it, it deals damage equal to its power to its controller, then destroy that creature and it can't be regenerated."),
+            ("Krovikan Plague", "Enchant non-Wall creature you control\nWhen this Aura enters, draw a card at the beginning of the next turn's upkeep.\nTap enchanted creature: This Aura deals 1 damage to any target. Put a -0/-1 counter on enchanted creature. Activate only if enchanted creature is untapped."),
+        ];
+        for (name, oracle) in cards {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &["enchant".into()],
+                &["Enchantment".into()],
+                &["Aura".into()],
+            );
+            let filter = parsed
+                .extracted_keywords
+                .iter()
+                .find_map(|keyword| {
+                    if let Keyword::Enchant(filter) = keyword {
+                        Some(filter)
+                    } else {
+                        None
+                    }
+                })
+                .expect("every printed full-card Enchant must be retained");
+            if name == "Puppet Crafting" {
+                let TargetFilter::Or { filters } = filter else {
+                    panic!("expected union")
+                };
+                assert_eq!(filters.len(), 2);
+                let TargetFilter::Typed(artifact) = &filters[0] else {
+                    panic!("artifact leg")
+                };
+                assert_eq!(artifact.type_filters, vec![TypeFilter::Artifact]);
+                let TargetFilter::Typed(enchantment) = &filters[1] else {
+                    panic!("enchantment leg")
+                };
+                assert_eq!(
+                    enchantment.type_filters,
+                    vec![
+                        TypeFilter::Enchantment,
+                        TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".into())))
+                    ]
+                );
+                assert!(
+                    parsed.parse_warnings.is_empty(),
+                    "{:?}",
+                    parsed.parse_warnings
+                );
+                assert!(parsed
+                    .abilities
+                    .iter()
+                    .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })));
+            } else {
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("single creature leg")
+                };
+                assert_eq!(
+                    typed.type_filters,
+                    vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Non(Box::new(TypeFilter::Subtype("Wall".into())))
+                    ]
+                );
+                assert_eq!(
+                    typed.controller,
+                    if name == "Krovikan Plague" {
+                        Some(ControllerRef::You)
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+        assert!(try_parse_multi_type_enchant("Enchant artifact or non-Aura enchantment").is_some());
+        for phrase in [
+            "Enchant artifact or non-Aura",
+            "Enchant artifact or non-Aurora enchantment",
+            "Enchant artifact or non-Aura enchantment if you control a creature",
+        ] {
+            assert!(
+                try_parse_multi_type_enchant(phrase).is_none(),
+                "must decline: {phrase}"
+            );
+        }
+    }
 
     #[test]
     fn parse_keyword_line_core_emerge_from_artifact_preserves_quality() {
@@ -3042,6 +3174,70 @@ mod tests {
             parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
                 .is_none(),
             "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    /// CR 207.2d: an ability/flavor word label that happens to begin with a
+    /// keyword-cost prefix ("Echo of the Lost — During your turn, you may play
+    /// cards from your graveyard." on Hades, Sorcerer of Eld) is NOT a keyword
+    /// declaration. The generic name/parameter split would read the label's first
+    /// word as a keyword name and fabricate `Keyword::Echo` from the label,
+    /// silently swallowing the labeled ability; both strict router surfaces must
+    /// decline the line so it falls through to the static parser.
+    #[test]
+    fn short_label_prefix_is_not_a_keyword_declaration() {
+        let hades = "Echo of the Lost — During your turn, you may play cards from your graveyard.";
+        // Reach guard: the line IS a keyword-cost candidate — that is exactly why
+        // the fabricated parse was reachable at all. Only the label decline rejects it.
+        assert!(
+            is_keyword_cost_line(&hades.to_lowercase()),
+            "reach: \"echo\" must match the candidate prefix at a word boundary"
+        );
+        assert_eq!(
+            parse_router_keyword_line(hades),
+            None,
+            "a rules-free ability/flavor word label must not route as a keyword declaration"
+        );
+        assert_eq!(
+            parse_router_keyword_fragment(&hades.to_lowercase()),
+            None,
+            "the strict fragment sibling must decline the same line"
+        );
+    }
+
+    /// The genuine `echo` keyword-cost declarations still route: the spaced-mana
+    /// form ("Echo {2}") and the CR 702.30a em-dash non-mana form
+    /// ("Echo—discard a card.") carry no spaced-dash label, so the label decline
+    /// does not apply to either.
+    #[test]
+    fn real_echo_lines_still_route() {
+        assert!(
+            matches!(
+                parse_router_keyword_line("Echo {2}").map(|routed| routed.keyword),
+                Some(Some(Keyword::Echo(_)))
+            ),
+            "a spaced-mana Echo declaration must still route"
+        );
+        assert!(
+            matches!(
+                parse_router_keyword_line("Echo—discard a card.").map(|routed| routed.keyword),
+                Some(Some(Keyword::Echo(_)))
+            ),
+            "the em-dash non-mana Echo declaration must still route"
+        );
+    }
+
+    /// CR 702.62a: `Suspend N — {cost}` carries a spaced dash and a short label,
+    /// so it lies inside the decline predicate's shape — but Suspend's dedicated
+    /// arm returns before the decline coordinate and must keep doing so.
+    #[test]
+    fn suspend_spaced_dash_still_routes() {
+        let routed = parse_router_keyword_line("Suspend 17 — {0}")
+            .expect("the dedicated Suspend arm must claim the line before the label decline");
+        assert!(
+            matches!(routed.keyword, Some(Keyword::Suspend { count: 17, .. })),
+            "expected Suspend {{ count: 17, .. }}, got {:?}",
+            routed.keyword
         );
     }
 

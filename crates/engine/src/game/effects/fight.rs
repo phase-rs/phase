@@ -793,6 +793,7 @@ mod tests {
             }],
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
 
         // Accept the replacement for bear → wolf (first direction).

@@ -23,7 +23,9 @@ use super::oracle_cost::parse_oracle_cost;
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
-    conditions::{split_leading_conditional, strip_leading_general_conditional},
+    conditions::{
+        split_leading_conditional, strip_routed_leading_general_conditional, LeadingConditionRoute,
+    },
     parse_ability_ir_with_context, try_parse_named_choice,
 };
 use super::oracle_ir::context::ParseContext;
@@ -46,6 +48,7 @@ use super::oracle_static::{parse_pt_mod, parse_static_line_ir};
 #[cfg(test)]
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_trigger::parse_trigger_lines_at_index_ir;
+use super::oracle_trigger::unhoisted_modal_guard_body;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
     parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst, ReflexiveModalParent,
@@ -149,6 +152,17 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             // `WhenYouDo` sub carries the modal, instead of firing the modes
             // unconditionally on the trigger.
             let (trigger_line, reflexive_parent) = classify_reflexive_modal_parent(trigger_line);
+            // CR 603.4: the modal splitter accepts a header that opens with the
+            // trigger's intervening-if ("Whenever X, if Y, choose one —"), so the
+            // guard lands in `header.raw` and the plain-modal lowering, which
+            // replaces the trigger body, would never see it. Return it to the
+            // trigger line so the trigger parser hoists it or fails the trigger
+            // closed. A reflexive parent keeps it in the header for
+            // `reflexive_modal_connector`.
+            let trigger_line = match (&reflexive_parent, split_leading_conditional(&header.raw)) {
+                (None, Some((guard, _))) => format!("{trigger_line}, {guard}"),
+                _ => trigger_line,
+            };
             return Some((
                 OracleBlockAst::TriggeredModal {
                     trigger_line,
@@ -1020,12 +1034,24 @@ fn reflexive_modal_connector(
     header: &ModalHeaderAst,
     ctx: &mut ParseContext,
 ) -> Result<AbilityCondition, Box<Effect>> {
-    let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
-    if let Some(guard) = guard {
-        return Ok(AbilityCondition::when_you_do_with_guard(guard));
+    match strip_routed_leading_general_conditional(&header.raw, ctx) {
+        // CR 115.1 + CR 608.2c: a target P/T threshold guard's
+        // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
+        // first object target, and a mode may announce its own target, so the
+        // guard cannot bind the antecedent "that creature" here; refuse it.
+        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+            return Err(Box::new(Effect::unimplemented(
+                "modal_reflexive_condition",
+                &header.raw,
+            )));
+        }
+        (Some((guard, LeadingConditionRoute::General)), _) => {
+            return Ok(AbilityCondition::when_you_do_with_guard(guard));
+        }
+        (None, _) => {}
     }
 
-    // `strip_leading_general_conditional` returns `None` both for a header
+    // `strip_routed_leading_general_conditional` returns `None` both for a header
     // with no guard and for an unmodeled leading conditional. Only the first
     // may become a bare `WhenYouDo`: lowering the second that way would make
     // an unsupported intervening-if condition silently permissive.
@@ -1217,6 +1243,13 @@ pub(crate) fn lower_oracle_block_ir(
             );
             ctx.diagnostics.extend(trigger_ctx.diagnostics);
             for trigger in &mut triggers {
+                // CR 603.4: a trailing "if <guard>" left on the trigger line that
+                // did not hoist would be silently dropped when the modal payload
+                // replaces the body; fail the trigger closed instead.
+                if let Some(gap_body) = unhoisted_modal_guard_body(trigger) {
+                    trigger.body = Some(gap_body);
+                    continue;
+                }
                 // `body_context` is captured before normal trigger-body parsing.
                 // Clone it per sibling: each mode receives all trigger-established
                 // facts, but no mode can leak chain-local state into another.
@@ -1807,6 +1840,7 @@ fn lower_as_enters_anchor_word_modal(
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         };
         result.statics.push(placeholder);
     }

@@ -28,11 +28,12 @@ import {
   loadActiveDeck,
   loadSavedDeckBracket,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import { isCommanderFamilyFormat, type CommanderBracket } from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
+import { restrictAiPoolByBracket } from "../services/aiRandomPool";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
@@ -224,9 +225,10 @@ function setupDraftMatchAvatars(seed: string) {
  * wire-assigned mode re-establishes the seat when its effect re-runs:
  * draft-match re-runs `setupDraftMatchAvatars`, and a fresh WS/P2P-guest
  * adapter re-emits `playerIdentity` from `GameStarted` / `reconnect_ack`. The
- * P2P HOST is the one path with no re-emit (it emits only from its game-start
- * flow) — it is unaffected because the host is always seat 0, which is exactly
- * what `resolveLocalSeat` falls back to.
+ * P2P HOST is the one path with no remount re-emit (it emits only from its
+ * game-start flow and from a resumed `initialize`) — it is unaffected because
+ * the host is always seat 0, which is exactly what `resolveLocalSeat` falls
+ * back to.
  */
 function clearWireAssignedSeat(): void {
   useMultiplayerStore.getState().setActivePlayerId(null);
@@ -374,6 +376,7 @@ function candidatePassesFilters(
 
 function pickOpponentDeck(
   catalog: AiDeckCandidate[],
+  pool: AiDeckCandidate[],
   requestedDeckId: string,
   excludeIds: Set<string>,
   archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
@@ -385,10 +388,14 @@ function pickOpponentDeck(
     if (pinned) return pinned;
   }
 
-  const filtered = catalog.filter((candidate) =>
+  // Random seats draw from `pool`: the bracket-restricted pool when it is
+  // non-empty, else the full legal catalog (an empty restriction warns at
+  // setup, so reaching here means the fallback was accepted). Archetype +
+  // coverage are soft preferences applied within that pool.
+  const filtered = pool.filter((candidate) =>
     candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
   );
-  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : catalog, {
+  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : pool, {
     selectedFormat,
     excludeIds,
   }) ?? catalog[0];
@@ -456,7 +463,7 @@ async function buildLocalAiDeckList(
     };
   }
 
-  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor, aiBracketFilter } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
     selectedMatchType,
@@ -468,6 +475,42 @@ async function buildLocalAiDeckList(
         : t("gameProvider.noLegalAiDecks.generic"),
     );
   }
+
+  // The bracket/cEDH restriction is the same pool the setup page previews
+  // (`restrictAiPoolByBracket`): Random seats draw from it, so a 1–3 filter
+  // can never field a bracket-4+ deck. Pinned seats bypass the pool —
+  // `pickOpponentDeck` resolves explicit ids against the full catalog.
+  const bracketPool = restrictAiPoolByBracket(catalog.candidates, {
+    bracketFilter: aiBracketFilter,
+    cedhMode,
+    selectedFormat: formatConfig?.format ?? null,
+  });
+  // An empty pool means the table's bracket constraint excluded every legal
+  // deck (the catalog itself is non-empty here). In cEDH mode the engine
+  // rejects any non-bracket-5 deck at init (`validate_cedh_bracket`, gated
+  // on CEDH AI difficulties), so there is no legal fallback: fail fast
+  // unless every seat is pinned to an explicit deck. Otherwise (manual
+  // filter) any legal deck plays fine — the setup page warns about the
+  // empty pool (soft gate, Start stays enabled), so fall back to the full
+  // legal catalog.
+  const effectiveCedhMode = cedhMode && isCommanderFamilyFormat(formatConfig?.format ?? undefined);
+  if (bracketPool.length === 0 && effectiveCedhMode) {
+    const opponentCount = Math.max(1, playerCount - 1);
+    const needsRandomSeat = Array.from(
+      { length: opponentCount },
+      (_, i) => aiSeats[i]?.deckId ?? AI_DECK_RANDOM,
+    ).some((requestedDeckId) =>
+      requestedDeckId === AI_DECK_RANDOM || !catalog.candidates.some((c) => c.id === requestedDeckId),
+    );
+    if (needsRandomSeat) {
+      throw new Error(
+        formatConfig?.format
+          ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+          : t("gameProvider.noLegalAiDecks.generic"),
+      );
+    }
+  }
+  const randomPool = bracketPool.length > 0 ? bracketPool : catalog.candidates;
 
   const excludeIds = new Set<string>();
   let playerDeck = deck;
@@ -498,6 +541,7 @@ async function buildLocalAiDeckList(
     const requestedDeckId = aiSeats[i]?.deckId ?? AI_DECK_RANDOM;
     const result = pickOpponentDeck(
       catalog.candidates,
+      randomPool,
       requestedDeckId,
       excludeIds,
       aiArchetypeFilter,
@@ -1001,12 +1045,13 @@ export function GameProvider({
                 formatConfig: formatConfig ?? null,
                 roomName: roomName ?? null,
                 draftMetadata: null,
-              });
-              signal.throwIfAborted();
+              }, signal);
+              // Owned before the abort check, so the catch releases a broker that resolved late.
               if (result) {
                 broker = result.broker;
                 serverGameCode = result.gameCode;
               }
+              signal.throwIfAborted();
             }
 
             // Only show the lobby tile for fresh hosts waiting for guests.
@@ -1139,6 +1184,7 @@ export function GameProvider({
               /* best-effort */
             });
           }
+          if (broker) useMultiplayerStore.getState().closeBroker(broker);
           hostPeerHandle?.destroy();
           if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
@@ -1231,6 +1277,13 @@ export function GameProvider({
       const setupWs = async () => {
         if (cancelled) return;
         const reconnectSession = isReconnect ? loadWsSession() : null;
+        if (wsMode === "host" && !reconnectSession) {
+          // Online play is entered by a join code or a saved session; with neither there is no game to attach to.
+          useMultiplayerStore.getState().setConnectionStatus("disconnected");
+          useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
+          onWsEventRef.current?.({ type: "reconnectFailed" });
+          return;
+        }
         if (reconnectSession) {
           const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
           if (cancelled) return;
@@ -1834,14 +1887,21 @@ export function GameProvider({
               return;
             }
 
-            deckList = await buildLocalAiDeckList(
-              tRef.current,
-              randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
-              playerCount ?? 2,
-              formatConfig,
-              matchConfig?.match_type,
-              loadActiveDeckBracket(),
-            );
+            try {
+              deckList = await buildLocalAiDeckList(
+                tRef.current,
+                randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
+                playerCount ?? 2,
+                formatConfig,
+                matchConfig?.match_type,
+                loadActiveDeckBracket(),
+              );
+            } catch (deckErr) {
+              if (!cancelled) {
+                onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
+              }
+              return;
+            }
             if (cancelled) return;
           }
 

@@ -445,7 +445,13 @@ fn resolution_zone_candidates(
         .filter(|(id, object)| {
             scan_zones.contains(&object.zone)
                 && !object.is_emblem
-                && crate::game::filter::matches_target_filter(state, **id, target_filter, &ctx)
+                && crate::game::filter::matches_target_filter_for_zone(
+                    state,
+                    **id,
+                    object.zone,
+                    target_filter,
+                    &ctx,
+                )
         })
         .filter(|(id, object)| {
             destination != Zone::Exile
@@ -612,6 +618,36 @@ fn capture_devour_snapshot_before_single_entry(
 }
 
 /// Move target objects between zones.
+/// CR 610.3 + CR 610.3b: True when the "until" event bounding THIS node's own
+/// zone change (`ResolvedAbility::bounded_zone_change_event`) already occurred —
+/// latched on this node after the ability triggered, or emitted earlier in this
+/// same resolution. The initial one-shot move then does not happen. Shared by
+/// the single-object and mass resolvers so each bounded node refuses on its own
+/// latch.
+pub(crate) fn until_event_already_occurred(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    events: &[GameEvent],
+) -> bool {
+    let Some(duration_event) = ability.bounded_zone_change_event() else {
+        return false;
+    };
+    ability.context.duration_events.contains(&duration_event)
+        || events.iter().any(|event| {
+            crate::game::engine::duration_event_matches(
+                state,
+                ability.source_id,
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ability.controller,
+                duration_event,
+                event,
+            )
+        })
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -697,34 +733,13 @@ pub fn resolve(
     // CR 610.3b: If the specified event occurred after this triggered ability
     // triggered but before its initial one-shot zone change, the object does
     // not move.
-    if let Some(duration_event) = ability
-        .duration
-        .as_ref()
-        .and_then(Duration::zone_change_event)
-    {
-        let occurred_before_this_resolution =
-            ability.context.duration_events.contains(&duration_event);
-        let occurred_earlier_this_resolution = events.iter().any(|event| {
-            crate::game::engine::duration_event_matches(
-                state,
-                ability.source_id,
-                ability
-                    .trigger_source
-                    .as_ref()
-                    .map(|source| source.identity.reference),
-                ability.controller,
-                duration_event,
-                event,
-            )
+    if until_event_already_occurred(state, ability, events) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
         });
-        if occurred_before_this_resolution || occurred_earlier_this_resolution {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(completed_result(0));
-        }
+        return Ok(completed_result(0));
     }
 
     let mut origin = origin;
@@ -1918,6 +1933,21 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 610.3b: an "until" event that already occurred before this mass
+    // move's initial zone change means nothing moves and no return link is
+    // installed. That refusal is non-performance for this node's own "if you
+    // do" rider (CR 118.12); `resolve_ability_chain` derives it from this same
+    // predicate over the call's own event window, so no resolution-wide flag
+    // is written here.
+    if until_event_already_occurred(state, ability, events) {
+        state.last_effect_count = Some(0);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
     // CR 400.3 + CR 701.23: When the target filter encodes multiple zones via
     // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
     // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
@@ -2110,7 +2140,15 @@ pub fn resolve_all(
             .objects
             .iter()
             .filter(|(_, obj)| {
-                change_zone_all_player_scope_member_matches(obj, player, &origin_zones)
+                // CR 108.3 + CR 400.1 as modified by a shared-zone format: a card
+                // in the scoped player's shared graveyard or library is theirs
+                // whichever seat owns it.
+                crate::game::filter::zone_axis_admits(
+                    state,
+                    (obj.zone != Zone::Battlefield).then_some(obj.zone),
+                    player,
+                    |seat| change_zone_all_player_scope_member_matches(obj, seat, &origin_zones),
+                )
             })
             .map(|(id, _)| *id)
             .collect()
@@ -2126,9 +2164,10 @@ pub fn resolve_all(
                         } else {
                             ability.target_pin_is_current(id, state)
                         })
-                    && crate::game::filter::matches_target_filter(
+                    && crate::game::filter::matches_target_filter_for_zone(
                         state,
                         id,
+                        obj.zone,
                         &effective_filter,
                         &ctx,
                     )
@@ -11016,5 +11055,100 @@ mod tests {
 
         assert_eq!(state.objects[&obj].zone, Zone::Battlefield);
         assert_eq!(state.objects[&obj].controller, PlayerId(2));
+    }
+
+    /// Resolves a `TrackedSetFiltered` creature-you-control move for P0 over the chosen members of
+    /// (P0 pile creature, P1 pile creature, P1 battlefield creature); returns every one's zone.
+    fn mixed_tracked_set_run(
+        format: crate::types::format::FormatConfig,
+        members: &[usize],
+    ) -> (Zone, Zone, Zone) {
+        let mut state = GameState::new(format, 2, 1);
+        let pile = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pile P0".to_string(),
+            Zone::Graveyard,
+        );
+        let pile1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Pile P1".to_string(),
+            Zone::Graveyard,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [pile, pile1, theirs] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        let all = [pile, pile1, theirs];
+        state
+            .tracked_object_sets
+            .insert(set_id, members.iter().map(|&i| all[i]).collect());
+        state.chain_tracked_set_id = Some(set_id);
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(crate::types::ability::ControllerRef::You),
+            properties: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(filter),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        (
+            state.objects[&pile].zone,
+            state.objects[&pile1].zone,
+            state.objects[&theirs].zone,
+        )
+    }
+
+    /// A tracked set spanning two zones is judged per member by the zone it is in.
+    #[test]
+    fn a_mixed_tracked_set_is_judged_per_member_zone() {
+        use crate::types::format::FormatConfig;
+        let all = [0, 1, 2];
+        assert_eq!(
+            mixed_tracked_set_run(FormatConfig::dandan(), &all),
+            (Zone::Hand, Zone::Hand, Zone::Battlefield)
+        );
+        assert_eq!(
+            mixed_tracked_set_run(FormatConfig::standard(), &all),
+            (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
+        );
+        for format in [FormatConfig::dandan(), FormatConfig::standard()] {
+            assert_eq!(
+                mixed_tracked_set_run(format, &[0, 2]),
+                (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
+            );
+        }
     }
 }

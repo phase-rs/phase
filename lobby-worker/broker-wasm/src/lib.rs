@@ -366,6 +366,12 @@ impl Default for WasmBroker {
     }
 }
 
+/// The broker's per-viewer projection of one serialized fan-out frame.
+#[wasm_bindgen]
+pub fn lobby_frame_for_viewer(frame_json: &str, viewer_build_commit: &str) -> Option<String> {
+    lobby_broker::lobby_frame_json_for_viewer(frame_json, viewer_build_commit)
+}
+
 /// The shared phase.rs wire-protocol version. The Cloudflare Worker shell uses
 /// this for `ServerHello` and its pre-broker handshake gate, so it cannot drift
 /// from the Rust protocol constant.

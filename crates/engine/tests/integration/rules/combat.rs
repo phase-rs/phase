@@ -384,6 +384,86 @@ fn tangle_asp_destroys_creature_it_blocks_at_end_of_combat() {
     );
 }
 
+/// CR 509.1 + CR 603.7c + CR 608.2c: Wall of Tears
+/// "Defender (This creature can't attack.)
+/// Whenever this creature blocks a creature, return that creature to its owner's hand at end of combat."
+/// When Wall of Tears blocks an attacking creature, the delayed trigger created must target and return
+/// the attacking creature it blocked to its owner's hand, and Wall of Tears must remain on the battlefield.
+#[test]
+fn wall_of_tears_returns_blocked_creature_to_hand_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacking Bear", 1, 5).id();
+    let wall = scenario
+        .add_creature(P1, "Wall of Tears", 0, 4)
+        .from_oracle_text(
+            "Defender (This creature can’t attack.)\n\
+             Whenever this creature blocks a creature, \
+             return that creature to its owner’s hand at end of combat.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Bear should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(wall, attacker)],
+        })
+        .expect("Wall of Tears should be able to block");
+    runner.advance_until_stack_empty();
+
+    let scheduled_bounce = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(
+            &dt.ability.effect,
+            Effect::Bounce { .. }
+                | Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    ..
+                }
+        )
+    });
+    assert!(
+        scheduled_bounce,
+        "Wall of Tears must schedule an end-of-combat bounce when blocking; delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    // Advance through combat damage into End of Combat so the delayed trigger fires.
+    for _ in 0..40 {
+        if runner.state().objects[&attacker].zone == Zone::Hand {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&attacker).map(|o| o.zone),
+        Some(Zone::Hand),
+        "the attacking creature blocked by Wall of Tears must be returned to hand at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&wall).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "Wall of Tears must remain on the battlefield — it returns the creature it blocked, not itself"
+    );
+}
+
 /// CR 509.1h + CR 509.3d + CR 603.7c + CR 608.2c: Tangle Asp's
 /// "Whenever this creature blocks or becomes blocked by a creature, destroy that creature at end of combat."
 /// When Tangle Asp ATTACKS and is blocked by a creature, the delayed trigger created must target and destroy

@@ -7,6 +7,7 @@ import { useDisplayedLife } from "../../hooks/useDisplayedLife.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { damageCauseState } from "../animation/cardVfx/cardVfxSpecs.ts";
 
 interface LifeTotalProps {
   playerId: number;
@@ -49,7 +50,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
 
       // Same delay the overlay records the new total on, so the flash and the
       // number it is flashing about land together.
-      const impactDelay = lifeChangeImpactDelayMs(effect, activeStep.effects, playerId);
+      const impactDelay = lifeChangeImpactDelayMs(effect, activeStep.effects, playerId, damageCauseState());
       if (impactDelay > 0) {
         impactTimerRef.current = setTimeout(flashLifeChange, impactDelay * speedMultiplier);
       } else {

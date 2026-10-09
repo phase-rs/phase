@@ -118,6 +118,9 @@ expression: "&ir"
                     "target": {
                       "type": "Any"
                     },
+                    "recipient_scope": {
+                      "type": "Single"
+                    },
                     "scope": "CombatDamage"
                   },
                   "duration": "UntilEndOfTurn",

@@ -77,7 +77,9 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
     };
-    let count = resolve_quantity(state, &count_expr, ability.controller, ability.source_id).max(0);
+    // CR 107.3a + CR 601.2b: `count` may be the X announced while casting, which resolves from `ability.chosen_x`.
+    let count =
+        crate::game::quantity::resolve_quantity_with_targets(state, &count_expr, ability).max(0);
 
     // CR 109.4 + CR 111.2: The token's creator (and therefore controller) is
     // determined by the `owner` filter. Resolved once, before the creation
@@ -229,6 +231,10 @@ pub fn resolve(
                 display_source: source.display_source,
                 printed_ref: source.printed_ref.clone(),
                 token_image_ref: source.token_image_ref.clone(),
+                // Created copy-tokens derive their descriptor from their
+                // own base at injection (copy exceptions included), so the
+                // source's captured body is deliberately not carried here.
+                token_art: None,
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -287,6 +293,15 @@ pub(crate) fn drain_pending_copy_token_resolution(
         return;
     };
     drain_copy_token_resolution(state, pending, events);
+    // CR 608.2c + CR 117.3b: a continuation left directly beneath the consumed
+    // owner resumes now, before any player receives priority.
+    if matches!(
+        state.waiting_for,
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ) && state.active_ability_continuation().is_some()
+    {
+        super::drain_pending_continuation(state, events);
+    }
 }
 
 fn drain_copy_token_resolution(
@@ -499,6 +514,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -563,6 +579,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 display_source,
                 printed_ref: printed_ref.clone(),
                 token_image_ref: token_image_ref.clone(),
+                token_art: token_art.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -692,6 +709,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             display_source,
             printed_ref: printed_ref.clone(),
             token_image_ref: token_image_ref.clone(),
+            token_art: token_art.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
             tapped,

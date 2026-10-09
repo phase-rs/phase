@@ -76,6 +76,7 @@
   "visual": {
     "title": "Visual",
     "vfxQuality": "Qualidade dos VFX",
+    "cardAnimationStyle": "Animações das cartas",
     "keywordStrip": "Faixa de Palavras-chave",
     "showKeywords": "Mostrar palavras-chave nas cartas do campo de batalha",
     "opponentHoverPreview": "Pré-visualização ao Passar o Mouse sobre o Oponente",
@@ -122,7 +123,13 @@
       "full": "Completa",
       "reduced": "Reduzida",
       "minimal": "Mínima"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Novas",
+      "classic": "Clássicas"
+    },
+    "cardAnimationPreviewHintHover": "Passe o cursor para pré-visualizar",
+    "cardAnimationPreviewHintTap": "Toque para pré-visualizar"
   },
   "flexLayout": {
     "title": "Layout flexível",
@@ -498,14 +505,28 @@
     "modelPlaceholder": "ID do modelo (p. ex. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://o-teu-servidor/v1",
+    "jevEndpointPlaceholder": "Por predefinição, o teu servidor multijogador",
+    "jevEndpointHint": "O Jev é acedido através de um servidor multijogador do phase, que reencaminha cada pedido para a TypeSafe. A tua chave viaja apenas dentro desse pedido e nunca é guardada no servidor.",
     "apiKey": "Chave de API",
     "apiKeyPlaceholder": "Cola a tua chave de API",
     "apiKeyOptional": "Opcional para servidores locais",
+    "apiKeyMissing": "Introduz novamente a tua chave de API. As chaves não são guardadas após recarregar, e este fornecedor não é usado nos lugares de IA nem nos bots do draft até o fazeres.",
     "apiKeyStorage": "Mantida em memória apenas nesta sessão do navegador. As chaves de API nunca são escritas em disco e ficam excluídas da exportação de cópia de segurança e da sincronização na nuvem, por isso terás de a introduzir novamente após recarregar. Uma chave de API exige também um endpoint https://, a menos que o servidor esteja em localhost.",
     "apiKeyGet": "Obter uma chave",
     "test": "Testar ligação",
     "testing": "A testar…",
     "testOk": "Ligado.",
+    "defaultPrompt": {
+      "connected": "Ligado. Usá-lo como oponente predefinido?",
+      "ready": "Usar este fornecedor como oponente predefinido?",
+      "action": "Usar como predefinido",
+      "badge": "Oponente predefinido"
+    },
+    "defaultOpponent": {
+      "label": "Oponente predefinido",
+      "hint": "Os oponentes de IA usam este fornecedor, a menos que escolhas outro para um lugar ao preparar uma partida. Inclui o oponente das partidas de draft.",
+      "engine": "IA integrada do motor"
+    },
     "draftToggle": {
       "label": "Usar para os bots do draft",
       "hint": "Os lugares de bot de um draft escolhem com o modelo, usando o contexto de colecções do formato.",

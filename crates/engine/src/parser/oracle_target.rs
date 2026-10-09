@@ -11,10 +11,10 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
     CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
-    TypedFilter,
+    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1265,45 +1265,11 @@ pub fn parse_target_with_syntax<'a>(
         ))
         .parse(after_target)
         {
-            if let Ok((object_tail, _)) = alt((
-                tag::<_, _, OracleError<'_>>(", and/or "),
-                tag(", and "),
-                tag(", or "),
-                tag(", "),
-            ))
-            .parse(after_player)
-            {
-                if starts_with_type_word(object_tail) {
-                    let mut combined = player_filter.clone();
-                    let mut leg_text = &text[lower.len() - object_tail.len()..];
-                    let mut merged_any = false;
-                    loop {
-                        let (leg, rest) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
-                        if matches!(leg, TargetFilter::Any) {
-                            if merged_any {
-                                return (combined, leg_text, syntax);
-                            }
-                            break;
-                        }
-                        combined = merge_or_filters(combined, leg);
-                        merged_any = true;
-
-                        let rest_lower = rest.to_lowercase();
-                        let Ok((next_leg, _)) = alt((
-                            tag::<_, _, OracleError<'_>>(", and/or "),
-                            tag(", and "),
-                            tag(", or "),
-                            tag(", "),
-                        ))
-                        .parse(rest_lower.as_str()) else {
-                            return (combined, rest, syntax);
-                        };
-                        if !starts_with_type_word(next_leg) {
-                            return (combined, rest, syntax);
-                        }
-                        leg_text = &rest[rest_lower.len() - next_leg.len()..];
-                    }
-                }
+            let after_player_orig = &text[lower.len() - after_player.len()..];
+            let (combined, rest, _) =
+                parse_coordinated_target_tail(player_filter.clone(), after_player_orig, ctx);
+            if rest.len() != after_player_orig.len() {
+                return (combined, rest, syntax);
             }
             // CR 115.1 + CR 601.2c + CR 603.3d: a `who`-headed relative clause
             // narrows the PLAYER TARGET's legal domain, and every conjunct of it
@@ -1403,6 +1369,17 @@ pub fn parse_target_with_syntax<'a>(
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
         let (filter, rest) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        // CR 115.1: an object-headed coordinated list whose later leg is a
+        // player ("creature token, player, or planeswalker") is still one
+        // target slot. Extend only when a player leg actually appears, so
+        // player-free lists keep their ordinary type-phrase semantics.
+        let mut tentative_ctx = ctx.clone();
+        let (combined, extended_rest, saw_player) =
+            parse_coordinated_target_tail(filter.clone(), rest, &mut tentative_ctx);
+        if saw_player || continues_suffixed_type_list(&filter, rest) {
+            *ctx = tentative_ctx;
+            return (combined, extended_rest, syntax);
+        }
         let consumed_end = lower.len() - rest.len();
         return (
             scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
@@ -2256,6 +2233,20 @@ pub(super) fn parse_definite_parent_reference<'a>(
     if !tail.is_empty() && nom_target::parse_type_filter_word(tail).is_ok() {
         return None;
     }
+    // CR 601.2c + CR 608.2c: a controller qualifier belongs to the anaphor's
+    // noun phrase ("the creature you control", "the chosen creature an opponent
+    // controls"). It narrows which declared slot is named, so two same-typed
+    // slots that differ only by controller still resolve to exactly one, and
+    // the qualifier is consumed with the anaphor instead of being left behind.
+    let (rest, controller) = opt(preceded(
+        space1,
+        terminated(
+            nom_filter::parse_zone_controller,
+            not(satisfy(|c: char| c.is_alphanumeric())),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
     // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
     // UNIQUE match; zero or ≥2 matches fall through as `None`.
     let mut matched: Option<usize> = None;
@@ -2264,7 +2255,10 @@ pub(super) fn parse_definite_parent_reference<'a>(
     // reachable only from the demonstrative-route gate in `conditions.rs`.
     let anaphor_noun = AnaphorNoun::Type(anaphor_type);
     for (index, slot) in slots.iter().enumerate() {
-        if slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
+        let controller_matches = controller.as_ref().is_none_or(
+            |ctrl| matches!(slot, TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(ctrl)),
+        );
+        if controller_matches && slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
             if matched.is_some() {
                 return None;
             }
@@ -2489,6 +2483,42 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
                     tag("she "),
                     tag("you "),
                     tag("its "),
+                )),
+            ),
+        ),
+        // CR 201.2 + CR 603.4: a comma followed by an imperative effect verb
+        // ends the name — it is the boundary between an intervening-if
+        // condition and its effect ("if you don't control another permanent
+        // named The Majestic Duo, create a token …"). Legendary epithets are
+        // noun phrases and never open with one of these verbs; "counter" is
+        // left out because it does open one ("Gimli, Counter of Kills"). The
+        // trailing space keeps a name-final verb ("Untap, Upkeep, Draw") whole.
+        value(
+            (),
+            (
+                tag(", "),
+                alt((
+                    alt((
+                        tag("create "),
+                        tag("draw "),
+                        tag("put "),
+                        tag("return "),
+                        tag("exile "),
+                        tag("destroy "),
+                        tag("sacrifice "),
+                        tag("search "),
+                        tag("gain "),
+                    )),
+                    alt((
+                        tag("lose "),
+                        tag("look "),
+                        tag("reveal "),
+                        tag("mill "),
+                        tag("scry "),
+                        tag("copy "),
+                        tag("shuffle "),
+                        tag("add "),
+                    )),
                 )),
             ),
         ),
@@ -3444,6 +3474,21 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
+    }
+
+    // CR 208.4b: "with base power and toughness N/M" — a conjunctive base-P/T
+    // designation (Duskana, Bess, Andrios class). Lowers to two base-scope
+    // `PtComparison` props appended to the conjunctive property list. Kept apart
+    // from `parse_power_suffix`, whose contract is a single prop; that
+    // combinator cannot match this form (it stops at "and toughness"), so the
+    // ordering is for grouping only, not precedence.
+    {
+        let after_ws = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - after_ws.len();
+        if let Ok((rest, props)) = nom_filter::parse_with_base_pt_designation(after_ws) {
+            properties.extend(props);
+            pos += ws + (after_ws.len() - rest.len());
+        }
     }
 
     // Check "with power N or less/greater" suffix
@@ -4453,6 +4498,131 @@ fn starts_with_commander_word(text: &str) -> bool {
         .is_ok_and(|(after, _)| after.is_empty() || after.starts_with([' ', ',', '.', ';']))
 }
 
+/// CR 115.1: a player leg of a coordinated target noun list — "player(s)" or
+/// "opponent(s)" at a word boundary.
+fn parse_coordinated_player_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    terminated(
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                alt((tag("opponents"), tag("opponent"))),
+            ),
+            value(TargetFilter::Player, alt((tag("players"), tag("player")))),
+        )),
+        peek(not(satisfy(|c: char| c.is_alphanumeric() || c == '\''))),
+    )
+    .parse(input)
+}
+
+/// CR 115.1: Fold the remaining legs of a coordinated target noun list into
+/// `head`. Each leg after a `, and/or ` / `, and ` / `, or ` / `, ` separator
+/// is either a player leg or an object type phrase, in any position; all legs
+/// describe one target slot whose legal domain is their union. `rest` starts
+/// at the first separator. Returns the merged filter, the unconsumed text, and
+/// whether any player leg was merged.
+fn parse_coordinated_target_tail<'a>(
+    head: TargetFilter,
+    mut rest: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str, bool) {
+    let mut combined = head;
+    let mut saw_player = false;
+    loop {
+        let rest_lower = rest.to_lowercase();
+        let Ok((leg_lower, _)) = alt((
+            tag::<_, _, OracleError<'_>>(", and/or "),
+            tag(", and "),
+            tag(", or "),
+            tag(", "),
+        ))
+        .parse(rest_lower.as_str()) else {
+            return (combined, rest, saw_player);
+        };
+        let leg_text = &rest[rest_lower.len() - leg_lower.len()..];
+        if let Ok((after_leg, player_leg)) = parse_coordinated_player_leg(leg_lower) {
+            combined = merge_or_filters(combined, player_leg);
+            saw_player = true;
+            rest = &leg_text[leg_lower.len() - after_leg.len()..];
+        } else if starts_with_type_word(leg_lower) {
+            let (leg, after_leg) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
+            if matches!(leg, TargetFilter::Any) {
+                return (combined, rest, saw_player);
+            }
+            combined = merge_or_filters(combined, leg);
+            rest = after_leg;
+        } else {
+            return (combined, rest, saw_player);
+        }
+    }
+}
+
+/// CR 308.2 + CR 205.3m: In "Cleric, Rogue, Warrior, or Wizard creature card" the
+/// trailing core-type noun modifies every subtype in the list. Kindred cards carry
+/// creature types too, so a bare subtype leg would also match a Kindred sorcery.
+/// When the final leg of a union is `<core type> + <subtype>` (the noun bound to a
+/// subtype), every earlier leg that is a bare subtype gains that core type.
+/// Unions whose last leg has no subtype ("Spirit, creature with disturb, or
+/// enchantment") name independent types and are left unchanged.
+fn distribute_trailing_core_type(filter: TargetFilter) -> TargetFilter {
+    let TargetFilter::Or { mut filters } = filter else {
+        return filter;
+    };
+    let shared = match filters.last() {
+        Some(TargetFilter::Typed(tf))
+            if tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(_))) =>
+        {
+            let mut core = tf.type_filters.iter().filter(|t| {
+                !matches!(
+                    t,
+                    TypeFilter::Subtype(_)
+                        | TypeFilter::Non(_)
+                        | TypeFilter::AnyOf(_)
+                        | TypeFilter::Any
+                        | TypeFilter::Card
+                )
+            });
+            match (core.next(), core.next()) {
+                (Some(core_type), None) => Some(core_type.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(core_type) = shared {
+        for leg in &mut filters {
+            if let TargetFilter::Typed(tf) = leg {
+                if !tf.type_filters.is_empty()
+                    && tf
+                        .type_filters
+                        .iter()
+                        .all(|t| matches!(t, TypeFilter::Subtype(_)))
+                {
+                    tf.type_filters.insert(0, core_type.clone());
+                }
+            }
+        }
+    }
+    TargetFilter::Or { filters }
+}
+
+/// CR 115.1 + CR 205.2a: True when a comma-opened type list ("Spirit, creature
+/// with disturb, or enchantment") stopped after a leg that carried its own
+/// suffix ("with disturb"): the type-list recursion consumes separators before
+/// per-leg suffixes, so the final Oxford-comma leg is left in `rest`. The list
+/// is already an `Or`, and the leftover starts with the final-leg connector
+/// followed by a type word, so it is one more leg of the same target slot. A
+/// bare ", and " is excluded: it can equally begin a new clause.
+fn continues_suffixed_type_list(filter: &TargetFilter, rest: &str) -> bool {
+    let rest_lower = rest.to_lowercase();
+    matches!(filter, TargetFilter::Or { .. })
+        && alt((tag::<_, _, OracleError<'_>>(", or "), tag(", and/or ")))
+            .parse(rest_lower.as_str())
+            .is_ok_and(|(leg, _)| starts_with_type_word(leg))
+}
+
 /// Guard: does text start with something `parse_type_phrase_folding` would recognize?
 /// Used to prevent comma/and/or recursion on non-type text.
 pub(crate) fn starts_with_type_word(text: &str) -> bool {
@@ -4821,6 +4991,7 @@ fn stack_spell_filter(mut typed: TypedFilter) -> TargetFilter {
 fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) -> TargetFilter {
     let combined = distribute_controller_to_or(combined);
     let combined = distribute_core_type_to_or(combined);
+    let combined = distribute_trailing_core_type(combined);
     let combined = distribute_neg_type_filters_to_or(combined);
     let combined = distribute_shared_properties(combined, shared_props);
     distribute_properties_to_or(combined)
@@ -4835,6 +5006,10 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
 /// on a leg pinned to a noncreature core type. No printed card routes a P/T prop
 /// through this path today — the gate exists so the two distributors cannot
 /// diverge, not because it fixes a card.
+///
+/// Pushes go through `push_distributable_props`, which also owns the shared
+/// dedupe contract (pre-distribution `same_kind` witness, so a multi-prop group
+/// lands whole).
 ///
 /// No relocation sweep here: this function receives `shared_props` from its
 /// caller and never harvests them off a leg, so there is no origin leg to
@@ -4855,16 +5030,7 @@ pub(super) fn distribute_shared_properties(
 ) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
-            for prop in shared_props {
-                if prop_distributes_to_leg(prop, &typed)
-                    && !typed
-                        .properties
-                        .iter()
-                        .any(|existing| prop.same_kind(existing))
-                {
-                    typed.properties.push(prop.clone());
-                }
-            }
+            push_distributable_props(&mut typed, shared_props);
             TargetFilter::Typed(typed)
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
@@ -4943,7 +5109,7 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
             | FilterProp::Attacking { defender: None }
             | FilterProp::Blocking
-            | FilterProp::Unblocked
+            | FilterProp::BlockStatus { .. }
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
@@ -5058,7 +5224,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
@@ -5456,6 +5622,38 @@ fn prop_distributes_to_leg(prop: &FilterProp, typed: &TypedFilter) -> bool {
     !prop_reads_creature_pt(prop) || leg_admits_creature_pt(&typed.type_filters)
 }
 
+/// Push each prop of a distributed suffix group onto `typed`. Single
+/// receiving-leg authority shared by `distribute_properties_to_or` and
+/// `distribute_shared_properties`, so the two distributors cannot diverge.
+///
+/// A prop is pushed when the CR 208.3 gate `prop_distributes_to_leg` accepts
+/// the leg AND the leg did not ALREADY carry a prop of the same kind
+/// (`FilterProp::same_kind`) before this call.
+///
+/// The dedupe witness is the leg's PRE-distribution properties, never the props
+/// this call pushes: a postnominal "with …" suffix is one restrictive clause, so
+/// the group harvested from it lands on a leg whole. CR 208.1 + CR 208.4b:
+/// "with base power and toughness N/M" names both numbers and lowers to two
+/// same-variant `PtComparison` props (base power = N, base toughness = M);
+/// deduping the group against its own pushes would land only the power half and
+/// let a base 2/3 creature satisfy "2/2". A leg that parsed its own restriction
+/// of a kind still receives none of that kind from another leg's suffix (matrix
+/// row 7), so a `PtComparison` group lands all-or-nothing per leg.
+fn push_distributable_props(typed: &mut TypedFilter, props: &[FilterProp]) {
+    let additions: Vec<FilterProp> = props
+        .iter()
+        .filter(|prop| {
+            prop_distributes_to_leg(prop, typed)
+                && !typed
+                    .properties
+                    .iter()
+                    .any(|existing| prop.same_kind(existing))
+        })
+        .cloned()
+        .collect();
+    typed.properties.extend(additions);
+}
+
 /// Collect the P/T-family props that depth-1 `Typed` legs the CR 208.3 gate
 /// ACCEPTS actually carry. This is the rehoming witness set consumed by
 /// `strip_misplaced_pt_props_from_or_legs`.
@@ -5517,8 +5715,9 @@ fn pt_hosting_leg_props(filters: &[TargetFilter]) -> Vec<FilterProp> {
 ///    WotC writes `creature` mid-list.
 ///
 /// 2. WHY THE WITNESS IS `==` AND NOT `same_kind`. `FilterProp::same_kind` is
-///    discriminant-only, so the push loop's dedupe suppresses a *different
-///    payload* prop of the same variant. For
+///    discriminant-only, so the distribution dedupe (`push_distributable_props`)
+///    suppresses a harvested prop when the receiving leg ALREADY carried a
+///    *different-payload* prop of the same variant. For
 ///    `Or[Creature{Pt(Toughness,GE,2)}, Enchantment{Pt(Power,GE,4)}]` the
 ///    harvested `Pt(Power,GE,4)` is never pushed onto the creature leg. A sweep
 ///    conditioned merely on "some gate-accepted leg exists" would then DELETE a
@@ -5569,8 +5768,9 @@ fn strip_misplaced_pt_props_from_or_legs(filters: &mut [TargetFilter]) {
 }
 
 /// Distribute trailing filter properties (Cmc, PtComparison, etc.)
-/// from the last `Typed` element in an `Or` filter to all preceding `Typed`
-/// elements that lack a property of the same kind.
+/// from the last `Typed` element in an `Or` filter to every `Typed` element
+/// that did not already carry a property of the same kind before this
+/// distribution (see `push_distributable_props`).
 /// Handles "artifacts and creatures with mana value 2 or less" where only the
 /// final type parses the "with mana value N or less/greater" suffix.
 ///
@@ -5639,15 +5839,8 @@ pub(crate) fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter 
     if !trailing_props.is_empty() {
         for f in &mut filters {
             if let TargetFilter::Typed(ref mut typed) = f {
-                for prop in &trailing_props {
-                    // CR 208.3: never push a power/toughness restriction onto a
-                    // leg pinned to a noncreature core type.
-                    if prop_distributes_to_leg(prop, typed)
-                        && !typed.properties.iter().any(|p| prop.same_kind(p))
-                    {
-                        typed.properties.push(prop.clone());
-                    }
-                }
+                // CR 208.3 gate + pre-distribution same_kind dedupe: see push_distributable_props.
+                push_distributable_props(typed, &trailing_props);
             }
         }
     }
@@ -6107,7 +6300,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
     if let Ok((rest, prop)) = nom_filter::parse_property_filter(text) {
         if matches!(
             prop,
-            FilterProp::Unblocked
+            FilterProp::BlockStatus { .. }
                 | FilterProp::Attacking { defender: None }
                 | FilterProp::Blocking
                 | FilterProp::Tapped
@@ -7114,6 +7307,10 @@ fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
             | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. }
             | QuantityRef::CountersOn { scope, .. } => scope,
@@ -7599,6 +7796,25 @@ fn parse_counters_put_this_turn_clause(input: &str) -> Option<(FilterProp, usize
     None
 }
 
+/// A keyword-list separator followed by something other than a keyword, where
+/// that something opens another leg of the enclosing list — a type word ("creature
+/// with disturb, or enchantment") or a determiner-led leg ("each creature without
+/// flying and each planeswalker", "target creature with flying and all Equipment
+/// attached to that creature") — belongs to the enclosing list and stays
+/// unconsumed.
+fn separator_continues_enclosing_list(after_separator: &str) -> bool {
+    parse_leading_keyword_match(after_separator).is_none()
+        && (starts_with_type_word(after_separator)
+            || alt((
+                tag::<_, _, OracleError<'_>>("each "),
+                tag("all "),
+                tag("target "),
+                tag("up to "),
+            ))
+            .parse(after_separator)
+            .is_ok())
+}
+
 struct KeywordSuffix {
     properties: Vec<FilterProp>,
     disjunctive: bool,
@@ -7629,6 +7845,12 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                // A separator followed by a type word rather than a keyword
+                // belongs to the enclosing type list ("creature with disturb,
+                // or enchantment") and stays unconsumed for the caller.
+                if separator_continues_enclosing_list(rest) {
+                    break;
+                }
                 if matches!(*sep, ", or " | " or ") {
                     disjunctive = true;
                 }
@@ -7685,6 +7907,9 @@ pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                if separator_continues_enclosing_list(rest) {
+                    break;
+                }
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -8530,11 +8755,17 @@ pub(crate) fn parse_attachment_kind_disjunction(
 /// Aura/Equipment has left, CR 608.2h + CR 113.7a). The adjective comes from
 /// `parse_attachment_kind_disjunction`; its compound "enchanted or equipped"
 /// forms are refused, leaving the suffix unconsumed. The host noun is the
-/// closed singular set of `parse_attached_host_noun`.
+/// closed singular set of `parse_attached_host_noun`. CR 201.5a: a granted
+/// body's own card name excludes the granting object (`FilterProp::DistinctFrom`).
 fn parse_other_than_exclusion(input: &str) -> OracleResult<'_, FilterProp> {
     preceded(
         tag("other than "),
         alt((
+            map(nom_target::parse_granting_object_ref, |reference| {
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                }
+            }),
             map(nom_target::parse_self_reference, |_| FilterProp::Another),
             map_opt(
                 (
@@ -9494,7 +9725,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -10236,9 +10467,60 @@ pub(crate) fn parse_zone_suffix(
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl)) = parse_zone_suffix_nom(&lower).ok()?;
+    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower).ok()?;
     let consumed = lower.len() - rest.len();
     Some((props, ctrl, leading_ws + consumed))
+}
+
+/// Recover a single graveyard source using the shared zone grammar, without
+/// changing the public zone-suffix adapter's controller/consumption contract.
+pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let lower = trimmed.to_lowercase();
+    peek(tag::<_, _, OracleError<'_>>("from "))
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower).ok()?;
+    if !props.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )
+    }) || props
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::InAnyZone { .. }))
+    {
+        return None;
+    }
+    match qualifier {
+        ZoneQual::OtherPoss | ZoneQual::TargetPlayer => return None,
+        ZoneQual::Plain => {
+            // This adapter admits only the singular unowned object form. The
+            // shared grammar still owns adjective/plural/selection spellings.
+            peek((
+                tag::<_, _, OracleError<'_>>("from "),
+                alt((tag("a "), tag("the "), tag(""))),
+                tag("graveyard"),
+                peek_zone_boundary,
+            ))
+            .parse(lower.as_str())
+            .ok()?;
+        }
+        ZoneQual::You | ZoneQual::ChosenPlayer => {
+            // CR 108.3 + CR 108.4a + CR 109.4 + CR 109.5 + CR 400.1 + CR 400.3:
+            // a player's graveyard contains their owned cards; You remains the
+            // declaring ability's symbolic authority, not a card controller.
+            props.push(FilterProp::Owned {
+                controller: controller?,
+            });
+        }
+        // CR 108.3 + CR 404.1: retain the shared grammar's opponent/iteration owner.
+        ZoneQual::Opponent | ZoneQual::Their => {}
+    }
+    Some((props, leading_ws + lower.len() - rest.len()))
 }
 
 /// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
@@ -10259,7 +10541,8 @@ pub(crate) fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
 
 fn parse_zone_suffix_nom(
     i: &str,
-) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>)> {
+) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
+{
     let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
     let (i, prep) = alt((
         value(ZonePrep::From, tag("from ")),
@@ -10408,7 +10691,7 @@ fn parse_zone_suffix_nom(
         }
     };
 
-    Ok((i, out))
+    Ok((i, (out.0, out.1, qual)))
 }
 
 fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQual> {
@@ -10506,6 +10789,7 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
 
@@ -10535,6 +10819,21 @@ mod tests {
             "ebondeath, dracolich".len()
         );
         assert_eq!(named_filter_name_end("foo with flying"), "foo".len());
+        // An imperative effect verb after a comma ends the name (the
+        // intervening-if boundary) — but an epithet that merely starts with a
+        // verb-shaped word, or a name-final verb, stays whole.
+        assert_eq!(
+            named_filter_name_end("the majestic duo, create a token that's a copy of it"),
+            "the majestic duo".len()
+        );
+        assert_eq!(
+            named_filter_name_end("gimli, counter of kills you control"),
+            "gimli, counter of kills".len()
+        );
+        assert_eq!(
+            named_filter_name_end("untap, upkeep, draw"),
+            "untap, upkeep, draw".len()
+        );
 
         let (filter, rest) =
             parse_type_phrase_folding("permanent named bonder's ornament draws a card");
@@ -12201,6 +12500,65 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_target_player_leg_in_middle_is_kept() {
+        let (filter, rest) = parse_target("target creature token, player, or planeswalker.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert_eq!(filters[1], TargetFilter::Player);
+        assert!(matches!(&filters[2], TargetFilter::Typed(t)
+            if t.type_filters == vec![TypeFilter::Planeswalker]));
+    }
+
+    #[test]
+    fn coordinated_target_opponent_leg_last_is_kept() {
+        let (filter, rest) = parse_target("target artifact, creature, planeswalker, or opponent.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 4);
+        assert_eq!(
+            filters[3],
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
+    fn coordinated_target_plural_and_or_player_leg_is_kept() {
+        let (filter, rest) = parse_target("target creatures, planeswalkers, and/or players.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert_eq!(filters[2], TargetFilter::Player);
+    }
+
+    #[test]
+    fn coordinated_target_without_player_leg_keeps_controller_qualifier() {
+        let (filter, rest) = parse_target("target artifact, creature, or land you control.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert!(
+            filters
+                .iter()
+                .all(|leg| matches!(leg, TargetFilter::Typed(t)
+                if t.controller == Some(ControllerRef::You))),
+            "every leg keeps the trailing controller qualifier: {filters:?}"
+        );
+    }
+
+    #[test]
     fn coordinated_player_and_object_target_preserves_plain_player_behavior() {
         let (filter, rest) = parse_target("target player, creature you control");
 
@@ -13134,6 +13492,41 @@ mod tests {
         );
     }
 
+    /// CR 208.4b: the type-phrase suffix arm folds "with base power and
+    /// toughness N/M" into two base-scope exact props alongside the subject's
+    /// other qualifiers, under any prefix, leaving the predicate unconsumed.
+    #[test]
+    fn type_phrase_base_pt_designation_suffix() {
+        let base_eq = |stat, value| FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        };
+
+        // Andrios, Roaming Explorer subject.
+        let (filter, rest) = parse_type_phrase_folding(
+            "tapped creatures you control with base power and toughness 4/3 have trample",
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Tapped));
+        assert!(tf.properties.contains(&base_eq(PtStat::Power, 4)));
+        assert!(tf.properties.contains(&base_eq(PtStat::Toughness, 3)));
+        assert_eq!(rest.trim(), "have trample");
+
+        // Bess, Soul Nourisher subject.
+        let (filter, rest) = parse_type_phrase_folding(
+            "other creatures you control with base power and toughness 1/1 enter",
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
+        assert!(tf.properties.contains(&base_eq(PtStat::Power, 1)));
+        assert!(tf.properties.contains(&base_eq(PtStat::Toughness, 1)));
+        assert_eq!(rest.trim(), "enter");
+    }
+
     #[test]
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
@@ -14020,6 +14413,53 @@ mod tests {
         ];
         assert_eq!(
             parse_definite_parent_reference("the creature and it fights", &two_creatures),
+            None
+        );
+    }
+
+    #[test]
+    fn definite_reference_controller_qualifier_disambiguates_and_is_consumed() {
+        // CR 601.2c + CR 608.2c: two creature slots that differ only by
+        // controller tie on the bare noun (see the ambiguous test above); the
+        // printed controller qualifier names exactly one and is consumed with
+        // the anaphor.
+        let you_vs_opponent = vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }),
+        ];
+        for (input, index, rest) in [
+            ("the creature you control", 0, ""),
+            (
+                "the chosen creature you control if it fights",
+                0,
+                " if it fights",
+            ),
+            ("the creature an opponent controls", 1, ""),
+            ("the creature you don't control.", 1, "."),
+        ] {
+            assert_eq!(
+                parse_definite_parent_reference(input, &you_vs_opponent),
+                Some((TargetFilter::ParentTargetSlot { index }, rest)),
+                "{input}"
+            );
+        }
+        // A qualifier that names no declared slot never guesses one.
+        let you_only = vec![you_vs_opponent[0].clone()];
+        assert_eq!(
+            parse_definite_parent_reference("the creature an opponent controls", &you_only),
+            None
+        );
+        // A longer word sharing the qualifier's prefix is not the qualifier.
+        assert_eq!(
+            parse_definite_parent_reference("the creature you controlled", &you_vs_opponent),
             None
         );
     }
@@ -17307,10 +17747,16 @@ mod tests {
         );
     }
 
-    /// Matrix row 7 — `FilterProp::same_kind` is discriminant-only, so a
-    /// different-payload sibling prop suppresses the push. Without a per-prop
-    /// `==` witness the sweep would DELETE a printed restriction that was never
-    /// rehomed. No printed card produces this shape — structural guard. The
+    /// Matrix row 7 — the creature leg already carries its own leg-local P/T
+    /// restriction (a different stat), so `push_distributable_props`'s
+    /// `same_kind` dedupe, witnessed against the leg's PRE-distribution props,
+    /// suppresses the harvested prop. This is the contract the base-P/T group
+    /// rule deliberately keeps: the witness excludes only the group's own
+    /// pushes, never what a leg parsed itself. Stat-aware or payload-equality
+    /// dedupe keys were rejected because they would conjoin another leg's power
+    /// restriction onto this creature leg (see the base-P/T group rows). Without
+    /// a per-prop `==` witness the sweep would DELETE a printed restriction that
+    /// was never rehomed. No printed card produces this shape — structural guard. The
     /// retained AST is deliberately imperfect-but-faithful (a vacuous P/T
     /// restriction on an enchantment leg) rather than lossy. Rejected
     /// alternative: making `same_kind` payload-sensitive — it is the dedupe
@@ -17350,7 +17796,7 @@ mod tests {
         assert_eq!(
             typed_or_leg(&filters, 0).properties,
             vec![toughness_ge_2],
-            "creature leg must be unchanged — same_kind suppressed the push"
+            "creature leg must be unchanged — its own pre-existing PtComparison suppressed the push"
         );
     }
 
@@ -17826,6 +18272,236 @@ mod tests {
         );
     }
 
+    /// `base power = N` / `base toughness = M` props, the exact lowering of
+    /// "with base power and toughness N/M" (CR 208.4b).
+    fn base_eq(stat: PtStat, value: i32) -> FilterProp {
+        FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        }
+    }
+
+    /// Matrix row 15 — CR 208.4b: "with base power and toughness 2/2" is one
+    /// postnominal clause lowering to TWO same-variant `PtComparison` props, so
+    /// the trailing distributor must land the whole group on every eligible
+    /// creature leg. No printed card — latent generic grammar (PR #9653 review).
+    /// Reverting `push_distributable_props` to dedupe against its own pushes
+    /// lands only base power on leg 0, so the base-toughness assertion fails and
+    /// a base 2/3 creature would satisfy "2/2".
+    #[test]
+    fn base_pt_designation_distributes_whole_to_every_creature_or_leg() {
+        let (f, rest) =
+            parse_target("target creature or artifact creature with base power and toughness 2/2");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+
+        let creature = typed_or_leg(filters, 0);
+        assert!(has_type(creature, TypeFilter::Creature), "{creature:?}");
+        let artifact_creature = typed_or_leg(filters, 1);
+        assert!(
+            has_type(artifact_creature, TypeFilter::Artifact)
+                && has_type(artifact_creature, TypeFilter::Creature),
+            "{artifact_creature:?}"
+        );
+
+        // Reach guards: the suffix arm fired on the origin leg, and the
+        // distributor ran on the earlier creature leg.
+        for stat in [PtStat::Power, PtStat::Toughness] {
+            assert!(
+                has_prop(artifact_creature, base_eq(stat, 2)),
+                "origin leg must carry the whole designation: {artifact_creature:?}"
+            );
+        }
+        assert!(
+            has_prop(creature, base_eq(PtStat::Power, 2)),
+            "distribution must reach the creature leg: {creature:?}"
+        );
+        assert!(
+            has_prop(creature, base_eq(PtStat::Toughness, 2)),
+            "whole group on every eligible creature leg — base toughness must \
+             not be self-suppressed by the group's own base-power push: {creature:?}"
+        );
+
+        // No duplication across the per-merge distributor re-calls.
+        for leg in [creature, artifact_creature] {
+            let pt_count = leg
+                .properties
+                .iter()
+                .filter(|p| matches!(p, FilterProp::PtComparison { .. }))
+                .count();
+            assert_eq!(pt_count, 2, "exactly the two base props: {leg:?}");
+        }
+    }
+
+    /// Matrix row 16 — the whole-group rule composed with the CR 208.3
+    /// relocation sweep. The designation is harvested off the planeswalker
+    /// origin leg, lands whole on the creature leg, and the sweep then strips
+    /// BOTH props off the planeswalker leg (each has an exactly-equal witness).
+    /// No printed card — latent generic grammar (PR #9653 review). Reverting
+    /// leaves the creature leg with base power only, so base toughness has no
+    /// witness and the planeswalker leg keeps a vacuous base-toughness
+    /// restriction — the `!has_pt_prop` assertion fails.
+    #[test]
+    fn base_pt_designation_relocates_whole_off_noncreature_origin_leg() {
+        let (f, rest) =
+            parse_target("target creature or planeswalker with base power and toughness 2/2");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+
+        let creature = typed_or_leg(filters, 0);
+        assert!(has_type(creature, TypeFilter::Creature), "{creature:?}");
+        let planeswalker = typed_or_leg(filters, 1);
+        assert!(
+            has_type(planeswalker, TypeFilter::Planeswalker),
+            "{planeswalker:?}"
+        );
+
+        // Paired positive: the designation reached the creature disjunct whole.
+        for stat in [PtStat::Power, PtStat::Toughness] {
+            assert!(
+                has_prop(creature, base_eq(stat, 2)),
+                "whole group on every eligible creature leg: {creature:?}"
+            );
+        }
+        assert!(
+            !has_pt_prop(planeswalker),
+            "CR 208.3: the planeswalker leg must keep no P/T restriction — a \
+             vacuous base-toughness prop would make it untargetable: {planeswalker:?}"
+        );
+    }
+
+    /// Matrix row 17 — a multi-prop group never lands PARTIALLY on a leg that
+    /// parsed its own P/T restriction (the row-7 contract, kept for groups).
+    /// Rejects the payload-equality and stat-aware dedupe keys: either would
+    /// push the base props onto leg 0. CR 208.4b. No printed card — latent
+    /// generic grammar (PR #9653 review). Reverting to the in-loop dedupe leaves
+    /// the bare creature leg 1 with base power only, failing its base-toughness
+    /// assertion.
+    #[test]
+    fn base_pt_group_never_lands_partially_on_leg_with_own_pt_restriction() {
+        let power_ge_3 = FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 3 },
+        };
+        let designation = vec![base_eq(PtStat::Power, 2), base_eq(PtStat::Toughness, 2)];
+        let origin = TypedFilter {
+            type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+            properties: designation.clone(),
+            ..Default::default()
+        };
+        let input = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![power_ge_3.clone()],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(origin.clone()),
+            ],
+        };
+        let TargetFilter::Or { filters } = distribute_properties_to_or(input) else {
+            panic!("expected Or");
+        };
+
+        let bare = typed_or_leg(&filters, 1);
+        assert!(
+            has_prop(bare, base_eq(PtStat::Power, 2)),
+            "the group was distributed in this call: {bare:?}"
+        );
+        assert!(
+            has_prop(bare, base_eq(PtStat::Toughness, 2)),
+            "whole group on every eligible creature leg: {bare:?}"
+        );
+        assert_eq!(
+            typed_or_leg(&filters, 0).properties,
+            vec![power_ge_3],
+            "never partially on a leg with its own P/T restriction"
+        );
+        assert_eq!(
+            typed_or_leg(&filters, 2),
+            &origin,
+            "origin leg is unchanged"
+        );
+    }
+
+    /// Matrix row 18 — the left-to-right `distribute_shared_properties` path
+    /// implements the same whole-group contract through the same helper, and
+    /// keeps the CR 208.3 gate and the leg-local collision rule. No printed
+    /// card — latent generic grammar (PR #9653 review). Reverting to the
+    /// in-loop dedupe leaves legs 0 and 2 with base power only, failing the
+    /// base-toughness assertions.
+    #[test]
+    fn shared_property_distribution_pushes_whole_base_pt_group() {
+        let toughness_ge_2 = FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 2 },
+        };
+        let input = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![toughness_ge_2.clone()],
+                    ..Default::default()
+                }),
+            ],
+        };
+        let TargetFilter::Or { filters } = distribute_shared_properties(
+            input,
+            &[base_eq(PtStat::Power, 2), base_eq(PtStat::Toughness, 2)],
+        ) else {
+            panic!("expected Or");
+        };
+
+        for idx in [0, 2] {
+            let leg = typed_or_leg(&filters, idx);
+            assert!(
+                has_prop(leg, base_eq(PtStat::Power, 2)),
+                "leg {idx} must receive the shared group: {leg:?}"
+            );
+            assert!(
+                has_prop(leg, base_eq(PtStat::Toughness, 2)),
+                "whole group on every eligible creature leg (leg {idx}): {leg:?}"
+            );
+        }
+        assert!(
+            !has_pt_prop(typed_or_leg(&filters, 1)),
+            "CR 208.3: the artifact leg must not receive the P/T group"
+        );
+        assert_eq!(
+            typed_or_leg(&filters, 3).properties,
+            vec![toughness_ge_2],
+            "never partially on a leg with its own P/T restriction"
+        );
+    }
+
     #[test]
     fn comma_or_without_keyword_suffix_stays_on_final_disjunct_only() {
         let (f, rest) = parse_target("target artifact or creature without flying");
@@ -18115,7 +18791,15 @@ mod tests {
     #[test]
     fn combat_status_prefix_unblocked() {
         let result = parse_combat_status_prefix("unblocked attacking creatures");
-        assert_eq!(result, Some((FilterProp::Unblocked, 10)));
+        assert_eq!(
+            result,
+            Some((
+                FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Unblocked
+                },
+                10
+            ))
+        );
         // Second call on remainder should get Attacking
         let result2 = parse_combat_status_prefix("attacking creatures");
         assert_eq!(
@@ -18125,12 +18809,52 @@ mod tests {
     }
 
     #[test]
+    fn combat_status_prefix_blocked() {
+        // CR 509.1h: "blocked" as a prefix adjective consumes "blocked ".
+        assert_eq!(
+            parse_combat_status_prefix("blocked creature"),
+            Some((
+                FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Blocked
+                },
+                8
+            ))
+        );
+        // Postfix forms are handled elsewhere and must not be consumed.
+        assert_eq!(parse_combat_status_prefix("blocked by a creature"), None);
+        assert_eq!(parse_combat_status_prefix("blocked this turn"), None);
+    }
+
+    #[test]
+    fn blocking_or_blocked_creature_parses_as_disjunction() {
+        let (filter, remainder) = parse_type_phrase_folding("blocking or blocked creature");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        let has = |prop: FilterProp| {
+            filters.iter().any(|f| {
+                matches!(f, TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&prop))
+            })
+        };
+        assert!(has(FilterProp::Blocking));
+        assert!(has(FilterProp::BlockStatus {
+            status: AttackerBlockStatus::Blocked
+        }));
+    }
+
+    #[test]
     fn parse_type_phrase_unblocked_attacking_creatures_you_control() {
         let (filter, remainder) =
             parse_type_phrase_folding("unblocked attacking creatures you control");
         assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
         if let TargetFilter::Typed(tf) = &filter {
-            assert!(tf.properties.contains(&FilterProp::Unblocked));
+            assert!(tf.properties.contains(&FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked
+            }));
             assert!(tf
                 .properties
                 .contains(&FilterProp::Attacking { defender: None }));
@@ -21628,6 +22352,112 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
     }
 
+    /// CR 115.1: a comma-opened type list whose middle leg carries a `with`
+    /// suffix keeps its final Oxford-comma leg in the same target slot.
+    #[test]
+    fn target_list_keeps_final_leg_after_suffixed_middle_leg() {
+        for text in [
+            "target Spirit, creature with disturb, or enchantment",
+            "target artifact, creature with flying, or land",
+        ] {
+            let (f, rest) = parse_target(text);
+            assert!(rest.trim().is_empty(), "{text}: leftover {rest:?}");
+            let TargetFilter::Or { filters } = f else {
+                panic!("{text}: expected Or, got {f:?}");
+            };
+            assert_eq!(filters.len(), 3, "{text}: {filters:?}");
+        }
+    }
+
+    /// CR 308.2: the shared trailing core-type noun of a subtype list binds to
+    /// every subtype leg, for 2-leg and 3+-leg lists; a list whose last leg has no
+    /// subtype keeps independent legs.
+    #[test]
+    fn subtype_list_distributes_shared_core_type_noun() {
+        for (text, legs) in [
+            ("target Warrior or Wizard creature card", 2),
+            ("target Cleric, Rogue, Warrior, or Wizard creature card", 4),
+            (
+                "target Cleric, Rogue, Warrior, or Wizard creature card from your graveyard",
+                4,
+            ),
+        ] {
+            let (f, rest) = parse_target(text);
+            assert!(rest.trim().is_empty(), "{text}: leftover {rest:?}");
+            let TargetFilter::Or { filters } = f else {
+                panic!("{text}: expected Or, got {f:?}");
+            };
+            assert_eq!(filters.len(), legs, "{text}");
+            for leg in &filters {
+                assert!(
+                    matches!(leg, TargetFilter::Typed(t)
+                        if t.type_filters.contains(&TypeFilter::Creature)),
+                    "{text}: leg lacks Creature: {leg:?}"
+                );
+            }
+        }
+        // A leg that names its own card type keeps it and does not gain the noun.
+        let (f, _) = parse_target("target artifact, Cleric, or Wizard creature card");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or, got {f:?}");
+        };
+        assert!(
+            matches!(&filters[0], TargetFilter::Typed(t)
+                if t.type_filters.contains(&TypeFilter::Artifact)
+                    && !t.type_filters.contains(&TypeFilter::Creature)),
+            "artifact leg must not gain Creature: {:?}",
+            filters[0]
+        );
+        let (f, _) = parse_target("target Spirit, creature with disturb, or enchantment");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or, got {f:?}");
+        };
+        assert!(
+            matches!(&filters[0], TargetFilter::Typed(t) if !t.type_filters.contains(&TypeFilter::Creature)),
+            "independent Spirit leg must stay creature-free: {:?}",
+            filters[0]
+        );
+    }
+
+    /// CR 608.2c: a keyword suffix stops before a separator that opens another
+    /// determiner-led leg of the enclosing phrase ("target creature with flying
+    /// and all Equipment attached to that creature"), so the leg is not swallowed.
+    /// The paired positive: a separator followed by another keyword still joins
+    /// the keyword list.
+    #[test]
+    fn keyword_suffix_leaves_determiner_led_leg_unconsumed() {
+        for leg in [
+            " and all Equipment attached to that creature",
+            " and each planeswalker",
+            " and target artifact",
+            " and up to one target land",
+        ] {
+            let text = format!("target creature with flying{leg}");
+            let (filter, rest) = parse_target(&text);
+            assert!(
+                matches!(&filter, TargetFilter::Typed(t)
+                    if t.properties.iter().any(|p| matches!(p, FilterProp::WithKeyword { .. }))),
+                "{text}: flying suffix kept: {filter:?}"
+            );
+            assert_eq!(rest, leg, "{text}: the determiner-led leg stays unconsumed");
+        }
+        let (filter, rest) = parse_target("target creature with flying and vigilance");
+        assert_eq!(rest, "", "a second keyword still joins the list");
+        assert!(
+            matches!(&filter, TargetFilter::Typed(t)
+                if t.properties.iter().filter(|p| matches!(p, FilterProp::WithKeyword { .. })).count() == 2),
+            "{filter:?}"
+        );
+    }
+
+    /// A non-list target followed by an unrelated ", or" clause stays untouched.
+    #[test]
+    fn target_single_type_leaves_trailing_or_clause() {
+        let (f, rest) = parse_target("target creature, or draw a card");
+        assert!(matches!(f, TargetFilter::Typed(_)), "{f:?}");
+        assert_eq!(rest, ", or draw a card");
+    }
+
     /// Regression: a single article-led conjunction with no connector still
     /// parses to a single Typed filter (not an Or).
     #[test]
@@ -22103,5 +22933,115 @@ mod tests {
             ChosenColorQualifierScope::Unbound,
             "a freshly defaulted context leaves the gate closed"
         );
+    }
+}
+
+#[cfg(test)]
+mod exile_graveyard_source_shape {
+    use super::*;
+
+    #[test]
+    fn shape_shared_adapter_preserves_public_zone_contract() {
+        for (phrase, owner) in [
+            ("from your graveyard", Some(ControllerRef::You)),
+            (
+                "from the chosen player's graveyard",
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
+        ] {
+            let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(
+                public,
+                vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }]
+            );
+            assert_eq!(ctrl, owner);
+            assert_eq!(count, phrase.len());
+            let (recovered, used) = parse_exile_graveyard_source(phrase).unwrap();
+            assert_eq!(used, count);
+            assert_eq!(
+                recovered,
+                vec![
+                    public[0].clone(),
+                    FilterProp::Owned {
+                        controller: owner.unwrap()
+                    }
+                ]
+            );
+        }
+        for (phrase, owner) in [
+            ("from an opponent's graveyard", ControllerRef::Opponent),
+            ("from each opponent's graveyard", ControllerRef::Opponent),
+            ("from their graveyard", ControllerRef::ScopedPlayer),
+        ] {
+            let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(ctrl, None);
+            assert!(public.contains(&FilterProp::Owned { controller: owner }));
+            assert_eq!(parse_exile_graveyard_source(phrase), Some((public, count)));
+        }
+        for phrase in ["from a graveyard", "from the graveyard", "from graveyard"] {
+            assert_eq!(
+                parse_exile_graveyard_source(phrase),
+                Some((
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }],
+                    phrase.len()
+                ))
+            );
+        }
+        let phrase = "  From Your Graveyard. remainder";
+        let (props, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(
+            props,
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]
+        );
+        assert_eq!(&phrase[count..], ". remainder");
+        assert_eq!(parse_exile_graveyard_source(phrase).unwrap().1, count);
+        let (props, ctrl, count) =
+            parse_zone_suffix("from your graveyard or from your hand").unwrap();
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(
+            props,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Graveyard, Zone::Hand]
+            }]
+        );
+        assert_eq!(count, "from your graveyard or from your hand".len());
+    }
+
+    #[test]
+    fn shape_adapter_declines_other_zones_owners_prepositions_and_selections() {
+        assert!(parse_exile_graveyard_source("from your graveyard").is_some());
+        for phrase in [
+            "from your hand",
+            "from your library",
+            "from exile",
+            "from the command zone",
+            "from target player's graveyard",
+            "from its owner's graveyard",
+            "from that player's graveyard",
+            "from defending player's graveyard",
+            "from each player's graveyard",
+            "from a player's graveyard",
+            "in your graveyard",
+            "on your graveyard",
+            "cards from your graveyard",
+            "from all graveyards",
+            "from each graveyard",
+            "from a single graveyard",
+            "from a random graveyard",
+            "from graveyards",
+            "from a graveyardkeeper",
+            "from your graveyard or from your hand",
+            "from your graveyard or from your graveyard",
+            "from each opponent's hand",
+        ] {
+            assert!(parse_exile_graveyard_source(phrase).is_none(), "{phrase}");
+        }
     }
 }

@@ -940,6 +940,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 510.1c + CR 609.4 + CR 611.3a: "[As long as <cond>, ]for each <creature class>
+    // you control, you may have that creature assign its combat damage as though it
+    // weren't blocked" (Siege Behemoth, Zilortha, Ruxa). Must run before the inverted
+    // "As long as" split below, which would otherwise cut the line at the first
+    // effect-subject comma and leave an `Unrecognized` gate.
+    if let Some(def) = parse_for_each_assign_damage_as_though_unblocked(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -950,6 +959,16 @@ pub(crate) fn parse_static_line_inner(
     if matches!(inverted, InvertedAsLongAs::Allow) {
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
             if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
+                return Some(def);
+            }
+            // CR 611.3a + CR 607.2a: the persistent exile-cast permission reads
+            // its own leading gate (`strip_leading_permission_condition`) — "As
+            // long as <condition>, you may cast the exiled card, and mana of any
+            // type can be spent to cast that spell" (Null Summoner). The canonical
+            // rewrite below would put the gate after the concession conjunct,
+            // where no permission grammar reads it, and the generic fallback
+            // would keep only the gate.
+            if let Some(def) = try_parse_persistent_exile_play_permission(&text, &lower) {
                 return Some(def);
             }
             // CR 400.2 + CR 701.20a: "As long as <condition>, all players
@@ -1724,12 +1743,12 @@ pub(crate) fn parse_static_line_inner(
                 ),
                 rest,
             )
-        } else if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+        } else if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![prop]),
+                        .properties(props),
                 ),
                 rest,
             )
@@ -1792,14 +1811,15 @@ pub(crate) fn parse_static_line_inner(
     // CR 613.7: "Other" excludes the source permanent itself via FilterProp::Another.
     if let Some(rest_tp) = nom_tag_tp(&tp, "other creatures you control ") {
         let after_prefix = rest_tp.original;
-        let (filter, predicate_text) = if let Some((prop, rest)) =
-            strip_counter_condition_prefix(after_prefix)
+        let (filter, predicate_text) = if let Some((mut props, rest)) =
+            strip_with_qualifier_prefix(after_prefix)
         {
+            props.push(FilterProp::Another);
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![prop, FilterProp::Another]),
+                        .properties(props),
                 ),
                 rest,
             )
@@ -2718,12 +2738,27 @@ pub(crate) fn parse_static_line_inner(
                 "Unconsumed conditional in 'can't be countered' catch-all — parser may need extension"
             );
         } else {
-            let affected = parse_cant_be_countered_subject(&tp);
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeCountered)
-                    .affected(affected)
-                    .description(text.to_string()),
-            );
+            // CR 101.2 + CR 604.1: a leading "if <cond>," gates the whole static
+            // (Dragonlord's Prerogative, Banefire). A typed condition is attached
+            // through the single gate authority. A condition the static grammar
+            // does not type, or a line with text beyond "<subject> can't be
+            // countered" (Banefire's "and the damage can't be prevented"), keeps the
+            // static but gates it on the always-inert, coverage-visible marker, so
+            // the card reads as an unsupported gap instead of an unconditional
+            // "can't be countered".
+            let (gate_text, body) = split_leading_if_gate(&tp);
+            let mut def = StaticDefinition::new(StaticMode::CantBeCountered)
+                .affected(parse_cant_be_countered_subject(&body))
+                .description(text.to_string());
+            if let Some(gate_text) = gate_text {
+                match parse_static_condition(gate_text)
+                    .filter(|_| is_bare_cant_be_countered_clause(body.lower))
+                {
+                    Some(condition) => attach_gated_condition(&mut def, condition, gate_text),
+                    None => def.condition = Some(unenforceable_gate_marker(gate_text)),
+                }
+            }
+            return Some(def);
         }
     }
 
@@ -3873,6 +3908,29 @@ pub(crate) fn parse_static_line_inner(
             .description(text.to_string());
         if let Some(filter) = parse_doubler_source_filter(tp.lower) {
             def = def.affected(filter);
+        }
+        // CR 603.2d + CR 604.1: "…triggers while <condition>, that ability triggers
+        // an additional time" (Sanctum of All: "while you control six or more
+        // Shrines") gates the doubling on a game-state condition, evaluated live
+        // by `active_static_definitions`. `parse_static_condition` delegates to
+        // `parse_inner_condition`, the single condition authority.
+        if nom_primitives::scan_contains(tp.lower, "triggers while ") {
+            // A printed gate whose continuation is not the doubler's own must not
+            // degrade to an unconditional doubler: decline so the line stays a
+            // flagged gap.
+            let (_, condition_text, _) = nom_primitives::scan_preceded(tp.lower, |i| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("triggers while "),
+                    // Anchor on the doubler's own continuation so a condition that
+                    // itself contains a comma is not cut at its first ", ".
+                    terminated(
+                        take_until(", that ability trigger"),
+                        tag(", that ability trigger"),
+                    ),
+                )
+                .parse(i)
+            })?;
+            def.condition = Some(parse_static_condition(condition_text)?);
         }
         return Some(def);
     }

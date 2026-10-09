@@ -68,11 +68,12 @@ import {
   isBundledDeck,
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
-import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
+import { BracketEstimateChip, ManualBracketChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import { isCommanderFamilyFormat } from "../../types/bracket";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 /** Sentinel section ids for the virtual/system folders in the collapse set. */
@@ -212,9 +213,7 @@ export function StatusBadge({ label, active }: { label: string; active: boolean 
   );
 }
 
-/** Inner component so the hook is always called unconditionally (Rules of Hooks).
- * Returns null for non-Commander decks — the hook handles that check. */
-function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+function EstimatedBracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
   const { estimate } = useBracketEstimate({
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
@@ -222,6 +221,16 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
     adapter: getSharedAdapter(),
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
+}
+
+/** Bracket tags apply only to Commander-family formats. A manual declaration
+ * takes precedence without scheduling an estimate for that deck. */
+function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+  if (!isCommanderFamilyFormat(candidate.knownFormat)) return null;
+  if (candidate.bracket != null) {
+    return <ManualBracketChip bracket={candidate.bracket} />;
+  }
+  return <EstimatedBracketChipForDeck candidate={candidate} />;
 }
 
 interface DeckTileProps {

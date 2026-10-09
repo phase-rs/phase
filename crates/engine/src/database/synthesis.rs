@@ -18640,16 +18640,7 @@ mod idempotency_tests {
 
     /// CR 609.3 + CR 111.7 (#8147): one mobilized token trades in combat before
     /// the end step, so it has ceased to exist by the time the delayed
-    /// "sacrifice them" fires. The delayed trigger snapshots BOTH token ids at
-    /// creation and carries no incarnation pins, so `live_object_targets` still
-    /// hands the resolver the dead id; `sacrifice::resolve` used to `?` out with
-    /// `EffectError::ObjectNotFound` on it and abandon the whole effect, leaving
-    /// the survivor on the battlefield forever.
-    ///
-    /// Discriminating (fail-on-revert): restore the `ok_or(...)?` in
-    /// `effects/sacrifice.rs` and the survivor stays on the battlefield.
-    /// `synthesize_mobilize_runtime_sacrifices_tokens_at_next_end_step` cannot
-    /// see this — nothing dies in it, so every snapshotted id is still live.
+    /// "sacrifice them" fires.
     #[test]
     fn mobilize_end_step_sacrifice_still_takes_the_survivor_of_a_combat_trade() {
         let mut face = CardFace::default();
@@ -18691,6 +18682,62 @@ mod idempotency_tests {
             state.objects[&survivor].zone,
             Zone::Graveyard,
             "surviving mobilized token must still be sacrificed"
+        );
+    }
+
+    /// CR 603.7c + CR 111.7: both mobilized tokens are gone before the end step, and
+    /// a later token producer has overwritten `last_created_token_ids`. The delayed
+    /// "sacrifice them" has no referent left, so it must not sacrifice that later
+    /// token.
+    #[test]
+    fn mobilize_end_step_sacrifice_ignores_a_later_producers_token_when_all_referents_are_gone() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+        synthesize_mobilize(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mobilizer".to_string(),
+            Zone::Battlefield,
+        );
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("mobilize trigger must have an execute body");
+        let ability = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let tokens = state.last_created_token_ids.clone();
+        assert_eq!(tokens.len(), 2);
+        for token in tokens {
+            state.battlefield.retain(|id| *id != token);
+            state.objects.remove(&token);
+        }
+
+        let later_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Later Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.last_created_token_ids = vec![later_token];
+
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert_eq!(stacked.len(), 1, "end-step cleanup must still stack");
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&later_token].zone,
+            Zone::Battlefield,
+            "the later producer's token was never named by the delayed trigger"
         );
     }
 

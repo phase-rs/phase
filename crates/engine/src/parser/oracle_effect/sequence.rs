@@ -1,8 +1,9 @@
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
+use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, map_opt, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, recognize, rest, value, verify};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -13,7 +14,9 @@ use super::super::oracle_nom::enters_under::{
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
-use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_ordinal, TextPair};
+use super::super::oracle_util::{
+    contains_possessive, parse_count_expr, parse_ordinal, parse_subtype, TextPair,
+};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -29,8 +32,8 @@ use crate::types::ability::{
     EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
     ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
     PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    ThisWayCause, TypeFilter, TypedFilter,
+    SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -431,6 +434,17 @@ pub(super) fn parse_rest_cards_reference(
     .parse(input)
 }
 
+/// CR 701.20a: "onto the battlefield" / "into your <zone>" / "into <zone>" kept-zone phrase.
+fn parse_reveal_until_kept_zone_phrase(i: &str) -> OracleResult<'_, Zone> {
+    let (i, zone) = preceded(
+        alt((tag("onto the "), tag("into your "), tag("into "))),
+        crate::parser::oracle_target::parse_zone_word,
+    )
+    .parse(i)?;
+    let (i, _) = crate::parser::oracle_target::peek_zone_boundary(i)?;
+    Ok((i, zone))
+}
+
 /// CR 202.3 + CR 608.2c: "if its mana value is <comparator> <dynamic
 /// quantity>, put it onto <zone>[. otherwise, put it into <zone>]." — a
 /// card-property branch on the RevealUntil hit card's own mana value,
@@ -447,23 +461,16 @@ pub(super) fn parse_rest_cards_reference(
 /// bare "put it" absorption, which harmlessly refines `kept_destination` to
 /// the same "otherwise" zone).
 fn parse_reveal_until_conditional_kept(input: &str) -> OracleResult<'_, ContinuationAst> {
-    fn kept_zone_phrase(i: &str) -> OracleResult<'_, Zone> {
-        let (i, zone) = preceded(
-            alt((tag("onto the "), tag("into your "), tag("into "))),
-            crate::parser::oracle_target::parse_zone_word,
-        )
-        .parse(i)?;
-        let (i, _) = crate::parser::oracle_target::peek_zone_boundary(i)?;
-        Ok((i, zone))
-    }
-
     let (i, _) = tag("if its mana value is ").parse(input)?;
     let (i, comparator) = crate::parser::oracle_nom::condition::parse_life_total_comparator(i)?;
     let (i, rhs) = crate::parser::oracle_nom::quantity::parse_quantity(i)?;
     let (i, _) = tag(", put it ").parse(i)?;
-    let (i, if_true_destination) = kept_zone_phrase(i)?;
-    let (i, otherwise_destination) =
-        opt(preceded(tag(". otherwise, put it "), kept_zone_phrase)).parse(i)?;
+    let (i, if_true_destination) = parse_reveal_until_kept_zone_phrase(i)?;
+    let (i, otherwise_destination) = opt(preceded(
+        tag(". otherwise, put it "),
+        parse_reveal_until_kept_zone_phrase,
+    ))
+    .parse(i)?;
 
     let filter = TargetFilter::Typed(TypedFilter {
         type_filters: Vec::new(),
@@ -480,6 +487,60 @@ fn parse_reveal_until_conditional_kept(input: &str) -> OracleResult<'_, Continua
             filter: Box::new(filter),
             if_true_destination,
             otherwise_destination,
+        },
+    ))
+}
+
+/// CR 701.20a + CR 608.2c: "put all <filter> cards revealed this way <zone>" after a
+/// RevealUntil whose until-filter is that same <filter> names exactly the matched set (the
+/// loop stops at the Nth match, so every <filter> card revealed is a hit) — the KeepEach
+/// disposition to <zone> (Mass Polymorph, Synthetic Destiny, Old Stickfingers). A different
+/// filter is a different set and is refused (falls through to the existing arms). A phrase
+/// whose built filter is `TargetFilter::Any` is unparsed and cannot establish set identity
+/// (it would alias any other degenerate until-filter), so it is refused too;
+/// "all cards revealed this way" (empty filter) is the whole pile, owned by
+/// `parse_reveal_until_all_to_zone_continuation`; "all other cards revealed this way" is the
+/// rest pile (Dance, Pathetic Marionette; Sharp Eraser), owned by the PutRest arm, and is
+/// refused by grammar before the filter is built.
+fn parse_reveal_until_matched_set_to_zone<'a>(
+    input: &'a str,
+    reveal_filter: &TargetFilter,
+) -> OracleResult<'a, ContinuationAst> {
+    let (i, _) = opt(alt((tag("then "), tag("and ")))).parse(input)?;
+    let (i, _) = alt((tag("puts "), tag("put "))).parse(i)?;
+    let (i, _) = tag("all ").parse(i)?;
+    // CR 608.2c: "all other cards revealed this way" names the non-matched rest, not the
+    // matched set — refuse the rest-subject head by grammar. Defence in depth: the
+    // `TargetFilter::Any` refusal below also stops it aliasing a degenerate until-filter.
+    let (i, _) = not(tag("other ")).parse(i)?;
+    // CR 608.2c: the phrase must build to a typed filter equal to the until-filter. An
+    // unparsed phrase degrades to `Any` and cannot establish set identity.
+    let (i, _) = verify(take_until(" cards revealed this way"), |text: &str| {
+        if text.is_empty() {
+            return false;
+        }
+        let filter = super::build_reveal_until_filter(text);
+        filter != TargetFilter::Any && filter == *reveal_filter
+    })
+    .parse(i)?;
+    let (i, _) = tag(" cards revealed this way ").parse(i)?;
+    let (i, destination) = parse_reveal_until_kept_zone_phrase(i)?;
+    let (i, _) = (opt(tag(".")), eof).parse(i)?;
+    Ok((
+        i,
+        ContinuationAst::RevealUntilKept {
+            destination,
+            enter_tapped: false,
+            enters_attacking: false,
+            any_number: false,
+            // eof-anchored: this chunk carries no rest clause; mirrors
+            // `parse_reveal_until_rest_zone_and_order`'s no-rest-subject result (None, Preserve),
+            // exactly as the Kindred Summons "put those cards" chunk does. A following
+            // "then shuffle the rest…"/"then put the rest…" clause refines the rest pile.
+            rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
+            enters_under: None,
+            optional_decline: None,
         },
     ))
 }
@@ -1271,9 +1332,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
-                if let Some((boundary, chars_to_skip)) =
-                    split_comma_clause_boundary(&current, &remainder)
-                {
+                // CR 608.2c + CR 109.5: ", then <verb>" after a compound-subject-each
+                // head continues the distributed body ("you and defending player
+                // each draw a card, then discard a card" — every named player does
+                // both), so it is not a clause boundary. Splitting would strand the
+                // trailing verb on the controller alone.
+                let comma_split =
+                    split_comma_clause_boundary(&current, &remainder).filter(|(boundary, _)| {
+                        !(compound_subject_each_sticky && matches!(boundary, ClauseBoundary::Then))
+                    });
+                if let Some((boundary, chars_to_skip)) = comma_split {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
                     current.clear();
                     compound_subject_each_sticky = false;
@@ -1596,6 +1664,24 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         ))
                         .parse(remainder_lower_for_loses.as_str())
                         .is_ok();
+                        // CR 608.2c: "you gain life and draw cards equal to its power"
+                        // (Lifeblood Hydra) — coordinated amount-elided verbs share ONE
+                        // trailing "equal to" postmodifier, so the " and " is internal
+                        // to a single instruction owned by
+                        // `try_parse_shared_equal_to_quantity_compound`. Same grammar
+                        // (`parse_equal_to_qty_conjuncts`) and same subject tightness as
+                        // the distributor: the chunk so far (reflexive connector
+                        // stripped, as for `compound_subject_each`) must be exactly
+                        // "[you ]<head>[ and <head>]*", and the remainder must continue
+                        // the head run up to " equal to ".
+                        let shared_equal_to_quantity_conjunct =
+                            all_consuming(super::parse_equal_to_qty_conjuncts)
+                                .parse(first_subject_token)
+                                .is_ok()
+                                && super::parse_equal_to_qty_verb_run(
+                                    remainder_lower_for_loses.as_str(),
+                                )
+                                .is_ok();
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -1615,6 +1701,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || bare_becomes_continuation
                         || mass_exile_union_continuation
                         || loses_all_other_card_types_continuation
+                        || shared_equal_to_quantity_conjunct
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
@@ -1636,6 +1723,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                                 combat_requirement_conjunct_prepend(before_and, remainder_trimmed)
                                     .or_else(|| {
                                         exile_conjunct_prepend(&before_lower, remainder_trimmed)
+                                    })
+                                    .or_else(|| {
+                                        mana_spent_amount_conjunct_prepend(
+                                            before_and,
+                                            remainder_trimmed,
+                                        )
                                     })
                                     .or_else(|| {
                                         untap_restriction_conjunct_prepend(
@@ -1811,6 +1904,19 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         return true;
     }
 
+    // CR 602.2b + CR 601.2f: a "This ability costs {N} less/more to activate …"
+    // sentence after a closed quote modifies the OUTER activated ability's total
+    // cost — "this ability" names the ability whose text holds the sentence, never
+    // the quoted grant (Llanowar Greenwidow: `It gains "If this permanent would
+    // leave the battlefield, exile it instead …" This ability costs {1} less to
+    // activate for each basic land type among lands you control.`). Splitting here
+    // lets the sentence reach `extract_cost_reduction_from_chain` as its own chain
+    // node; otherwise the quoted grant's static text swallows it and the reduction
+    // is lost.
+    if crate::parser::oracle_cost::is_self_cost_reduction_prefix(trimmed_lower.as_str()) {
+        return true;
+    }
+
     // CR 608.2c: read the whole text and apply the rules of English — a
     // granted-ability quote that ends a sentence can be followed by a fresh
     // causative "may have …" sentence directed at the affected object's
@@ -1962,6 +2068,23 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
+    // CR 601.2h + CR 608.2c: "<effect A> if {C1} was spent to cast this
+    // spell, and <subject> <effect B> if {C2} was spent to cast this spell" — two
+    // independently mana-gated instructions. Each half owns its own condition, so
+    // the ", and" is a clause boundary even though the second half opens with a
+    // subject noun phrase (not a verb `starts_clause_text_or_conjugated` knows).
+    if starts_mana_spent_conjunct(&current_lower, &trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
+    // CR 608.2c: "<effect A>, and <noun phrase> perpetually gets <P/T>" — a
+    // sibling instruction whose subject is a noun phrase, not a verb the
+    // clause-start recognisers know (Thorna and Twigtooth's "and the topmost
+    // creature card in your library perpetually gets +X/+X").
+    if starts_perpetual_subject_conjunct(&trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
     if starts_prefix_clause(&current_lower) {
         return None;
     }
@@ -2086,13 +2209,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         // (`try_parse_do_the_same_for_type`), so ONLY a clean pure-type
         // substitution is split off. Richer forms this PR does not model —
         // Gruesome Menagerie's "creature cards with mana value 2 and 3"
-        // (`FilterProp` predicate) and Grim Captain's Call's "Vampire, Dinosaur,
-        // and Merfolk" (type list) — fail the recognizer and stay glued exactly
+        // (`FilterProp` predicate) — fail the recognizer and stay glued exactly
         // as before, keeping this change's blast radius to the handled class.
         // The complete recognizer covers a terminal continuation. A following
         // comma-"then" clause (Glimpse of Tomorrow) is segmented by the same
         // grammar, so we do not weaken the pure-type whole-consumption rule.
         if try_parse_do_the_same_for_type(trimmed).is_some()
+            || try_parse_do_the_same_for_subtype_list(trimmed).is_some()
             || starts_do_the_same_for_type_before_then(after_then)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
@@ -2158,6 +2281,69 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     None
+}
+
+/// CR 601.2h: True when the closing chunk already carries an
+/// "if <mana> was spent to cast <it>" condition and the text after the comma is
+/// an "and"-joined conjunct carrying its own such condition. The conjunct ends
+/// at the next sentence boundary, so a later sentence's condition cannot make an
+/// ungated conjunct look gated.
+fn starts_mana_spent_conjunct(current_lower: &str, trimmed_lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("and ")
+        .parse(trimmed_lower)
+        .is_ok()
+        && nom_primitives::scan_contains(current_lower, MANA_SPENT_TO_CAST)
+        && nom_primitives::scan_contains(
+            before_sentence_boundary(trimmed_lower),
+            MANA_SPENT_TO_CAST,
+        )
+}
+
+/// CR 608.2c: True when the text after the comma is an "and"-joined conjunct
+/// whose own subject takes "perpetually get(s)" ("and the top creature card of
+/// your library perpetually gets +1/+1"). The verb tail is owned by
+/// `split_perpetual_get_clause`; the conjunct ends at the next sentence
+/// boundary, so a later sentence's "perpetually" cannot promote an earlier
+/// conjunct, and a subject holding a comma or period is not one noun phrase.
+fn starts_perpetual_subject_conjunct(trimmed_lower: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("and "),
+        rest::<_, OracleError<'_>>,
+    )
+    .parse(before_sentence_boundary(trimmed_lower))
+    .ok()
+    .and_then(|(_, conjunct)| super::split_perpetual_get_clause(conjunct))
+    .is_some_and(|(subject, _)| {
+        all_consuming(is_not::<_, _, OracleError<'_>>(",."))
+            .parse(subject)
+            .is_ok()
+            && super::perpetual_conjunct_subject_opens_a_clause(subject)
+    })
+}
+
+/// Phrase shared by every "if {C} was spent to cast <it>" gate.
+const MANA_SPENT_TO_CAST: &str = "was spent to cast ";
+
+/// The text up to the first sentence boundary (". "), or all of it when the text
+/// holds a single sentence.
+fn before_sentence_boundary(text: &str) -> &str {
+    take_until::<_, _, OracleError<'_>>(". ")
+        .parse(text)
+        .map_or(text, |(_, sentence)| sentence)
+}
+
+/// CR 608.2c: "They / Those can't be regenerated" names every Destroy of the
+/// run it follows; any other subject ("It", "A creature destroyed this way")
+/// names the nearest one.
+fn cant_regenerate_scope(lower: &str) -> AnaphorNumber {
+    if alt((tag::<_, _, OracleError<'_>>("they "), tag("those ")))
+        .parse(lower)
+        .is_ok()
+    {
+        AnaphorNumber::Plural
+    } else {
+        AnaphorNumber::Singular
+    }
 }
 
 fn is_for_each_copy_token_continuation(
@@ -2687,28 +2873,18 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// both sites in lockstep.
 ///
 /// Recognized second-subject axes (mirror `try_parse_compound_subject_each`):
-/// - "that player each" — the player-axis form (Council's-dilemma "for each
-///   player who chose <choice>" body).
-/// - "target opponent each" / "target player each" — targeted player-axis forms.
-///   The parser binds their exact player scope after the splitter preserves the
-///   full clause.
-/// - "that creature each" — the object-axis form (CR 115.1 parent-target
-///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
-///   +2/+0 and gain haste ... and attack this turn if able").
+/// - the static player/object axes owned by
+///   `parse_static_compound_second_subject` ("that player each", "target
+///   opponent each", "target player each", "defending player each", "that
+///   creature each"), shared with the effect parser so the two sites cannot
+///   drift.
 /// - "target &lt;filter&gt;'s controller/owner each" — the possessive-actor form
 ///   (CR 109.4; Life at Stake's "You and target creature's controller each
 ///   secretly choose a number 0 or greater"), delegated to the shared axis
 ///   combinator so the two sites cannot drift.
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
-    let result: nom::IResult<&str, (), OracleError<'_>> = alt((
-        value((), tag("that player each ")),
-        value((), tag("target opponent each ")),
-        value((), tag("target player each ")),
-        value((), tag("that creature each ")),
-    ))
-    .parse(lower.as_str());
-    if result.is_ok() {
+    if super::parse_static_compound_second_subject(lower.as_str()).is_ok() {
         return true;
     }
     controlled_creature_each_subject_starts(&lower)
@@ -2868,17 +3044,24 @@ fn starts_targeted_pt_conjunct_lower(s: &str) -> OracleResult<'_, ()> {
 }
 
 /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
-/// player" clause joined by a bare " and " is a fresh player-scoped clause start
+/// player"/"each other player" clause joined by a bare " and " is a fresh player-scoped clause start
 /// (Slitherwisp "you draw a card and each opponent loses 1 life"; Curry Favor;
 /// Disinformation Campaign; Bad Deal; Clockwork Fox). Without this arm the
 /// conjunct is swallowed by the first effect and the player-scoped half is
 /// dropped. The discriminator is a conjugated player-action verb immediately
-/// after the "each opponent "/"each player " subject — a bare-noun continuation
+/// after the "each opponent "/"each player "/"each other player " subject — a bare-noun continuation
 /// (Goblin Chainwhirler's "... and each creature you control") has no such verb
-/// and is left un-split, preserving the single DamageAll. Player-scope sibling of
+/// and is left un-split, preserving the single DamageAll. This only detects a
+/// fresh player-scoped clause; owner-relative "other" semantics are applied later
+/// by effect-chain antecedent logic. Player-scope sibling of
 /// `starts_target_continuous_clause_lower`.
 fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
-    let (rest, _) = alt((tag("each opponent "), tag("each player "))).parse(s)?;
+    let (rest, _) = alt((
+        tag("each opponent "),
+        tag("each player "),
+        tag("each other player "),
+    ))
+    .parse(s)?;
     value(
         (),
         alt((
@@ -3198,11 +3381,15 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // "gets"/"has" are continuous modification predicates. Safe to split because
         // a bare pronoun followed by a conjugated verb cannot be part of a noun phrase.
         value((), tag::<_, _, OracleError<'_>>("it doesn't ")),
+        value((), tag("it doesn\u{2019}t ")),
         value((), tag("it can't ")),
+        value((), tag("it can\u{2019}t ")),
         value((), tag("it cannot ")),
         value((), tag("~ can't ")),
+        value((), tag("~ can\u{2019}t ")),
         value((), tag("~ cannot ")),
         value((), tag("this creature can't ")),
+        value((), tag("this creature can\u{2019}t ")),
         value((), tag("this creature cannot ")),
         value((), tag("it gains ")),
         value((), tag("it gets ")),
@@ -3271,7 +3458,10 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             tag::<_, _, OracleError<'_>>("players "),
             tag("your opponents "),
         )),
-        value((), alt((tag("can't "), tag("cannot ")))),
+        value(
+            (),
+            alt((tag("can't "), tag("can\u{2019}t "), tag("cannot "))),
+        ),
     ))
     // CR 109.3 + CR 201.4b + CR 608.2k: gendered pronouns ("he"/"she") used as an
     // Oracle-text subject refer to the card itself (Machine Man, Model X-51:
@@ -3299,7 +3489,9 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
                 tag("has "),
                 tag("loses "),
                 tag("doesn't "),
+                tag("doesn\u{2019}t "),
                 tag("can't "),
+                tag("can\u{2019}t "),
                 tag("cannot "),
             )),
         ),
@@ -3614,6 +3806,57 @@ fn exile_conjunct_prepend(before_lower: &str, remainder_trimmed: &str) -> Option
     Some("exile ".to_string())
 }
 
+/// What a mana-gated conjunct's elided head hands out, which fixes the noun the
+/// conjunct's amount must be followed by.
+#[derive(Clone, Copy)]
+enum ElidedHeadNoun {
+    /// CR 120.2b: "<source> deals A damage to X".
+    Damage,
+    /// CR 119.3: "<player> gains/loses A life".
+    Life,
+}
+
+fn parse_elided_head_verb(input: &str) -> OracleResult<'_, ElidedHeadNoun> {
+    alt((
+        value(ElidedHeadNoun::Damage, tag("deals ")),
+        value(
+            ElidedHeadNoun::Life,
+            alt((tag("gains "), tag("gain "), tag("loses "), tag("lose "))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 601.2h + CR 608.2c: "<subject> <verb> A <noun> if {C1} was spent to cast
+/// this spell and B <noun> if {C2} was spent to cast this spell" — the second
+/// conjunct is a bare "<amount> <noun> …" tail that elides the "<subject> <verb>"
+/// head ("~ deals", "you gain") and carries its own mana-spent condition. Returns
+/// the head (through the verb) to prepend so the conjunct reaches its parser as
+/// its own gated clause. Requires both halves to carry a mana-spent condition
+/// within their own sentence, so an ungated multi-target damage chain keeps its
+/// own handling.
+fn mana_spent_amount_conjunct_prepend(before_and: &str, remainder_trimmed: &str) -> Option<String> {
+    let before_lower = before_and.to_ascii_lowercase();
+    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    let remainder_sentence = before_sentence_boundary(&remainder_lower);
+    if !nom_primitives::scan_contains(&before_lower, MANA_SPENT_TO_CAST)
+        || !nom_primitives::scan_contains(remainder_sentence, MANA_SPENT_TO_CAST)
+    {
+        return None;
+    }
+    let (_, noun, after_head) =
+        nom_primitives::scan_preceded(&before_lower, parse_elided_head_verb)?;
+    let amount_matches = match noun {
+        ElidedHeadNoun::Damage => starts_with_damage_amount_continuation(remainder_sentence),
+        ElidedHeadNoun::Life => parse_count_expr(remainder_sentence)
+            .is_some_and(|(_, rest)| tag::<_, _, OracleError<'_>>("life").parse(rest).is_ok()),
+    };
+    if !amount_matches {
+        return None;
+    }
+    Some(before_and[..before_lower.len() - after_head.len()].to_string())
+}
+
 fn combat_requirement_conjunct_prepend(
     before_and: &str,
     remainder_trimmed: &str,
@@ -3804,6 +4047,17 @@ fn next_token_is_player_action_count(s: &str) -> bool {
 /// Used by `starts_bare_and_clause` to split patterns like
 /// "sacrifice ~ and it deals 3 damage to target player".
 fn starts_with_damage_clause(lower: &str) -> bool {
+    // CR 608.2c: a source-pronoun damage instruction follows the earlier effect in order.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("he"), tag("she"))),
+        multispace1,
+        alt((tag("deals "), tag("deal "))),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        return true;
+    }
     if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("deals ")
         .parse(lower)
         .or_else(|_| take_until::<_, _, OracleError<'_>>("deal ").parse(lower))
@@ -4029,6 +4283,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         bypass_beneficiary: a_bypass_beneficiary,
         protection_does_not_remove: a_protection_does_not_remove,
         room_door: a_room_door,
+        granting_object: a_granting_object,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4047,6 +4302,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         bypass_beneficiary: b_bypass_beneficiary,
         protection_does_not_remove: b_protection_does_not_remove,
         room_door: b_room_door,
+        granting_object: b_granting_object,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4063,6 +4319,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_bypass_beneficiary == b_bypass_beneficiary
         && a_protection_does_not_remove == b_protection_does_not_remove
         && a_room_door == b_room_door
+        && a_granting_object == b_granting_object
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
@@ -4684,28 +4941,68 @@ pub(super) fn apply_clause_continuation(
             }
             defs.push(change_zone);
         }
+        // CR 608.2c + CR 701.20a: the card choice a follow-up clause makes from a
+        // revealed hand. After a single-player reveal (or a partial per-player
+        // reveal) the choice refines that reveal (Kitesail Freebooter,
+        // Thoughtseize). After a per-player whole-hand reveal ("Each opponent
+        // reveals their hand."), that instruction completes for every player
+        // before the next begins, so the choice is the next instruction's own
+        // co-scoped step: a card-parking `RevealHand` over the same player that
+        // adds no new public reveal (the hand is still revealed, CR 701.20a) —
+        // it only privately shows the hand to the chooser (CR 701.20e) — and
+        // starts that instruction (`SequentialSibling`). The printed controller
+        // chooses (`reveal_hand::resolve`). The binding only steers the chain builder's
+        // consumer rules; both bindings lower the same way.
         ContinuationAst::RevealHandFilter {
             card_filter,
             choice_optional,
+            binding: _,
         } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            if let Effect::RevealHand {
+            let reveal_scope = previous.player_scope.clone();
+            let Effect::RevealHand {
+                target,
                 card_filter: existing,
                 choice_optional: existing_choice_optional,
+                count,
                 ..
             } = &mut *previous.effect
-            {
-                match card_filter {
-                    Some(filter) => *existing = filter,
-                    None if matches!(existing, TargetFilter::None) => {
-                        *existing = TargetFilter::Any;
-                    }
-                    None => {}
+            else {
+                return;
+            };
+            let card_filter = match card_filter {
+                Some(filter) => filter,
+                None if matches!(existing, TargetFilter::None) => TargetFilter::Any,
+                None => existing.clone(),
+            };
+            let choice_step = match (reveal_scope, &*count) {
+                (Some(scope), None) => {
+                    let mut choice = AbilityDefinition::new(
+                        kind,
+                        Effect::RevealHand {
+                            target: target.clone(),
+                            card_filter,
+                            count: None,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            choice_optional,
+                            reveal: false,
+                        },
+                    );
+                    choice.player_scope = Some(scope);
+                    choice.sub_link = SubAbilityLink::SequentialSibling;
+                    Some(choice)
                 }
-                *existing_choice_optional = choice_optional;
-            }
+                // A single-player reveal, or a per-player partial reveal whose
+                // revealed subset no later step can name: refine the reveal.
+                _ => {
+                    *existing = card_filter;
+                    *existing_choice_optional = choice_optional;
+                    None
+                }
+            };
+            defs.extend(choice_step);
         }
         ContinuationAst::ManaRestriction {
             restrictions: new_restrictions,
@@ -4847,7 +5144,8 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::GoadLastCreated { duration } => {
-            // CR 701.15b: Goaded is a static ability on the just-created tokens.
+            // CR 701.15b: Goaded is a designation on the created tokens. The
+            // static-mode modification is an intermediate resolution encoding.
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::GenericEffect {
@@ -4864,21 +5162,53 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
-        ContinuationAst::CantRegenerate => {
+        ContinuationAst::CantRegenerate { scope } => {
             // CR 608.2c: walk backward through the definition chain to find
             // the nearest Destroy/DestroyAll. The regen clause may not be
             // adjacent — e.g. Kirtar's Wrath threshold has a Token creation
             // between the DestroyAll and "Creatures destroyed this way can't
             // be regenerated."
-            let bound = env.resolve(
-                defs,
-                super::assembly::AntecedentSelector::LastWithRole(
-                    super::assembly::AntecedentRole::DestroyLike,
-                ),
-                None,
-                super::assembly::OnMiss::Ignore,
-            );
-            if let Some(bound_index) = bound {
+            //
+            // CR 608.2c + CR 701.19c: plural "They can't be regenerated" names
+            // every Destroy of the run it follows (Plague Spores: "Destroy
+            // target nonblack creature and target land. They can't be
+            // regenerated."), so it fans out over the contiguous run of
+            // DestroyLike defs ending at the nearest one; an earlier Destroy
+            // separated from that run by another instruction is not part of
+            // the antecedent.
+            let bound: Vec<usize> = match scope {
+                AnaphorNumber::Singular => env
+                    .resolve(
+                        defs,
+                        super::assembly::AntecedentSelector::LastWithRole(
+                            super::assembly::AntecedentRole::DestroyLike,
+                        ),
+                        None,
+                        super::assembly::OnMiss::Ignore,
+                    )
+                    .into_iter()
+                    .collect(),
+                AnaphorNumber::Plural => {
+                    let members = env.resolve_all(
+                        defs,
+                        super::assembly::AntecedentSelector::AllWithRole(
+                            super::assembly::AntecedentRole::DestroyLike,
+                        ),
+                        None,
+                        super::assembly::OnMiss::Ignore,
+                    );
+                    // The run ends at the nearest Destroy and extends back while
+                    // each earlier member sits directly before the next.
+                    let run_len = members
+                        .windows(2)
+                        .rev()
+                        .take_while(|pair| pair[0] + 1 == pair[1])
+                        .count()
+                        + usize::from(!members.is_empty());
+                    members[members.len() - run_len..].to_vec()
+                }
+            };
+            for bound_index in bound {
                 let def = &mut defs[bound_index];
                 // CR 608.2c: the DestroyLike antecedent may be nested inside a
                 // CreateDelayedTrigger wrapper (Merieke Ri Berit), so descend
@@ -5904,6 +6234,52 @@ pub(super) fn apply_clause_continuation(
                 )
                 .or_else(|| defs.len().checked_sub(1));
             if let Some(target_idx) = target_idx {
+                // CR 608.2c: instructions are followed in the order written. When
+                // another instruction sits between the reveal and this pile
+                // placement (Goblin Charbelcher's damage), folding the placement
+                // into the reveal would move the pile BEFORE that instruction.
+                // Leave the cards where the reveal found them and emit the
+                // placement as a later chain instruction over the revealed set.
+                // Scoped to an intervening damage instruction: damage is the
+                // replaceable event whose replacement effects (CR 615.5) act on the
+                // revealed cards before the placement.
+                let intervening_damage = defs[target_idx + 1..]
+                    .iter()
+                    .any(super::def_is_damage_dealer);
+                if intervening_damage && defs[target_idx].sub_ability.is_none() {
+                    if let Effect::RevealUntil {
+                        matched_disposition,
+                        ..
+                    } = &mut *defs[target_idx].effect
+                    {
+                        *matched_disposition = RevealUntilDisposition::RevealOnly;
+                        let mut placement = AbilityDefinition::new(
+                            kind,
+                            Effect::ChangeZoneAll {
+                                origin: Some(Zone::Library),
+                                destination,
+                                // The cards this reveal revealed — those still in the
+                                // library: a card an intervening replacement moved
+                                // elsewhere (Swans's draw) is no longer part of the pile.
+                                target: TargetFilter::LastRevealed,
+                                enters_under: None,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enters_attacking: false,
+                                enter_with_counters: vec![],
+                                face_down_profile: None,
+                                library_position: (destination == Zone::Library)
+                                    .then_some(LibraryPosition::Bottom),
+                                library_shuffle: Default::default(),
+                                random_order: matches!(rest_order, DigRestOrder::Random),
+                            },
+                        );
+                        // An independent following instruction, performed on every
+                        // branch of an intervening "instead" override.
+                        placement.sub_link = SubAbilityLink::SequentialSibling;
+                        defs.push(placement);
+                        return;
+                    }
+                }
                 patch_reveal_until_all_to_zone_recursively(
                     &mut defs[target_idx],
                     destination,
@@ -6273,7 +6649,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
-        ContinuationAst::CantRegenerate => true,
+        ContinuationAst::CantRegenerate { .. } => true,
         // CR 116.2c: recognition was already gated on a preceding
         // continuous-effect-installing `GenericEffect`, so absorption is
         // unconditional. Full absorption is REQUIRED, not merely convenient: the
@@ -7759,6 +8135,66 @@ fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Opti
     Ok((input, source_keyword_condition))
 }
 
+/// CR 608.2d: a reveal-choice consumer phrased "[you] may choose/exile/discard"
+/// makes the post-reveal choice optional.
+fn reveal_choice_is_optional(lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("you may choose "),
+        tag("may choose "),
+        tag("you may exile "),
+        tag("may exile "),
+        tag("you may discard "),
+        tag("may discard "),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
+/// CR 608.2c + CR 701.20a: the object phrase of a clause that acts on a card
+/// chosen from a revealed hand — "a/an/one [<type>] card [they | that player |
+/// those players] revealed this way". Returns the chosen card's filter, or
+/// `None` when no such phrase is present. Mass forms ("each nonland card revealed
+/// this way", Fall; "for each blue instant card revealed this way", Sirocco) and
+/// conditions ("a card with the chosen name is revealed this way") carry no
+/// singular article + "card" + "revealed this way" run and are not matched.
+/// The description is recognized in place and read by `parse_type_phrase_folding`
+/// as printed.
+pub(super) fn parse_revealed_this_way_card_filter(lower: &str) -> Option<TargetFilter> {
+    let description = nom_primitives::scan_at_word_boundaries(lower, |input| {
+        let (input, _) =
+            alt((tag::<_, _, OracleError<'_>>("a "), tag("an "), tag("one "))).parse(input)?;
+        // CR 608.2c: "card" alone, or a type phrase whose head noun is "card" —
+        // kept as the printed slice for the type-phrase authority below.
+        let (input, description) = alt((
+            value(None, tag::<_, _, OracleError<'_>>("card")),
+            map(
+                recognize(terminated(take_until(" card"), tag(" card"))),
+                Some,
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>(" they"),
+            tag(" that player"),
+            tag(" those players"),
+        )))
+        .parse(input)?;
+        let (input, _) = tag(" revealed this way").parse(input)?;
+        Ok((input, description))
+    })?;
+    let filter = match description {
+        None => TargetFilter::Typed(TypedFilter::card()),
+        Some(phrase) => {
+            let (filter, rem) = parse_type_phrase_folding(phrase);
+            if !rem.trim().is_empty() {
+                return None;
+            }
+            filter
+        }
+    };
+    matches!(filter, TargetFilter::Typed(_)).then_some(filter)
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -7780,6 +8216,13 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
     let lower = text.to_lowercase();
     let face_down_profile_spec =
         parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
+    // The object phrase of a "… revealed this way" consumer after a hand reveal,
+    // parsed once for the guarded arm below.
+    let revealed_this_way_card = if let Effect::RevealHand { .. } = previous_effect {
+        parse_revealed_this_way_card_filter(&lower)
+    } else {
+        None
+    };
 
     match previous_effect {
         Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
@@ -7820,19 +8263,23 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             } else {
                 Some(super::parse_choose_filter_from_sentence(&lower, ctx))
             };
-            let choice_optional = alt((
-                tag::<_, _, OracleError<'_>>("you may choose "),
-                tag("may choose "),
-                tag("you may exile "),
-                tag("may exile "),
-                tag("you may discard "),
-                tag("may discard "),
-            ))
-            .parse(lower.as_str())
-            .is_ok();
+            let choice_optional = reveal_choice_is_optional(&lower);
             Some(ContinuationAst::RevealHandFilter {
                 card_filter,
                 choice_optional,
+                binding: RevealChoiceBinding::FromIt,
+            })
+        }
+        // CR 608.2c + CR 701.20a: "<verb> a <type> card [they] revealed this way"
+        // acts on a card chosen from the revealed hand — `apply_clause_continuation`
+        // lowers the choice (typed card filter) onto a single-player reveal or, after
+        // a per-player reveal, as its own co-scoped step; the chain builder re-binds
+        // the consumer to the chosen card.
+        Effect::RevealHand { .. } if revealed_this_way_card.is_some() => {
+            revealed_this_way_card.map(|card_filter| ContinuationAst::RevealHandFilter {
+                card_filter: Some(card_filter),
+                choice_optional: reveal_choice_is_optional(&lower),
+                binding: RevealChoiceBinding::RevealedThisWay,
             })
         }
         Effect::Mana { .. } => {
@@ -8181,6 +8628,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 .ok()
                 .map(|(_, continuation)| continuation)
         }
+        // CR 701.20a + CR 608.2c: matched-set disposition "put all <until-filter> cards revealed
+        // this way <zone>" (Mass Polymorph, Synthetic Destiny, Old Stickfingers).
+        Effect::RevealUntil { filter, .. }
+            if parse_reveal_until_matched_set_to_zone(lower.trim(), filter).is_ok() =>
+        {
+            parse_reveal_until_matched_set_to_zone(lower.trim(), filter)
+                .ok()
+                .map(|(_, continuation)| continuation)
+        }
         // CR 701.20a + CR 608.2c: "Put any number of those [filter] cards onto the
         // battlefield, then put the rest … on the bottom … in a random order"
         // (Aurora Awakener). This is the multi-match disposition over the *set* of
@@ -8353,9 +8809,12 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         Effect::Destroy { .. } | Effect::DestroyAll { .. } | Effect::CreateDelayedTrigger { .. }
             if effect_wraps_destroy_like(previous_effect)
                 && (nom_primitives::scan_contains(&lower, "can't be regenerated")
+                    || nom_primitives::scan_contains(&lower, "can\u{2019}t be regenerated")
                     || nom_primitives::scan_contains(&lower, "cannot be regenerated")) =>
         {
-            Some(ContinuationAst::CantRegenerate)
+            Some(ContinuationAst::CantRegenerate {
+                scope: cant_regenerate_scope(&lower),
+            })
         }
         // CR 120.4a + CR 608.2c + CR 702: excess-damage redirect rider on a
         // `DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous Tyrannosaurus),
@@ -8609,10 +9068,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         _ if nom_primitives::scan_contains(&lower, "destroyed this way can't be regenerated")
             || nom_primitives::scan_contains(
                 &lower,
+                "destroyed this way can\u{2019}t be regenerated",
+            )
+            || nom_primitives::scan_contains(
+                &lower,
                 "destroyed this way cannot be regenerated",
             ) =>
         {
-            Some(ContinuationAst::CantRegenerate)
+            Some(ContinuationAst::CantRegenerate {
+                scope: AnaphorNumber::Singular,
+            })
         }
         // CR 122.6a + CR 614.1c: Token enters-with-counters continuation. Two forms:
         //   * Declarative: "The token enters with X +1/+1 counters on it[, where X is ...]"
@@ -9280,9 +9745,47 @@ pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<Vec<TypeFilte
     // Menagerie's "creature cards with mana value 2 and 3") or a `controller`
     // scope — those need a full replacement-filter/cardinality grammar and must
     // stay strict-failing until it lands (CR #1: a flagged gap beats a misparse).
-    // The multi-type list form (Grim Captain's Call's "Vampire, Dinosaur, and
-    // Merfolk") is already rejected by the non-empty `remainder` guard above.
+    // The bare subtype list form (Grim Captain's Call's "Vampire, Dinosaur, and
+    // Merfolk") is rejected by the non-empty `remainder` guard above and handled
+    // by `try_parse_do_the_same_for_subtype_list`.
     pure_type_substitution(filter)
+}
+
+/// CR 608.2c: Parse "[then] do the same for A, B, and C." where the list is a
+/// bare creature/permanent subtype enumeration (Grim Captain's Call: "Return a
+/// Pirate card from your graveyard to your hand, then do the same for Vampire,
+/// Dinosaur, and Merfolk."). Returns one `Subtype` filter per listed entry; the
+/// chunk loop emits one clone-and-retype sibling of the antecedent per entry,
+/// exactly as the single-type form does. The list needs at least two entries —
+/// a lone type is the single-type form's job — and must consume the whole tail.
+pub(super) fn try_parse_do_the_same_for_subtype_list(text: &str) -> Option<Vec<TypeFilter>> {
+    let lower = text.to_lowercase();
+    let (subtypes, _) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = opt(tag("then ")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("do the same for ").parse(i)?;
+        let (i, subtypes) = separated_list1(
+            alt((
+                tag(", and/or "),
+                tag(", and "),
+                tag(", or "),
+                tag(" and/or "),
+                tag(" and "),
+                tag(" or "),
+                tag(", "),
+            )),
+            parse_subtype_token,
+        )
+        .parse(i)?;
+        let (i, _) = terminated(opt(tag(".")), eof).parse(i)?;
+        Ok((i, subtypes))
+    })?;
+    (subtypes.len() >= 2).then(|| subtypes.into_iter().map(TypeFilter::Subtype).collect())
+}
+
+/// Nom adapter over `parse_subtype` (plural- and case-aware canonicalization).
+fn parse_subtype_token(input: &str) -> OracleResult<'_, String> {
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    Ok((&input[consumed..], subtype))
 }
 
 /// Recognize a pure type-substitution segment when it is immediately followed
@@ -9438,6 +9941,64 @@ mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
 
+    #[test]
+    fn source_pronoun_damage_boundaries_compose_pronoun_verb_and_connector() {
+        for pronoun in ["he", "she"] {
+            for verb in ["deal", "deals"] {
+                for connector in [", and ", " and "] {
+                    let tail = format!("{pronoun} {verb} 4 damage to each opponent");
+                    assert!(starts_with_damage_clause(&tail), "{tail}");
+                    let text = format!("put four +1/+1 counters on ~{connector}{tail}");
+                    let chunks = split_clause_sequence(&text);
+                    assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
+                    assert_eq!(chunks[0].text, "put four +1/+1 counters on ~");
+                    let raw_tail = if connector == ", and " {
+                        format!("and {tail}")
+                    } else {
+                        tail.clone()
+                    };
+                    assert_eq!(chunks[1].text, raw_tail, "{text}");
+                    assert_eq!(
+                        super::super::lower::strip_leading_sequence_connector(&chunks[1].text)
+                            .trim(),
+                        tail,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundary_requires_an_immediate_whole_verb() {
+        assert!(starts_with_damage_clause(
+            "she deals 4 damage to each opponent"
+        ));
+        for tail in [
+            "shell deals 4 damage to each opponent",
+            "he dealing 4 damage to each opponent",
+            "she eventually deals 4 damage to each opponent",
+            "they deal 4 damage to each opponent",
+        ] {
+            assert!(!starts_with_damage_clause(tail), "{tail}");
+            let text = format!("put four +1/+1 counters on ~ and {tail}");
+            assert_eq!(split_clause_sequence(&text).len(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundaries_do_not_escape_quoted_abilities() {
+        let text = "target creature gains \"{T}: Put a +1/+1 counter on this creature and he deals 1 damage to each opponent.\" until end of turn";
+        assert_eq!(split_clause_sequence(text).len(), 1);
+        assert_eq!(
+            split_clause_sequence(
+                "put a +1/+1 counter on ~ and he deals 1 damage to each opponent"
+            )
+            .len(),
+            2,
+        );
+    }
+
     // CR 401.4: unspecified library placement preserves the owner's choice;
     // explicit randomization and non-library destinations retain their modes.
     #[test]
@@ -9472,6 +10033,112 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    fn creature_until_filter() -> TargetFilter {
+        super::super::build_reveal_until_filter("creature")
+    }
+
+    /// CR 701.20a + CR 608.2c (T-C1): the until-filter's own phrase names the
+    /// matched set; the zone phrase becomes the kept destination.
+    #[test]
+    fn matched_set_to_zone_accepts_the_until_filter() {
+        for (text, zone) in [
+            (
+                "put all creature cards revealed this way onto the battlefield",
+                Zone::Battlefield,
+            ),
+            (
+                "then put all creature cards revealed this way into your graveyard.",
+                Zone::Graveyard,
+            ),
+        ] {
+            let (_, continuation) =
+                parse_reveal_until_matched_set_to_zone(text, &creature_until_filter())
+                    .unwrap_or_else(|err| panic!("{text}: {err:?}"));
+            let ContinuationAst::RevealUntilKept {
+                destination,
+                any_number,
+                rest_destination,
+                rest_order,
+                ..
+            } = continuation
+            else {
+                panic!("{text}: expected RevealUntilKept, got {continuation:?}");
+            };
+            assert_eq!(destination, zone, "{text}");
+            assert!(!any_number, "{text}: the matched set is kept whole");
+            assert_eq!(rest_destination, None, "{text}");
+            assert_eq!(rest_order, DigRestOrder::Preserve, "{text}");
+        }
+    }
+
+    /// CR 701.20a (T-C2): a different filter is a different set.
+    #[test]
+    fn matched_set_to_zone_refuses_a_different_filter() {
+        assert!(parse_reveal_until_matched_set_to_zone(
+            "put all land cards revealed this way onto the battlefield",
+            &creature_until_filter(),
+        )
+        .is_err());
+    }
+
+    /// CR 701.20a (T-C3): "all cards revealed this way" is the whole pile, owned
+    /// by the all-to-zone continuation, not the matched set.
+    #[test]
+    fn matched_set_to_zone_leaves_the_whole_pile_to_all_to_zone() {
+        let text = "put all cards revealed this way into your hand";
+        assert!(parse_reveal_until_matched_set_to_zone(text, &creature_until_filter()).is_err());
+        assert!(
+            parse_reveal_until_all_to_zone_continuation(text).is_ok(),
+            "reach guard: the whole-pile continuation owns this text"
+        );
+    }
+
+    /// CR 701.20a: a phrase that builds to `TargetFilter::Any` is unparsed and
+    /// cannot establish set identity — refused even against an until-filter that
+    /// is itself `Any`. Paired positive: the same call shape with a typed phrase.
+    #[test]
+    fn matched_set_to_zone_refuses_a_phrase_building_to_any() {
+        assert_eq!(
+            super::super::build_reveal_until_filter("green"),
+            TargetFilter::Any,
+            "fixture precondition: the phrase builds to Any"
+        );
+        assert!(parse_reveal_until_matched_set_to_zone(
+            "put all green cards revealed this way onto the battlefield",
+            &TargetFilter::Any,
+        )
+        .is_err());
+        assert!(
+            parse_reveal_until_matched_set_to_zone(
+                "put all creature cards revealed this way onto the battlefield",
+                &creature_until_filter(),
+            )
+            .is_ok(),
+            "reach guard: the same call shape accepts a typed matched-set phrase"
+        );
+    }
+
+    /// CR 608.2c (T-C4): "all other cards revealed this way" is the rest pile —
+    /// refused even against the until-filter "other" itself would build.
+    /// Paired positive: the same call shape with the matched-set phrase.
+    #[test]
+    fn matched_set_to_zone_refuses_the_rest_subject() {
+        let other_filter = super::super::build_reveal_until_filter("other");
+        assert!(parse_reveal_until_matched_set_to_zone(
+            "put all other cards revealed this way into your graveyard",
+            &other_filter,
+        )
+        .is_err());
+        assert!(
+            parse_reveal_until_matched_set_to_zone(
+                "put all creature cards revealed this way into your graveyard",
+                &creature_until_filter(),
+            )
+            .is_ok(),
+            "reach guard: the same call shape accepts the matched-set phrase"
+        );
     }
 
     #[test]
@@ -9660,13 +10327,12 @@ mod tests {
     // or the broader "repeat this process for" family are NOT modeled by the
     // type-substitution path and must be rejected, so they stay strict-failing
     // until the full replacement-filter/cardinality grammar lands (Gruesome
-    // Menagerie, Grim Captain's Call, Firemind's Foresight) — CR #1: a flagged
+    // Menagerie, Firemind's Foresight) — CR #1: a flagged
     // gap beats a silent misparse.
     #[test]
     fn do_the_same_for_type_rejects_unmodeled_continuations() {
         for phrasing in [
             "do the same for creature cards with mana value 2 and 3",
-            "do the same for Vampire, Dinosaur, and Merfolk",
             "do the same for creature cards with flying",
             "repeat this process for instant cards",
         ] {
@@ -9674,6 +10340,49 @@ mod tests {
                 try_parse_do_the_same_for_type(phrasing),
                 None,
                 "must reject the unmodeled continuation {phrasing:?}"
+            );
+        }
+    }
+
+    // CR 608.2c: a bare subtype enumeration yields one `Subtype` substitution per
+    // entry, across comma / "and" / "and/or" list shapes.
+    #[test]
+    fn do_the_same_for_subtype_list_yields_one_filter_per_entry() {
+        let expected: Vec<TypeFilter> = ["Vampire", "Dinosaur", "Merfolk"]
+            .into_iter()
+            .map(|s| TypeFilter::Subtype(s.to_string()))
+            .collect();
+        for phrasing in [
+            "then do the same for Vampire, Dinosaur, and Merfolk.",
+            "do the same for Vampires, Dinosaurs and Merfolk",
+            "do the same for Vampire, Dinosaur, and/or Merfolk.",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_subtype_list(phrasing),
+                Some(expected.clone()),
+                "phrasing {phrasing:?}"
+            );
+        }
+        assert_eq!(
+            try_parse_do_the_same_for_subtype_list("do the same for Vampire and Merfolk")
+                .map(|v| v.len()),
+            Some(2)
+        );
+    }
+
+    // A lone type, a non-subtype list member, or trailing text is not this form.
+    #[test]
+    fn do_the_same_for_subtype_list_rejects_non_lists() {
+        for phrasing in [
+            "do the same for Aura cards",
+            "do the same for Vampire",
+            "do the same for Vampire, Dinosaur, and creature cards with flying",
+            "do the same for Vampire, Dinosaur, and Merfolk, then shuffle",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_subtype_list(phrasing),
+                None,
+                "must reject {phrasing:?}"
             );
         }
     }
@@ -10937,6 +11646,97 @@ mod tests {
             chunks.len(),
             chunks.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
+    }
+
+    // CR 601.2h: two independently mana-gated conjuncts split at
+    // ", and" whatever the subject/verb of each half; a single gated clause with
+    // an ungated ", and" conjunct is left alone.
+    #[test]
+    fn mana_spent_conjuncts_split_at_comma_and() {
+        for (left, right) in [
+            (
+                "Creatures you control get +1/+0 until end of turn if {R} was spent to cast this spell",
+                "and creatures your opponents control lose flying until end of turn if {G} was spent to cast this spell",
+            ),
+            (
+                "Draw a card if {U} was spent to cast this spell",
+                "and target player gains 2 life if {W} was spent to cast this spell",
+            ),
+        ] {
+            let chunks = clause_texts(&format!("{left}, {right}"));
+            assert_eq!(chunks, vec![left.to_string(), right.to_string()]);
+        }
+    }
+
+    // CR 120.2b + CR 601.2h: a no-comma " and " between two mana-gated damage
+    // conjuncts restores the elided "<source> deals" head on the second half.
+    #[test]
+    fn mana_spent_damage_conjunct_restores_elided_head() {
+        let chunks = clause_texts(
+            "~ deals 3 damage to each creature without flying if {R} was spent to cast this spell and 2 damage to each creature with flying if {G} was spent to cast this spell",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "~ deals 3 damage to each creature without flying if {R} was spent to cast this spell",
+                "~ deals 2 damage to each creature with flying if {G} was spent to cast this spell",
+            ]
+        );
+    }
+
+    // CR 119.3 + CR 601.2h: the elided "<subject> <verb>" head is restored for a
+    // gain-life conjunct too, not only for "deals".
+    #[test]
+    fn mana_spent_life_conjunct_restores_elided_head() {
+        for (verb, first, second) in [
+            ("gain", "You gain 2 life", "5 life"),
+            ("lose", "You lose 2 life", "5 life"),
+        ] {
+            let chunks = clause_texts(&format!(
+                "{first} if {{R}} was spent to cast this spell and {second} if {{G}} was spent to cast this spell"
+            ));
+            assert_eq!(
+                chunks,
+                vec![
+                    format!("{first} if {{R}} was spent to cast this spell"),
+                    format!("You {verb} {second} if {{G}} was spent to cast this spell"),
+                ]
+            );
+        }
+    }
+
+    // CR 601.2h: a "was spent to cast" in a LATER sentence does not gate this
+    // sentence's conjunct. Each negative is paired with the positive whose only
+    // difference is that the conjunct carries its own gate.
+    #[test]
+    fn mana_spent_split_stops_at_sentence_boundary() {
+        let later_sentence = "Draw a card if {G} was spent to cast this spell";
+        // Comma-and conjunct (subject-led second half).
+        let ungated = clause_texts(&format!(
+            "Creatures you control get +1/+0 until end of turn if {{R}} was spent to cast this spell, and creatures you control gain haste until end of turn. {later_sentence}"
+        ));
+        assert_eq!(ungated.len(), 2, "{ungated:?}");
+        let gated = clause_texts(&format!(
+            "Creatures you control get +1/+0 until end of turn if {{R}} was spent to cast this spell, and creatures you control gain haste until end of turn if {{U}} was spent to cast this spell. {later_sentence}"
+        ));
+        assert_eq!(gated.len(), 3, "{gated:?}");
+        // Elided-head conjunct.
+        let ungated = clause_texts(&format!(
+            "You gain 2 life if {{R}} was spent to cast this spell and 3 life. {later_sentence}"
+        ));
+        assert_eq!(ungated.len(), 2, "{ungated:?}");
+        let gated = clause_texts(&format!(
+            "You gain 2 life if {{R}} was spent to cast this spell and 3 life if {{U}} was spent to cast this spell. {later_sentence}"
+        ));
+        assert_eq!(gated.len(), 3, "{gated:?}");
+    }
+
+    #[test]
+    fn mana_spent_condition_without_second_condition_does_not_force_split() {
+        let chunks = clause_texts(
+            "Creatures you control get +1/+0 until end of turn if {R} was spent to cast this spell, and creatures you control gain haste until end of turn",
+        );
+        assert_eq!(chunks.len(), 1);
     }
 
     // --- Bare " and " splitting: damage clause patterns ---
@@ -14202,10 +15002,14 @@ mod tests {
         assert!(starts_bare_and_clause(
             "she doesn't untap during her next untap step"
         ));
+        // CR 608.2c: a source-pronoun damage instruction is its own clause
+        // (Aang, Master of Elements: "... counters on him, and he deals 4
+        // damage to each opponent").
+        assert!(starts_bare_and_clause("she deals 2 damage to any target"));
         // Guard: a gendered pronoun WITHOUT a recognized continuous/restriction
-        // verb must NOT split (no false clause boundary).
+        // or damage verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
-        assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+        assert!(!starts_bare_and_clause("she eventually deals 2 damage"));
     }
 
     /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +
@@ -15364,5 +16168,93 @@ mod leading_duration_guard_tests_7923 {
         assert!(!head_ends_with_dangling_phase_trigger(
             "target tapped creature doesn't untap during its controller's untap step"
         ));
+    }
+
+    /// CR 608.2c: ", and <noun phrase> perpetually get(s) <P/T>" opens a new
+    /// clause whatever the verb number or the subject's shape.
+    #[test]
+    fn comma_and_perpetual_subject_conjunct_opens_a_clause() {
+        let subjects = [
+            "the top creature card of your library",
+            "the topmost creature card in your library",
+            "target creature card in your hand",
+        ];
+        for subject in subjects {
+            for verb in ["gets", "get"] {
+                let text = format!("You gain 3 life, and {subject} perpetually {verb} +1/+1");
+                assert_eq!(
+                    split_clause_sequence(&text).len(),
+                    2,
+                    "{text:?} must split into the life gain and the perpetual edit"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2c: a compound subject joined by a bare "and" is one noun phrase,
+    /// and only the ", and" that follows a sibling instruction is a boundary.
+    #[test]
+    fn perpetual_compound_subject_is_not_split() {
+        assert_eq!(
+            split_clause_sequence(
+                "Creatures you control and creature cards in your hand perpetually get +1/+1"
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            split_clause_sequence(
+                "Draw a card, and creatures you control and creature cards in your hand \
+                 perpetually get +1/+1"
+            )
+            .len(),
+            2
+        );
+    }
+
+    /// CR 608.2c: a ", and" conjunct without "perpetually get(s)" gains no
+    /// boundary from this rule, and a later sentence's "perpetually" cannot
+    /// promote an earlier conjunct.
+    #[test]
+    fn perpetual_conjunct_boundary_is_bound_to_its_own_sentence() {
+        assert!(!starts_perpetual_subject_conjunct(
+            "and the top creature card of your library gets +1/+1"
+        ));
+        assert!(starts_perpetual_subject_conjunct(
+            "and the top creature card of your library perpetually gets +1/+1"
+        ));
+        assert!(!starts_perpetual_subject_conjunct(
+            "and draw a card. target creature perpetually gets +1/+1"
+        ));
+        assert!(!starts_perpetual_subject_conjunct(
+            "and draw a card, then target creature perpetually gets +1/+1"
+        ));
+    }
+
+    /// CR 608.2c: the last element of a serial list ("…in your hand, library,
+    /// and graveyard perpetually get +1/+1", Arming Gala) is not a subject, so
+    /// its ", and" is no clause boundary. The paired positive rows show the
+    /// same rule still opens a clause at a real noun-phrase subject, so the
+    /// negative cannot pass by the splitter having stopped firing.
+    #[test]
+    fn perpetual_conjunct_boundary_ignores_a_list_element() {
+        assert!(starts_perpetual_subject_conjunct(
+            "and the topmost creature card in your library perpetually gets +X/+X"
+        ));
+        assert!(starts_perpetual_subject_conjunct(
+            "and creature cards in your hand perpetually get +1/+1"
+        ));
+        assert!(!starts_perpetual_subject_conjunct(
+            "and graveyard perpetually get +1/+1"
+        ));
+        assert_eq!(
+            split_clause_sequence(
+                "Creatures you control and creature cards in your hand, library, and graveyard \
+                 perpetually get +1/+1"
+            )
+            .len(),
+            1,
+            "a serial-list subject is one clause"
+        );
     }
 }

@@ -29,6 +29,7 @@ import {
   directory_validate_announcement,
   directory_version,
   initSync,
+  lobby_frame_for_viewer,
   lobby_protocol_version,
   min_supported_lobby_protocol,
   protocol_version,
@@ -59,6 +60,7 @@ import { toDataPoint } from "./telemetry";
 import {
   classifyHelloGate,
   helloGateErrorMessage,
+  lobbyFrameFor,
   type ConnAttachment,
   type LobbyHelloPolicy,
 } from "./hello-gate";
@@ -866,7 +868,9 @@ export class LobbyDO {
 
   private broadcastToSubscribers(frame: string): void {
     for (const sock of this.ctx.getWebSockets()) {
-      if (this.isSubscribed(sock)) sock.send(frame);
+      const conn = sock.deserializeAttachment() as ConnAttachment | null;
+      const out = lobbyFrameFor(conn, frame, lobby_frame_for_viewer);
+      if (out !== null) sock.send(out);
     }
   }
 

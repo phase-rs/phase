@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4576
-- **Total card appearances across root causes:** 4609 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4550
+- **Total card appearances across root causes:** 4583 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -15,41 +15,41 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 736 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 582 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 403 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 385 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 332 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 1 | Relative-clause / filter restriction on target dropped | 735 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 574 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 402 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 4 | Conjoined / chained second effect clause dropped | 382 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 331 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 208 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
-| 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
+| 10 | Trigger event/mode unrecognized → Unknown | 165 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 129 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 128 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
-| 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
+| 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 50 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
-| 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
+| 25 | Wrong / dropped effect duration | 20 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 12 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2438/4609 ≈ 53% of all misparse appearances; the top 10 cover 3429/4609 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2424/4583 ≈ 53% of all misparse appearances; the top 10 cover 3413/4583 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (736 cards)
+### 1. Relative-clause / filter restriction on target dropped  (735 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -151,7 +151,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Captain America's Shield
 - Captain N'ghathrod
 - Cathedral Membrane
-- Cemetery Prowler
 - Cephalid Shrine
 - Challenger Troll
 - Champion's Victory
@@ -796,7 +795,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (582 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (574 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1088,11 +1087,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Kyren Legate
 - Kytheon, Hero of Akros
 - Laboratory Drudge
-- Lairwatch Giant
 - Lashwhip Predator
 - Latchkey Faerie
 - Lava Burst
-- Leader's Talent
 - Lethal Throwdown
 - Liberating Combustion
 - Liberator, Urza's Battlethopter
@@ -1149,7 +1146,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Nefarox, Overlord of Grixis
 - Negative Zone Portal
 - Nightshade Assassin
-- Nikara, Lair Scavenger
 - Nimbus Champion
 - Nine-Lives Familiar
 - No Quarter
@@ -1180,7 +1176,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Phyrexian Atlas
 - Pick Up the Pace
 - Pious Kitsune
-- Pitfall Trap
 - Planar Collapse
 - Platinum Angel Avatar
 - Play with Fire
@@ -1193,7 +1188,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Promising Stairs
 - Prompto Argentum
 - Prowling Geistcatcher
-- Pugnacious Hammerskull
 - Pulse of the Hunter Maze
 - Qasali Ambusher
 - Quest for the Nihil Stone
@@ -1206,7 +1200,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ran and Shaw
 - Raphael, the Muscle
 - Rapid Fire
-- Rashka the Slayer
 - Raven Clan War-Axe
 - Rayne, Academy Chancellor
 - Reaper of Night
@@ -1387,7 +1380,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (403 cards)
+### 3. Anaphor bound to wrong referent  (402 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1638,7 +1631,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Numbing Dose
 - Ob Nixilis, Unshackled
 - Oblation
-- Oft-Nabbed Goat
 - Ondu Rising
 - Opal Gargoyle
 - Opal Titan
@@ -1801,7 +1793,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (385 cards)
+### 4. Conjoined / chained second effect clause dropped  (382 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -1816,7 +1808,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Akroma, Angel of Wrath Avatar
 - Alien Symbiosis
 - All Shall Smolder in My Wake
-- Ambitious Augmenter
 - Amnesia
 - An-Havva Inn
 - Anavolver
@@ -1981,7 +1972,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lignify
 - Lim-Dûl's Paladin
 - Liquid Fire
-- Llanowar Greenwidow
 - Lona, Tracker of the Known
 - Lynde, Cheerful Tormentor
 - Magmaquake
@@ -2072,7 +2062,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rootwater Shaman
 - Rothga, Bonded Engulfer
 - Rout
-- Rufus Shinra
 - Rune-Brand Juggler
 - Ryan Sinclair
 - Rysorian Badger
@@ -2197,7 +2186,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (332 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (331 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2290,7 +2279,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Dragonscale General
 - Drakuseth, Maw of Flames
 - Dramatist's Puppet
-- Duskana, the Rage Mother
 - Dust Elemental
 - Ellywick Tumblestrum
 - Embodiment of Agonies
@@ -3410,7 +3398,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 10. Trigger event/mode unrecognized → Unknown  (167 cards)
+### 10. Trigger event/mode unrecognized → Unknown  (165 cards)
 
 **Signature.** TriggerMode parses as Unknown(text); the event/subject combinator (state-trigger, taps-for-mana, becomes-blocked, keyword-action, loyalty-activated, die-roll) doesn't recognize the phrasing so the trigger never fires.
 
@@ -3430,7 +3418,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Athreos, Shroud-Veiled
 - Balthier and Fran
 - Baneclaw Marauder
-- Bess, Soul Nourisher
 - Black Panther, Vanguard
 - Bomb Squad
 - Bronze Horse (n/a)
@@ -3512,7 +3499,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Multani's Presence
 - Narci, Fable Singer
 - Netherese Puzzle-Ward
-- Olivia, Crimson Bride
 - Oni-Cult Anvil
 - Orcish Mine
 - Oura, the Imitator
@@ -3915,7 +3901,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (129 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (128 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3994,7 +3980,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Knight of Malice
 - Kosei, Penitent Warlord
 - Masked Bandits
-- Mazemind Tome
 - Metathran Elite
 - Minas Morgul, Dark Fortress
 - Nature's Chosen
@@ -4440,7 +4425,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 18. Subtype / type-change modification malformed or dropped  (79 cards)
+### 18. Subtype / type-change modification malformed or dropped  (78 cards)
 
 **Signature.** A subtype is missing from SUBTYPES (silently discarded), singularized wrongly, a state/type word is mis-encoded as a Subtype, or a 'becomes/is a [color][type]' modification drops the color/subtype/P-T piece.
 
@@ -4510,7 +4495,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - The Wasp, Winsome Avenger
 - Then, Dreadmaws Ate Everyone
 - There and Back Again
-- Tideshaper Mystic
 - Timeless Dragon
 - Timeless Witness
 - Transgress the Mind
@@ -4849,7 +4833,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 25. Wrong / dropped effect duration  (28 cards)
+### 25. Wrong / dropped effect duration  (20 cards)
 
 **Signature.** Effect duration is wrong (UntilEndOfTurn where permanent/until-event/two-turn needed, or a spurious expiry added), or a 'until <state change>' delayed-return is dropped.
 
@@ -4869,13 +4853,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Fraying Sanity
 - Glorious End
 - Golden Guardian
-- Jinx
-- Mistform Shrieker
-- Mistform Skyreaver
-- Mistform Stalker
-- Mistform Wakecaster
-- Mistform Wall
-- Mistform Warchief
 - Monoist Gravliner
 - Mythos of Vadrok
 - Nezumi Ronin
@@ -4883,7 +4860,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Palace Jailer
 - Peace Talks
 - Plant a Sapling
-- Trickery Charm
 - War of the Last Alliance
 
 </details>
@@ -5057,6 +5033,12 @@ CR 607.2d linkage seam (`parser/oracle_nom/filter.rs::classify_chosen_color_gran
 the same moment, and **Chromatic Armor** becomes the first pool permanent able
 to hold two persisting colour answers.
 
+**F1-subtype — `persist: false` creature-type / basic-land-type choosers write nothing.**
+CLOSED. The "becomes the creature type / basic land type of your choice" class
+(Mistform family, Jinx, Trickery Charm, and the rest) now latches this
+resolution's answer when the effect is applied, and distinguishes set from
+retain semantics; see "Named follow-ups — the chosen-subtype class" below.
+
 **F6 — wrap the printed colour choice at the CARRYING clause's own node.**
 `inject_printed_color_choice_filter`
 (`crates/engine/src/parser/oracle_effect/mod.rs`) can only wrap the chain HEAD,
@@ -5229,3 +5211,50 @@ Both activated abilities export `Effect::PreventDamage` with NO
 `damage_source_filter`, so they prevent all damage from every source — with no
 `Effect::Unimplemented` and no parse warning. Same seam as root cause 11
 (replacement / prevention effect mis-modeled), not the object-filter seam.
+
+## Named follow-ups — the chosen-subtype class
+
+Filed by the Mistform Stalker / chosen-subtype work. The headline defect is
+CLOSED: "becomes the creature type / basic land type of your choice" (the
+Mistform family, Jinx, Trickery Charm, Reef Shaman, Unstable Frontier,
+Tideshaper Mystic, Mistform Sliver and Navigator's Compass "in addition to its
+other types") lowers a `persist: false` chooser whose answer lives only in
+`state.last_named_choice`, while the layer applier read the SOURCE's
+`chosen_attributes` — so the type change applied nothing. Resolution-created
+chosen-subtype effects now latch this resolution's answer once, when the effect
+is applied (CR 608.2d + CR 608.2h), in
+`crates/engine/src/game/effects/effect.rs::snapshot_transient_modifications`
+via `crates/engine/src/game/effects/choose.rs::resolution_chosen_subtype` /
+`resolution_chosen_basic_land_type`; printed statics stay live (CR 611.3a).
+Route A (`parser/oracle_effect/subject.rs::try_parse_become_choice`) now
+distinguishes set from retain: without the "in addition to its other types"
+marker the chosen creature type replaces the creature types (CR 205.1a) and the
+chosen basic land type sets the land's type (CR 305.7); with it the chosen
+subtype is added (CR 205.1b, CR 305.7). Regressed by
+`crates/engine/tests/integration/become_chosen_subtype.rs`.
+
+**S1 — Route B "becomes that type" is still wrong on two axes.** The
+`that type` branch of `build_become_clause`
+(`crates/engine/src/parser/oracle_effect/subject.rs`):
+(i) emits the additive `AddChosenSubtype` although "becomes that type" SETS the
+type (CR 205.1a) — Imagecrafter, Unnatural Selection, Standardize, Mistform
+Mutant, and Mistform Wakecaster's second ability keep their old creature types;
+(ii) hard-codes `ChosenSubtypeKind::CreatureType` even after a basic-land-type
+chooser, so Terraformer and Elsewhere Flask ("Choose a basic land type. Each
+land you control becomes that type") silently read nothing. Filed rather than
+fixed; out of scope for the chosen-subtype work.
+
+**S2 — `resolve_random_in_chain` does not clear `last_named_choice`.** The
+random `Effect::Choose` path (`game/effects/choose.rs::resolve_random_in_chain`)
+writes the slot through `bind_named_choice` but, unlike the interactive
+`NamedChoice` answer arm, never clears it. A future resolution-created
+chosen-subtype effect with no `Choose` in its own chain could therefore latch a
+stale random answer. Zero affected producers today: every resolution-created
+chosen-subtype `GenericEffect` has its own `Choose` parent, which overwrites the
+slot before the effect is applied.
+
+**S3 — the colour twin remains under F1.** The `persist: false` "becomes the
+color[s] of your choice" class (Wild Mongrel, Kavu Chameleon, Shyft, Greater
+Morphling, Mondo Gecko) is not touched by this latch — its `AddChosenColor`
+still reads the source's chosen colour at layer time and is tracked by F1 in
+the chosen-colour follow-ups above.

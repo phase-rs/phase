@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Decks unterhalb dieser Engine-Unterstützungsschwelle ausschließen",
     "bracket": "Bracket",
     "bracketHint": "Die zufällige KI wählt aus diesen Brackets. Nicht markierte Decks werden beim Filtern ausgeschlossen.",
+    "bracketPoolEmpty": "Keine Decks entsprechen den gewählten Brackets. Die zufällige KI zieht aus allen legalen Decks.",
+    "cedhPoolEmpty": "Keine Bracket-5-Decks verfügbar. Zufällige KI-Gegner können keine Decks erhalten.",
     "opponentLabel": "Gegner {{number}}",
     "deck": "Deck",
     "difficulty": "Schwierigkeit",

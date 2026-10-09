@@ -18,10 +18,11 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
-    CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit, GameState,
-    ManaAbilityCostParent, ManaAbilityResume, PayCostKind, PendingCast, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingDiscardForCostResume, PendingSacrificeCostCompletion,
-    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit, FinalizePrePaymentChecks,
+    GameState, ManaAbilityCostParent, ManaAbilityResume, PayCostKind, PendingCast,
+    PendingCostMoveCompletion, PendingCostMoveResume, PendingDiscardForCostResume,
+    PendingSacrificeCostCompletion, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -46,9 +47,10 @@ use super::triggers::trigger_matcher;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
-    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
+    assign_selected_slots_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_target_slots, build_target_slots_labelled,
+    declared_targets_in_chain, modal_choice_for_player, random_select_targets_for_ability,
+    target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -387,11 +389,16 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     }
     let mut pending = pending.clone();
     pending.declared_mana_additions.extend(split.declared);
-    let mut total = super::casting::recompute_pending_mana_total(
+    // CR 601.2f + CR 702.119a + CR 702.48c: preview against the total the cast
+    // will lock in, including the reduction an Emerge or Offering sacrifice
+    // already earned, so an optional cost the pool pays beside the reduced
+    // total is offered.
+    let mut total = super::casting::recompute_pending_mana_total_with(
         state,
         player,
         &pending,
         pending.ability.chosen_x,
+        &super::casting::CostFinalizeContext::from_pending(&pending),
     );
     // CR 601.2f: An optional exile-this-way cost can make the announced X
     // payable. The declaration preview runs before the cards are selected, so
@@ -954,6 +961,50 @@ pub(crate) fn payable_spell_alternative_cost_details(
         return self_option;
     }
 
+    // CR 118.9 + CR 113.6e + CR 601.2f: a SELF-granted alternative cost -- a
+    // `CastWithAlternativeCost` static the spell object carries on its OWN
+    // baseline (a perpetual "You may pay {N} rather than pay this spell's mana
+    // cost" grant, installed with the 6-zone `self_spell_cost_mod_active_zones`
+    // reach so it functions from any zone the spell could be cast from, plus
+    // the stack). Consulted alongside the printed self-option scan above,
+    // before battlefield grants: a spell's own alternative wins over outer
+    // grants, consistent with printed-self behavior. The gate mirrors
+    // `casting::self_spell_cost_modifier_applies_before_targets`' shape
+    // (current zone in `active_zones`, `affected == SelfRef`) with NO origin
+    // restriction -- `SelfRef` identity-match, not other-grant
+    // affected-filtering.
+    // CR 118.9 + CR 601.2f: select the first PAYABLE SELF grant — an
+    // unaffordable earlier grant must not mask an affordable later one. The
+    // payability test runs per candidate through the
+    // `spell_alternative_cost_is_payable` authority, preserving
+    // first-among-payable choice behavior.
+    let granted_self = obj
+        .static_definitions
+        .iter_all()
+        .filter(|def| {
+            !def.active_zones.is_empty()
+                && def.active_zones.contains(&obj.zone)
+                && matches!(def.affected, Some(TargetFilter::SelfRef))
+        })
+        .filter_map(|def| match &def.mode {
+            StaticMode::CastWithAlternativeCost {
+                cost,
+                timing_permission,
+                ..
+            } => Some((cost.clone(), *timing_permission)),
+            _ => None,
+        })
+        .find(|(cost, _)| spell_alternative_cost_is_payable(state, player, object_id, cost));
+    if let Some((cost, timing_permission)) = granted_self {
+        return Some(PayableSpellAlternativeCost {
+            cost,
+            timing_permission,
+            // CR 118.9: a self grant carries no per-turn grant slot to
+            // consume.
+            once_per_turn_source: None,
+        });
+    }
+
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
     // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
     // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE
@@ -1003,9 +1054,15 @@ fn spell_alternative_cost_is_payable(
         AbilityCost::Mana { cost } => {
             super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
         }
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|sub_cost| spell_alternative_cost_is_payable(state, player, object_id, sub_cost)),
+        // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
+        // hand-discard legs must be payable together (one card cannot serve two).
+        AbilityCost::Composite { costs } => {
+            costs.iter().all(|sub_cost| {
+                spell_alternative_cost_is_payable(state, player, object_id, sub_cost)
+            }) && super::cost_payability::discard_legs_jointly_payable(
+                state, player, object_id, None, costs,
+            )
+        }
         other => other.is_payable(state, player, object_id),
     }
 }
@@ -1560,6 +1617,33 @@ pub(crate) fn finish_pending_cost_or_cast(
         );
     }
     if !pending.deferred_sacrificed_permanents.is_empty() {
+        // CR 601.2f: the total is locked once, with the reduction the kept
+        // Emerge or Offering sacrifice earned applied in the caster's order
+        // (asking for that order when it is observable), never below {0}.
+        if !pending.accepted_cost_reductions.is_empty() {
+            match super::casting::lock_in_total_cost(
+                state,
+                player,
+                &pending,
+                &pending.accepted_cost_reductions,
+                pending.cost_reduction_election.as_ref(),
+            ) {
+                super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
+                super::casting::CostLockOutcome::Election {
+                    reductions,
+                    hybrid_symbols,
+                    outcomes,
+                } => {
+                    return Ok(WaitingFor::OrderCostReductions {
+                        player,
+                        reductions,
+                        hybrid_symbols,
+                        outcomes,
+                        pending_cast: Box::new(pending),
+                    });
+                }
+            }
+        }
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
     }
@@ -1698,6 +1782,20 @@ pub(crate) fn assign_next_announcing_opponent(
     false
 }
 
+/// CR 601.2c + CR 601.2f: a spell whose deferred target declaration completed
+/// without a prompt (no slot left, a random choice, or one legal choice)
+/// determines its total cost exactly as the prompted completion does.
+fn finish_unprompted_spell_declaration(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let ability = (*pending.ability).clone();
+    let cost = pending.cost.clone();
+    finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
+}
+
 pub(crate) fn begin_deferred_target_selection(
     state: &mut GameState,
     player: PlayerId,
@@ -1824,7 +1922,10 @@ pub(crate) fn begin_deferred_target_selection(
                 events,
             );
         }
-        return finish_pending_cost_or_cast(state, player, pending, events);
+        if pending.activation_ability_index.is_some() {
+            return finish_pending_cost_or_cast(state, player, pending, events);
+        }
+        return finish_unprompted_spell_declaration(state, player, pending, events);
     }
     // CR 115.1 + CR 701.9b: Random-target abilities short-circuit to RNG-driven
     // selection here too. The deferred-selection path is reached after additional
@@ -1836,30 +1937,32 @@ pub(crate) fn begin_deferred_target_selection(
         let targets =
             random_select_targets_for_ability(state, &target_slots, &pending.target_constraints)?;
         let mut ability = pending.ability.clone();
-        assign_targets_in_chain(state, &mut ability, &targets)?;
+        assign_selected_slots_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
-            &flatten_targets_in_chain(&pending.ability),
+            &declared_targets_in_chain(&pending.ability),
             pending.ability.controller,
+        );
+        // CR 601.2c + CR 603.2: each automatically declared target becomes the
+        // target of the spell or ability once, as a prompted declaration emits it.
+        super::casting::emit_targeting_events(
+            state,
+            &declared_targets_in_chain(&pending.ability),
+            pending.object_id,
+            pending.ability.controller,
+            events,
         );
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
             // announced through this deferred route.
-            super::casting::emit_targeting_events(
-                state,
-                &flatten_targets_in_chain(&pending.ability),
-                pending.object_id,
-                pending.ability.controller,
-                events,
-            );
             pending.begin_activation_trigger_collection();
             return finish_target_selected_activated_ability_at_payment_boundary(
                 state, player, pending, events,
             );
         }
-        return finish_pending_cost_or_cast(state, player, pending, events);
+        return finish_unprompted_spell_declaration(state, player, pending, events);
     }
     if let Some(targets) = auto_select_targets_for_ability(
         state,
@@ -1868,30 +1971,32 @@ pub(crate) fn begin_deferred_target_selection(
         &pending.target_constraints,
     )? {
         let mut ability = pending.ability.clone();
-        assign_targets_in_chain(state, &mut ability, &targets)?;
+        assign_selected_slots_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
-            &flatten_targets_in_chain(&pending.ability),
+            &declared_targets_in_chain(&pending.ability),
             pending.ability.controller,
+        );
+        // CR 601.2c + CR 603.2: each automatically declared target becomes the
+        // target of the spell or ability once, as a prompted declaration emits it.
+        super::casting::emit_targeting_events(
+            state,
+            &declared_targets_in_chain(&pending.ability),
+            pending.object_id,
+            pending.ability.controller,
+            events,
         );
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
             // announced through this deferred route.
-            super::casting::emit_targeting_events(
-                state,
-                &flatten_targets_in_chain(&pending.ability),
-                pending.object_id,
-                pending.ability.controller,
-                events,
-            );
             pending.begin_activation_trigger_collection();
             return finish_target_selected_activated_ability_at_payment_boundary(
                 state, player, pending, events,
             );
         }
-        return finish_pending_cost_or_cast(state, player, pending, events);
+        return finish_unprompted_spell_declaration(state, player, pending, events);
     }
 
     if pending.activation_ability_index.is_some() {
@@ -2290,8 +2395,13 @@ fn pay_deferred_random_discard_cost(
     if deferred.count == 0 {
         return Ok(None);
     }
-    let eligible =
-        super::casting::find_eligible_discard_targets(state, player, pending.object_id, None);
+    let eligible = super::casting::find_eligible_discard_targets(
+        state,
+        player,
+        pending.object_id,
+        pending.ability.context.granting_object,
+        None,
+    );
     if eligible.len() < deferred.count {
         return Err(EngineError::ActionNotAllowed(
             "Reserved random discard cost is no longer payable".to_string(),
@@ -2464,6 +2574,66 @@ fn park_cost_payment_triggers_if_paused(
     }
 }
 
+/// CR 601.2h + CR 616.1: Move `chosen[start_at_index..]` through the zone pipeline as
+/// cost moves. A move that parks for a replacement choice leaves the typed `Cast` root
+/// holding `pending` and `completion`, parks the span's already-raised cost triggers,
+/// and returns the live prompt; `None` means every move settled.
+#[allow(clippy::too_many_arguments)]
+fn move_cost_objects(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    chosen: &[ObjectId],
+    start_at_index: usize,
+    destination: Zone,
+    completion: &PendingCostMoveCompletion,
+    cost_event_start: usize,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
+        let mut request = ZoneMoveRequest::cost(object_id, destination, pending.object_id);
+        // CR 406.6: the delve exile is the casting spell's own cost, so a delivered
+        // card is linked to that spell.
+        if matches!(
+            completion,
+            PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+        ) {
+            request = request.track_exiled_by_source();
+        }
+        match zone_pipeline::move_object(state, request, events) {
+            ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsChoice(choice_player) => {
+                state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                    player,
+                    pending: Some(Box::new(pending.clone())),
+                    chosen: chosen.to_vec(),
+                    paused_at_index: index,
+                    destination,
+                    completion: completion.clone(),
+                });
+                // A delivered move can surface its own post-effect prompt; only a live
+                // CR 616.1 ordering choice is synthesized here.
+                if state.pending_replacement.is_some() {
+                    super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                }
+                let waiting_for = state.waiting_for.clone();
+                park_cost_payment_triggers_if_paused(
+                    state,
+                    events,
+                    cost_event_start,
+                    events.len(),
+                    &waiting_for,
+                );
+                return Some(waiting_for);
+            }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                unreachable!("a cost move to Hand or Exile cannot require an Aura attachment")
+            }
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_cost_object_moves(
     state: &mut GameState,
@@ -2477,37 +2647,18 @@ fn finish_cost_object_moves(
     park_events_after_completion: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
-        match zone_pipeline::move_object(
-            state,
-            ZoneMoveRequest::cost(object_id, destination, pending.object_id),
-            events,
-        ) {
-            ZoneMoveResult::Done => {}
-            ZoneMoveResult::NeedsChoice(choice_player) => {
-                state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
-                    player,
-                    pending: Some(Box::new(pending)),
-                    chosen,
-                    paused_at_index: index,
-                    destination,
-                    completion,
-                });
-                super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
-                let waiting_for = state.waiting_for.clone();
-                park_cost_payment_triggers_if_paused(
-                    state,
-                    events,
-                    cost_event_start,
-                    events.len(),
-                    &waiting_for,
-                );
-                return Ok(waiting_for);
-            }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                unreachable!("a cost move to Hand or Exile cannot require an Aura attachment")
-            }
-        }
+    if let Some(waiting_for) = move_cost_objects(
+        state,
+        player,
+        &pending,
+        &chosen,
+        start_at_index,
+        destination,
+        &completion,
+        cost_event_start,
+        events,
+    ) {
+        return Ok(waiting_for);
     }
 
     // CR 400.7j + CR 400.7 + CR 608.2k + CR 608.2h: Every cost object move above is now
@@ -2619,6 +2770,34 @@ fn finish_cost_object_moves(
                 }),
                 Some(actual_mana_spent),
                 ReturnedCreatureCostMove::Delivered,
+                Some(&deferred_life_resume_pending),
+                events,
+            )?
+        }
+        PendingCostMoveCompletion::FinalizeDelvedCast {
+            phyrexian_choices,
+            pre_payment_checks,
+        } => {
+            let actual_mana_spent = pending
+                .prepaid_actual_mana_spent
+                .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id));
+            let deferred_life_resume_pending = pending.clone();
+            finalize_cast_with_phyrexian_choices_inner(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                *pending.ability,
+                &pending.cost,
+                pending.casting_variant,
+                pending.casting_permission_index,
+                pending.cast_timing_permission,
+                pending.origin_zone,
+                phyrexian_choices.as_deref(),
+                None,
+                pre_payment_checks.map(|checks| *checks),
+                Some(actual_mana_spent),
+                ReturnedCreatureCostMove::Pending,
                 Some(&deferred_life_resume_pending),
                 events,
             )?
@@ -3179,6 +3358,103 @@ fn pay_deferred_spell_sacrifices_at_commit(
         &crate::game::zones::departed_subset(state, &departed_ids),
     );
     Ok(Some((cost_event_start, events.len())))
+}
+
+/// CR 601.2h: a delve selection is payable only while each card is still in its
+/// owner's graveyard; a mana ability may have exiled one since it was selected.
+fn validate_delve_selection_at_commit(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+) -> Result<(), EngineError> {
+    if pending.delved_cards.iter().all(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.is_delve_eligible(player))
+    }) {
+        Ok(())
+    } else {
+        Err(EngineError::ActionNotAllowed(
+            "A delved card is no longer in your graveyard".to_string(),
+        ))
+    }
+}
+
+/// CR 702.66a: drop the markers no generic mana consumed and narrow
+/// `pending.delved_cards` to the cards whose marker paid.
+fn settle_delve_markers(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) -> Result<(), EngineError> {
+    if pending.delved_cards.is_empty() {
+        return Ok(());
+    }
+    let selected = std::mem::take(&mut pending.delved_cards);
+    let Some(pool) = state.players.iter_mut().find(|p| p.id == player) else {
+        return Ok(());
+    };
+    let unspent: Vec<ObjectId> = pool
+        .mana_pool
+        .mana
+        .iter()
+        .filter(|unit| unit.is_convoke_payment() && selected.contains(&unit.source_id))
+        .map(|unit| unit.source_id)
+        .collect();
+    pool.mana_pool
+        .mana
+        .retain(|unit| !(unit.is_convoke_payment() && unspent.contains(&unit.source_id)));
+    pending.delved_cards = selected
+        .into_iter()
+        .filter(|id| !unspent.contains(id))
+        .collect();
+    validate_delve_selection_at_commit(state, player, pending)
+}
+
+/// CR 601.2h: the post-payment division is announced before the total cost is
+/// paid, so the delve exile runs when that division completes.
+pub(super) fn pay_delve_after_distribution(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let spent = recorded_mana_spent_to_cast(state, pending.object_id);
+    let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
+        phyrexian_choices: None,
+        pre_payment_checks: None,
+    };
+    pay_delve_at_commit(state, player, pending, spent, completion, events)
+}
+
+/// CR 601.2h + CR 702.66a: pay the delve part of the total cost. Each card whose
+/// marker the mana payment consumed is exiled through the cost-move authority; an
+/// exile that parks leaves a `Cast` root that re-enters the finalizer.
+fn pay_delve_at_commit(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    actual_mana_spent: u32,
+    completion: PendingCostMoveCompletion,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    settle_delve_markers(state, player, pending)?;
+    let spent = std::mem::take(&mut pending.delved_cards);
+    let mut parked = pending.clone();
+    parked.cost = ManaCost::NoCost;
+    parked.prepaid_actual_mana_spent = Some(actual_mana_spent);
+    Ok(move_cost_objects(
+        state,
+        player,
+        &parked,
+        &spent,
+        0,
+        Zone::Exile,
+        &completion,
+        events.len(),
+        events,
+    ))
 }
 
 fn park_deferred_cost_triggers_if_paused(
@@ -3756,8 +4032,13 @@ pub(crate) fn handle_sacrifice_for_cost(
         .ok_or_else(|| {
             EngineError::InvalidAction("sacrifice payment has no selected non-self cost".into())
         })?;
-    let live =
-        super::casting::find_eligible_sacrifice_targets(state, player, pending.object_id, filter);
+    let live = super::casting::find_eligible_sacrifice_targets(
+        state,
+        player,
+        pending.object_id,
+        pending.ability.context.granting_object,
+        filter,
+    );
     if chosen.iter().any(|id| !live.contains(id)) {
         return Err(EngineError::ActionNotAllowed(
             "Selected permanent no longer eligible for sacrifice".into(),
@@ -3825,16 +4106,36 @@ pub(crate) fn handle_sacrifice_for_cost(
 
     // CR 702.48c / CR 702.119a: Offering and Emerge use different reduction
     // rules, but both must read the sacrificed permanent before it leaves.
+    // CR 601.2f: when the sacrifice is chosen before a deferred target
+    // declaration, the reduction it earns is also recorded, so the authority
+    // that determines the total after the declaration locks it in once.
     if let Some(reduction_source) = reduction_source {
         if let Some(&first) = chosen.first() {
-            match reduction_source {
+            let amount = match reduction_source {
                 SpellCostSource::Offering => {
+                    let amount = state
+                        .objects
+                        .get(&first)
+                        .map(|object| object.mana_cost.clone());
                     apply_offering_cost_reduction(state, first, &mut pending.cost);
+                    amount
                 }
                 SpellCostSource::Emerge => {
+                    let amount = state
+                        .objects
+                        .get(&first)
+                        .map(|object| ManaCost::generic(object.effective_mana_value()));
                     apply_emerge_cost_reduction(state, first, &mut pending.cost);
+                    amount
                 }
-                SpellCostSource::Other => {}
+                SpellCostSource::Other => None,
+            };
+            if pending.deferred_target_selection {
+                if let Some((object, amount)) = state.objects.get(&first).zip(amount) {
+                    pending
+                        .accepted_cost_reductions
+                        .push(sacrifice_reduction_entry(object, amount, reduction_source));
+                }
             }
         }
     }
@@ -4001,6 +4302,7 @@ pub(crate) fn handle_resolution_optional_sacrifice_for_cost(
         state,
         player,
         frame.ability.source_id,
+        frame.ability.context.granting_object,
         &cost.target,
     );
     if live.len() != advertised_choices.len()
@@ -4102,7 +4404,8 @@ pub(crate) fn handle_unattach_for_cost(
             "Must unattach at least one attachment to pay the cost".to_string(),
         ));
     }
-    let ctx = super::filter::FilterContext::from_source(state, pending.object_id);
+    let ctx = super::filter::FilterContext::from_source(state, pending.object_id)
+        .with_granting_object(pending.ability.context.granting_object);
     for &id in chosen {
         if !choices.contains(&id) {
             return Err(EngineError::InvalidAction(
@@ -5001,7 +5304,7 @@ pub(crate) fn handle_exile_for_cost(
                 .get(player.0 as usize)
                 .is_some_and(|p| match zone {
                     ExileCostSourceZone::Hand => p.hand.contains(&id),
-                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                    ExileCostSourceZone::Graveyard => state.graveyard_of(p.id).contains(&id),
                 });
             if !still_in_zone {
                 return Err(EngineError::InvalidAction(format!(
@@ -5045,7 +5348,7 @@ pub(crate) fn handle_exile_any_number_for_cost(
                 .get(player.0 as usize)
                 .is_some_and(|p| match zone {
                     ExileCostSourceZone::Hand => p.hand.contains(&id),
-                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                    ExileCostSourceZone::Graveyard => state.graveyard_of(p.id).contains(&id),
                 });
             if !still_in_zone {
                 return Err(EngineError::InvalidAction(format!(
@@ -5090,18 +5393,20 @@ pub(crate) fn handle_exile_permanent_for_cost(
         "permanent(s)",
         "Selected permanent not eligible to exile as a cost",
         |state, player, id, pending| {
-            // CR 601.2h: Re-validate against the live battlefield — the chosen
-            // permanent must still be on the battlefield, controlled by the
-            // payer, match the cost's filter, and not be the cast source.
+            // CR 601.2h: Re-validate against the live battlefield.
+            // CR 701.13a + CR 109.5: exiling needs no control; the cost's "you" is the payer.
             if id == pending.object_id {
                 return Err(EngineError::InvalidAction(
                     "Cannot exile the spell being cast as its own escape cost".into(),
                 ));
             }
-            let ctx = super::filter::FilterContext::from_source(state, pending.object_id);
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                pending.object_id,
+                player,
+            )
+            .with_granting_object(pending.ability.context.granting_object);
             let eligible = state.objects.get(&id).is_some_and(|obj| {
                 obj.zone == Zone::Battlefield
-                    && obj.controller == player
                     && filter
                         .as_ref()
                         .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
@@ -5554,6 +5859,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         return Ok(None);
     };
     let source_id = pending.object_id;
+    let granting_object = pending.ability.context.granting_object;
 
     match super::casting::single_random_hand_discard_cost(&initial_cost) {
         Err(message) => return Err(EngineError::ActionNotAllowed(message.to_string())),
@@ -5566,8 +5872,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             let count =
                 super::quantity::resolve_quantity_with_targets(state, count, &pending.ability)
                     .max(0) as usize;
-            let eligible =
-                super::casting::find_eligible_discard_targets(state, player, source_id, None);
+            let eligible = super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                source_id,
+                granting_object,
+                None,
+            );
             if eligible.len() < count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough cards in hand to discard at random".to_string(),
@@ -5595,15 +5906,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     // Bomat Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
     // helper returns `Ok(None)` so we FALL THROUGH to the next unpaid leg (the sacrifice arm
     // below) rather than surfacing a dead `PayCost { count: 0 }`.
-    if let Some((count, eligible)) =
-        super::casting::resolve_non_self_discard_requirement_with_ability(
-            state,
-            player,
-            source_id,
-            cost,
-            Some(&pending.ability),
-        )?
-    {
+    if let Some((count, eligible)) = super::casting::resolve_non_self_discard_requirement(
+        state,
+        player,
+        source_id,
+        cost,
+        super::casting::DiscardCostPayer::Ability(&pending.ability),
+    )? {
         return Ok(Some(WaitingFor::PayCost {
             player,
             kind: PayCostKind::Discard,
@@ -5640,6 +5949,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             state,
             player,
             source_id,
+            granting_object,
             sacrifice_filter,
         );
         let (min_count, max_count) = super::casting::sacrifice_cost_bounds(count, eligible.len());
@@ -5664,7 +5974,12 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         let zone = ExileCostSourceZone::try_from_zone(zone)
             .expect("non-self activation exile costs use hand or graveyard");
         let eligible = super::casting::find_eligible_exile_for_cost_targets(
-            state, player, source_id, zone, filter,
+            state,
+            player,
+            source_id,
+            granting_object,
+            zone,
+            filter,
         );
         if eligible.len() < count as usize {
             return Err(EngineError::ActionNotAllowed(
@@ -5784,6 +6099,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             state,
             player,
             source_id,
+            granting_object,
             Zone::Battlefield,
             effective_filter.as_ref(),
             count,
@@ -5814,6 +6130,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             state,
             player,
             source_id,
+            granting_object,
             filter,
             min_mana_value,
         );
@@ -5839,8 +6156,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     if let Some((count, filter)) = super::casting::find_return_to_hand_cost(cost)
         .filter(|(_, filter)| !matches!(filter, Some(TargetFilter::SelfRef)))
     {
-        let eligible =
-            super::casting::find_eligible_return_to_hand_targets(state, player, source_id, filter);
+        let eligible = super::casting::find_eligible_return_to_hand_targets(
+            state,
+            player,
+            source_id,
+            granting_object,
+            filter,
+        );
         if eligible.len() < count as usize {
             return Err(EngineError::ActionNotAllowed(
                 "No eligible permanents to return".into(),
@@ -5869,6 +6191,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             state,
             player,
             source_id,
+            granting_object,
             target,
             counter_type,
             required_count,
@@ -5945,7 +6268,12 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             )
         })?;
         let eligible = super::casting::find_eligible_tap_creatures_for_cost(
-            state, player, source_id, cost, filter,
+            state,
+            player,
+            source_id,
+            granting_object,
+            cost,
+            filter,
         );
         // CR 107.3a + CR 601.2b: mirror the adjacent Sacrifice arm above —
         // a "Tap X untapped [type] you control" cost uses the u32::MAX
@@ -6133,8 +6461,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         })
     {
         if let Some(filter) = filter {
-            let choices =
-                super::casting::find_eligible_reveal_targets(state, player, source_id, filter);
+            let choices = super::casting::find_eligible_reveal_targets(
+                state,
+                player,
+                source_id,
+                granting_object,
+                filter,
+            );
             if choices.len() < *count as usize {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible cards in hand to reveal".to_string(),
@@ -6399,7 +6732,7 @@ pub(super) fn push_activated_ability_to_stack(
     // as `handle_activate_ability`; never pay the suffix and reopen targets.
     if !matches!(target_selection, ActivationTargetSelection::Settled) {
         let target_slots = build_target_slots(state, &resolved)?;
-        let assigned_targets = flatten_targets_in_chain(&resolved);
+        let assigned_targets = declared_targets_in_chain(&resolved);
         if !target_slots.is_empty() {
             let pending = |resolved: ResolvedAbility| {
                 let mut pending = PendingCast::for_activation(
@@ -6434,17 +6767,17 @@ pub(super) fn push_activated_ability_to_stack(
                 crate::types::ability::TargetSelectionMode::Random
             ) {
                 let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
-                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     player,
                 );
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     source_id,
                     player,
                     events,
@@ -6457,17 +6790,17 @@ pub(super) fn push_activated_ability_to_stack(
             if let Some(targets) =
                 auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
             {
-                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     player,
                 );
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     source_id,
                     player,
                     events,
@@ -6808,10 +7141,10 @@ pub(super) fn push_ability_entry(
 
 /// Check for an additional cost on the object being cast. If one exists,
 /// return `WaitingFor::OptionalCostChoice` so the player can decide;
-/// otherwise proceed directly to `pay_and_push`.
+/// otherwise proceed directly to `pay_and_push_with_lock`.
 ///
 /// This function sits between targeting and payment in the casting pipeline:
-/// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push → Stack`
+/// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push_with_lock → Stack`
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
@@ -6842,6 +7175,7 @@ pub(super) fn check_additional_cost_or_pay(
         None,
         origin_zone,
         payment_mode,
+        CostLockInput::default(),
         events,
     )
 }
@@ -6857,7 +7191,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     if !pending.crime_candidate {
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
-            &flatten_targets_in_chain(&ability),
+            &declared_targets_in_chain(&ability),
             player,
         );
     }
@@ -6873,6 +7207,12 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
+    // CR 601.2b + CR 601.2f: an Emerge or Offering sacrifice chosen before the
+    // deferred declaration stays chosen, and the reduction it earned stays
+    // accepted in `lock`, while the authority determines the rest of the total
+    // cost.
+    let lock = CostLockInput::from_pending(&pending);
+    let kept_sacrifices = std::mem::take(&mut pending.deferred_sacrificed_permanents);
     let object_id = pending.object_id;
     let card_id = pending.card_id;
     let casting_variant = pending.casting_variant;
@@ -6884,7 +7224,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     let base_cost = pending.base_cost;
     let cost = pending.cost;
     let ability = pending.ability;
-    check_additional_cost_or_pay_with_distribute(
+    check_additional_cost_or_pay_with_kept_cost(
         state,
         player,
         object_id,
@@ -6898,6 +7238,8 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         distribute,
         origin_zone,
         payment_mode,
+        lock,
+        kept_sacrifices,
         events,
     )
 }
@@ -7110,7 +7452,7 @@ pub(super) fn required_additional_cost_can_declare_x(
     else {
         return None;
     };
-    additional_cost_x_max(state, player, object_id, &cost)
+    additional_cost_x_max(state, player, object_id, None, &cost)
         .is_some()
         .then_some(cost)
 }
@@ -7373,9 +7715,32 @@ fn required_cost_from_additional(additional: Option<AdditionalCost>) -> Option<A
     }
 }
 
+/// A pending cast the additional-cost authority rebuilds, carrying `lock`'s
+/// cost-determination state and the sacrifice selection it was handed
+/// (CR 601.2b + CR 601.2f).
+fn pending_cast_keeping(
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    lock: &CostLockInput,
+    kept_sacrifices: &[DeferredSacrificeSelection],
+) -> PendingCast {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    lock.apply_to(&mut pending);
+    pending.deferred_sacrificed_permanents = kept_sacrifices.to_vec();
+    pending
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
+///
+/// CR 601.2b + CR 601.2f: `lock` carries the cast's cost-determination state,
+/// including the mana of additional costs the caster already declared: splice
+/// costs (CR 702.47a) and the costs of chosen Spree or entwined modes
+/// (CR 702.172a, CR 702.42a). Every pending cast rebuilt here has it applied, so
+/// a total recomputed from `base_cost` still includes them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay_with_distribute(
     state: &mut GameState,
@@ -7391,6 +7756,50 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    lock: CostLockInput,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    check_additional_cost_or_pay_with_kept_cost(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        cost,
+        base_cost,
+        casting_variant,
+        casting_permission_index,
+        cast_timing_permission,
+        distribute,
+        origin_zone,
+        payment_mode,
+        lock,
+        Vec::new(),
+        events,
+    )
+}
+
+/// CR 601.2b + CR 601.2f: the additional-cost authority, handed `lock` and the
+/// sacrifice selection a cast already made before its deferred target
+/// declaration. Every pending cast it rebuilds keeps both, so the sacrifice is
+/// made once and a kept reduction (in `lock`) is locked into the total once.
+#[allow(clippy::too_many_arguments)]
+fn check_additional_cost_or_pay_with_kept_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    base_cost: Option<ManaCost>,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    lock: CostLockInput,
+    kept_sacrifices: Vec<DeferredSacrificeSelection>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
@@ -7415,7 +7824,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             casting_variant == CastingVariant::Fuse,
         )
     {
-        let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let pending_for_cancel = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
         return Err(EngineError::ActionNotAllowed(
             "Chosen targets do not satisfy the flash casting condition".to_string(),
@@ -7490,7 +7906,17 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     } else {
         obj_additional.clone()
     };
-    let offering_additional = effective_offering_additional_cost(state, player, object_id);
+    // CR 702.48a: Offering is one optional additional cost; a kept Offering
+    // reduction means the caster already chose to pay it before the deferred
+    // target declaration, so it is not offered again.
+    let offering_taken = lock.accepted.iter().any(|entry| {
+        entry.provenance == ReductionProvenance::SacrificedForCost(SpellCostSource::Offering)
+    });
+    let offering_additional = if offering_taken {
+        None
+    } else {
+        effective_offering_additional_cost(state, player, object_id)
+    };
     let conspire_additional = effective_conspire_additional_cost(state, player, object_id);
 
     let (additional, deferred_required, additional_cost_source) =
@@ -7565,7 +7991,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             // Foretold) across the choice round-trip so its per-turn slot is
             // consumed at finalize. `None` for self-options / `Unlimited` grants.
             let alt_cost_grant_source = alt_cost.once_per_turn_source;
-            let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
+            let mut pending = pending_cast_keeping(
+                object_id,
+                card_id,
+                ability,
+                ManaCost::NoCost,
+                &lock,
+                &kept_sacrifices,
+            );
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
             pending.casting_permission_index = casting_permission_index;
@@ -7618,7 +8051,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     }
 
     if !additional_cost_queue.is_empty() {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7636,7 +8076,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         match &additional_cost {
             AdditionalCost::Required(req_cost) => {
                 // Required additional costs bypass the choice prompt — pay directly.
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_keeping(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &lock,
+                    &kept_sacrifices,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7681,7 +8128,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 costs,
                 repeatability,
             } => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_keeping(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &lock,
+                    &kept_sacrifices,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7711,7 +8165,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 cost: repeatable_cost,
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
             } => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_keeping(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &lock,
+                    &kept_sacrifices,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7731,7 +8192,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 cost: opt_cost,
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_keeping(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &lock,
+                    &kept_sacrifices,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7764,7 +8232,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 ));
             }
             AdditionalCost::Choice(preferred, fallback) => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_keeping(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &lock,
+                    &kept_sacrifices,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7824,7 +8299,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     });
     if let Some(energy_mv) = energy_cost {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7912,7 +8394,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                         .map(|extra| extra.cost)
                     })
                 })
-        } else if obj.zone == Zone::Library && obj.owner == player {
+        } else if super::casting::object_in_players_library(state, obj, player) {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
             // value rather than paying its mana cost").
@@ -7922,7 +8404,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     });
     if let Some(alt_cost) = alt_ability_cost {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7941,7 +8430,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // a time by `pay_additional_cost`'s Composite arm (CR 601.2h).
     if casting_variant == CastingVariant::Escape {
         if let Some((_, residual)) = super::keywords::effective_escape_data(state, object_id) {
-            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+            let mut pending = pending_cast_keeping(
+                object_id,
+                card_id,
+                ability,
+                cost.clone(),
+                &lock,
+                &kept_sacrifices,
+            );
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
             pending.casting_permission_index = casting_permission_index;
@@ -7957,7 +8453,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 702.81a: Retrace requires discarding a land card as an additional
     // cost, then paying the card's normal mana cost.
     if casting_variant == CastingVariant::Retrace {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7972,7 +8475,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 702.133a: Jump-start requires discarding a card (any card) as an
     // additional cost, then paying the card's normal mana cost.
     if casting_variant == CastingVariant::JumpStart {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7998,7 +8508,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some(non_mana_cost) =
         alternative_cost_residual(state, player, object_id, casting_variant)
     {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -8020,7 +8537,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
     if let Some(defiler) = find_defiler_reduction(state, player, object_id) {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -8039,7 +8563,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     }
 
     if let Some(imposed_cost) = imposed_required_cost {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -8056,7 +8587,29 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         return pay_additional_cost(state, player, imposed_cost, pending, events);
     }
 
-    let waiting_for = pay_and_push(
+    // CR 702.48b + CR 702.119c: the kept sacrifice is made as the total cost is
+    // paid, through the payment step that owns deferred sacrifices.
+    if !kept_sacrifices.is_empty() {
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
+        pending.base_cost = base_cost;
+        pending.casting_variant = casting_variant;
+        pending.casting_permission_index = casting_permission_index;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+    // CR 601.2f: a kept reduction (an Offering that already zeroed the cost)
+    // rides in `lock`, so it is locked into the total exactly once.
+    let waiting_for = pay_and_push_with_lock(
         state,
         player,
         object_id,
@@ -8070,6 +8623,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         distribute,
         origin_zone,
         payment_mode,
+        lock,
         events,
     )?;
     Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -8390,6 +8944,28 @@ fn accepted_defiler_reduction_entry(
     }
 }
 
+/// CR 601.2f + CR 702.48c + CR 702.119a: the accepted reduction an Offering
+/// or Emerge sacrifice earns, read from the sacrificed permanent before it
+/// leaves. `amount` is its mana cost for Offering and its mana value as
+/// generic mana for Emerge.
+fn sacrifice_reduction_entry(
+    object: &super::game_object::GameObject,
+    amount: ManaCost,
+    source: SpellCostSource,
+) -> CostReductionEntry {
+    CostReductionEntry {
+        amount,
+        multiplier: 1,
+        // CR 118.7b/c + CR 702.48c: a coloured reduction the cost lacks, or
+        // that exceeds its coloured component, reduces generic.
+        reach: CostReductionReach::SpillsToGeneric,
+        provenance: ReductionProvenance::SacrificedForCost(source),
+        display_name: object.name.clone(),
+        // CR 601.2f: a spell reduction; no floor.
+        minimum_mana: 0,
+    }
+}
+
 /// CR 601.2f + CR 118.7: Preview the locked mana obligation after an
 /// affordable Defiler life-payment reduction, without paying life or mutating
 /// the spell's announced cost.
@@ -8420,14 +8996,17 @@ pub(crate) fn defiler_reduced_cost_alongside(
 
 /// CR 601.2f + CR 601.2h: whether a paused cast still owes committed non-mana
 /// costs that only `finish_pending_cost_or_cast` pays: a required (imposed)
-/// cost on `additional_cost_flow`, or a deferred required cost (a compound
-/// alternative cost's residual). A continuation that rebuilt the cast with
-/// `pay_and_push_with_lock` instead would drop them.
+/// cost on `additional_cost_flow`, a deferred required cost (a compound
+/// alternative cost's residual), or (CR 702.48b + CR 702.119c) an Emerge or
+/// Offering sacrifice chosen before a deferred target declaration, whose kept
+/// reduction the lock then applies once. A continuation that rebuilt the cast
+/// with `pay_and_push_with_lock` instead would drop them.
 pub(crate) fn pending_carries_unpaid_committed_costs(pending: &PendingCast) -> bool {
     matches!(
         pending.additional_cost_flow,
         Some(AdditionalCost::Required(_))
     ) || pending.deferred_required_additional_cost.is_some()
+        || !pending.deferred_sacrificed_permanents.is_empty()
 }
 
 /// CR 601.2b: Handle the player's decision on Defiler life payment.
@@ -8504,6 +9083,8 @@ pub(crate) fn handle_defiler_payment(
                 // residual (`pay_alternative_cost_residual`) or an imposed
                 // required cost (a target's tax) is stashed on the pending cast;
                 // resume through the pending so it is still paid.
+                // CR 702.48b + CR 702.119c: so is a sacrifice chosen before a
+                // deferred target declaration.
                 if pending_carries_unpaid_committed_costs(&pending) {
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
@@ -8546,7 +9127,9 @@ pub(crate) fn handle_defiler_payment(
     // total from the pending — as the paused-life branch above does.
     // `pay_and_push_with_lock` would rebuild the pending from scratch and drop it.
     // CR 601.2f: the same holds for an imposed required cost carried on the
-    // pending (a tax on a spell targeting Terror of the Peaks).
+    // pending (a tax on a spell targeting Terror of the Peaks), and CR 702.48b +
+    // CR 702.119c for an Emerge or Offering sacrifice chosen before a deferred
+    // target declaration, whose kept reduction the lock then applies once.
     if pending_carries_unpaid_committed_costs(&pending) {
         let mut pending = pending;
         if pay {
@@ -8634,6 +9217,14 @@ pub(crate) fn handle_order_cost_reductions(
         hybrid_announcement: hybrid_announcement.to_vec(),
     };
 
+    // CR 601.2f: a cast whose Emerge or Offering sacrifice was chosen before a
+    // deferred target declaration resumes through the payment step that makes
+    // that sacrifice, and the lock there honours this election.
+    if !pending.deferred_sacrificed_permanents.is_empty() {
+        let mut pending = pending;
+        pending.cost_reduction_election = Some(election);
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
     let lock = CostLockInput {
         election: Some(election),
         ..CostLockInput::from_pending(&pending)
@@ -8697,7 +9288,7 @@ fn apply_defiler_mana_reduction(
 }
 
 /// CR 601.2b: Pay an additional cost, returning a WaitingFor if interactive input is needed
-/// (e.g. choosing which card to discard), or continuing to pay_and_push if atomic.
+/// (e.g. choosing which card to discard), or continuing to pay_and_push_with_lock if atomic.
 fn pay_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -8717,7 +9308,25 @@ fn pay_additional_cost_with_source(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if pending.ability.chosen_x.is_none() {
-        if let Some(max) = additional_cost_x_max(state, player, pending.object_id, &cost) {
+        if let Some(cost_max) = additional_cost_x_max(
+            state,
+            player,
+            pending.object_id,
+            pending.ability.context.granting_object,
+            &cost,
+        ) {
+            // CR 107.3a + CR 601.2h: one X is announced for the whole cost, so a
+            // spell with {X} in its mana cost also caps it by the mana it can pay.
+            let max = if cost_has_x(&pending.cost) {
+                cost_max.min(max_x_value(
+                    state,
+                    player,
+                    &pending.cost,
+                    Some(pending.object_id),
+                ))
+            } else {
+                cost_max
+            };
             let min = pending.ability.min_x_value;
             if min > max {
                 super::casting::handle_cancel_cast(state, &pending, events);
@@ -8763,6 +9372,7 @@ fn pay_additional_cost_with_source(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 None,
             );
             if eligible.len() < count {
@@ -8796,6 +9406,7 @@ fn pay_additional_cost_with_source(
             state,
             player,
             pending.object_id,
+            pending.ability.context.granting_object,
             zone,
             Some(filter),
         );
@@ -8936,13 +9547,22 @@ fn pay_additional_cost_with_source(
             });
         }
         AbilityCost::Discard { count, filter, .. } => {
-            let count = super::quantity::resolve_quantity(state, &count, player, pending.object_id)
-                .max(0) as usize;
+            // CR 107.3a: the pending ability carries the announced X that a
+            // "discard X cards" count reads.
+            let count =
+                super::quantity::resolve_quantity_with_targets(state, &count, &pending.ability)
+                    .max(0) as usize;
+            // CR 107.3a + CR 601.2h: a zero discard count is already paid;
+            // continue with the remaining costs without requesting a selection.
+            if count == 0 {
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
             // CR 601.2b: Discard requires interactive card selection — return a WaitingFor.
             let eligible = super::casting::find_eligible_discard_targets(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 filter.as_ref(),
             );
             // CR 601.2b: Defense-in-depth — empty hand means no legal choice.
@@ -9048,6 +9668,7 @@ fn pay_additional_cost_with_source(
                     state,
                     player,
                     pending.object_id,
+                    pending.ability.context.granting_object,
                     target,
                 );
                 let (min_count, max_count) = super::casting::sacrifice_cost_bounds_with_chosen_x(
@@ -9086,6 +9707,7 @@ fn pay_additional_cost_with_source(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 filter.as_ref(),
             );
             if eligible.len() < count as usize {
@@ -9121,6 +9743,7 @@ fn pay_additional_cost_with_source(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 target,
                 counter_type,
                 required_count,
@@ -9218,7 +9841,7 @@ fn pay_additional_cost_with_source(
         // Hatchling's "Exile a land you control"). The parser emits zone: None +
         // a permanent-implying filter; `exile_cost_effective_zone` resolves it to
         // the battlefield. The permanent is EXILED, not sacrificed (CR 701.13).
-        // `eligible_exile_cost_objects` is single-zone (only controller-owned
+        // `eligible_exile_cost_objects` is single-zone (only
         // battlefield objects matching the filter) — graveyard cards are NEVER
         // offered (unlike the dual-zone craft union `ExileMaterials`). Ordered
         // before the hand/graveyard exile arm; the two are disjoint by effective
@@ -9236,6 +9859,7 @@ fn pay_additional_cost_with_source(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 Zone::Battlefield,
                 effective_filter.as_ref(),
                 count,
@@ -9279,6 +9903,7 @@ fn pay_additional_cost_with_source(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 narrow_zone,
                 filter.as_ref(),
             );
@@ -9330,7 +9955,8 @@ fn pay_additional_cost_with_source(
                                 &super::filter::FilterContext::from_source(
                                     state,
                                     pending.object_id,
-                                ),
+                                )
+                                .with_granting_object(pending.ability.context.granting_object),
                             )
                     })
                 })
@@ -9421,6 +10047,7 @@ fn pay_additional_cost_with_source(
                 state,
                 player,
                 pending.object_id,
+                pending.ability.context.granting_object,
                 &filter,
             );
             // CR 601.2b: Defense-in-depth — payability already gated this.
@@ -9634,24 +10261,31 @@ pub(super) fn can_pay_emerge_cost(
     emerge_cost: &ManaCost,
     sacrifice_filter: &TargetFilter,
 ) -> bool {
-    super::casting::find_eligible_sacrifice_targets(state, player, object_id, sacrifice_filter)
-        .into_iter()
-        .any(|permanent| {
-            let mut reduced = emerge_cost.clone();
-            apply_emerge_cost_reduction(state, permanent, &mut reduced);
-            // CR 601.2f + CR 702.119a: Affordability probes must include the
-            // final Trinisphere-class floor after Emerge's sacrifice reduction.
-            if !cost_has_x(&reduced) {
-                super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
-            }
-            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-        })
+    super::casting::find_eligible_sacrifice_targets(
+        state,
+        player,
+        object_id,
+        None,
+        sacrifice_filter,
+    )
+    .into_iter()
+    .any(|permanent| {
+        let mut reduced = emerge_cost.clone();
+        apply_emerge_cost_reduction(state, permanent, &mut reduced);
+        // CR 601.2f + CR 702.119a: Affordability probes must include the
+        // final Trinisphere-class floor after Emerge's sacrifice reduction.
+        if !cost_has_x(&reduced) {
+            super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
+        }
+        super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+    })
 }
 
 fn additional_cost_x_max(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
     cost: &AbilityCost,
 ) -> Option<u32> {
     match cost {
@@ -9664,16 +10298,37 @@ fn additional_cost_x_max(
         AbilityCost::PayEnergy { amount } if amount.contains_x() => {
             Some(state.players[player.0 as usize].energy)
         }
+        // CR 107.3a: X in a discard count is announced before the discard. The
+        // engine caps it at the cards that can pay it, since CR 601.2h makes a
+        // larger discard an unpayable cost.
+        AbilityCost::Discard { count, filter, .. } if is_bare_x_count(count) => Some(
+            super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                source_id,
+                granting_object,
+                filter.as_ref(),
+            )
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        ),
         AbilityCost::Discard {
             filter: Some(filter),
             ..
         } if super::cost_payability::target_filter_has_x_mana_value_constraint(filter) => Some(
-            super::casting::find_eligible_discard_targets(state, player, source_id, Some(filter))
-                .into_iter()
-                .filter_map(|object_id| state.objects.get(&object_id))
-                .map(|object| object.effective_mana_value())
-                .max()
-                .unwrap_or(0),
+            super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                source_id,
+                granting_object,
+                Some(filter),
+            )
+            .into_iter()
+            .filter_map(|object_id| state.objects.get(&object_id))
+            .map(|object| object.effective_mana_value())
+            .max()
+            .unwrap_or(0),
         ),
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
@@ -9684,6 +10339,7 @@ fn additional_cost_x_max(
                     state,
                     player,
                     source_id,
+                    granting_object,
                     &cost.target,
                 )
                 .len()
@@ -9704,6 +10360,7 @@ fn additional_cost_x_max(
                     state,
                     player,
                     source_id,
+                    granting_object,
                     ExileCostSourceZone::Graveyard,
                     filter.as_ref(),
                 )
@@ -9724,6 +10381,7 @@ fn additional_cost_x_max(
                 state,
                 player,
                 source_id,
+                granting_object,
                 target_filter,
                 counter_type,
                 *count,
@@ -9748,13 +10406,27 @@ fn additional_cost_x_max(
         }
         AbilityCost::Composite { costs } => costs
             .iter()
-            .filter_map(|cost| additional_cost_x_max(state, player, source_id, cost))
+            .filter_map(|cost| {
+                additional_cost_x_max(state, player, source_id, granting_object, cost)
+            })
             .min(),
         AbilityCost::PerCounter { base, .. } => {
-            additional_cost_x_max(state, player, source_id, base)
+            additional_cost_x_max(state, player, source_id, granting_object, base)
         }
         _ => None,
     }
+}
+
+/// True when a cost's count is exactly the announced X ("discard X cards"),
+/// the only X-count shape printed on a discard cost; the discardable-card
+/// count is then X's exact bound.
+fn is_bare_x_count(count: &QuantityExpr) -> bool {
+    matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X"
+    )
 }
 
 fn activation_counter_cost_x_max(
@@ -9767,7 +10439,13 @@ fn activation_counter_cost_x_max(
     if !activation_cost_needs_x_choice(ability, cost) {
         return None;
     }
-    additional_cost_x_max(state, player, source_id, cost)
+    additional_cost_x_max(
+        state,
+        player,
+        source_id,
+        ability.context.granting_object,
+        cost,
+    )
 }
 
 pub(super) fn activation_cost_needs_x_choice(
@@ -9778,9 +10456,10 @@ pub(super) fn activation_cost_needs_x_choice(
 }
 
 /// True when an activated ability's cost carries a symbolic X that must be
-/// announced before payment: a variable counter-removal count (CR 601.2b) or a
+/// announced before payment: a variable counter-removal count (CR 601.2b), a
 /// variable `{E}` amount (CR 107.3a + CR 601.2b, e.g. "Pay X {E}" — Chthonian
-/// Nightmare, issue #1092). `AbilityCost::PayLife`/`PaySpeed` variable amounts
+/// Nightmare, issue #1092), or a discard whose count or mana-value filter reads
+/// X (CR 107.3a, e.g. "Discard X cards" — Gix, Yawgmoth Praetor). `AbilityCost::PayLife`/`PaySpeed` variable amounts
 /// are handled by a separate, older path (`additional_cost_x_max`'s `PayLife`
 /// arm feeds `pay_additional_cost_with_source` directly; `PaySpeed` rides the
 /// mana-ability `PayAmountChoice` channel) so are intentionally not duplicated
@@ -9789,10 +10468,12 @@ fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
         AbilityCost::PayEnergy { amount } => amount.contains_x(),
-        AbilityCost::Discard {
-            filter: Some(filter),
-            ..
-        } => super::cost_payability::target_filter_has_x_mana_value_constraint(filter),
+        AbilityCost::Discard { count, filter, .. } => {
+            is_bare_x_count(count)
+                || filter
+                    .as_ref()
+                    .is_some_and(super::cost_payability::target_filter_has_x_mana_value_constraint)
+        }
         AbilityCost::Composite { costs } => costs.iter().any(cost_needs_activation_x_announcement),
         _ => false,
     }
@@ -10227,6 +10908,7 @@ pub(super) fn can_pay_offering_additional_cost(
         state,
         player,
         object_id,
+        None,
         &offering_quality_filter(&quality),
     )
     .is_empty()
@@ -10454,6 +11136,7 @@ fn exile_any_number_cost_reduction_capacity(
         state,
         player,
         spell_id,
+        None,
         zone,
         Some(cost_filter),
     );
@@ -10510,8 +11193,14 @@ pub(super) fn can_pay_retrace_additional_cost(
     object_id: ObjectId,
 ) -> bool {
     let land_filter = TargetFilter::Typed(TypedFilter::land());
-    !super::casting::find_eligible_discard_targets(state, player, object_id, Some(&land_filter))
-        .is_empty()
+    !super::casting::find_eligible_discard_targets(
+        state,
+        player,
+        object_id,
+        None,
+        Some(&land_filter),
+    )
+    .is_empty()
 }
 
 /// CR 702.133a: Jump-start's additional cost is "discard a card" — any card,
@@ -10531,55 +11220,13 @@ pub(super) fn can_pay_jumpstart_additional_cost(
     object_id: ObjectId,
 ) -> bool {
     // CR 702.133a: any card in hand can be discarded for the jump-start cost.
-    !super::casting::find_eligible_discard_targets(state, player, object_id, None).is_empty()
-}
-
-/// CR 601.2f: Announce-time entry to the lock seam, for the paths that reach it
-/// with no `PendingCast` in hand — nothing has been declared, accepted or
-/// elected yet. Any caller that DOES hold a `PendingCast` must call
-/// [`pay_and_push_with_lock`] with [`CostLockInput::from_pending`] instead, so
-/// the cast's declared additional mana costs and accepted reductions survive
-/// the seam's recompute.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn pay_and_push(
-    state: &mut GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    card_id: CardId,
-    ability: ResolvedAbility,
-    cost: &crate::types::mana::ManaCost,
-    base_cost: Option<ManaCost>,
-    casting_variant: CastingVariant,
-    casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
-    distribute: Option<DistributionUnit>,
-    origin_zone: Zone,
-    payment_mode: CastPaymentMode,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    pay_and_push_with_lock(
-        state,
-        player,
-        object_id,
-        card_id,
-        ability,
-        cost,
-        base_cost,
-        casting_variant,
-        casting_permission_index,
-        cast_timing_permission,
-        distribute,
-        origin_zone,
-        payment_mode,
-        CostLockInput::default(),
-        events,
-    )
+    !super::casting::find_eligible_discard_targets(state, player, object_id, None, None).is_empty()
 }
 
 /// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs
 /// beyond the board to determine the total cost.
 ///
-/// The seam rebuilds a probe [`PendingCast`] from `pay_and_push`'s exploded
+/// The seam rebuilds a probe [`PendingCast`] from `pay_and_push_with_lock`'s exploded
 /// parameters and hands it to [`super::casting::recompute_pending_mana_total_with`].
 /// EVERY `PendingCast` field that recompute reads and that is not one of those
 /// exploded parameters has to be carried here, or the probe silently drops its
@@ -10595,8 +11242,10 @@ pub(super) struct CostLockInput {
     /// exactly the declared amount (CR 601.2f: base plus all additional costs
     /// minus reductions).
     pub declared_mana_additions: Vec<ManaCost>,
-    /// Reductions the caster has accepted that no static reproduces — today
-    /// exactly an accepted Defiler life payment (CR 601.2b).
+    /// Reductions the caster has accepted that no static reproduces: an
+    /// accepted Defiler life payment (CR 601.2b), or the reduction an Emerge or
+    /// Offering sacrifice earned before a deferred target declaration
+    /// (CR 702.119a + CR 702.48c).
     pub accepted: Vec<CostReductionEntry>,
     /// The caster's answer to `WaitingFor::OrderCostReductions`, when the
     /// prompt has already been shown and answered. `Some` also means "do not
@@ -10630,7 +11279,7 @@ impl CostLockInput {
     }
 }
 
-/// CR 601.2f: The single seam where a spell's total cost becomes "locked in".
+/// CR 601.2f: Locks in a spell's total cost and pays it.
 ///
 /// Both the ordinary cast path and the Defiler resume funnel through here, so
 /// an accepted Defiler reduction is ordered against the board's reductions
@@ -10638,7 +11287,10 @@ impl CostLockInput {
 /// orders lock in different costs, the caster is asked which they want
 /// (`WaitingFor::OrderCostReductions`) before any mana is paid — CR 601.2g puts
 /// mana abilities *after* the total cost is determined, so the prompt has to
-/// come first.
+/// come first. The other `lock_in_total_cost` caller is the kept-sacrifice
+/// branch of `finish_pending_cost_or_cast`: a cast whose Emerge or Offering
+/// sacrifice was chosen before a deferred target declaration locks its own
+/// pending there, since rebuilding it here would drop the sacrifice.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pay_and_push_with_lock(
     state: &mut GameState,
@@ -10791,14 +11443,29 @@ pub(super) fn pay_and_push_adventure(
         casting_variant == CastingVariant::Fuse,
     );
     // Gate on eligible creatures/artifacts being present.
+    // CR 702.66a: delve needs at least one fuel card in the caster's graveyard.
+    let has_delve_fuel = || {
+        state
+            .objects
+            .keys()
+            .any(|&id| state.is_delve_fuel_for(player, object_id, id))
+    };
     let convoke_mode = convoke_mode.filter(|mode| {
-        state.objects.values().any(|o| match mode {
-            ConvokeMode::Convoke => o.is_convoke_eligible(player),
-            ConvokeMode::Waterbend => o.is_waterbend_eligible(player),
-            ConvokeMode::Improvise => o.is_improvise_eligible(player),
-            // CR 702.66a: delve needs at least one eligible card in the caster's graveyard.
-            ConvokeMode::Delve => o.is_delve_eligible(player),
-        }) || (has_delve && state.objects.values().any(|o| o.is_delve_eligible(player)))
+        (match mode {
+            ConvokeMode::Convoke => state
+                .objects
+                .values()
+                .any(|o| o.is_convoke_eligible(player)),
+            ConvokeMode::Waterbend => state
+                .objects
+                .values()
+                .any(|o| o.is_waterbend_eligible(player)),
+            ConvokeMode::Improvise => state
+                .objects
+                .values()
+                .any(|o| o.is_improvise_eligible(player)),
+            ConvokeMode::Delve => has_delve_fuel(),
+        }) || (has_delve && has_delve_fuel())
     });
 
     // Enter the payment step if cost needs player input (X), convoke/waterbend is active,
@@ -10910,15 +11577,6 @@ pub(super) fn pay_and_push_adventure(
 ///
 /// Shared by `pay_and_push_adventure` (normal casting) and the
 /// `(ManaPayment, PassPriority)` handler (after interactive mana payment).
-#[derive(Clone, Debug)]
-struct FinalizePrePaymentChecks {
-    early_waiting_for: Option<WaitingFor>,
-    cascade_cast_transformed: bool,
-    resolution_success_waiting_for: Option<WaitingFor>,
-    cast_this_way_etb_counter: Option<crate::types::counter::CounterType>,
-    cast_this_way_enters_mods: Vec<crate::types::ability::ContinuousModification>,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn finalize_cast_pre_payment_checks(
     state: &mut GameState,
@@ -11255,6 +11913,35 @@ fn finalize_cast_with_phyrexian_choices_inner(
         }
     }
 
+    // CR 601.2h + CR 702.66a: the delve exile is part of the same total-cost payment.
+    if let Some(mut pending) = deferred_life_resume_pending
+        .filter(|pending| !pending.delved_cards.is_empty())
+        .cloned()
+    {
+        let actual_mana_spent = prepaid_actual_mana_spent
+            .unwrap_or_else(|| recorded_mana_spent_to_cast(state, object_id));
+        let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
+            phyrexian_choices: phyrexian_choices.map(<[_]>::to_vec),
+            pre_payment_checks: Some(Box::new(FinalizePrePaymentChecks {
+                early_waiting_for: None,
+                cascade_cast_transformed,
+                resolution_success_waiting_for: resolution_success_waiting_for.clone(),
+                cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
+                cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
+            })),
+        };
+        if let Some(waiting_for) = pay_delve_at_commit(
+            state,
+            player,
+            &mut pending,
+            actual_mana_spent,
+            completion,
+            events,
+        )? {
+            return Ok(waiting_for);
+        }
+    }
+
     // CR 702.190a / CR 702.188a: Sneak and Web-slinging additionally require
     // returning a creature to its owner's hand as part of paying the casting
     // cost. Sneak's returned creature was an attacker, so remove it from combat.
@@ -11412,7 +12099,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         }
     }
 
-    let announced_targets = flatten_targets_in_chain(&ability);
+    let announced_targets = declared_targets_in_chain(&ability);
 
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
@@ -13021,10 +13708,11 @@ fn collect_sorted_auto_tap_source_options(
 ) -> Vec<ManaSourceOption> {
     use crate::types::card_type::{CoreType, Supertype};
 
-    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
-    // every land in this board-global sweep, so compute it once instead of
-    // re-scanning the whole battlefield per land inside `land_mana_options`.
+    // Loop-invariant hoist: the TapsForMana trigger-source list and the activation-prohibition
+    // presence gates are identical for every permanent in this board-global sweep, so compute
+    // them once instead of re-scanning the whole battlefield per source.
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
 
     // Build list of activatable mana options for ALL permanents this player controls.
     // CR 605.1b: Non-land permanents can have mana abilities.
@@ -13062,14 +13750,20 @@ fn collect_sorted_auto_tap_source_options(
             // payable from the current pool; Phase 3 pays those sub-costs from
             // other selected sources before resolving the paid mana ability.
             if obj.card_types.core_types.contains(&CoreType::Land) {
-                Some(mana_sources::auto_tap_land_mana_options_indexed(
+                Some(mana_sources::auto_tap_land_mana_options_indexed_gated(
                     state,
                     oid,
                     player,
                     &aura_sources,
+                    Some(&gates),
                 ))
             } else {
-                Some(mana_sources::auto_tap_mana_options(state, oid, player))
+                Some(mana_sources::auto_tap_mana_options_gated(
+                    state,
+                    oid,
+                    player,
+                    Some(&gates),
+                ))
             }
         })
         .flatten()
@@ -13716,6 +14410,24 @@ fn auto_tap_mana_sources_inner(
                         caused_by: None,
                     });
                 }
+                // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
+                // intrinsic mana ability. It never moves the land, so it carries no
+                // departed-source LKI; its triggers are observed at the activation
+                // boundary, before production, like every mana activation.
+                let activation_event = super::casting_targets::emit_ability_activated(
+                    state,
+                    player,
+                    option.object_id,
+                    crate::types::events::ActivatedAbilityKind::Mana,
+                    crate::types::zones::Zone::Battlefield,
+                    events,
+                );
+                super::triggers::collect_activation_event_at_boundary(
+                    state,
+                    events,
+                    activation_event,
+                )
+                .expect("intrinsic mana activation trigger collection cause must be live");
                 mana_payment::produce_mana(
                     state,
                     option.object_id,
@@ -14059,11 +14771,10 @@ pub(super) fn max_x_value_excluding(
     }) {
         state
             .objects
-            .iter()
-            .filter(|(id, obj)| {
-                obj.is_delve_eligible(player)
-                    && Some(**id) != object_id
-                    && !excluded_sources.contains(*id)
+            .keys()
+            .filter(|&&id| {
+                object_id.is_some_and(|spell| state.is_delve_fuel_for(player, spell, id))
+                    && !excluded_sources.contains(&id)
             })
             .count() as u32
     } else {
@@ -14236,7 +14947,7 @@ pub(super) fn largest_x_satisfying_at_most(max: u32, predicate: impl Fn(u32) -> 
 /// CR 702.102b + CR 702.132a: THREADED. Assist is a `CastWithKeyword`-grantable
 /// cost keyword whose grant filter may be value-keyed (Cmc/HasColor/ColorCount),
 /// and this read is pre-payment-reachable (before the fuse marker at
-/// `pay_and_push`'s payment step) for a FUSED split cast. `fused` projects the
+/// `pay_and_push_with_lock`'s payment step) for a FUSED split cast. `fused` projects the
 /// combined MV/colors so a value-keyed assist grant is not silently dropped on the
 /// front half. Callers pass `casting_variant == CastingVariant::Fuse`.
 pub(super) fn assist_offer_params(
@@ -14425,7 +15136,15 @@ pub fn enter_payment_step(
             let max = pending
                 .activation_cost
                 .as_ref()
-                .and_then(|cost| additional_cost_x_max(state, player, pending.object_id, cost))
+                .and_then(|cost| {
+                    additional_cost_x_max(
+                        state,
+                        player,
+                        pending.object_id,
+                        pending.ability.context.granting_object,
+                        cost,
+                    )
+                })
                 .or(activation_counter_x_max)
                 .map_or(mana_max, |cost_max| mana_max.min(cost_max));
             if min > max {
@@ -14886,6 +15605,7 @@ fn finalize_mana_payment_with_resume(
             return Ok(waiting_for);
         }
 
+        validate_delve_selection_at_commit(state, player, &pending)?;
         // CR 601.2f: snapshot the pool BEFORE `pay_spell_mana_before_deferred_sacrifice`
         // spends it. The distribute branch below infers X from `pool_before - pool_after`,
         // and on the deferred-sacrifice route the mana is already gone by then, so reading
@@ -15105,6 +15825,7 @@ fn finalize_mana_payment_with_resume(
                 .ability
                 .chosen_x
                 .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
+            settle_delve_markers(state, player, &mut pending)?;
 
             // CR 601.2c + CR 601.2d: Divide only among the distributing effect's own targets.
             let targets = super::ability_utils::distribution_targets(&pending.ability);
@@ -15120,6 +15841,7 @@ fn finalize_mana_payment_with_resume(
             pending_resumed.casting_permission_index = pending.casting_permission_index;
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
+            pending_resumed.delved_cards = pending.delved_cards.clone();
 
             // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
             // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -15397,6 +16119,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             return Ok(waiting_for);
         }
 
+        validate_delve_selection_at_commit(state, player, &pending)?;
         // CR 601.2f: snapshot the pool BEFORE `pay_spell_mana_before_deferred_sacrifice`
         // spends it. The distribute branch below infers X from `pool_before - pool_after`,
         // and on the deferred-sacrifice route the mana is already gone by then, so reading
@@ -15597,6 +16320,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 .ability
                 .chosen_x
                 .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
+            settle_delve_markers(state, player, &mut pending)?;
 
             // CR 601.2c + CR 601.2d: Divide only among the distributing effect's own targets.
             let targets = super::ability_utils::distribution_targets(&pending.ability);
@@ -15610,6 +16334,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             pending_resumed.casting_permission_index = pending.casting_permission_index;
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
+            pending_resumed.delved_cards = pending.delved_cards.clone();
 
             if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
                 let num = targets.len() as u32;
@@ -16058,6 +16783,7 @@ mod tests {
                         extra_cost: None,
                         enters_with_counter: None,
                         required_cast_keyword: None,
+                        pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                     },
                 )
                 .affected(crate::types::ability::TargetFilter::Typed(
@@ -16195,7 +16921,8 @@ mod tests {
                 },
             },
             Some(TriggerFiring::ReceiptEligible(origin)),
-        );
+        )
+        .expect("the fixture begins with no carrier installed");
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::NoOp,
@@ -16907,6 +17634,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -17015,7 +17743,7 @@ mod tests {
             filter: None,
         };
         assert_eq!(
-            additional_cost_x_max(&state, PlayerId(0), source, &cost),
+            additional_cost_x_max(&state, PlayerId(0), source, None, &cost),
             Some(4)
         );
     }
@@ -17127,7 +17855,7 @@ mod tests {
         };
 
         assert_eq!(
-            additional_cost_x_max(&state, PlayerId(0), source, &cost),
+            additional_cost_x_max(&state, PlayerId(0), source, None, &cost),
             Some(3),
             "X must be capped by removable +1/+1 counters, not by eligible target count"
         );
@@ -17140,7 +17868,7 @@ mod tests {
     /// rest) via last-known information. This drives the FULL `apply_action`
     /// cast pipeline (not a `process_triggers` shape test): the `SelectCards`
     /// action runs `handle_sacrifice_for_cost` → `finish_pending_cost_or_cast`
-    /// → `pay_and_push` → `WaitingFor::Priority` → `run_post_action_pipeline` →
+    /// → `pay_and_push_with_lock` → `WaitingFor::Priority` → `run_post_action_pipeline` →
     /// `process_triggers` over the same `events` vector that still carries the
     /// cost-sacrifice `ZoneChanged` records. The spell has NO kicker and NO
     /// deferred targets, so the cast lands in the SAME action — the only path
@@ -17168,7 +17896,7 @@ mod tests {
         };
 
         // The spell being cast: a no-target, no-kicker effect (Scry) so the cast
-        // lands directly via `pay_and_push` to `Priority` in the same action.
+        // lands directly via `pay_and_push_with_lock` to `Priority` in the same action.
         let spell = create_object(
             &mut state,
             CardId(1),
@@ -17223,14 +17951,14 @@ mod tests {
         }
 
         // Build the pending spell cast (NOT an activated ability: index None so
-        // `finish_pending_cost_or_cast` routes to `pay_and_push`).
+        // `finish_pending_cost_or_cast` routes to `pay_and_push_with_lock`).
         let mut pending = make_pending(spell);
         pending.activation_ability_index = None;
         pending.card_id = CardId(1);
         pending.origin_zone = Zone::Hand;
 
         // CR 601.2a/601.2i: the spell was announced onto the stack before cost
-        // payment; `pay_and_push` finalizes that existing entry rather than
+        // payment; `pay_and_push_with_lock` finalizes that existing entry rather than
         // pushing a new one. Mirror the announcement entry the real cast flow
         // leaves on the stack while costs are paid.
         state.stack.push_back(StackEntry {
@@ -18133,6 +18861,7 @@ mod tests {
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("granted casualty should be castable");
@@ -18249,6 +18978,7 @@ mod tests {
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("granted conspire should be castable");
@@ -19693,6 +20423,7 @@ mod tests {
                     runner.state(),
                     PlayerId(0),
                     source,
+                    None,
                     &filter,
                 );
                 assert_eq!(live.contains(&candidate), eligible, "live reach: {case}");
@@ -19822,6 +20553,7 @@ mod tests {
                             runner.state(),
                             PlayerId(0),
                             source,
+                            None,
                             filter
                         )
                         .contains(&chosen),
@@ -19907,6 +20639,7 @@ mod tests {
                         runner.state(),
                         PlayerId(0),
                         source,
+                        None,
                         &filter
                     )
                     .contains(&candidate),
@@ -23193,6 +23926,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -23335,6 +24069,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -23446,6 +24181,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -23546,6 +24282,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -23679,6 +24416,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -25892,6 +26630,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
@@ -26114,6 +26853,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
@@ -26293,6 +27033,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("Artifact offering spell must be castable");
@@ -26409,6 +27150,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Manual,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
@@ -26728,6 +27470,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Manual, // manual so mana payment pauses, not auto-completes
+            CostLockInput::default(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");

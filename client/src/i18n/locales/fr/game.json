@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Choisir une source de mana",
     "description": "Cette capacité de mana demande de sacrifier un permanent.",
+    "baseOutput_one": "Production de base : {{count}} mana",
+    "baseOutput_other": "Production de base : {{count}} manas",
+    "baseOutputVariable": "Quantité de base déterminée à l’activation",
     "sacrifice": "Sacrifier",
     "back": "Retour au paiement de mana",
     "unknownSource": "Source de mana"
@@ -102,6 +105,24 @@
     "subtitle": "Tous les joueurs doivent approuver avant que le moteur ne résolve un préfixe sûr de la pile.",
     "grant": "Approuver",
     "decline": "Garder la priorité"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Corriger les points de vie",
+    "title": "Correction des points de vie Sandbox",
+    "description": "Utilisez les commandes habituelles de la main et de la pile pour lancer et résoudre une créature. Ce panneau envoie l'action SetLife de Sandbox via l'adaptateur de jeu existant.",
+    "scopeNote": "Cette correction passe par la modification du joueur dans le moteur ; elle ne représente ni des blessures ni un effet de carte. Cette version n'inclut pas la révélation d'une main cachée, la défausse selon les règles ni l'annulation préalablement convenue avant le lancement.",
+    "target": "Joueur",
+    "player": "{{name}} (joueur {{seat}})",
+    "you": "Vous",
+    "opponent": "Adversaire",
+    "currentLife": "Total de points de vie actuel",
+    "newLife": "Nouveau total de points de vie",
+    "submit": "Appliquer la correction",
+    "submitting": "Correction envoyée ; fermer ce panneau ne l'annule pas.",
+    "applied": "Total de points de vie actuel confirmé pour {{player}} : {{life}}.",
+    "notApplied": "Le moteur n'a pas confirmé cette correction. Vérifiez le snapshot actuel avant de réessayer.",
+    "failed": "La correction n'a pas pu être envoyée.",
+    "stale": "La partie a changé pendant la modification. Fermez puis rouvrez ce panneau pour repartir du snapshot actuel."
   },
   "debugCreate": {
     "copies": "Copies",
@@ -808,6 +829,7 @@
     "titleTargets": "Cibles : {{targets}}",
     "titlePaid": "Payé : {{paid}}",
     "titleContext": "Contexte : {{context}}",
+    "revealedCards": "Révélée : {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
     "paidColorsSpent": "{{count}} couleurs",
@@ -839,6 +861,7 @@
     "chooseNewTargetForCopy": "Choisissez une nouvelle cible pour la copie",
     "chooseTargetForCopy": "Choisissez la cible de la copie",
     "chooseCreatureToExplore": "Choisissez quelle créature explore ensuite",
+    "chooseCreatureToEquip": "Choisissez une créature à équiper",
     "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
@@ -1130,6 +1153,8 @@
       "usePowder": "Utiliser {{name}}",
       "powderDescription": "Exilez toutes les cartes en main, piochez le même nombre — pas un mulligan",
       "powderTooltip": "Exilez toutes les cartes de votre main et piochez le même nombre. Pas un mulligan — le compte et les cartes en dessous ne sont pas affectés.",
+      "freeReveal": "Révéler et repiocher (gratuit)",
+      "freeRevealDescription": "Révélez votre main, mélangez-la et piochez 7 — gratuit, aucune carte dessous, pas un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londres",
       "eyebrowOpening": "Main de départ · Mulligan de Londres",
       "reviewTitle": "Examinez votre main de départ",
@@ -1347,8 +1372,6 @@
     },
     "config": {
       "startingLife": "Points de vie de départ",
-      "experimentalDungeons": "Donjons expérimentaux",
-      "experimentalDungeonsHelp": "Proposer Baldur's Gate Wilderness dans les donjons et à la prise d'initiative. Expérimental et non officiel.",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {
@@ -1384,6 +1407,7 @@
       "target": "Cible",
       "return": "Renvoyer",
       "discard": "Défausser",
+      "reveal": "Révéler",
       "evidence": "Preuves",
       "manifest": "Manifester",
       "untap": "Dégager",
@@ -1696,6 +1720,10 @@
       "title": "Renforcer Jace",
       "subtitle": "Choisissez un jeton Jace que vous contrôlez pour qu'il gagne +{{count}} de loyauté"
     },
+    "spellCopyOrder": {
+      "title": "Ordonner les copies",
+      "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"
@@ -2006,7 +2034,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Choisir un adversaire",
-    "subtitle": "Choisissez quel adversaire fait le choix."
+    "subtitle": "Choisissez quel adversaire fait le choix.",
+    "orderTitle": "Choisir le joueur suivant",
+    "orderSubtitle": "Choisissez pour qui faire la prochaine sélection.",
+    "substituteTitle": "Choisir un joueur",
+    "substituteSubtitle": "Choisissez qui fait ce choix."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2264,7 +2296,9 @@
     "accept": "Oui",
     "decline": "Non",
     "sourceFallback": "Effet",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
+    "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effet",
@@ -2297,7 +2331,8 @@
       "zoneExile": "l’exil",
       "zoneHand": "votre main",
       "discard": "Défaussez-vous de {{count}} {{cards}}",
-      "exile": "Exilez {{count}} {{cards}} depuis {{zone}}"
+      "exile": "Exilez {{count}} {{cards}} depuis {{zone}}",
+      "reveal": "Révélez {{count}} {{cards}} de {{zone}}"
     }
   },
   "topOrBottom": {
@@ -2343,6 +2378,8 @@
     "confirm": "Confirmer"
   },
   "replacement": {
+    "remember": "Mémoriser ce choix pour cette partie",
+    "savedChoice": "Remplacement : {{choice}}",
     "eyebrow": "Ordre de résolution",
     "title": "Effets de remplacement",
     "orderSubtitle": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : le dernier appliqué est celui qui prend effet (CR 616.1).",
