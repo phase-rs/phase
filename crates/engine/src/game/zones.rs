@@ -286,6 +286,11 @@ pub(crate) fn apply_zone_exit_cleanup(
                 .insert(incarnation, lki);
         }
         if let Some(values) = lki_copiable_values {
+            state
+                .lki_copiable_values_by_incarnation
+                .entry(object_id)
+                .or_default()
+                .insert(occurrence.incarnation, values.clone());
             state.lki_copiable_values.insert(object_id, values);
         }
     }

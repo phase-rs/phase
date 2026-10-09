@@ -1292,6 +1292,7 @@ mod season_points_budget_modal;
 mod seasoned_dungeoneer_initiative_room_trigger;
 mod selenia_vigilance_grant;
 mod self_attached_aura_token_host;
+mod self_copy_last_known_values;
 mod self_destruct_target_power;
 mod self_exile_at_resolution_8721;
 mod sensei_golden_tail_5950;

@@ -22136,6 +22136,18 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub lki_by_incarnation: im::HashMap<ObjectId, im::HashMap<u64, LKISnapshot>>,
+    /// CR 400.7 + CR 608.2h + CR 707.2: `lki_copiable_values` keyed by exact
+    /// object incarnation, as `lki_by_incarnation` is to `lki_cache`, written on
+    /// every departure that writes `lki_copiable_values` (from the battlefield,
+    /// exile or the stack). A copy effect bound to one incarnation of its copy
+    /// source reads that incarnation's last-known copiable values
+    /// (`token_copy::copy_source`), so a later object under the same storage id
+    /// (a flickered or returned card) can neither supply nor overwrite them.
+    /// Cleared with `lki_by_incarnation` on step transitions.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub lki_copiable_values_by_incarnation:
+        im::HashMap<ObjectId, im::HashMap<u64, CopiableValues>>,
 
     /// CR 608.2h + CR 707.2: A spell's stack entry and object as they last
     /// existed on the stack (`stack::record_departed_stack_spell`) — keyed by storage id,
@@ -27732,6 +27744,7 @@ impl GameState {
             lki_cache: im::HashMap::new(),
             lki_copiable_values: HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
+            lki_copiable_values_by_incarnation: im::HashMap::new(),
             departed_stack_spells: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
@@ -28852,6 +28865,59 @@ impl GameState {
             }
         }
 
+        // CR 104.4b + CR 608.2h: which `lki_copiable_values_by_incarnation`
+        // entries an ability can still read as its own copy source. Read BEFORE
+        // the carrier loops below erase each ability's captured source identity
+        // (`clear_trigger_identity_recursive`), the only key to those entries,
+        // over every carrier that erase touches.
+        let mut retained_copy_sources: HashSet<ObjectIncarnationRef> = HashSet::new();
+        {
+            let mut collect = |ability: &ResolvedAbility| {
+                crate::game::effects::token_copy::collect_own_copy_sources(
+                    ability,
+                    &mut retained_copy_sources,
+                );
+            };
+            for entry in clone.stack.iter().chain(clone.resolving_stack_entry.iter()) {
+                if let Some(ability) = entry.ability() {
+                    collect(ability);
+                }
+            }
+            for pending in clone
+                .pending_trigger
+                .as_deref()
+                .into_iter()
+                .chain(clone.deferred_triggers.iter().map(|ctx| &ctx.pending))
+                .chain(
+                    clone
+                        .pending_trigger_order
+                        .iter()
+                        .flat_map(|order| order.groups.iter())
+                        .flat_map(|group| group.triggers.iter())
+                        .map(|ctx| &ctx.pending),
+                )
+            {
+                collect(&pending.ability);
+            }
+            for trigger in &clone.delayed_triggers {
+                collect(&trigger.ability);
+            }
+            if let Some(resume) = clone.pending_triggered_mana_resume.as_ref() {
+                collect(&resume.current.pending.ability);
+                for ctx in resume.accepted_tail.iter().chain(
+                    resume
+                        .collected_batches
+                        .iter()
+                        .flat_map(|batch| batch.contexts.iter()),
+                ) {
+                    collect(&ctx.pending.ability);
+                }
+            }
+            for epic in &clone.epic_effects {
+                collect(&epic.spell);
+            }
+        }
+
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
@@ -29051,6 +29117,20 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+        // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
+        // read as its own copy source are history, not position — pruned against
+        // the set captured above, before the identities were erased.
+        clone.lki_copiable_values_by_incarnation =
+            std::mem::take(&mut clone.lki_copiable_values_by_incarnation)
+                .into_iter()
+                .filter_map(|(object_id, mut history)| {
+                    history.retain(|incarnation, _| {
+                        retained_copy_sources
+                            .contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                    });
+                    (!history.is_empty()).then_some((object_id, history))
+                })
+                .collect();
         clone
     }
 
@@ -30125,6 +30205,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_cache: _,
         lki_copiable_values: _,
         lki_by_incarnation: _,
+        lki_copiable_values_by_incarnation: _,
         departed_stack_spells: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
@@ -30466,6 +30547,8 @@ impl PartialEq for GameState {
             && self.lki_cache == other.lki_cache
             && self.lki_copiable_values == other.lki_copiable_values
             && self.lki_by_incarnation == other.lki_by_incarnation
+            && self.lki_copiable_values_by_incarnation
+                == other.lki_copiable_values_by_incarnation
             && self.departed_stack_spells == other.departed_stack_spells
             && self.city_blessing == other.city_blessing
             && self.enduring_story == other.enduring_story
@@ -37539,6 +37622,119 @@ mod tests {
         assert!(
             !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
             "different LKI for a still-referenced incarnation remains meaningful"
+        );
+    }
+
+    /// N1 (P5b-1, C5b1.4): CR 104.4b + CR 608.2h: `normalize_for_loop` keeps
+    /// the last-known copiable values an ability can still read as its own copy
+    /// source, captured before the ability's identity is erased, and prunes
+    /// every other incarnation's entry. An ability that does not copy its own
+    /// source retains nothing.
+    #[test]
+    fn normalize_for_loop_keeps_only_the_own_copy_source_values_an_ability_can_read() {
+        let source = ObjectId(5);
+        let captured = 7;
+        let mut a = GameState::new_two_player(7);
+        let values_object = crate::game::zones::create_object(
+            &mut a,
+            CardId(90),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Exile,
+        );
+        let values = |name: &str| {
+            let mut values =
+                crate::game::printed_cards::intrinsic_copiable_values(&a.objects[&values_object]);
+            values.name = name.to_string();
+            values
+        };
+        let (departed, later, other) = (values("Departed"), values("Later"), values("Other"));
+        let entry = |id: u64, effect: Effect| {
+            let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+            ability.source_incarnation = Some(captured);
+            StackEntry {
+                id: ObjectId(id),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            }
+        };
+        let copy_effect = Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        };
+        a.stack.push_back(entry(20, copy_effect));
+        a.lki_copiable_values_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(captured, departed.clone());
+        a.lki_copiable_values_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(8, later.clone());
+
+        let mut b = a.clone();
+        b.lki_copiable_values_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(9, later.clone());
+        assert_ne!(a, b, "fixture differs by irrelevant accumulated values");
+        let normalized_a = a.normalize_for_loop();
+        assert!(
+            loop_states_equal(&normalized_a, &b.normalize_for_loop()),
+            "unreachable incarnation history must not block loop recurrence"
+        );
+        assert_eq!(
+            normalized_a.lki_copiable_values_by_incarnation[&source]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![captured],
+            "the captured own-source incarnation remains available"
+        );
+
+        let mut changed = a.clone();
+        changed
+            .lki_copiable_values_by_incarnation
+            .get_mut(&source)
+            .unwrap()
+            .insert(captured, other);
+        assert!(
+            !loop_states_equal(&normalized_a, &changed.normalize_for_loop()),
+            "different values for a still-readable incarnation remain meaningful"
+        );
+
+        let mut not_a_copy = a;
+        not_a_copy.stack.clear();
+        not_a_copy.stack.push_back(entry(
+            20,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        assert!(
+            not_a_copy
+                .normalize_for_loop()
+                .lki_copiable_values_by_incarnation
+                .is_empty(),
+            "an ability that does not copy its own source retains nothing"
         );
     }
 

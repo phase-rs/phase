@@ -11,6 +11,7 @@ use engine::ai_support::AiDecisionContract;
 use engine::game::engine::{apply, apply_verified_ai_priority_pass};
 use engine::game::perf_counters;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zones::move_to_zone;
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -23,6 +24,7 @@ use engine::types::game_state::{
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
@@ -86,6 +88,17 @@ struct Drive {
 /// row's permanents; `lands` basic lands are already on P0's battlefield. P0
 /// then plays a Forest and answers the order prompt with the identity order.
 fn landfall_board(lands: usize, setup: impl FnOnce(&mut GameScenario)) -> GameState {
+    landfall_board_keeping(lands, 0, setup)
+}
+
+/// `landfall_board`, keeping candidate `keep` (in setup order) when the Forest's
+/// checkpoint asks the legend rule (CR 704.5j). Under the identity order the
+/// source added at setup index `i` of `n` resolves `n − i`th.
+fn landfall_board_keeping(
+    lands: usize,
+    keep: usize,
+    setup: impl FnOnce(&mut GameScenario),
+) -> GameState {
     let mut scenario = GameScenario::new_n_player(2, 0x5C07E);
     scenario.at_phase(Phase::PreCombatMain);
     for _ in 0..lands {
@@ -105,6 +118,13 @@ fn landfall_board(lands: usize, setup: impl FnOnce(&mut GameScenario)) -> GameSt
             card_id,
         })
         .expect("playing the Forest is legal");
+    if let WaitingFor::ChooseLegend { candidates, .. } = runner.state().waiting_for.clone() {
+        runner
+            .act(GameAction::ChooseLegend {
+                keep: candidates[keep],
+            })
+            .expect("keeping a candidate is legal");
+    }
     if let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
         runner
             .act(GameAction::OrderTriggers {
@@ -762,6 +782,108 @@ fn met_copy_instead_run_stays_on_the_proof() {
     assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
     assert_eq!(bulk.counters.bulk_entries, 0);
     assert_eq!(bulk.counters.batched_entries, RUN as u64);
+}
+
+/// Every battlefield Scute Swarm moves to the graveyard through the production
+/// zone-move primitive, which records last-known information (CR 400.7,
+/// CR 608.2h) exactly as an instant-speed sweeper cast in response would.
+fn remove_scute_sources(state: &mut GameState) {
+    let sources: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].name == "Scute Swarm")
+        .collect();
+    let mut events = Vec::new();
+    for id in sources {
+        move_to_zone(state, id, Zone::Graveyard, &mut events);
+    }
+}
+
+/// L5 (P5b-1): every source left the battlefield after its met landfall
+/// trigger. Each member copies its own source's last-known copiable values
+/// (CR 608.2h + CR 707.2; Scute Swarm's ruling), so the run makes six Scute
+/// Swarm tokens. The production verdict still refuses the met copy run
+/// (P5a-S1), so the sequential proof resolves it.
+#[test]
+fn departed_self_copy_run_still_creates_every_copy() {
+    let mut s0 = landfall_board(5, |s| scutes(s, RUN));
+    remove_scute_sources(&mut s0);
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    assert!(
+        !s0.battlefield
+            .iter()
+            .any(|id| s0.objects[id].name == "Scute Swarm"),
+        "reach guard: no source is on the battlefield"
+    );
+    let (bulk, reference) = parity("L5", s0);
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// Six Scute Swarms under Leyline of Singularity (every nonland permanent is
+/// legendary): the Forest's checkpoint asks the legend rule (CR 704.5j) before
+/// the triggers are put on the stack (CR 117.5), and P0 keeps the source added
+/// at `keep`. The other five sources are in the graveyard.
+fn leyline_board(keep: usize) -> GameState {
+    let s0 = landfall_board_keeping(5, keep, |s| {
+        scutes(s, RUN);
+        s.add_enchantment_from_oracle(P0, "Leyline of Singularity", LEYLINE_OF_SINGULARITY);
+    });
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    let kept = s0
+        .battlefield
+        .iter()
+        .filter(|id| s0.objects[id].name == "Scute Swarm")
+        .count();
+    assert_eq!(kept, 1, "reach guard: the legend rule kept one source");
+    s0
+}
+
+/// The resolution position (1 = top) of the trigger whose source is on the
+/// battlefield.
+fn kept_source_position(state: &GameState) -> usize {
+    state
+        .stack
+        .iter()
+        .rev()
+        .position(|entry| state.battlefield.contains(&entry.source_id))
+        .expect("the kept source has a trigger on the stack")
+        + 1
+}
+
+/// L6 (P5b-1; A8-C-GY's derived reading): the kept source's trigger resolves
+/// fourth, so members 1–3 copy sources the legend rule put into the
+/// graveyard. Each copies its source's last-known copiable values
+/// (CR 608.2h), so member 1's copy is a legendary Scute Swarm under Leyline
+/// and the legend rule (CR 704.5j) asks after member 1, over the kept source
+/// and that copy, with five entries still on the stack.
+#[test]
+fn self_copy_run_with_departed_sources_asks_after_member_one() {
+    let s0 = leyline_board(2);
+    assert_eq!(
+        kept_source_position(&s0),
+        RUN - 2,
+        "reach guard: kept source mid-run"
+    );
+    let kept_source = s0
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| s0.objects[id].name == "Scute Swarm")
+        .expect("reach guard: one source on the battlefield");
+    let (bulk, reference) = parity("L6", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after member 1");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.contains(&kept_source));
+    assert!(candidates
+        .iter()
+        .any(|id| reference.state.objects[id].is_token
+            && reference.state.objects[id].name == "Scute Swarm"));
+    assert_eq!(reference.state.stack.len(), RUN - 1);
+    assert_eq!(bulk.counters.bulk_entries, 0);
 }
 
 /// L-SHAPE: Jetmir's population-conditioned statics (CR 611.3a) are perturbed

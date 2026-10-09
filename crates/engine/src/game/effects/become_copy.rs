@@ -1,8 +1,7 @@
+use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
-use crate::game::layers::{
-    compute_current_copiable_values, remove_subtype_set, subtype_matches_core_types,
-};
+use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
 use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
     ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
@@ -46,61 +45,55 @@ pub fn resolve(
         ),
     };
 
-    let target_id = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        // CR 115.1 + CR 601.2c: when the RECIPIENT is itself an announced target
-        // (Shuri: "Target artifact you control becomes a copy of a second target
-        // artifact you control"), it was declared FIRST, so the copy source is
-        // the SECOND declared object. `become_copy_copy_source_target_index` is
-        // derived from the same authority the slot builder uses, so this index
-        // cannot drift from the surfaced slot order. Mirrors
-        // `fight::resolve_fight_fighters`.
-        .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
-        .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
-
-    let values = compute_current_copiable_values(state, target_id)
-        .ok_or(EffectError::ObjectNotFound(target_id))?;
+    // CR 707.2 + CR 608.2h: the copy source is read once, through the
+    // copy-source authority. "It becomes a copy of this creature" (`SelfRef`,
+    // The Flood of Mars) copies the ability's own source, with its last-known
+    // copiable values once it has left; any other copy source is the declared
+    // object target.
+    let source = if copies_own_source(&ability.effect) {
+        copy_source(state, ability, CopySourceReferent::OwnSource)
+            .ok_or(EffectError::ObjectNotFound(ability.source_id))?
+    } else {
+        let target_id = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            // CR 115.1 + CR 601.2c: when the RECIPIENT is itself an announced target
+            // (Shuri: "Target artifact you control becomes a copy of a second target
+            // artifact you control"), it was declared FIRST, so the copy source is
+            // the SECOND declared object. `become_copy_copy_source_target_index` is
+            // derived from the same authority the slot builder uses, so this index
+            // cannot drift from the surfaced slot order. Mirrors
+            // `fight::resolve_fight_fighters`.
+            .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
+            .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
+        copy_source(state, ability, CopySourceReferent::Object(target_id))
+            .ok_or(EffectError::ObjectNotFound(target_id))?
+    };
 
     // Display identity follows the copy: carry the source's image routing so the
     // copying object renders the copied source's art. Not a CR 707.2 copiable
     // value (kept off `CopiableValues`); rides on the modification so it reverts
-    // with the effect. The source is guaranteed present — the copiable-values
-    // lookup above returned `Some` for `target_id`.
+    // with the effect. The authority supplies it with the values.
     //
     // CR 111.1 + CR 707.2: when the source is a true token, `printed_ref` is
     // `None` and the token's art lives only in the token database — so capture
     // `display_source` + `token_image_ref` too, otherwise a copy-of-token (e.g.
     // Mockingbird copying a Rabbit token) is stranded on the real-card name path
     // for a name that has no real-card printing and renders blank.
-    let (source_display_source, source_printed_ref, source_token_image_ref, source_token_art) =
-        state
-            .objects
-            .get(&target_id)
-            .map(|o| {
-                (
-                    o.display_source,
-                    o.printed_ref.clone(),
-                    o.token_image_ref.clone(),
-                    o.token_art.clone(),
-                )
-            })
-            .unwrap_or_default();
-
     let copy = PrecomputedCopyValues {
         source_id: ability.source_id,
         controller: ability.controller,
-        duration_subject: ObjectIncarnationRef::from_object(&state.objects[&target_id]),
+        duration_subject: source.incarnation,
         duration,
-        values,
-        display_source: source_display_source,
-        printed_ref: source_printed_ref,
-        token_image_ref: source_token_image_ref,
-        token_art: source_token_art,
+        values: source.values,
+        display_source: source.display_source,
+        printed_ref: source.printed_ref,
+        token_image_ref: source.token_image_ref,
+        token_art: source.token_art,
         additional_modifications,
         effect_kind: EffectKind::from(&ability.effect),
     };
