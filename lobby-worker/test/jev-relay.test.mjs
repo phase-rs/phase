@@ -256,7 +256,11 @@ test("an oversized body is refused, by header and by bytes read", async () => {
 test("a hung upstream is a 504 and an unreachable one a 502", async () => {
   globalThis.fetch = (_input, init) =>
     new Promise((_resolve, reject) => {
-      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+      const watchdog = setTimeout(() => reject(new Error("upstream abort not received")), 1_000);
+      init.signal.addEventListener("abort", () => {
+        clearTimeout(watchdog);
+        reject(init.signal.reason);
+      });
     });
   const slow = await relayed(simplePost(URL_, envelope()), {}, { timeoutMs: 20 });
   assert.equal(slow.status, 504);
