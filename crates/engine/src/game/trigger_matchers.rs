@@ -813,6 +813,8 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
         // filter. Cartographer's Hawk exercises this event-time player-relative
         // damage-recipient shape; the unit test keeps future changes deliberate.
         TargetFilter::PlayerMatching { .. } => true,
+        // CR 120.3: a latched player recipient ("the player who cast <granter>").
+        TargetFilter::SpecificPlayer { .. } => true,
         _ => false,
     }
 }
@@ -900,9 +902,8 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::Owner => false,
         TargetFilter::Any
         | TargetFilter::SelfRef
-        // CR 201.5a: a source-relative object ref, concretized to SpecificObject
-        // before any trigger evaluates; delegates like the other object refs.
-        | TargetFilter::GrantingObject
+        // CR 201.5a: a source-relative object ref; delegates like the other object refs.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)
@@ -1006,12 +1007,19 @@ fn count_matching_trigger_event_subjects(
         // Object target events yield the affected object as subject. Player
         // target events carry no object subject; player scoping lives on
         // `valid_target`.
-        GameEvent::DamageDealt { target, .. } | GameEvent::BecomesTarget { target, .. } => {
-            match target {
-                TargetRef::Object(id) => count_one(*id),
-                TargetRef::Player(_) => 0,
-            }
-        }
+        GameEvent::BecomesTarget { target, .. } => match target {
+            TargetRef::Object(id) => count_one(*id),
+            TargetRef::Player(_) => 0,
+        },
+        // CR 120.4b + CR 608.2c: like `CounterAdded` below, a damage event's
+        // batch amount is the DAMAGE dealt to matching recipients, not a
+        // recipient headcount — "one or more creatures you control are dealt
+        // damage, you gain that much life" reads the damage. A headcount here
+        // would shadow the event's own magnitude in `EventContextAmount`.
+        GameEvent::DamageDealt { target, amount, .. } => match target {
+            TargetRef::Object(id) if matches(*id) => *amount,
+            TargetRef::Object(_) | TargetRef::Player(_) => 0,
+        },
         // CR 603.2c + CR 608.2: For a batched "one or more counters are put on
         // <FILTER>" trigger whose effect reads "that much"/`EventContextAmount`
         // (All Will Be One), the batch amount is the NUMBER OF COUNTERS placed by
@@ -1167,6 +1175,28 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn destination_constraint_names(
+    destination: Option<&Zone>,
+    constraint: &DestinationConstraint,
+    zone: Zone,
+) -> bool {
+    destination == Some(&zone)
+        || match constraint {
+            DestinationConstraint::Equals(expected) => *expected == zone,
+            DestinationConstraint::OneOf(zones) => zones.contains(&zone),
+            DestinationConstraint::Any | DestinationConstraint::NotEquals(_) => false,
+        }
+}
+
+/// The zone a card left when the trigger names its origin (CR 603.10a for a graveyard, CR 400.1
+/// as the format modifies it for a library); a trigger naming none states no zone.
+fn named_origin_zone(origin: &OriginConstraint, from: Option<Zone>) -> Option<Zone> {
+    match origin {
+        OriginConstraint::Equals(_) | OriginConstraint::OneOf(_) => from,
+        OriginConstraint::Any | OriginConstraint::NotEquals(_) => None,
+    }
+}
+
 fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
     match constraint {
         DestinationConstraint::Any => true,
@@ -1213,10 +1243,31 @@ fn zone_change_clause_matches(
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-        let matches = if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) {
-            super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
-        } else {
-            super::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
+        let live_entrant =
+            *to == Zone::Battlefield && state.objects.contains_key(&record.object_id);
+        let departed = named_origin_zone(origin, record.from_zone);
+        let matches = match (live_entrant, departed) {
+            // CR 603.6a: an enters trigger reads the permanent as it exists on the battlefield,
+            // so a named battlefield destination leaves the pile unlicensed.
+            (true, Some(from))
+                if !destination_constraint_names(destination, destination_constraint, *to) =>
+            {
+                super::filter::matches_target_filter_on_departure(
+                    state,
+                    record.object_id,
+                    from,
+                    filter,
+                    &ctx,
+                )
+            }
+            (true, _) => {
+                super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
+            }
+            (false, departed) => {
+                super::filter::matches_target_filter_on_zone_change_record_licensed(
+                    state, record, departed, filter, &ctx,
+                )
+            }
         };
         if !matches {
             return false;
@@ -2484,6 +2535,7 @@ pub(super) fn match_taps(
     if let GameEvent::PermanentTapped {
         object_id,
         caused_by,
+        ..
     } = event
     {
         // If valid_card is set, check the tapped object matches (e.g. "opponent's creature")
@@ -2848,6 +2900,7 @@ pub(super) fn match_becomes_target(
     let GameEvent::BecomesTarget {
         target,
         source_id: targeting_spell_id,
+        targeter,
         ..
     } = event
     else {
@@ -2857,18 +2910,38 @@ pub(super) fn match_becomes_target(
     // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
     // constrains the targeting source to matching stack spell characteristics.
     if let Some(source_filter) = &trigger.valid_source {
+        // CR 601.2c + CR 113.8: the event records what targeted, as it was
+        // announced. A spell targeter is the spell entry carrying that
+        // announcement; an ability targeter is never a spell, even when its
+        // source is a spell on the stack (Elder Deep-Fiend's cast trigger). A
+        // legacy event without a targeter falls back to the id lookup.
+        let is_targeter = |entry: &&crate::types::game_state::StackEntry| {
+            let id_matches =
+                entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id;
+            let is_spell = matches!(
+                entry.kind,
+                crate::types::game_state::StackEntryKind::Spell { .. }
+            );
+            match targeter {
+                None => id_matches,
+                Some(crate::types::events::Targeter::Ability(_)) => id_matches && !is_spell,
+                Some(crate::types::events::Targeter::Spell(announcement)) => {
+                    is_spell
+                        && entry.id == *targeting_spell_id
+                        && state
+                            .objects
+                            .get(&entry.id)
+                            .is_some_and(|obj| obj.spell_announcement == Some(*announcement))
+                }
+            }
+        };
         // First, try to find the entry on the stack (normal case)
-        let targeting_entry = state.stack.iter().find(|entry| {
-            entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
-        });
+        let targeting_entry = state.stack.iter().find(is_targeter);
         // CR 608.2: A resolving spell or ability follows its resolution steps even
         // after the local stack entry has been popped and saved in `resolving_stack_entry`.
         // Triggered abilities can emit BecomesTarget events during that effect execution.
-        let targeting_entry = targeting_entry.or_else(|| {
-            state.resolving_stack_entry.as_ref().filter(|entry| {
-                entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
-            })
-        });
+        let targeting_entry =
+            targeting_entry.or_else(|| state.resolving_stack_entry.as_ref().filter(is_targeter));
         let Some(targeting_entry) = targeting_entry else {
             return false;
         };
@@ -13196,6 +13269,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // No valid_card, so fallback: event.object_id == source_id param
         assert!(match_becomes_target(
@@ -13224,6 +13298,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13245,6 +13320,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13306,6 +13382,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13331,6 +13408,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13352,6 +13430,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13379,6 +13458,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13406,6 +13486,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13432,6 +13513,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13459,6 +13541,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13485,6 +13568,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13511,6 +13595,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13538,6 +13623,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         assert!(match_becomes_target(
@@ -13566,6 +13652,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         assert!(!match_becomes_target(
@@ -13594,6 +13681,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         assert!(!match_becomes_target(
@@ -13659,6 +13747,7 @@ mod tests {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             match_becomes_target(
@@ -13676,6 +13765,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             match_becomes_target(
@@ -13717,6 +13807,7 @@ mod tests {
             target: TargetRef::Object(permanent),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(
@@ -13758,6 +13849,7 @@ mod tests {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(
@@ -13802,6 +13894,7 @@ mod tests {
             target: TargetRef::Object(graveyard_card),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(
@@ -13849,6 +13942,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(&event, &trigger, &test_trigger_source_context(&state, rotpriest), &state),
@@ -13867,6 +13961,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13887,6 +13982,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13907,6 +14003,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13927,6 +14024,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13947,6 +14045,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13967,6 +14066,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13987,6 +14087,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -14032,6 +14133,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -14074,6 +14176,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -14135,6 +14238,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // Should NOT fire because the ability (entry.id = ability_id) is controlled by PlayerId(1)
         // The other entry with different controller should not be considered
@@ -14201,6 +14305,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: pw_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // Should NOT fire because the ability (entry.source_id = pw_id) is controlled by PlayerId(0)
         // The trigger requires opponent control
@@ -14273,6 +14378,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: innkeepers_talent_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // Should NOT fire because the triggered ability is controlled by PlayerId(0)
         // The trigger requires opponent control
@@ -15267,6 +15373,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: opp_creature,
             caused_by: Some(your_source),
+            incarnation: None,
         };
         assert!(match_taps(
             &event,
@@ -15306,6 +15413,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: opp_creature,
             caused_by: None,
+            incarnation: None,
         };
         assert!(!match_taps(
             &event,
@@ -15345,6 +15453,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: own_creature,
             caused_by: Some(trigger_src),
+            incarnation: None,
         };
         assert!(!match_taps(
             &event,
@@ -15385,6 +15494,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: any_creature,
             caused_by: None,
+            incarnation: None,
         };
         assert!(match_taps(
             &event,
@@ -15404,6 +15514,7 @@ mod tests {
         let event2 = GameEvent::PermanentTapped {
             object_id: any_creature,
             caused_by: Some(opp_source),
+            incarnation: None,
         };
         assert!(match_taps(
             &event2,
@@ -18503,6 +18614,86 @@ mod tests {
                 &state
             ),
             "a non-artifact token must fail the Artifact type filter even via LKI"
+        );
+    }
+
+    /// A card reanimated from the shared graveyard by `reanimator`, judged by P0's creature-you-
+    /// control trigger over `origin`/`destination`; returns whether the trigger matches.
+    fn reanimation_matches(
+        format: crate::types::format::FormatConfig,
+        pile_owner: PlayerId,
+        reanimator: PlayerId,
+        destination: Option<Zone>,
+    ) -> bool {
+        let mut state = GameState::new(format, 2, 1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            pile_owner,
+            "Entrant".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, entrant);
+        state.objects.get_mut(&entrant).unwrap().controller = reanimator;
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Graveyard);
+        trigger.destination = destination;
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        }));
+        let event = GameEvent::ZoneChanged {
+            object_id: entrant,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                owner: pile_owner,
+                controller: reanimator,
+                ..ZoneChangeRecord::test_minimal(entrant, Some(Zone::Graveyard), Zone::Battlefield)
+            }),
+        };
+        match_changes_zone(
+            &event,
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state,
+        )
+    }
+
+    /// CR 603.6a: a trigger naming the battlefield as destination reads the permanent, so only
+    /// its controller counts; without a named destination it reads the departed pile.
+    #[test]
+    fn a_named_battlefield_destination_judges_the_permanent_not_the_pile() {
+        use crate::types::format::FormatConfig;
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let named = Some(Zone::Battlefield);
+        for format in [FormatConfig::dandan(), FormatConfig::standard()] {
+            assert!(
+                reanimation_matches(format.clone(), p1, p0, named),
+                "reach: P0's own permanent matches"
+            );
+            assert!(
+                !reanimation_matches(format.clone(), p0, p1, named),
+                "P1's permanent is not a creature P0 controls"
+            );
+            assert!(reanimation_matches(format, p1, p0, None));
+        }
+        assert!(
+            reanimation_matches(FormatConfig::dandan(), p0, p1, None),
+            "paired: the pile reading"
+        );
+        assert!(
+            !reanimation_matches(FormatConfig::standard(), p0, p1, None),
+            "Standard has no shared pile"
         );
     }
 }

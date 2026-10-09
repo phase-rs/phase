@@ -303,6 +303,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::PermanentTapped {
                 object_id,
                 caused_by,
+                ..
             } => {
                 mark_public_state_object_dirty(state, *object_id);
                 if let Some(cause) = caused_by {

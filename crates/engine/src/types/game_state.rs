@@ -31,9 +31,9 @@ use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{
     EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
-    EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind,
+    EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind, Targeter,
 };
-use super::format::FormatConfig;
+use super::format::{FormatConfig, ZoneScope};
 use super::identifiers::{
     CardId, DelayedInstallIdentity, DelayedTriggerOrigin, ExtraPhaseId, LogicalZoneChangeGroupId,
     ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ResolutionCastOfferId, TrackedSetId,
@@ -591,6 +591,9 @@ pub struct TriggerSourceContext {
     pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 201.5a: the granter stamped on the trigger definition this context was handed with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl std::fmt::Debug for TriggerSourceContext {
@@ -667,8 +670,11 @@ impl std::fmt::Debug for TriggerSourceContext {
                 &self.additional_cost_payment_count,
             )
             .field("additional_cost_payments", &self.additional_cost_payments)
-            .field("cast_cost_paid_object", &self.cast_cost_paid_object)
-            .finish()
+            .field("cast_cost_paid_object", &self.cast_cost_paid_object);
+        if self.granting_object.is_some() {
+            debug.field("granting_object", &self.granting_object);
+        }
+        debug.finish()
     }
 }
 
@@ -1154,6 +1160,15 @@ pub struct ManaSpentSourceSnapshot {
     pub source_id: ObjectId,
     pub lki: LKISnapshot,
 }
+
+/// CR 601.2a + CR 400.7: the identity of one spell on the stack, minted when the
+/// spell is announced (or a copy is put onto the stack, CR 707.10) and carried
+/// unchanged through targeting, payment and finalization — unlike the object's
+/// incarnation, which advances when finalization moves the card to the stack.
+/// Never reused: the allocator only increases, and cleared identities are not
+/// reminted. Legacy saves carry no announcement, which matches nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SpellAnnouncement(pub u64);
 
 /// CR 601.2i: Stable coordinate of one finalized cast in its caster's
 /// turn-scoped spell-cast journal.
@@ -2778,6 +2793,13 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
+    /// CR 405.3 + CR 707.10: set on a loop that puts copies of several spells
+    /// on the stack as one batch. `Some(n)`: the controller has already fixed
+    /// the order of `tracked_members[..n]`, and picks the spell for iteration
+    /// `n` before it runs (`WaitingFor::SpellCopyOrderChoice`). `None` for
+    /// every other loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_order_fixed: Option<usize>,
 }
 
 /// CR 705.2: The controller-relevant result of the most recent coin flip
@@ -6618,6 +6640,18 @@ pub enum BatchCompletion {
 /// the terminal batch belongs to the still-stashed resolving Ripple ability;
 /// the post-announcement boundary then combines this cast's triggers with the
 /// earlier accepted casts' parked observers before ordering the one batch.
+/// CR 608.2n + CR 608.2g: the move of a resolving instant or sorcery to the
+/// zone it goes to "as the final part" of its resolution, held back while the
+/// spell is paused on its own during-resolution free-cast window (Finale of
+/// Promise, Collected Conjuring). The spell stays on the stack until the window
+/// and the rest of its instructions are done; the destination is the one
+/// `resolve_top` selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredSpellDelivery {
+    pub object_id: ObjectId,
+    pub destination: crate::types::zones::Zone,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResolutionCompletion {
     pub player: PlayerId,
@@ -8169,6 +8203,99 @@ impl PendingCast {
 }
 
 impl GameState {
+    /// CR 400.1 as modified by a format's shared-zone axis: the seat whose
+    /// container holds every shared-zone card. The lowest `PlayerId`; the seat
+    /// set never shrinks, so it is fixed for the life of the game.
+    pub fn canonical_seat(&self) -> PlayerId {
+        self.players
+            .iter()
+            .map(|player| player.id)
+            .min()
+            .expect("a game has at least one seat")
+    }
+
+    /// The seat holding `zone`'s shared container, or `None` when each seat
+    /// keeps its own. Exhaustive over `Zone`: only library and graveyard can
+    /// be shared.
+    pub(crate) fn shared_zone_holder(&self, zone: Zone) -> Option<PlayerId> {
+        let shared = self.format_config.format.shared_zones();
+        let scope = match zone {
+            Zone::Library => shared.library,
+            Zone::Graveyard => shared.graveyard,
+            Zone::Hand | Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => {
+                ZoneScope::PerPlayer
+            }
+        };
+        match scope {
+            ZoneScope::Shared => Some(self.canonical_seat()),
+            ZoneScope::PerPlayer => None,
+        }
+    }
+
+    /// CR 400.1 + CR 400.3: the seat whose container stores `seat`'s `zone`
+    /// cards. Identity unless the format shares that zone.
+    pub fn zone_storage_seat(&self, zone: Zone, seat: PlayerId) -> PlayerId {
+        self.shared_zone_holder(zone).unwrap_or(seat)
+    }
+
+    fn player_at_seat(&self, seat: PlayerId) -> &Player {
+        self.players
+            .iter()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+    }
+
+    fn player_at_seat_mut(&mut self, seat: PlayerId) -> &mut Player {
+        self.players
+            .iter_mut()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+    }
+
+    /// CR 400.1: `seat`'s library, resolved through the format's shared-zone axis.
+    pub fn library_of(&self, seat: PlayerId) -> &im::Vector<ObjectId> {
+        &self
+            .player_at_seat(self.zone_storage_seat(Zone::Library, seat))
+            .library
+    }
+
+    pub fn library_of_mut(&mut self, seat: PlayerId) -> &mut im::Vector<ObjectId> {
+        let holder = self.zone_storage_seat(Zone::Library, seat);
+        // allow-raw-zone: the storage accessor itself; callers own the zone semantics (CR 400.1).
+        &mut self.player_at_seat_mut(holder).library
+    }
+
+    /// CR 400.1: `seat`'s graveyard, resolved through the format's shared-zone axis.
+    pub fn graveyard_of(&self, seat: PlayerId) -> &im::Vector<ObjectId> {
+        &self
+            .player_at_seat(self.zone_storage_seat(Zone::Graveyard, seat))
+            .graveyard
+    }
+
+    pub fn graveyard_of_mut(&mut self, seat: PlayerId) -> &mut im::Vector<ObjectId> {
+        let holder = self.zone_storage_seat(Zone::Graveyard, seat);
+        // allow-raw-zone: the storage accessor itself; callers own the zone semantics (CR 400.1).
+        &mut self.player_at_seat_mut(holder).graveyard
+    }
+
+    /// The deck pool backing `seat`'s library: the pile holder's pool when the
+    /// format shares the library, the seat's own otherwise.
+    pub fn deck_pool_of(&self, seat: PlayerId) -> Option<&PlayerDeckPool> {
+        let holder = self.zone_storage_seat(Zone::Library, seat);
+        self.deck_pools.iter().find(|pool| pool.player == holder)
+    }
+
+    /// Seats whose library is empty after deck load.
+    pub fn seats_with_empty_library(&self) -> Vec<PlayerId> {
+        self.players
+            .iter()
+            .map(|player| player.id)
+            .filter(|&seat| self.library_of(seat).is_empty())
+            .collect()
+    }
+}
+
+impl GameState {
     /// Mint the nonzero producer identity for one paid resolution-cast offer.
     /// The allocator is persisted so a restored offer never shares authority
     /// with a later one, even when their card/source fields collide.
@@ -8246,6 +8373,10 @@ impl GameState {
     }
 
     pub(crate) fn advance_library_knowledge_epoch(&mut self, owner: PlayerId) {
+        // CR 400.1: knowledge is keyed by the library's storage seat, so a
+        // shared pile has one epoch whichever seat reorders it.
+        let holder = self.shared_zone_holder(Zone::Library);
+        let owner = holder.unwrap_or(owner);
         let index = owner.0 as usize;
         if self
             .product_knowledge_state
@@ -8279,11 +8410,12 @@ impl GameState {
         // rather than retaining stale generations in authoritative state.
         self.product_knowledge_state
             .facts
-            .retain(|fact| !(fact.owner == owner && fact.zone == Zone::Library));
+            .retain(|fact| !(holder.unwrap_or(fact.owner) == owner && fact.zone == Zone::Library));
         self.canonicalize_library_knowledge_epoch(owner);
     }
 
     pub(crate) fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
+        let owner = self.zone_storage_seat(Zone::Library, owner);
         self.product_knowledge_state
             .library_epochs
             .get(owner.0 as usize)
@@ -8292,6 +8424,7 @@ impl GameState {
     }
 
     pub(crate) fn library_knowledge_boundary_generation(&self, owner: PlayerId) -> u64 {
+        let owner = self.zone_storage_seat(Zone::Library, owner);
         self.product_knowledge_state
             .action_library_knowledge_generations
             .get(owner.0 as usize)
@@ -8302,9 +8435,11 @@ impl GameState {
     /// Removes an epoch once no current library fact relies on it, keeping
     /// equivalent product-knowledge states equal and serialized identically.
     fn canonicalize_library_knowledge_epoch(&mut self, owner: PlayerId) {
+        let holder = self.shared_zone_holder(Zone::Library);
+        let owner = holder.unwrap_or(owner);
         let current_epoch = self.library_knowledge_epoch(owner);
         let has_live_library_fact = self.product_knowledge_state.facts.iter().any(|fact| {
-            fact.owner == owner
+            holder.unwrap_or(fact.owner) == owner
                 && fact.zone == Zone::Library
                 && fact.library_epoch == Some(current_epoch)
         });
@@ -8500,6 +8635,94 @@ pub enum ManaAbilityResume {
     FinalizePendingManaPayment {
         player: PlayerId,
     },
+}
+
+/// CR 104.4b: the trigger events (and deferred cost events) a paused payment
+/// resume retains, for `GameState::for_each_trigger_event_carrier_mut`.
+/// Exhaustive on purpose: a variant that starts retaining an event must be
+/// visited here.
+fn visit_cost_move_resume_events(
+    resume: &mut PendingCostMoveResume,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    match resume {
+        PendingCostMoveResume::SacrificeForCost {
+            deferred_cost_events,
+            ..
+        } => deferred_cost_events.iter_mut().for_each(&mut *f),
+        PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
+            CollectEvidenceResume::ManaAbility {
+                pending_mana_ability,
+            } => visit_pending_mana_ability_events(pending_mana_ability, f),
+            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {}
+        },
+        PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
+            visit_pending_mana_ability_events(pending, f);
+            visit_mana_cost_cursor_events(cursor, f);
+        }
+        PendingCostMoveResume::CounterAdditionUnlessPayment { trigger_event, .. } => {
+            if let Some(event) = trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
+            if let Some(event) = resume.trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        PendingCostMoveResume::Cast { .. }
+        | PendingCostMoveResume::WardSacrificePayment { .. }
+        | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::Foretell { .. }
+        | PendingCostMoveResume::UnlessBouncePayment { .. }
+        | PendingCostMoveResume::ActivationMillPayment { .. }
+        | PendingCostMoveResume::LoyaltyActivation { .. } => {}
+    }
+}
+
+/// A parked mana-ability activation: its resume roots, and its cost cursor's
+/// parents (each a parked activation of its own).
+fn visit_pending_mana_ability_events(
+    pending: &mut PendingManaAbility,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    visit_mana_ability_resume_events(&mut pending.resume, f);
+    if let Some(resume) = pending.cost_move_resume.as_mut() {
+        visit_mana_ability_resume_events(resume, f);
+    }
+}
+
+fn visit_mana_cost_cursor_events(
+    cursor: &mut ManaAbilityCostCursor,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    cursor.deferred_cost_events.iter_mut().for_each(&mut *f);
+    if let Some(parent) = cursor.parent.as_deref_mut() {
+        visit_pending_mana_ability_events(&mut parent.pending, f);
+        visit_mana_cost_cursor_events(&mut parent.cursor, f);
+    }
+}
+
+fn visit_mana_ability_resume_events(
+    resume: &mut ManaAbilityResume,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    match resume {
+        ManaAbilityResume::UnlessPayment { trigger_event, .. } => {
+            if let Some(event) = trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        ManaAbilityResume::Priority
+        | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::TurnFaceUp { .. }
+        | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::ManaPayment { .. }
+        | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::EffectPayCost { .. }
+        | ManaAbilityResume::PhyrexianCastPayment { .. }
+        | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
+    }
 }
 
 impl ManaAbilityResume {
@@ -9389,8 +9612,29 @@ pub enum MulliganDecisionPhase {
     },
 }
 
+/// CR 103.5: what a held mulligan does when the declare round closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MulliganDeclarationKind {
+    /// A regular mulligan: the redraw counts and owes a bottom.
+    #[default]
+    Regular,
+    /// The Dandan free reveal: the hand is revealed, then redrawn at the same count.
+    FreeReveal,
+}
+
+/// CR 103.5: a mulligan this player has declared, carried out once every player has declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MulliganDeclaration {
+    pub player: PlayerId,
+    /// Mulligans taken before this declaration (a `Regular` redraw makes it one more).
+    pub mulligan_count: u8,
+    #[serde(default)]
+    pub kind: MulliganDeclarationKind,
+}
+
 /// CR 103.5: Per-player state during the simultaneous mulligan decision phase.
-/// One entry per player who has not yet declared "keep".
+/// One entry per player who owes an action (a declaration or owed bottoms).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MulliganDecisionEntry {
     pub player: PlayerId,
@@ -13867,6 +14111,11 @@ pub enum WaitingFor {
     /// empties, the flow advances directly to `finish_mulligans`; there is no
     /// separate batch bottoms phase.
     ///
+    /// CR 103.5: when the library is shared, the redraws would be observable
+    /// between seats, so `Mulligan` is held in `declared` (and the player leaves
+    /// `pending`) until every player has declared; the held mulligans are then
+    /// carried out together.
+    ///
     /// CR 103.5d + CR 805.3a + CR 810.2: shared-team-turn mulligans are
     /// represented in the same simultaneous-decision model; every player
     /// remains independently pending until their own keep/mulligan decision.
@@ -13878,6 +14127,11 @@ pub enum WaitingFor {
         /// Surfaced so display layers can render "Free Mulligan" labelling
         /// without re-deriving format/seat rules.
         free_first_mulligan: bool,
+        /// CR 103.5: in a format whose library is shared, `Mulligan` is recorded
+        /// here and carried out only once every player has declared; a declared
+        /// player is not in `pending`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        declared: Vec<MulliganDeclaration>,
     },
     /// TL:R 906.6a/e: A player with more than one Tiny Leader performs a
     /// forced first mulligan before any player may make a normal mulligan
@@ -14647,6 +14901,18 @@ pub enum WaitingFor {
         source_id: ObjectId,
         choices: Vec<ObjectId>,
         count: u32,
+    },
+    /// CR 405.3 + CR 707.10: an effect that puts copies of several spells on
+    /// the stack at once ("copy each of those spells twice" — Finale of
+    /// Promise) lets their controller choose the copies' relative order. Asked
+    /// one copy at a time: `choices` are the distinct spells that still have a
+    /// copy to make, and the chosen spell's next copy goes on the stack next,
+    /// above the copies already made. Raised only while two or more spells
+    /// remain; the answer is a single-object `SelectCards`.
+    SpellCopyOrderChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        choices: Vec<ObjectId>,
     },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
@@ -16818,6 +17084,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
+            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -16982,6 +17249,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
             | WaitingFor::EmpowerJaceChoice { player, .. }
+            | WaitingFor::SpellCopyOrderChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
@@ -17246,11 +17514,25 @@ impl WaitingFor {
             )
     }
 
-    /// CR 601.2i: Whether the current prompt permits withdrawing the pending
-    /// spell. Kept distinct from `has_pending_cast`: a cast can be pending at
-    /// a mandatory choice without granting a cancellation action.
+    /// CR 601.2i + CR 602.2b: Whether the current prompt permits withdrawing
+    /// the pending spell-cast or a pre-cost keyword-activation announcement.
+    /// Spell casts complete only after CR 601.2a-h, so an in-flight cast can
+    /// still be withdrawn; keyword activations follow CR 601.2b-i (CR 602.2b),
+    /// so their pre-cost target/crew-choice steps (Equip CR 702.6a, Crew
+    /// CR 702.122a, Saddle CR 702.171a, Station CR 702.184a) can likewise be
+    /// backed out of with nothing to unwind. Kept distinct from
+    /// `has_pending_cast`: a cast can be pending at a mandatory choice without
+    /// granting a cancellation action, and keyword states allow cancel without
+    /// carrying a `PendingCast` at all.
     pub fn allows_cancel_cast(&self) -> bool {
-        self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
+        (self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. }))
+            || matches!(
+                self,
+                WaitingFor::EquipTarget { .. }
+                    | WaitingFor::CrewVehicle { .. }
+                    | WaitingFor::StationTarget { .. }
+                    | WaitingFor::SaddleMount { .. }
+            )
     }
 
     /// CR 605.3a + CR 605.3b: Whether this state continues a mana ability's
@@ -17335,6 +17617,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -19810,6 +20093,11 @@ declare_game_state! {
     /// games don't re-mint colliding ids.
     #[serde(default)]
     pub next_pip_id: u64,
+    /// CR 601.2a + CR 400.7: the last [`SpellAnnouncement`] minted. Monotonic and
+    /// serialized, so a reloaded game never remints an id a live or departed
+    /// spell still carries.
+    #[serde(default)]
+    pub next_spell_announcement: u64,
     /// Resolved-rules journal for exact mana provenance and P2 mana commands.
     /// It is serialized so a restored game retains the command operands needed
     /// by later retained-prefix replay.
@@ -20110,7 +20398,8 @@ declare_game_state! {
     /// O(1) presence index over `StaticModeKind` discriminants — "does any functioning
     /// static of kind K exist on the board?" Rebuilt wholesale from `game_functioning_statics`
     /// as a byproduct of the layers pipeline (`layers::refresh_static_mode_presence`), so it is
-    /// exactly `.any(kind)` for every kind. Lets discriminant-only scan gates (e.g. the
+    /// the `.any(kind)` fold for every kind, plus `Goaded` for every def
+    /// `combat::static_designates_goad` admits. Lets discriminant-only scan gates (e.g. the
     /// hexproof scans in `static_abilities`) skip an O(battlefield) `.any()` when zero statics
     /// of that kind exist.
     ///
@@ -20911,6 +21200,20 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
+    /// CR 603.4 + CR 607.1c: Exact triggered-ability occurrences (CR 113.2c:
+    /// per ability; CR 400.7: per object incarnation) that actually added
+    /// mana to a player this turn, whether by the ability's effect or by
+    /// a mana-adding cost of that ability paid while it resolves (CR 118.1 +
+    /// CR 118.12). Written only when at least one unit reached a pool
+    /// (CR 106.4), so a declined "you may" (CR 603.5), a declined cost, a
+    /// zero-count or {0}-reduced payment, or a fully prevented (CR 614.1)
+    /// production records nothing. Non-triggered resolutions carry no
+    /// `trigger_definition_ref` and never write. Cleared in `start_next_turn`;
+    /// cleared, not preserved, by the loop-shortcut resource projection (see
+    /// `project_out_resources`).
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub triggered_abilities_added_mana_this_turn: HashSet<(TriggerDefinitionRef, PlayerId)>,
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
@@ -21587,6 +21890,17 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
+    /// CR 105.4 + CR 608.2c: the colour the current resolution's most recent
+    /// colour choice named, persisting or not ("Choose a color. … a creature
+    /// of that color"). Unlike last_named_choice, a later choice of another
+    /// kind (a number, a player) doesn't overwrite it, and a parked
+    /// continuation doesn't clear it; unlike chosen_color_this_resolution,
+    /// a non-persisting chooser writes it, so its readers are only those that
+    /// name "that color" within the same resolution. Cleared at every
+    /// top-level resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_color_this_resolution: Option<crate::types::mana::ManaColor>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -21974,6 +22288,9 @@ declare_game_state! {
     /// that spell's cast triggers into the same deferred ordering batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resolution_completion: Option<PendingResolutionCompletion>,
+    /// CR 608.2n + CR 608.2g: see [`DeferredSpellDelivery`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_spell_delivery: Option<DeferredSpellDelivery>,
     /// CR 107.3i: the X announced for an in-flight COST, keyed by the object whose cost
     /// it is. CR 107.3i: "Normally, all instances of X on an object have the same value
     /// at any given time" — so a triggered ability of that SAME object which fires
@@ -22838,14 +23155,16 @@ pub struct EndEffectPermission {
 
 /// Exact object bindings captured when a transient continuous effect begins.
 ///
-/// CR 400.7 + CR 611.2b: both fields name the particular objects the resolved
-/// effect may affect or whose state may sustain its duration.  They travel in
-/// the same journaled install command as the rest of the effect, rather than
-/// being attached after installation, so replay cannot observe a partial TCE.
+/// CR 400.7 + CR 611.2b: `affected_recipient` and `duration_subject` name the
+/// particular objects the resolved effect may affect or whose state may sustain
+/// its duration.  They travel in the same journaled install command as the rest
+/// of the effect, rather than being attached after installation, so replay
+/// cannot observe a partial TCE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransientContinuousEffectBindings {
     pub affected_recipient: Option<ObjectIncarnationRef>,
     pub duration_subject: Option<ObjectIncarnationRef>,
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -22892,12 +23211,15 @@ pub struct TransientContinuousEffect {
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
     /// printed termination permission. Set inside the single construction
-    /// authority (`add_transient_continuous_effect_with_end_permission`), so it
+    /// authority (`add_transient_continuous_effect_inner`), so it
     /// rides inside the journaled `ResolvedContinuousEffectCommand` rather than
     /// being post-stamped. Backward-compatible across the WASM/multiplayer
     /// serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_permission: Option<EndEffectPermission>,
+    /// CR 201.5a: the object that granted the ability that created this effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
     /// Snapshot of the originating object's or dungeon's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -23569,6 +23891,103 @@ pub struct DrawSequenceFrame {
     /// (Dredge) contributes 0; a unit doubled by a count modifier contributes its
     /// post-replacement count.
     pub accumulated: u32,
+    /// Set when this frame serves several players drawing at once from a shared
+    /// library. `player`, `applied`, `accumulated` and `pending_delivery` are then
+    /// the working copy of the seat `player`; the dealer holds the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dealer: Option<DrawDealer>,
+}
+
+/// CR 121.2 + the format's `DealOrder`: the seats of one simultaneous draw
+/// instruction, settled in dealing order and then dealt one card at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawDealer {
+    pub stage: DrawDealerStage,
+    pub seats: Vec<DrawDealerSeat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DrawDealerStage {
+    /// CR 121.2a: instruction counts settle in dealing order; `next` is the seat
+    /// whose instruction the frame holds.
+    Settling { next: usize },
+    /// The recipient of each individual draw still owed, next first.
+    Dealing { schedule: Vec<PlayerId> },
+}
+
+/// One player's share of a simultaneous draw instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawDealerSeat {
+    pub player: PlayerId,
+    /// The instruction count, replaced by the settled count once the seat settles.
+    pub count: u32,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub accumulated: u32,
+}
+
+impl DrawSequenceFrame {
+    /// The seat whose instruction this frame is settling, if the dealer is in
+    /// the settling stage.
+    pub(crate) fn settling_seat(&self) -> Option<usize> {
+        match self.dealer.as_ref()?.stage {
+            DrawDealerStage::Settling { next } => Some(next),
+            DrawDealerStage::Dealing { .. } => None,
+        }
+    }
+
+    /// Take the next owed unit's recipient and its applied set, making that
+    /// recipient the working seat. A frame without a dealer draws for `player`.
+    pub(crate) fn begin_next_unit(&mut self) -> (PlayerId, HashSet<AppliedReplacementKey>) {
+        debug_assert!(
+            self.pending_delivery.is_none(),
+            "a seat switch never happens at a parked unit"
+        );
+        if let Some(DrawDealer {
+            stage: DrawDealerStage::Dealing { schedule },
+            seats,
+        }) = self.dealer.as_mut()
+        {
+            if !schedule.is_empty() {
+                let recipient = schedule.remove(0);
+                if recipient != self.player {
+                    if let Some(held) = seats.iter_mut().find(|seat| seat.player == self.player) {
+                        held.accumulated = self.accumulated;
+                        held.applied = std::mem::take(&mut self.applied);
+                    }
+                    if let Some(next) = seats.iter().find(|seat| seat.player == recipient) {
+                        self.player = recipient;
+                        self.applied = next.applied.clone();
+                        self.accumulated = next.accumulated;
+                    }
+                }
+            }
+        }
+        (self.player, self.applied.clone())
+    }
+
+    /// Each seat's delivered count in dealing order, with the working seat written
+    /// back; `None` for a frame without a dealer.
+    pub(crate) fn dealer_deliveries(&mut self) -> Option<Vec<(PlayerId, u32)>> {
+        let dealer = self.dealer.as_mut()?;
+        if let Some(held) = dealer
+            .seats
+            .iter_mut()
+            .find(|seat| seat.player == self.player)
+        {
+            held.accumulated = self.accumulated;
+        }
+        Some(
+            dealer
+                .seats
+                .iter()
+                .map(|seat| (seat.player, seat.accumulated))
+                .collect(),
+        )
+    }
 }
 
 /// CR 121.2 + CR 616.1g: the stack of draw instructions in flight.
@@ -23683,6 +24102,7 @@ impl DrawSequenceStack {
             delivery_owner: None,
             capture_next_child_delivery: false,
             accumulated: 0,
+            dealer: None,
         });
         debug_assert!(
             self.validate().is_ok(),
@@ -23735,6 +24155,7 @@ impl DrawSequenceStack {
                     && a.pending_delivery == b.pending_delivery
                     && a.delivery_owner.is_some() == b.delivery_owner.is_some()
                     && a.capture_next_child_delivery == b.capture_next_child_delivery
+                    && a.dealer == b.dealer
             })
     }
 
@@ -23780,8 +24201,51 @@ impl DrawSequenceStack {
                     frame.frame_id
                 ));
             }
+            if let Some(dealer) = &frame.dealer {
+                validate_draw_dealer(frame, dealer)?;
+            }
         }
         Ok(())
+    }
+}
+
+fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Result<(), String> {
+    let id = frame.frame_id;
+    let mut players = HashSet::new();
+    if !dealer.seats.iter().all(|seat| players.insert(seat.player)) {
+        return Err(format!("draw frame {id:?} deals to a seat twice"));
+    }
+    if !players.contains(&frame.player) {
+        return Err(format!(
+            "draw frame {id:?} holds a player outside its seats"
+        ));
+    }
+    if frame.origin != DrawSequenceOrigin::Plain {
+        return Err(format!(
+            "draw frame {id:?} is a dealer frame with a tail origin"
+        ));
+    }
+    match &dealer.stage {
+        DrawDealerStage::Settling { next } if *next >= dealer.seats.len() => Err(format!(
+            "draw frame {id:?} settles seat {next} of {}",
+            dealer.seats.len()
+        )),
+        DrawDealerStage::Settling { .. } => Ok(()),
+        DrawDealerStage::Dealing { schedule } => {
+            if !schedule.iter().all(|player| players.contains(player)) {
+                return Err(format!(
+                    "draw frame {id:?} schedules a player outside its seats"
+                ));
+            }
+            if frame.remaining as usize != schedule.len() {
+                return Err(format!(
+                    "draw frame {id:?} owes {} draws against a schedule of {}",
+                    frame.remaining,
+                    schedule.len()
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -26101,12 +26565,13 @@ impl GameState {
     /// at one exact zone-change occurrence. The record has already received its
     /// stable `(turn, index)` key when this is called.
     pub(crate) fn record_zone_change_library_knowledge_stamp(&mut self, record: &ZoneChangeRecord) {
+        let library_owner = self.zone_storage_seat(Zone::Library, record.owner);
         let source = (record.from_zone == Some(Zone::Library)).then(|| LibraryKnowledgeStamp {
-            library_owner: record.owner,
+            library_owner,
             boundary_generation: self.library_knowledge_boundary_generation(record.owner),
         });
         let destination = (record.to_zone == Zone::Library).then(|| LibraryKnowledgeStamp {
-            library_owner: record.owner,
+            library_owner,
             boundary_generation: self.library_knowledge_boundary_generation(record.owner),
         });
         if source.is_none() && destination.is_none() {
@@ -27454,6 +27919,7 @@ impl GameState {
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
+            next_spell_announcement: 0,
             resolved_rules_journal: ResolvedRulesJournal::default(),
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
@@ -27579,6 +28045,7 @@ impl GameState {
             trigger_fire_counts_this_turn: HashMap::new(),
             triggers_fired_this_turn_per_opponent: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
+            triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
@@ -27674,6 +28141,7 @@ impl GameState {
             last_named_choice: None,
             chosen_counter_kind_this_resolution: None,
             chosen_color_this_resolution: None,
+            named_color_this_resolution: None,
             placed_sticker_this_resolution: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
@@ -27718,6 +28186,7 @@ impl GameState {
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
             pending_resolution_completion: None,
+            deferred_spell_delivery: None,
             resolution_source_relatch: None,
             last_loop_action_sequence: Vec::new(),
             current_trigger_events: Vec::new(),
@@ -27890,6 +28359,14 @@ impl GameState {
         let ts = self.next_timestamp;
         self.next_timestamp += 1;
         ts
+    }
+
+    /// CR 601.2a + CR 707.10: mint the identity of a spell put onto the stack.
+    /// Strictly increasing from 1, so it never collides with an earlier
+    /// announcement, even one minted before a reload.
+    pub(crate) fn mint_spell_announcement(&mut self) -> SpellAnnouncement {
+        self.next_spell_announcement += 1;
+        SpellAnnouncement(self.next_spell_announcement)
     }
 
     /// CR 613.7: carry the timestamp allocator past a timestamp that a CR 733
@@ -28371,7 +28848,7 @@ impl GameState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_transient_continuous_effect_inner(
+    pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
@@ -28535,6 +29012,7 @@ impl GameState {
                 duration_subject: bindings.duration_subject,
                 duration_event_source,
                 end_permission,
+                granting_object: bindings.granting_object,
                 source_name,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
@@ -28786,6 +29264,7 @@ impl GameState {
         // loop pre-filter fingerprint.
         self.chosen_counter_kind_this_resolution.hash(&mut h);
         self.chosen_color_this_resolution.hash(&mut h);
+        self.named_color_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -28830,6 +29309,7 @@ impl GameState {
         clone.state_revision = 0;
         clone.next_timestamp = 0;
         clone.next_object_id = 0;
+        clone.next_spell_announcement = 0;
         clone.next_delayed_trigger_token = 0;
         clone.next_delayed_trigger_instance = 0;
         clone.next_resolution_cast_offer_id = 0;
@@ -29058,9 +29538,10 @@ impl GameState {
 
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
-        // reachable from trigger-event carriers that can still resume or resolve:
-        // stack/resolving entries, pending/deferred/ordering triggers, current and
-        // batched trigger contexts, and continuation/optional-choice sidecars.
+        // reachable from trigger-event carriers that can still resume or resolve
+        // (`for_each_trigger_event_carrier_mut`: stack/resolving entries,
+        // pending/deferred/ordering triggers, current and batched trigger events,
+        // every parked resolution frame, and a paused triggered mana ability).
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
@@ -29074,91 +29555,20 @@ impl GameState {
                     referenced_lki.insert(ObjectIncarnationRef::of(*object_id, incarnation));
                 }
             }
+            // CR 400.7 + CR 608.2h: a tap event names the incarnation that was
+            // tapped; "that permanent's controller" reads its snapshot.
+            if let GameEvent::PermanentTapped {
+                object_id,
+                incarnation: Some(incarnation),
+                ..
+            } = event
+            {
+                referenced_lki.insert(ObjectIncarnationRef::of(*object_id, *incarnation));
+            }
         };
 
-        for entry in &clone.stack {
-            if let StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            } = &entry.kind
-            {
-                record_event(event);
-            }
-        }
-        if let Some(entry) = clone.resolving_stack_entry.as_ref() {
-            if let StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            } = &entry.kind
-            {
-                record_event(event);
-            }
-        }
-        if let Some(pending) = clone.pending_trigger.as_ref() {
-            if let Some(event) = pending.trigger_event.as_ref() {
-                record_event(event);
-            }
-        }
-        for event in &clone.pending_trigger_event_batch {
-            record_event(event);
-        }
-        for context in &clone.deferred_triggers {
-            if let Some(event) = context.pending.trigger_event.as_ref() {
-                record_event(event);
-            }
-            for event in &context.trigger_events {
-                record_event(event);
-            }
-        }
-        if let Some(order) = clone.pending_trigger_order.as_ref() {
-            for context in order.groups.iter().flat_map(|group| group.triggers.iter()) {
-                if let Some(event) = context.pending.trigger_event.as_ref() {
-                    record_event(event);
-                }
-                for event in &context.trigger_events {
-                    record_event(event);
-                }
-            }
-        }
-        if let Some(event) = clone.current_trigger_event.as_ref() {
-            record_event(event);
-        }
-        for event in &clone.current_trigger_events {
-            record_event(event);
-        }
-        for events in clone.stack_trigger_event_batches.values() {
-            for event in events {
-                record_event(event);
-            }
-        }
-        if let Some(event) = clone
-            .active_optional_effect_frame()
-            .and_then(|frame| frame.trigger_event.as_ref())
-        {
-            record_event(event);
-        }
-        if let Some(context) = clone
-            .active_ability_continuation_frame()
-            .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
-        {
-            if let Some(event) = context.event.as_ref() {
-                record_event(event);
-            }
-            for event in &context.events {
-                record_event(event);
-            }
-        }
-        if let Some(context) = clone
-            .active_ability_continuation()
-            .and_then(|continuation| continuation.trigger_context.as_ref())
-        {
-            if let Some(event) = context.event.as_ref() {
-                record_event(event);
-            }
-            for event in &context.events {
-                record_event(event);
-            }
-        }
+        // The same traversal the canonicalization below uses (CR 104.4b).
+        clone.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
 
         clone.lki_by_incarnation = std::mem::take(&mut clone.lki_by_incarnation)
             .into_iter()
@@ -29169,20 +29579,460 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
-        // CR 104.4b + CR 608.2h: records no live spell-cast trigger can reach are
-        // history, not position — prune the same way as `lki_by_incarnation`,
-        // against the set captured above before it was cleared.
+        // CR 104.4b + CR 608.2h: records no live spell-cast trigger and no
+        // announcement-bound targeting event can reach are history, not
+        // position. Prune them the same way as `lki_by_incarnation`, against the
+        // set captured above before it was cleared, plus every departure whose
+        // spell a `BecomesTarget` targeter still names (the targeter authority,
+        // `targeting::event_referent_controller`, reads that record).
+        let targeted_announcements = clone.targeter_spell_announcements();
         clone.departed_stack_spells = std::mem::take(&mut clone.departed_stack_spells)
             .into_iter()
             .filter_map(|(object_id, mut history)| {
-                history.retain(|incarnation, _| {
+                history.retain(|incarnation, record| {
                     retained_departed_spells
                         .contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                        || record
+                            .object
+                            .spell_announcement
+                            .is_some_and(|announcement| {
+                                targeted_announcements.contains(&announcement)
+                            })
                 });
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+        // CR 104.4b + CR 601.2a: a spell's announcement is monotonic identity,
+        // not position. Renumber every announcement by its rank among those
+        // the position carries, on the spell objects, the departure records,
+        // and the `BecomesTarget` targeters on every trigger-event carrier, so
+        // two positions minted at different times still confirm as a repeat
+        // while which spell each targeter names is preserved. Ranked AFTER
+        // pruning, so discarded history cannot shift the surviving ranks.
+        clone.canonicalize_spell_announcements_for_loop();
+        // CR 104.4b + CR 400.7: an incarnation is monotonic identity too. Renumber
+        // the retained LKI keys and every trigger event that names one, per
+        // object, by rank — after pruning, so discarded history cannot shift it.
+        clone.canonicalize_lki_incarnations_for_loop();
         clone
+    }
+
+    /// See `normalize_for_loop`. Per object, rank-based over the retained
+    /// `lki_by_incarnation` keys and the incarnations trigger events name
+    /// (`ZoneChanged` entries and stamped `PermanentTapped` taps), so two
+    /// positions minted at different times compare equal while which
+    /// incarnation each event names — and its snapshot — is preserved.
+    fn canonicalize_lki_incarnations_for_loop(&mut self) {
+        fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
+            match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } => record
+                    .entered_incarnation
+                    .as_mut()
+                    .map(|incarnation| (*object_id, incarnation)),
+                GameEvent::PermanentTapped {
+                    object_id,
+                    incarnation: Some(incarnation),
+                    ..
+                } => Some((*object_id, incarnation)),
+                // Exhaustive on purpose: a new event that names an incarnation must
+                // decide here whether loop normalization renumbers it.
+                GameEvent::PermanentTapped {
+                    incarnation: None, ..
+                }
+                | GameEvent::GameStarted
+                | GameEvent::HiddenSearchViewed { .. }
+                | GameEvent::TurnStarted { .. }
+                | GameEvent::ExtraTurnCreated { .. }
+                | GameEvent::PhaseChanged { .. }
+                | GameEvent::PriorityPassed { .. }
+                | GameEvent::SpellCast { .. }
+                | GameEvent::Mutated { .. }
+                | GameEvent::Augmented { .. }
+                | GameEvent::Melded { .. }
+                | GameEvent::SpellCopied { .. }
+                | GameEvent::XValueChosen { .. }
+                | GameEvent::AbilityActivated { .. }
+                | GameEvent::LifeChanged { .. }
+                | GameEvent::ManaAdded { .. }
+                | GameEvent::TappedForMana { .. }
+                | GameEvent::ManaAbilityProduced { .. }
+                | GameEvent::ManaPoolEmptied { .. }
+                | GameEvent::ManaBurn { .. }
+                | GameEvent::ManaRecolored { .. }
+                | GameEvent::CreatureExerted { .. }
+                | GameEvent::CreatureEnlisted { .. }
+                | GameEvent::ArmyAmassed { .. }
+                | GameEvent::Foretold { .. }
+                | GameEvent::BecameForetold { .. }
+                | GameEvent::PlayerLost { .. }
+                | GameEvent::MulliganStarted
+                | GameEvent::CardsDrawn { .. }
+                | GameEvent::CardDrawn { .. }
+                | GameEvent::PermanentUntapped { .. }
+                | GameEvent::PermanentPhasedOut { .. }
+                | GameEvent::PermanentPhasedIn { .. }
+                | GameEvent::PlayerPhasedOut { .. }
+                | GameEvent::PlayerPhasedIn { .. }
+                | GameEvent::LandPlayed { .. }
+                | GameEvent::StackPushed { .. }
+                | GameEvent::StackResolved { .. }
+                | GameEvent::Discarded { .. }
+                | GameEvent::Milled { .. }
+                | GameEvent::DamageCleared { .. }
+                | GameEvent::GameOver { .. }
+                | GameEvent::ResolutionHalted { .. }
+                | GameEvent::DamageDealt { .. }
+                | GameEvent::DamagePrevented { .. }
+                | GameEvent::SpellCountered { .. }
+                | GameEvent::CounterAdded { .. }
+                | GameEvent::SagaChapterAbilityResolved { .. }
+                | GameEvent::ObjectIntensified { .. }
+                | GameEvent::Evolved { .. }
+                | GameEvent::CounterRemoved { .. }
+                | GameEvent::TokenCreated { .. }
+                | GameEvent::ObjectConjured { .. }
+                | GameEvent::CreatureDestroyed { .. }
+                | GameEvent::PermanentSacrificed { .. }
+                | GameEvent::ControllerChanged { .. }
+                | GameEvent::EffectResolved { .. }
+                | GameEvent::Unattached { .. }
+                | GameEvent::ContinuousEffectEnded { .. }
+                | GameEvent::AttackersDeclared { .. }
+                | GameEvent::BlockersDeclared { .. }
+                | GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+                | GameEvent::CombatTaxPaid { .. }
+                | GameEvent::CombatTaxDeclined { .. }
+                | GameEvent::BecomesTarget { .. }
+                | GameEvent::VehicleCrewed { .. }
+                | GameEvent::Stationed { .. }
+                | GameEvent::Saddled { .. }
+                | GameEvent::ReplacementApplied { .. }
+                | GameEvent::Transformed { .. }
+                | GameEvent::Flipped { .. }
+                | GameEvent::Specialized { .. }
+                | GameEvent::DayNightChanged { .. }
+                | GameEvent::TurnedFaceUp { .. }
+                | GameEvent::TurnedFaceDown { .. }
+                | GameEvent::CardsRevealed { .. }
+                | GameEvent::ChosenNumbersRevealed { .. }
+                | GameEvent::CombatDamageDealtToPlayer { .. }
+                | GameEvent::PlayerEliminated { .. }
+                | GameEvent::CrimeCommitted { .. }
+                | GameEvent::Cycled { .. }
+                | GameEvent::PlayerPerformedAction { .. }
+                | GameEvent::CardPredicateGuessMade { .. }
+                | GameEvent::Regenerated { .. }
+                | GameEvent::CreatureSuspected { .. }
+                | GameEvent::CreatureNoLongerSuspected { .. }
+                | GameEvent::Detained { .. }
+                | GameEvent::BecamePrepared { .. }
+                | GameEvent::BecameUnprepared { .. }
+                | GameEvent::CaseSolved { .. }
+                | GameEvent::ClassLevelGained { .. }
+                | GameEvent::MonarchChanged { .. }
+                | GameEvent::CityBlessingGained { .. }
+                | GameEvent::EnduringStoryGained { .. }
+                | GameEvent::DieRolled { .. }
+                | GameEvent::DieRollIgnored { .. }
+                | GameEvent::StartingPlayerContest { .. }
+                | GameEvent::CoinFlipped { .. }
+                | GameEvent::RingTemptsYou { .. }
+                | GameEvent::RoomEntered { .. }
+                | GameEvent::RoomDoorUnlocked { .. }
+                | GameEvent::BecomesPlotted { .. }
+                | GameEvent::DungeonCompleted { .. }
+                | GameEvent::Planeswalked { .. }
+                | GameEvent::ChaosEnsued { .. }
+                | GameEvent::PlanarDieRolled { .. }
+                | GameEvent::SchemeSetInMotion { .. }
+                | GameEvent::SchemeAbandoned { .. }
+                | GameEvent::InitiativeTaken { .. }
+                | GameEvent::AttractionOpened { .. }
+                | GameEvent::ContraptionAssembled { .. }
+                | GameEvent::StickerPlaced { .. }
+                | GameEvent::AttractionsRolledToVisit { .. }
+                | GameEvent::AttractionVisited { .. }
+                | GameEvent::ContraptionCranked { .. }
+                | GameEvent::Firebend { .. }
+                | GameEvent::Airbend { .. }
+                | GameEvent::Earthbend { .. }
+                | GameEvent::Waterbend { .. }
+                | GameEvent::CompanionRevealed { .. }
+                | GameEvent::CompanionMovedToHand { .. }
+                | GameEvent::NinjutsuActivated { .. }
+                | GameEvent::KeywordAbilityActivated { .. }
+                | GameEvent::CreatureExploited { .. }
+                | GameEvent::EnergyChanged { .. }
+                | GameEvent::SpeedChanged { .. }
+                | GameEvent::PlayerCounterChanged { .. }
+                | GameEvent::ManaExpended { .. }
+                | GameEvent::Clash { .. }
+                | GameEvent::VoteCast { .. }
+                | GameEvent::VoteResolved { .. }
+                | GameEvent::PowerToughnessChanged { .. }
+                | GameEvent::CascadeMissed { .. }
+                | GameEvent::DebugActionUsed { .. }
+                | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::DebugPermissionRevoked { .. } => None,
+            }
+        }
+        let mut present: std::collections::HashMap<ObjectId, Vec<u64>> =
+            std::collections::HashMap::new();
+        for (object_id, history) in self.lki_by_incarnation.iter() {
+            present
+                .entry(*object_id)
+                .or_default()
+                .extend(history.keys().copied());
+        }
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let Some((object_id, incarnation)) = named_incarnation(event) {
+                present.entry(object_id).or_default().push(*incarnation);
+            }
+        });
+        for incarnations in present.values_mut() {
+            incarnations.sort_unstable();
+            incarnations.dedup();
+        }
+        let canonical = |object_id: ObjectId, incarnation: u64| {
+            let rank = present[&object_id]
+                .binary_search(&incarnation)
+                .expect("every incarnation was collected above");
+            rank as u64 + 1
+        };
+        self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
+            .into_iter()
+            .map(|(object_id, history)| {
+                let history = history
+                    .into_iter()
+                    .map(|(incarnation, snapshot)| (canonical(object_id, incarnation), snapshot))
+                    .collect();
+                (object_id, history)
+            })
+            .collect();
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let Some((object_id, incarnation)) = named_incarnation(event) {
+                *incarnation = canonical(object_id, *incarnation);
+            }
+        });
+    }
+
+    /// The spell announcements named by `BecomesTarget` targeters on every
+    /// trigger-event carrier that can still resume or resolve.
+    fn targeter_spell_announcements(&mut self) -> HashSet<SpellAnnouncement> {
+        let mut named = HashSet::new();
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::BecomesTarget {
+                targeter: Some(Targeter::Spell(announcement)),
+                ..
+            } = event
+            {
+                named.insert(*announcement);
+            }
+        });
+        named
+    }
+
+    /// See `normalize_for_loop`. Rank-based, so the mapping depends only on
+    /// the relative order of the announcements present, which is the same for
+    /// two positions with the same structure minted at different times.
+    fn canonicalize_spell_announcements_for_loop(&mut self) {
+        let mut present: Vec<SpellAnnouncement> = Vec::new();
+        for (_, object) in self.objects.iter() {
+            present.extend(object.spell_announcement);
+        }
+        for (_, records) in self.departed_stack_spells.iter() {
+            for (_, record) in records.iter() {
+                present.extend(record.object.spell_announcement);
+            }
+        }
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::BecomesTarget {
+                targeter: Some(Targeter::Spell(announcement)),
+                ..
+            } = event
+            {
+                present.push(*announcement);
+            }
+        });
+        present.sort_unstable();
+        present.dedup();
+        let canonical = |announcement: SpellAnnouncement| {
+            let rank = present
+                .binary_search(&announcement)
+                .expect("every announcement was collected above");
+            SpellAnnouncement(rank as u64 + 1)
+        };
+        for (_, object) in self.objects.iter_mut() {
+            if let Some(announcement) = object.spell_announcement.as_mut() {
+                *announcement = canonical(*announcement);
+            }
+        }
+        for (_, records) in self.departed_stack_spells.iter_mut() {
+            for (_, record) in records.iter_mut() {
+                if let Some(announcement) = record.object.spell_announcement.as_mut() {
+                    *announcement = canonical(*announcement);
+                }
+            }
+        }
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::BecomesTarget {
+                targeter: Some(Targeter::Spell(announcement)),
+                ..
+            } = event
+            {
+                *announcement = canonical(*announcement);
+            }
+        });
+    }
+
+    /// CR 104.4b + CR 732.2a: the restricted loop-normalization contract.
+    /// `for_each_trigger_event_carrier_mut` normalizes every carrier live at a
+    /// settled Priority sample. A state that still holds an unsettled delivery
+    /// carrier — a zone-change or batch-delivery frame, a player-scope sacrifice
+    /// completion, a discard or combat-lifelink batch, deferred entry events, or
+    /// undispatched attack/blocker declaration events — is not loop-comparable:
+    /// it never compares equal, so no draw or shortcut is certified from it.
+    pub(crate) fn is_loop_comparable(&self) -> bool {
+        !self.resolution_stack.holds_unsettled_delivery_frame()
+            && self.pending_player_scope_sacrifice_choice.is_none()
+            && self.pending_discard_batch.is_none()
+            && self.pending_combat_lifelink.is_none()
+            && self.deferred_entry_events.is_empty()
+            && self.pending_attack_trigger_events.is_empty()
+            && self
+                .combat
+                .as_ref()
+                .is_none_or(|combat| combat.pending_blocker_declaration_events.is_empty())
+    }
+
+    /// Every trigger-event carrier that can still resume or resolve: the stack,
+    /// pending/deferred/ordering triggers, current and batched trigger events,
+    /// every parked resolution frame, and a paused triggered mana ability. The
+    /// one traversal `normalize_for_loop` uses for both LKI retention and
+    /// identity canonicalization.
+    fn for_each_trigger_event_carrier_mut(&mut self, f: &mut impl FnMut(&mut GameEvent)) {
+        for entry in self
+            .stack
+            .iter_mut()
+            .chain(self.resolving_stack_entry.iter_mut())
+        {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &mut entry.kind
+            {
+                f(event);
+            }
+        }
+        if let Some(event) = self
+            .pending_trigger
+            .as_mut()
+            .and_then(|pending| pending.trigger_event.as_mut())
+        {
+            f(event);
+        }
+        self.pending_trigger_event_batch
+            .iter_mut()
+            .for_each(&mut *f);
+        let order_contexts = self
+            .pending_trigger_order
+            .iter_mut()
+            .flat_map(|order| order.groups.iter_mut())
+            .flat_map(|group| group.triggers.iter_mut());
+        for context in self.deferred_triggers.iter_mut().chain(order_contexts) {
+            if let Some(event) = context.pending.trigger_event.as_mut() {
+                f(event);
+            }
+            context.trigger_events.iter_mut().for_each(&mut *f);
+        }
+        if let Some(event) = self.current_trigger_event.as_mut() {
+            f(event);
+        }
+        self.current_trigger_events.iter_mut().for_each(&mut *f);
+        for events in self.stack_trigger_event_batches.values_mut() {
+            events.iter_mut().for_each(&mut *f);
+        }
+        // CR 117.3d + CR 117.4: a stack-resolution session fences each triggered
+        // entry with its captured trigger event.
+        if let Some(session) = self.stack_resolution_session.as_mut() {
+            for fence in session.entries.iter_mut() {
+                if let StackResolutionEntryProvenance::TriggeredAbility(provenance) =
+                    &mut fence.provenance
+                {
+                    if let Some(event) = provenance.trigger_event.as_mut() {
+                        f(event);
+                    }
+                }
+            }
+        }
+        // Every parked frame, not only the active one: an optional frame's
+        // singular and plural events, a continuation's trigger contexts.
+        self.resolution_stack.for_each_retained_trigger_event_mut(f);
+        // CR 605.4a: a triggered mana ability paused mid-occurrence retains its
+        // current work item, its accepted tail and its collected batches.
+        if let Some(resume) = self.pending_triggered_mana_resume.as_deref_mut() {
+            fn context_events(
+                context: &mut crate::game::triggers::PendingTriggerContext,
+                f: &mut impl FnMut(&mut GameEvent),
+            ) {
+                if let Some(event) = context.pending.trigger_event.as_mut() {
+                    f(event);
+                }
+                context.trigger_events.iter_mut().for_each(&mut *f);
+            }
+            context_events(&mut resume.current, f);
+            for context in resume.accepted_tail.iter_mut() {
+                context_events(context, f);
+            }
+            for batch in resume.collected_batches.iter_mut() {
+                for context in batch.contexts.iter_mut() {
+                    context_events(context, f);
+                }
+                batch.delayed_events.iter_mut().for_each(&mut *f);
+                for consumed in batch.delayed_consumed.iter_mut() {
+                    f(&mut consumed.event);
+                }
+            }
+            match &mut resume.outer_resume {
+                ManaTriggerFixedPointResume::Parent => {}
+                ManaTriggerFixedPointResume::Root { resume, .. } => {
+                    visit_mana_ability_resume_events(resume, f);
+                }
+                ManaTriggerFixedPointResume::ColorChoice(choice) => match &mut choice.context {
+                    ManaChoiceContext::ManaAbility(pending) => {
+                        visit_pending_mana_ability_events(pending, f);
+                    }
+                    ManaChoiceContext::ResolvingEffect(..) => {}
+                },
+            }
+        }
+        // CR 608.2c + CR 608.2h: a staged resolution payment's captured trigger
+        // context.
+        if let Some(context) = self
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.resolving_trigger_context.as_mut())
+        {
+            if let Some(event) = context.event.as_mut() {
+                f(event);
+            }
+            context.events.iter_mut().for_each(&mut *f);
+        }
+        // CR 118.12 + CR 616.1: payment resumes paused on a replacement choice.
+        if let Some(resume) = self.pending_cost_move_resume.as_mut() {
+            visit_cost_move_resume_events(resume, f);
+        }
+        if let Some(resume) = self.pending_deferred_life_cost_resume.as_mut() {
+            match resume {
+                DeferredLifeCostResume::ManaRoot { resume, .. } => {
+                    visit_mana_ability_resume_events(resume, f);
+                }
+                DeferredLifeCostResume::Cast { .. } | DeferredLifeCostResume::PayAmount { .. } => {}
+            }
+        }
     }
 
     /// PR-3 (Option C): push one NORMALIZED post-resolution snapshot onto the
@@ -29204,6 +30054,17 @@ impl GameState {
     /// share every other conjunct, including `WaitingFor::Priority{active_player}`, which is
     /// what keeps the ring homogeneous for `analysis::resource::ring_delta_signature`.
     pub(crate) fn record_loop_detect_sample(&mut self) {
+        // CR 104.4b + CR 732.2a: the restricted normalization contract. A beat
+        // holding an unsettled delivery carrier is never sampled, and it breaks
+        // the ring's contiguity like the settle sampler's own `else` clear, so
+        // no route (strict equality, growth cover, or `ring_delta_signature`'s
+        // bounded offer) certifies a period across it.
+        if !self.is_loop_comparable() {
+            self.loop_detect_ring.clear();
+            // CR 603.5: the answers belong to the window the ring just lost.
+            self.loop_answer_journal = None;
+            return;
+        }
         if self.loop_detect_ring.len() == LOOP_DETECT_RING_CAP {
             self.loop_detect_ring.pop_front();
         }
@@ -29846,7 +30707,9 @@ const LOOP_DETECT_RING_CAP: usize = 16;
 /// equality. Only a true match permits a draw, so the cheap `loop_fingerprint`
 /// can never cause a wrongful draw.
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
-    a == b
+    a.is_loop_comparable()
+        && b.is_loop_comparable()
+        && a == b
         && a.stack_trigger_firings == b.stack_trigger_firings
         && objects_content_eq(&a.objects, &b.objects)
 }
@@ -29930,6 +30793,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // #6865: a cast occurrence is resolution-semantic provenance while the
         // spell remains on the stack. Comparing it is fail-safe for loop detection.
         && x.cast_occurrence == y.cast_occurrence
+        && x.spell_announcement == y.spell_announcement
 }
 
 /// CR 104.4b compile-time totality guard for the object-growth cover gate's
@@ -29960,6 +30824,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_resolution_cast_offer_id: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
+        next_spell_announcement: _,
         resolved_rules_journal: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
@@ -30118,6 +30983,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         trigger_fire_counts_this_turn: _,
         triggers_fired_this_turn_per_opponent: _,
         triggers_fired_this_game: _,
+        triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
         crew_activated_this_turn: _,
@@ -30203,6 +31069,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         last_named_choice: _,
         chosen_counter_kind_this_resolution: _,
         chosen_color_this_resolution: _,
+        named_color_this_resolution: _,
         placed_sticker_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
@@ -30250,6 +31117,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         pending_resolution_completion: _,
+        deferred_spell_delivery: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         stack_trigger_firings: _,
@@ -30376,6 +31244,7 @@ impl PartialEq for GameState {
             && self.next_delayed_trigger_instance == other.next_delayed_trigger_instance
             && self.next_resolution_cast_offer_id == other.next_resolution_cast_offer_id
             && self.next_pip_id == other.next_pip_id
+            && self.next_spell_announcement == other.next_spell_announcement
             && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield
             && self.stack == other.stack
@@ -30473,6 +31342,8 @@ impl PartialEq for GameState {
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
             && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
             && self.triggers_fired_this_game == other.triggers_fired_this_game
+            && self.triggered_abilities_added_mana_this_turn
+                == other.triggered_abilities_added_mana_this_turn
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
@@ -30547,6 +31418,7 @@ impl PartialEq for GameState {
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
+            && self.deferred_spell_delivery == other.deferred_spell_delivery
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
@@ -30582,6 +31454,7 @@ impl PartialEq for GameState {
             && self.chosen_counter_kind_this_resolution
                 == other.chosen_counter_kind_this_resolution
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
+            && self.named_color_this_resolution == other.named_color_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
@@ -32581,6 +33454,7 @@ mod tests {
             condition: None,
             duration_subject: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
         };
@@ -37381,6 +38255,257 @@ mod tests {
         assert!(a != b, "\"that sticker\" participates in state equality");
     }
 
+    /// CR 104.4b + CR 601.2a: two positions that differ only in WHEN their
+    /// spells were announced normalize equal, while a targeter that names a
+    /// different spell than the other position's targeter stays distinguishable.
+    #[test]
+    fn normalize_for_loop_canonicalizes_spell_announcements_by_rank() {
+        fn position(spell_a: u64, spell_b: u64, targeter_names: u64) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            for (id, announcement) in [(ObjectId(600), spell_a), (ObjectId(601), spell_b)] {
+                let mut object = GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    "Loop Spell".to_string(),
+                    Zone::Stack,
+                );
+                object.spell_announcement = Some(SpellAnnouncement(announcement));
+                state.objects.insert(id, object);
+            }
+            state.next_spell_announcement = spell_a.max(spell_b);
+            // `pending_trigger` is an equality-compared trigger-event carrier.
+            state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
+                source_id: ObjectId(602),
+                controller: PlayerId(1),
+                condition: None,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(602),
+                    PlayerId(1),
+                )),
+                timestamp: 0,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(GameEvent::BecomesTarget {
+                    target: crate::types::ability::TargetRef::Player(PlayerId(1)),
+                    source_id: ObjectId(600),
+                    source_controller: PlayerId(0),
+                    targeter: Some(Targeter::Spell(SpellAnnouncement(targeter_names))),
+                }),
+                modal: None,
+                mode_abilities: vec![],
+                description: None,
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            }));
+            state
+        }
+        let early = position(3, 4, 3).normalize_for_loop();
+        let late = position(91, 92, 91).normalize_for_loop();
+        assert!(
+            loop_states_equal(&early, &late),
+            "minted at different times, same position"
+        );
+        let other_referent = position(91, 92, 92).normalize_for_loop();
+        assert!(
+            !loop_states_equal(&early, &other_referent),
+            "a targeter naming the other spell is a different position"
+        );
+        assert_eq!(early.next_spell_announcement, 0);
+    }
+
+    fn announced_departure(
+        spell: ObjectId,
+        announcement: u64,
+        controller: PlayerId,
+    ) -> DepartedStackSpell {
+        let mut object = GameObject::new(
+            spell,
+            CardId(spell.0),
+            controller,
+            "Departed Spell".to_string(),
+            Zone::Graveyard,
+        );
+        object.controller = controller;
+        object.spell_announcement = Some(SpellAnnouncement(announcement));
+        DepartedStackSpell {
+            entry: StackEntry {
+                id: spell,
+                source_id: spell,
+                controller,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: spell,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        spell,
+                        controller,
+                    )),
+                },
+            },
+            object: Box::new(object),
+        }
+    }
+
+    fn pending_targeting_trigger(targeter_names: u64, source: ObjectId) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(602),
+            controller: PlayerId(0),
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(602),
+                PlayerId(0),
+            )),
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::BecomesTarget {
+                target: crate::types::ability::TargetRef::Object(ObjectId(602)),
+                source_id: source,
+                source_controller: PlayerId(1),
+                targeter: Some(Targeter::Spell(SpellAnnouncement(targeter_names))),
+            }),
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+        state
+    }
+
+    /// CR 104.4b + CR 608.2h: a departure record a pending targeting event's
+    /// targeter still names is position, not history. Two positions that differ
+    /// only in that departed spell's last controller (the answer the targeter
+    /// authority reads) stay distinguishable after normalization.
+    #[test]
+    fn normalize_for_loop_keeps_the_departure_a_targeter_names() {
+        let position = |last_controller: PlayerId| {
+            let mut state = pending_targeting_trigger(5, ObjectId(610));
+            state.departed_stack_spells.insert(
+                ObjectId(610),
+                im::HashMap::from_iter([(
+                    1,
+                    announced_departure(ObjectId(610), 5, last_controller),
+                )]),
+            );
+            state.normalize_for_loop()
+        };
+        let p0 = position(PlayerId(0));
+        assert_eq!(
+            p0.departed_stack_spells
+                .get(&ObjectId(610))
+                .map(|records| records.len()),
+            Some(1),
+            "the named record is retained"
+        );
+        assert!(
+            !loop_states_equal(&p0, &position(PlayerId(1))),
+            "a different last controller is a different position"
+        );
+    }
+
+    /// CR 104.4b: announcements are ranked AFTER unreachable history is pruned,
+    /// so an unreferenced older departure can't shift the surviving ranks.
+    #[test]
+    fn normalize_for_loop_ranks_announcements_after_pruning() {
+        let position = |first: u64, stale_departure: bool| {
+            let mut state = GameState::new_two_player(7);
+            for (id, announcement) in [(ObjectId(600), first), (ObjectId(601), first + 1)] {
+                let mut object = GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    "Loop Spell".to_string(),
+                    Zone::Stack,
+                );
+                object.spell_announcement = Some(SpellAnnouncement(announcement));
+                state.objects.insert(id, object);
+            }
+            if stale_departure {
+                state.departed_stack_spells.insert(
+                    ObjectId(620),
+                    im::HashMap::from_iter([(
+                        1,
+                        announced_departure(ObjectId(620), first - 1, PlayerId(0)),
+                    )]),
+                );
+            }
+            state.normalize_for_loop()
+        };
+        assert!(
+            loop_states_equal(&position(1, false), &position(2, true)),
+            "pruned history does not shift the live spells' ranks"
+        );
+    }
+
+    /// CR 601.2a: the announcement, its allocator and the event's targeter
+    /// round-trip through serde; a legacy payload without them decodes to
+    /// "no announcement" (which matches nothing) and a zero allocator.
+    #[test]
+    fn spell_announcement_and_targeter_round_trip() {
+        let mut state = GameState::new_two_player(7);
+        let mut object = GameObject::new(
+            ObjectId(700),
+            CardId(700),
+            PlayerId(1),
+            "Announced".to_string(),
+            Zone::Stack,
+        );
+        object.spell_announcement = Some(SpellAnnouncement(12));
+        state.objects.insert(ObjectId(700), object);
+        state.next_spell_announcement = 12;
+        for targeter in [
+            Targeter::Spell(SpellAnnouncement(12)),
+            Targeter::Ability(crate::types::ability::StackAbilityKind::Triggered),
+        ] {
+            state.current_trigger_event = Some(GameEvent::BecomesTarget {
+                target: crate::types::ability::TargetRef::Object(ObjectId(1)),
+                source_id: ObjectId(700),
+                source_controller: PlayerId(1),
+                targeter: Some(targeter),
+            });
+            let json = serde_json::to_string(&state).expect("serialize");
+            let restored: GameState = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                restored.objects[&ObjectId(700)].spell_announcement,
+                Some(SpellAnnouncement(12))
+            );
+            assert_eq!(restored.next_spell_announcement, 12);
+            assert_eq!(restored.current_trigger_event, state.current_trigger_event);
+        }
+
+        let legacy_event: GameEvent = serde_json::from_value(serde_json::json!({
+            "type": "BecomesTarget",
+            "data": {
+                "target": { "Object": 1 },
+                "source_id": 700,
+                "source_controller": 1
+            }
+        }))
+        .expect("a legacy targeting event decodes");
+        assert!(matches!(
+            legacy_event,
+            GameEvent::BecomesTarget { targeter: None, .. }
+        ));
+        let legacy_object: GameObject = serde_json::from_value({
+            let mut value = serde_json::to_value(&state.objects[&ObjectId(700)]).unwrap();
+            value.as_object_mut().unwrap().remove("spell_announcement");
+            value
+        })
+        .expect("a legacy object decodes");
+        assert_eq!(legacy_object.spell_announcement, None);
+    }
+
     #[test]
     fn normalize_for_loop_canonicalizes_cast_coordinates_but_preserves_identity_shape() {
         fn ability_graph(occurrence: CastOccurrence) -> ResolvedAbility {
@@ -37652,13 +38777,21 @@ mod tests {
             loop_states_equal(&normalized_a, &normalized_b),
             "irrelevant incarnation history must not block loop recurrence"
         );
+        let retained: Vec<u64> = normalized_a.lki_by_incarnation[&entrant]
+            .keys()
+            .copied()
+            .collect();
+        let named = match &normalized_a.stack[0].kind {
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+                ..
+            } => record.entered_incarnation,
+            other => panic!("unexpected stack entry {other:?}"),
+        };
         assert_eq!(
-            normalized_a.lki_by_incarnation[&entrant]
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![referenced_incarnation],
-            "the trigger-referenced incarnation remains available"
+            (retained.len(), named),
+            (1, retained.first().copied()),
+            "the trigger-referenced incarnation remains available (canonically renumbered)"
         );
 
         let mut changed_reference = a;
@@ -37670,6 +38803,374 @@ mod tests {
         assert!(
             !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
             "different LKI for a still-referenced incarnation remains meaningful"
+        );
+    }
+
+    /// Pre-push review R3. CR 104.4b + CR 400.7 + CR 608.2h: a Royal Decree
+    /// trigger on the stack names the tapped Pyromancer's departed incarnation,
+    /// whose snapshot records its last controller. Two positions that differ
+    /// only in how incarnations were allocated (3 vs 91, renumbered
+    /// consistently in the event and the LKI key) are the same position.
+    /// Controls: a different departed controller, or an event that names an
+    /// incarnation with no retained snapshot (the snapshot is for another), stay unequal.
+    #[test]
+    fn normalize_for_loop_canonicalizes_a_tapped_incarnation() {
+        fn snapshot(controller: PlayerId) -> LKISnapshot {
+            LKISnapshot {
+                name: "Prodigal Pyromancer".to_string(),
+                token_image_ref: None,
+                power: Some(1),
+                toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
+                mana_value: 3,
+                controller,
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: vec![ManaColor::Red],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: true,
+                is_suspected: false,
+                attachments: Vec::new(),
+            }
+        }
+
+        let pyromancer = ObjectId(50);
+        let decree = ObjectId(5);
+        let position = |incarnation: u64, departed: Option<(u64, PlayerId)>| {
+            let mut state = GameState::new_two_player(7);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(20),
+                source_id: decree,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: decree,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::ParentTargetController,
+                            damage_source: None,
+                            excess: None,
+                        },
+                        vec![],
+                        decree,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::PermanentTapped {
+                        object_id: pyromancer,
+                        caused_by: None,
+                        incarnation: Some(incarnation),
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            if let Some((key, controller)) = departed {
+                state
+                    .lki_by_incarnation
+                    .entry(pyromancer)
+                    .or_default()
+                    .insert(key, snapshot(controller));
+            }
+            state
+        };
+
+        let early = position(3, Some((3, PlayerId(1))));
+        let late = position(91, Some((91, PlayerId(1))));
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(
+            loop_states_equal(&early.normalize_for_loop(), &late.normalize_for_loop()),
+            "consistently renumbered incarnations are the same position"
+        );
+        let other_controller = position(91, Some((91, PlayerId(0))));
+        assert!(
+            !loop_states_equal(
+                &early.normalize_for_loop(),
+                &other_controller.normalize_for_loop()
+            ),
+            "a different departed controller is a different position"
+        );
+        let unmatched = position(92, Some((91, PlayerId(1))));
+        assert!(
+            !loop_states_equal(&early.normalize_for_loop(), &unmatched.normalize_for_loop()),
+            "an event naming an incarnation with no retained snapshot is a different position"
+        );
+    }
+
+    /// Maintainer round 4, finding 1. CR 104.4b + CR 400.7: LKI retention and
+    /// identity canonicalization share one carrier traversal that reaches every
+    /// parked frame, not only the active one. A tapped incarnation named only in
+    /// a BURIED optional frame's PLURAL `trigger_events`, or only in a buried
+    /// copy-chosen walk's `trigger_event`, keeps its snapshot, and two positions
+    /// minted at incarnation 3 vs 91 compare equal. Negative: the
+    /// retained snapshot names a different controller, so the positions differ.
+    #[test]
+    fn normalize_for_loop_reaches_a_buried_frames_plural_trigger_events() {
+        use crate::types::resolution::{OptionalEffectFrame, ResolutionFrame};
+
+        fn snapshot(controller: PlayerId) -> LKISnapshot {
+            LKISnapshot {
+                name: "Prodigal Pyromancer".to_string(),
+                token_image_ref: None,
+                power: Some(1),
+                toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
+                mana_value: 3,
+                controller,
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: vec![ManaColor::Red],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: true,
+                is_suspected: false,
+                attachments: Vec::new(),
+            }
+        }
+        fn optional_frame(trigger_events: Vec<GameEvent>) -> ResolutionFrame {
+            ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ObjectId(5),
+                    PlayerId(0),
+                )),
+                trigger_event: None,
+                trigger_events,
+                trigger_match_count: None,
+                return_result_occurrence: None,
+            })
+        }
+
+        fn copy_chosen_frame(trigger_event: GameEvent) -> ResolutionFrame {
+            ResolutionFrame::EachPlayerCopyChosen(PendingEachPlayerCopyChosen {
+                stage: CopyChosenStage::AwaitingCopy,
+                player: PlayerId(0),
+                chosen: Vec::new(),
+                remaining_choices: Vec::new(),
+                choose_filter: TargetFilter::Controller,
+                min: 0,
+                max: 0,
+                copy_modifications: Vec::new(),
+                scale: None,
+                choose_scope: CopyChooseScope::Chooser,
+                source_id: ObjectId(5),
+                source_controller: PlayerId(0),
+                scoped_players: Vec::new(),
+                trigger_event: Some(trigger_event),
+            })
+        }
+
+        let pyromancer = ObjectId(50);
+        let position_in = |copy_chosen: bool, incarnation: u64, controller: PlayerId| {
+            let mut state = GameState::new_two_player(7);
+            let tapped = GameEvent::PermanentTapped {
+                object_id: pyromancer,
+                caused_by: None,
+                incarnation: Some(incarnation),
+            };
+            state.resolution_stack.push_inner(if copy_chosen {
+                copy_chosen_frame(tapped)
+            } else {
+                optional_frame(vec![tapped])
+            });
+            // The frame above buries the event-bearing one.
+            state
+                .resolution_stack
+                .push_inner(optional_frame(Vec::new()));
+            state
+                .lki_by_incarnation
+                .entry(pyromancer)
+                .or_default()
+                .insert(incarnation, snapshot(controller));
+            state
+        };
+
+        // The buried optional frame's plural events, then a buried copy-chosen
+        // walk's singular trigger event.
+        for copy_chosen in [false, true] {
+            let position =
+                |incarnation, controller| position_in(copy_chosen, incarnation, controller);
+            let early = position(3, PlayerId(1));
+            let late = position(91, PlayerId(1));
+            assert_ne!(
+                early, late,
+                "[copy_chosen={copy_chosen}] reach guard: the raw positions differ"
+            );
+            let normalized_late = late.normalize_for_loop();
+            assert_eq!(
+                normalized_late
+                    .lki_by_incarnation
+                    .get(&pyromancer)
+                    .map(|history| history.len()),
+                Some(1),
+                "[copy_chosen={copy_chosen}] the snapshot the buried event names is retained"
+            );
+            assert!(
+                loop_states_equal(&early.normalize_for_loop(), &normalized_late),
+                "[copy_chosen={copy_chosen}] consistently renumbered incarnations are the same position"
+            );
+            let other_controller = position(91, PlayerId(0));
+            assert!(
+                !loop_states_equal(
+                    &early.normalize_for_loop(),
+                    &other_controller.normalize_for_loop()
+                ),
+                "[copy_chosen={copy_chosen}] a different referent controller is a different position"
+            );
+        }
+    }
+
+    /// Maintainer round 4 re-check. CR 104.4b + CR 601.2a: a stack-resolution
+    /// session fences each triggered entry with its trigger event. Disenchant
+    /// (600) targets Forsaken Wastes (602), whose trigger is fenced; two
+    /// positions whose Disenchant was announced at 3 vs 91 normalize equal. A
+    /// fence naming a different announcement than the spell's is a different
+    /// position.
+    #[test]
+    fn normalize_for_loop_reaches_a_stack_resolution_fence_event() {
+        fn position(disenchant: u64, fence_names: u64) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            let mut object = GameObject::new(
+                ObjectId(600),
+                CardId(600),
+                PlayerId(0),
+                "Disenchant".to_string(),
+                Zone::Stack,
+            );
+            object.spell_announcement = Some(SpellAnnouncement(disenchant));
+            state.objects.insert(ObjectId(600), object);
+            state.next_spell_announcement = disenchant;
+            let entry = StackEntry {
+                id: ObjectId(20),
+                source_id: ObjectId(602),
+                controller: PlayerId(1),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: ObjectId(602),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(602),
+                        PlayerId(1),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::BecomesTarget {
+                        target: crate::types::ability::TargetRef::Object(ObjectId(602)),
+                        source_id: ObjectId(600),
+                        source_controller: PlayerId(0),
+                        targeter: Some(Targeter::Spell(SpellAnnouncement(fence_names))),
+                    }),
+                    description: None,
+                    source_name: "Forsaken Wastes".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            };
+            state.stack_resolution_session = Some(StackResolutionSession {
+                entries: vec![StackResolutionEntryFence::capture(&entry)],
+                cursor: 0,
+                representatives: [PlayerId(0)].into_iter().collect(),
+                verified_pass_representatives: BTreeSet::new(),
+                budget: StackResolutionBudget::Unlimited,
+                policy: StackResolutionPolicy::Committed,
+                auto_pass_overlay: StackResolutionAutoPassOverlay {
+                    baseline: BTreeMap::new(),
+                },
+            });
+            state
+        }
+        let early = position(3, 3);
+        let late = position(91, 91);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(
+            loop_states_equal(&early.normalize_for_loop(), &late.normalize_for_loop()),
+            "a fenced trigger event renumbered with its spell is the same position"
+        );
+        let other_referent = position(91, 92);
+        assert!(
+            !loop_states_equal(
+                &early.normalize_for_loop(),
+                &other_referent.normalize_for_loop()
+            ),
+            "a fence naming a different announcement is a different position"
+        );
+    }
+
+    /// Maintainer round 4 re-check. CR 104.4b: the restricted normalization
+    /// contract. A state still holding an unsettled delivery carrier (here,
+    /// deferred entry events) is not loop-comparable: it never compares equal,
+    /// even with an identical copy of itself.
+    #[test]
+    fn an_unsettled_delivery_carrier_makes_the_state_not_loop_comparable() {
+        let settled = GameState::new_two_player(7);
+        assert!(settled.is_loop_comparable());
+        assert!(
+            loop_states_equal(
+                &settled.normalize_for_loop(),
+                &settled.clone().normalize_for_loop()
+            ),
+            "reach guard: a settled state equals its copy"
+        );
+        let mut unsettled = settled.clone();
+        unsettled
+            .deferred_entry_events
+            .push(GameEvent::PermanentTapped {
+                object_id: ObjectId(50),
+                caused_by: None,
+                incarnation: Some(3),
+            });
+        assert!(!unsettled.is_loop_comparable());
+        let normalized = unsettled.normalize_for_loop();
+        assert!(
+            !loop_states_equal(&normalized, &normalized.clone()),
+            "an unsettled carrier is never loop-equal, even to itself"
+        );
+
+        // Every certification route reads the sample ring, so the sampler is
+        // gated too. Reach guard: three settled beats with a steady life delta
+        // certify a bounded offer.
+        let mut ring = GameState::new_two_player(7);
+        for life in [40, 39, 38] {
+            ring.players[1].life = life;
+            ring.record_loop_detect_sample();
+        }
+        assert_eq!(
+            ring.loop_detect_ring.len(),
+            3,
+            "reach guard: settled beats sample"
+        );
+        assert!(
+            crate::analysis::resource::ring_delta_signature(&ring).is_some(),
+            "reach guard: a steady settled ring certifies"
+        );
+        // An unsettled beat records no sample and breaks the ring, so nothing
+        // is certified from it.
+        ring.players[1].life = 37;
+        ring.deferred_entry_events = unsettled.deferred_entry_events.clone();
+        ring.record_loop_detect_sample();
+        assert!(
+            ring.loop_detect_ring.is_empty(),
+            "no sample from an unsettled beat"
+        );
+        assert!(
+            crate::analysis::resource::ring_delta_signature(&ring).is_none(),
+            "no shortcut is certified across an unsettled beat"
         );
     }
 
@@ -39831,6 +41332,141 @@ mod tests {
         );
     }
 
+    fn dealer_frame(
+        state: &mut GameState,
+        stage: DrawDealerStage,
+        remaining: u32,
+    ) -> DrawSequenceFrameId {
+        let marker = |index| HashSet::from([AppliedReplacementKey::Floating { index }]);
+        let id = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            0,
+            marker(10),
+            DrawSequenceOrigin::Plain,
+        );
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.remaining = remaining;
+        frame.dealer = Some(DrawDealer {
+            stage,
+            seats: vec![
+                DrawDealerSeat {
+                    player: PlayerId(0),
+                    count: 2,
+                    applied: marker(10),
+                    accumulated: 0,
+                },
+                DrawDealerSeat {
+                    player: PlayerId(1),
+                    count: 2,
+                    applied: marker(11),
+                    accumulated: 5,
+                },
+            ],
+        });
+        id
+    }
+
+    #[test]
+    fn begin_next_unit_saves_the_held_seat_and_loads_the_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let id = dealer_frame(
+            &mut state,
+            DrawDealerStage::Dealing {
+                schedule: vec![PlayerId(0), PlayerId(1), PlayerId(1)],
+            },
+            3,
+        );
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.accumulated = 3;
+
+        let (player, applied) = frame.begin_next_unit();
+        assert_eq!(player, PlayerId(0), "same seat keeps the working copy");
+        assert_eq!(frame.accumulated, 3);
+        assert!(applied.contains(&AppliedReplacementKey::Floating { index: 10 }));
+
+        let (player, applied) = frame.begin_next_unit();
+        assert_eq!(player, PlayerId(1), "a seat switch loads the recipient");
+        assert_eq!(frame.player, PlayerId(1));
+        assert_eq!(frame.accumulated, 5, "the recipient's own count");
+        assert!(applied.contains(&AppliedReplacementKey::Floating { index: 11 }));
+        let held = &frame.dealer.as_ref().expect("dealer").seats[0];
+        assert_eq!(held.accumulated, 3, "the held seat's count was saved");
+        assert!(held
+            .applied
+            .contains(&AppliedReplacementKey::Floating { index: 10 }));
+    }
+
+    #[test]
+    fn begin_next_unit_without_a_dealer_draws_for_the_frame_player() {
+        let mut state = GameState::new_two_player(42);
+        let id = state.push_draw_sequence_with_origin(
+            PlayerId(1),
+            2,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        assert_eq!(frame.begin_next_unit().0, PlayerId(1));
+        assert!(frame.dealer_deliveries().is_none());
+    }
+
+    #[test]
+    fn draw_dealer_frames_validate_their_seats_and_schedule() {
+        let mut state = GameState::new_two_player(42);
+        let id = dealer_frame(
+            &mut state,
+            DrawDealerStage::Dealing {
+                schedule: vec![PlayerId(0), PlayerId(1)],
+            },
+            2,
+        );
+        let valid = |state: &GameState| {
+            state
+                .active_multi_draw_frame()
+                .expect("multi draw")
+                .draw_sequences
+                .validate()
+        };
+        assert!(valid(&state).is_ok(), "reach: the fixture is valid");
+
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.remaining = 1;
+        assert!(valid(&state).is_err(), "remaining must equal the schedule");
+
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.remaining = 2;
+        frame.dealer.as_mut().expect("dealer").seats[1].player = PlayerId(0);
+        assert!(valid(&state).is_err(), "a seat appears twice");
+
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.dealer.as_mut().expect("dealer").seats[1].player = PlayerId(1);
+        frame.dealer.as_mut().expect("dealer").stage = DrawDealerStage::Settling { next: 2 };
+        assert!(valid(&state).is_err(), "settling past the last seat");
+    }
+
+    #[test]
+    fn loop_equality_distinguishes_dealer_stages() {
+        let mut state = GameState::new_two_player(42);
+        dealer_frame(&mut state, DrawDealerStage::Settling { next: 0 }, 0);
+        let mut other = GameState::new_two_player(42);
+        dealer_frame(
+            &mut other,
+            DrawDealerStage::Dealing {
+                schedule: vec![PlayerId(0)],
+            },
+            1,
+        );
+        let stack = |state: &GameState| {
+            state
+                .active_multi_draw_frame()
+                .expect("multi draw")
+                .draw_sequences
+                .clone()
+        };
+        assert!(stack(&state).loop_equal(&stack(&state)), "reach: reflexive");
+        assert!(!stack(&state).loop_equal(&stack(&other)));
+    }
+
     /// CR 614.6 + CR 615.5: abandoning a paused general replacement dispatch
     /// clears its one exact active child before clearing the resident parent.
     #[test]
@@ -40214,6 +41850,7 @@ mod tests {
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
@@ -40225,6 +41862,7 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
@@ -40238,6 +41876,20 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
+        }));
+        variants.push(Box::new(WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
+            }],
+            free_first_mulligan: false,
+            declared: vec![MulliganDeclaration {
+                player: PlayerId(1),
+                mulligan_count: 0,
+                kind: MulliganDeclarationKind::FreeReveal,
+            }],
         }));
         variants.push(Box::new(WaitingFor::OpeningHandBottomCards {
             pending: vec![MulliganBottomEntry {
@@ -40569,7 +42221,68 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 41);
+        assert_eq!(variants.len(), 42);
+    }
+
+    #[test]
+    fn mulligan_decision_declared_round_trips_and_is_omitted_when_empty() {
+        let entry = MulliganDecisionEntry {
+            player: PlayerId(0),
+            mulligan_count: 0,
+            phase: MulliganDecisionPhase::Declare,
+        };
+        let held = WaitingFor::MulliganDecision {
+            pending: vec![entry.clone()],
+            free_first_mulligan: false,
+            declared: vec![MulliganDeclaration {
+                player: PlayerId(1),
+                mulligan_count: 2,
+                kind: MulliganDeclarationKind::Regular,
+            }],
+        };
+        let json = serde_json::to_string(&held).unwrap();
+        assert!(json.contains("\"declared\""));
+        let back: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, held);
+
+        let open = WaitingFor::MulliganDecision {
+            pending: vec![entry],
+            free_first_mulligan: false,
+            declared: Vec::new(),
+        };
+        let json = serde_json::to_string(&open).unwrap();
+        assert!(!json.contains("declared"));
+        let back: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, open);
+    }
+
+    #[test]
+    fn mulligan_declaration_kind_round_trips_and_defaults_to_regular() {
+        use crate::types::actions::MulliganChoice;
+
+        for kind in [
+            MulliganDeclarationKind::Regular,
+            MulliganDeclarationKind::FreeReveal,
+        ] {
+            let declaration = MulliganDeclaration {
+                player: PlayerId(1),
+                mulligan_count: 0,
+                kind,
+            };
+            let json = serde_json::to_string(&declaration).unwrap();
+            let back: MulliganDeclaration = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, declaration);
+        }
+        let legacy: MulliganDeclaration =
+            serde_json::from_str(r#"{"player":1,"mulligan_count":2}"#).unwrap();
+        assert_eq!(legacy.kind, MulliganDeclarationKind::Regular);
+
+        assert_eq!(
+            serde_json::to_string(&MulliganChoice::FreeReveal).unwrap(),
+            r#"{"type":"FreeReveal"}"#
+        );
+        let back: MulliganChoice = serde_json::from_str(r#"{"type":"FreeReveal"}"#).unwrap();
+        assert_eq!(back, MulliganChoice::FreeReveal);
     }
 
     #[test]
@@ -40726,6 +42439,89 @@ mod tests {
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());
+    }
+
+    /// CR 602.2b: pre-cost keyword-activation announcements allow cancel
+    /// without carrying a `PendingCast` — `has_pending_cast` stays false for
+    /// all four (the `derived.rs` invariant guard), while
+    /// `allows_cancel_cast` is true.
+    #[test]
+    fn allows_cancel_cast_covers_pre_cost_keyword_announcements() {
+        let equip = WaitingFor::EquipTarget {
+            player: PlayerId(0),
+            equipment_id: ObjectId(1),
+            valid_targets: vec![ObjectId(2), ObjectId(3)],
+        };
+        let crew = WaitingFor::CrewVehicle {
+            player: PlayerId(0),
+            vehicle_id: ObjectId(1),
+            crew_power: 3,
+            eligible_creatures: vec![ObjectId(2)],
+            contributions: vec![3],
+        };
+        let station = WaitingFor::StationTarget {
+            player: PlayerId(0),
+            spacecraft_id: ObjectId(1),
+            eligible_creatures: vec![ObjectId(2)],
+        };
+        let saddle = WaitingFor::SaddleMount {
+            player: PlayerId(0),
+            mount_id: ObjectId(1),
+            saddle_power: 2,
+            eligible_creatures: vec![ObjectId(2)],
+            contributions: vec![3],
+        };
+        for state in [&equip, &crew, &station, &saddle] {
+            assert!(
+                state.allows_cancel_cast(),
+                "{state:?} must allow withdrawing the pre-cost announcement"
+            );
+            assert!(
+                !state.has_pending_cast(),
+                "{state:?} carries no PendingCast — the derived invariant must keep holding"
+            );
+            assert!(state.pending_cast_ref().is_none());
+        }
+    }
+
+    /// The broadening flips exactly the four keyword states: Priority,
+    /// ManaSourceSelection, and the modal shapes (which own their own
+    /// CancelCast pushes) still report false.
+    #[test]
+    fn allows_cancel_cast_stays_false_outside_keyword_announcements() {
+        let priority = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!priority.allows_cancel_cast());
+
+        let source_selection = WaitingFor::ManaSourceSelection {
+            player: PlayerId(0),
+            options: Vec::new(),
+            convoke_mode: None,
+        };
+        assert!(!source_selection.allows_cancel_cast());
+
+        let ability_modes = WaitingFor::AbilityModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            source_id: ObjectId(1),
+            mode_abilities: Vec::new(),
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            activation_cost_snapshot: None,
+            unavailable_modes: Vec::new(),
+        };
+        assert!(!ability_modes.allows_cancel_cast());
+
+        let modal_face = WaitingFor::ModalFaceChoice {
+            player: PlayerId(0),
+            object_id: ObjectId(1),
+            card_id: CardId(1),
+            payment_mode: CastPaymentMode::Auto,
+            resolution_additional_cost: None,
+        };
+        assert!(!modal_face.allows_cancel_cast());
     }
 
     /// CR 605.3b + CR 704.3: a mana ability's own prompts are part of its
@@ -41955,6 +43751,7 @@ mod tests {
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(recipient),
                     duration_subject: Some(copy_source),
+                    granting_object: None,
                 },
             )
             .expect("the fixture's duration begins");
@@ -42051,6 +43848,7 @@ mod tests {
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(recipient_ref),
                     duration_subject: Some(source_ref),
+                    granting_object: None,
                 },
             )
             .expect("the fixture's duration begins");
@@ -44088,6 +45886,105 @@ mod stack_bound_reveal_tests {
         assert!(
             state != leased,
             "a lease difference alone makes states unequal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shared_zone_storage_tests {
+    use super::{GameState, ZoneChangeRecord};
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    #[test]
+    fn storage_seat_resolves_only_the_shared_zones() {
+        let dandan = GameState::new(FormatConfig::dandan(), 2, 1);
+        let standard = GameState::new_two_player(1);
+        for (zone, shared) in [
+            (Zone::Library, true),
+            (Zone::Graveyard, true),
+            (Zone::Hand, false),
+            (Zone::Battlefield, false),
+            (Zone::Stack, false),
+            (Zone::Exile, false),
+            (Zone::Command, false),
+        ] {
+            assert_eq!(
+                dandan.zone_storage_seat(zone, P1),
+                if shared { P0 } else { P1 },
+                "{zone:?}"
+            );
+            assert_eq!(standard.zone_storage_seat(zone, P1), P1, "{zone:?}");
+        }
+    }
+
+    #[test]
+    fn library_stamp_names_the_storage_seat() {
+        let record = ZoneChangeRecord {
+            owner: P1,
+            ..ZoneChangeRecord::test_minimal(ObjectId(1), Some(Zone::Hand), Zone::Library)
+        };
+        for (state, expected) in [
+            (GameState::new(FormatConfig::dandan(), 2, 1), P0),
+            (GameState::new_two_player(1), P1),
+        ] {
+            let mut state = state;
+            state.record_zone_change_library_knowledge_stamp(&record);
+            let stamp = state
+                .library_knowledge_stamp_for_zone_change(&record, false)
+                .expect("destination stamp recorded");
+            assert_eq!(stamp.library_owner, expected);
+        }
+    }
+
+    /// `loop_fingerprint` hashes the stored containers, so a pile in the canonical
+    /// seat's container is folded once under the shared-zone axis, not once per seat.
+    #[test]
+    fn loop_fingerprint_folds_the_shared_pile_once() {
+        let mut standard = GameState::new_two_player(5);
+        for id in [1, 2, 3] {
+            standard.players[0].library.push_back(ObjectId(id));
+        }
+        standard.players[0].graveyard.push_back(ObjectId(4));
+        let mut dandan = standard.clone();
+        dandan.format_config = FormatConfig::dandan();
+
+        assert_eq!(
+            standard.loop_fingerprint(),
+            dandan.loop_fingerprint(),
+            "the pile is folded once under the shared axis"
+        );
+
+        let mut grown = dandan.clone();
+        grown.players[0].library.push_back(ObjectId(5));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            grown.loop_fingerprint(),
+            "reach: the pile's library length is hashed"
+        );
+        let mut buried = dandan.clone();
+        buried.players[0].graveyard.push_back(ObjectId(6));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            buried.loop_fingerprint(),
+            "reach: the pile's graveyard length is hashed"
+        );
+        assert_eq!(
+            dandan.library_of(P1).len(),
+            3,
+            "the pile reads through seat 1"
+        );
+        let mut stray = dandan.clone();
+        stray.players[1].library.push_back(ObjectId(7));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            stray.loop_fingerprint(),
+            "the non-canonical seat's own container is hashed too"
         );
     }
 }

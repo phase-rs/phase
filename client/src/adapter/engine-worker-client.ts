@@ -360,9 +360,9 @@ export class EngineWorkerClient {
     );
   }
 
-  async getLegalActions(): Promise<LegalActionsResult> {
+  async getLegalActions(viewerId: number): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>(
-      { type: "getLegalActions" },
+      { type: "getLegalActions", viewerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -373,9 +373,9 @@ export class EngineWorkerClient {
    * Same timeout class as `getState`. The caller (`WasmAdapter.getSnapshot`)
    * stamps the `seq` on arrival.
    */
-  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
+  async getSnapshot(viewerId: number): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
     return this.request<{ state: GameState; legalResult: LegalActionsResult }>(
-      { type: "getSnapshot" },
+      { type: "getSnapshot", viewerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -537,8 +537,8 @@ export class EngineWorkerClient {
     await this.request<null>({ type: "restoreState", stateJson });
   }
 
-  async resumeRestoredGameState(): Promise<RestoredWorkerResult> {
-    return this.request<RestoredWorkerResult>({ type: "resumeRestoredGameState" });
+  async resumeRestoredGameState(viewerId: number): Promise<RestoredWorkerResult> {
+    return this.request<RestoredWorkerResult>({ type: "resumeRestoredGameState", viewerId });
   }
 
   /**
@@ -548,8 +548,8 @@ export class EngineWorkerClient {
    * flips the engine's multiplayer flag. Mirrors server-core's
    * `GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(stateJson: string): Promise<RestoredWorkerResult> {
-    return this.request<RestoredWorkerResult>({ type: "resumeMultiplayerHostState", stateJson });
+  async resumeMultiplayerHostState(stateJson: string, viewerId: number): Promise<RestoredWorkerResult> {
+    return this.request<RestoredWorkerResult>({ type: "resumeMultiplayerHostState", stateJson, viewerId });
   }
 
   async resetGame(): Promise<void> {

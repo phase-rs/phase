@@ -3258,7 +3258,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::SelfRef => Axes::NONE,
         // CR 201.5a: a source-relative object ref (the granting object), like
         // SelfRef — no event/sibling/projected resource axis.
-        TargetFilter::GrantingObject => Axes::NONE,
+        TargetFilter::GrantingObject { .. } => Axes::NONE,
         // CR 608.2c: source-relative object ref (concretized to SpecificObject),
         // like SelfRef — no event/sibling/projected resource axis.
         TargetFilter::OriginalSource => Axes::NONE,
@@ -3490,6 +3490,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // resolving ability's context — no event/sibling projected axis
         // (mirrors Target/Demonstrative).
         ObjectScope::ChainRootTarget => Axes::NONE,
+        // CR 201.5a: both name one fixed object — the stamped granter or the bound
+        // incarnation. Neither has an event/sibling axis.
+        ObjectScope::GrantingObject | ObjectScope::SpecificObject { .. } => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -3609,6 +3612,7 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         taps_for_mana_produced: _,
         mana_ability_produced: _,
         clash_result: _,
+        granting_object: _,
     } = t;
 
     let mut acc = Axes::NONE;
@@ -4068,6 +4072,17 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::AttackersDeclaredCount { .. } => Axes::CONSERVATIVE,
         TriggerCondition::ExceptFirstDrawInDrawStep => Axes::NONE,
         TriggerCondition::PlacedByAbilitySource => Axes::NONE,
+        // A per-turn per-ability ledger keyed by this occurrence's own identity,
+        // like `AbilityCondition::AbilityUseCountThisTurn`: it reads neither the
+        // triggering event nor a sibling's output. `project_out_resources` clears
+        // the ledger, so this projected classification is what keeps
+        // `fire_time_conditions_read_projected_resource` fail-closed while such a
+        // trigger is live.
+        TriggerCondition::AddedManaWithThisAbilityThisTurn => Axes {
+            event: false,
+            sibling: false,
+            projected: true,
+        },
         TriggerCondition::TriggeringSpellTargetsFilter { filter } => {
             let mut acc = Axes {
                 event: true,
@@ -4728,7 +4743,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             acc
         }
         PlayerFilter::ChosenPlayer { index: _ } => Axes::NONE,
-        PlayerFilter::ParentObjectTargetOwner => Axes {
+        PlayerFilter::ParentObjectTargetOwner | PlayerFilter::GrantingObjectCaster => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -5147,6 +5162,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
         face_down_in_exile: _,
+        granting_object: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -5998,6 +6014,7 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         // CR 612.8 / CR 613.1c: a literal-name text-changing effect reads no board
         // aggregate or projected resource (sibling of `SetChosenName`).
         | ContinuousModification::SetTextName { .. }
@@ -9287,6 +9304,25 @@ mod tests {
         assert!(!ability_reads_projected_resource(&fixed_drain()));
     }
 
+    /// CR 603.4 + CR 607.1c: the self-linked "added mana with this ability this
+    /// turn" guard reads a per-turn ledger that `project_out_resources` clears,
+    /// so its negated form (the shape the parser emits) must classify as a
+    /// projected read. The sibling "with this ability" leaf reads zone-change
+    /// provenance, not a projected ledger, and is the control.
+    #[test]
+    fn added_mana_with_this_ability_guard_is_a_projected_read() {
+        assert!(trigger_condition_reads_projected_resource(
+            &TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+            }
+        ));
+        assert!(!trigger_condition_reads_projected_resource(
+            &TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::PlacedByAbilitySource),
+            }
+        ));
+    }
+
     // ---- Axis 1: event-context ----
     #[test]
     fn event_context_axis_discriminates() {
@@ -9387,7 +9423,9 @@ mod tests {
         // Pin the legacy shape's classification so the delta is explicit and a
         // future retirement of `ManaColorSpent` cannot silently change it.
         let legacy = AbilityCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: crate::types::ability::SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         let legacy_axes = scan_ability_condition(&legacy, ScanMode::Conservative);

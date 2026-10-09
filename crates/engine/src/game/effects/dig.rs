@@ -138,7 +138,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // CR 401.5: If a library has fewer cards than required, use as many as available.
-    let count = dig_num.min(player.library.len());
+    let count = dig_num.min(state.library_of(player.id).len());
     if count == 0 {
         // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
         // ("put up to one of them on top … the rest on the bottom") has no
@@ -153,8 +153,8 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()
@@ -553,7 +553,8 @@ pub(crate) fn move_mass_put_all_selected(
                 object_id,
                 destination,
                 source_id,
-            );
+            )
+            .hand_taker(player);
             request.mods.enter_tapped = enter_tapped;
             request.mods.enters_attacking = enters_attacking;
             request

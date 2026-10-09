@@ -1743,12 +1743,12 @@ pub(crate) fn parse_static_line_inner(
                 ),
                 rest,
             )
-        } else if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+        } else if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![prop]),
+                        .properties(props),
                 ),
                 rest,
             )
@@ -1811,14 +1811,15 @@ pub(crate) fn parse_static_line_inner(
     // CR 613.7: "Other" excludes the source permanent itself via FilterProp::Another.
     if let Some(rest_tp) = nom_tag_tp(&tp, "other creatures you control ") {
         let after_prefix = rest_tp.original;
-        let (filter, predicate_text) = if let Some((prop, rest)) =
-            strip_counter_condition_prefix(after_prefix)
+        let (filter, predicate_text) = if let Some((mut props, rest)) =
+            strip_with_qualifier_prefix(after_prefix)
         {
+            props.push(FilterProp::Another);
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![prop, FilterProp::Another]),
+                        .properties(props),
                 ),
                 rest,
             )

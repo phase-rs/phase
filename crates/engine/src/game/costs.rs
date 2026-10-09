@@ -75,10 +75,11 @@ fn find_eligible_exile_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
     zone: Zone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let ctx = FilterContext::from_source(state, source_id);
+    let ctx = FilterContext::from_source(state, source_id).with_granting_object(granting_object);
     let player_state = state.players.get(player.0 as usize);
 
     match zone {
@@ -114,7 +115,8 @@ fn find_eligible_exile_targets(
                 // Scan only the payer's graveyard (controller-scoped)
                 player_state
                     .map(|p| {
-                        p.graveyard
+                        state
+                            .graveyard_of(p.id)
                             .iter()
                             .copied()
                             .filter(|&id| {
@@ -223,6 +225,22 @@ pub(crate) enum PaymentScope<'a> {
         ability: &'a ResolvedAbility,
         cost_move_root: ResolutionCostMoveRoot,
     },
+}
+
+impl PaymentScope<'_> {
+    /// CR 201.5a: the granter stamped on the ability whose cost is being paid.
+    fn granting_object(
+        &self,
+        state: &GameState,
+        source_id: ObjectId,
+    ) -> Option<ObjectIncarnationRef> {
+        match self {
+            PaymentScope::Activation { ability_index, .. } => {
+                super::casting::activated_ability_granting_object(state, source_id, *ability_index)
+            }
+            PaymentScope::Resolution { ability, .. } => ability.context.granting_object,
+        }
+    }
 }
 
 /// The owner of a resolution-time non-self cost move. Only an accepted
@@ -1082,7 +1100,13 @@ fn pay_ability_cost_inner(
         } if matches!(scope, PaymentScope::Resolution { .. }) => {
             let count =
                 resolve_cost_quantity(state, count, player, source_id, scope).max(0) as usize;
-            let eligible = find_eligible_discard_targets(state, player, source_id, filter.as_ref());
+            let eligible = find_eligible_discard_targets(
+                state,
+                player,
+                source_id,
+                scope.granting_object(state, source_id),
+                filter.as_ref(),
+            );
             if eligible.len() < count {
                 return Ok(payment_failed("not enough cards to discard"));
             }
@@ -1257,6 +1281,7 @@ fn pay_ability_cost_inner(
                 state,
                 player,
                 source_id,
+                scope.granting_object(state, source_id),
                 effective_zone,
                 filter.as_ref(),
             );
@@ -1449,20 +1474,58 @@ fn pay_ability_cost_inner(
                         super::mana_sources::mana_production_could_produce_two_or_more_colors(
                             state, player, source_id, produced,
                         );
+                    let mut deposited = false;
                     for color in colors {
-                        super::mana_payment::produce_mana_with_attributes_from_source_quality(
-                            state,
-                            source_id,
-                            super::mana_sources::mana_color_to_type(color),
-                            player,
-                            false,
-                            source_could_produce_two_or_more_colors,
-                            &restrictions,
-                            grants,
-                            *expiry,
-                            events,
-                        );
+                        deposited |=
+                            !super::mana_payment::produce_mana_with_attributes_from_source_quality(
+                                state,
+                                source_id,
+                                super::mana_sources::mana_color_to_type(color),
+                                player,
+                                false,
+                                source_could_produce_two_or_more_colors,
+                                &restrictions,
+                                grants,
+                                *expiry,
+                                events,
+                            )
+                            .is_empty();
                     }
+                    // CR 118.1 + CR 118.12 + CR 607.1c: paying this resolution-time cost
+                    // carries out the resolving ability's own instruction to add mana, so a
+                    // real deposit is mana added "with this ability". Gated on returned units:
+                    // a {0}-reduced cumulative upkeep never reaches this arm
+                    // (`expand_per_counter(_, 0)` is `Mana {0}`), and a prevented production
+                    // (CR 614.1) returns none.
+                    match scope {
+                        PaymentScope::Resolution { ability, .. } => {
+                            super::effects::mana::record_triggered_ability_added_mana(
+                                state, ability, player, deposited,
+                            )
+                        }
+                        // CR 602.1a: an activation cost belongs to an activated ability,
+                        // which has no triggered identity to record.
+                        PaymentScope::Activation { .. } => {}
+                    }
+                }
+                // CR 118.3 + CR 701.26a: tapping one determined permanent (the granter, or the
+                // permanent the source is attached to) pays only while it is untapped.
+                Effect::SetTapState {
+                    target,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Tap,
+                } if matches!(target, TargetFilter::GrantingObject { .. })
+                    || target.contains_source_attachment_host() =>
+                {
+                    let ctx = FilterContext::from_source(state, source_id)
+                        .with_granting_object(scope.granting_object(state, source_id));
+                    let Some(id) = state.battlefield.iter().copied().find(|&id| {
+                        !state.objects[&id].tapped
+                            && super::filter::matches_target_filter(state, id, target, &ctx)
+                    }) else {
+                        return Ok(payment_failed("no untapped permanent to tap"));
+                    };
+                    super::restrictions::tap_permanent_for_cost(state, id, events)?;
                 }
                 _ => {
                     return Ok(payment_failed(format!(
@@ -1642,9 +1705,10 @@ fn pay_ability_cost_inner(
                 std::cmp::Ordering::Equal => {}
             }
         }
-        // CR 118.3 + CR 122: Remove-counter cost. The SelfRef form ("Remove N
-        // {type} counters from ~") is auto-payable — no player choice is needed,
-        // so it lands here rather than in an interactive WaitingFor round-trip.
+        // CR 118.3 + CR 122: Remove-counter cost. The `~` form ("Remove N {type}
+        // counters from ~") and the granter form are auto-payable — no
+        // player choice is needed, so they land here rather than in an
+        // interactive WaitingFor round-trip.
         // Routes through the single-authority counter resolver so replacement
         // effects (Vorinclex, Doubling Season) apply per CR 614.1a and
         // obj.loyalty/obj.defense stay in sync per CR 306.5b / CR 310.4c.
@@ -1654,15 +1718,31 @@ fn pay_ability_cost_inner(
         AbilityCost::RemoveCounter {
             count,
             counter_type,
-            target: None,
+            target:
+                target @ (None | Some(TargetFilter::GrantingObject { .. })),
             ..
         } => {
+            // CR 201.5a + CR 602.2b + CR 601.2h: a fixed- or ALL-count cost naming the
+            // granter involves no choice, so it is paid here like `~`.
+            let payer = match target {
+                // CR 201.5a + CR 400.7: the granter stamped on the paying ability, while it is that object.
+                Some(TargetFilter::GrantingObject { .. }) => {
+                    match scope
+                        .granting_object(state, source_id)
+                        .filter(|granter| granter.is_current(state))
+                    {
+                        Some(granter) => granter.object_id,
+                        None => return Ok(payment_failed("the granter is gone")),
+                    }
+                }
+                _ => source_id,
+            };
             if *count == REMOVE_COUNTER_COST_ALL
                 && matches!(counter_type, crate::types::counter::CounterMatch::Any)
             {
                 let mut counters: Vec<_> = state
                     .objects
-                    .get(&source_id)
+                    .get(&payer)
                     .map(|obj| {
                         obj.counters
                             .iter()
@@ -1677,7 +1757,7 @@ fn pay_ability_cost_inner(
                 for (counter_type, count) in counters {
                     super::effects::counters::remove_counter_with_replacement(
                         state,
-                        source_id,
+                        payer,
                         counter_type,
                         count,
                         events,
@@ -1691,13 +1771,13 @@ fn pay_ability_cost_inner(
             // a single concrete kind. `OfType(t)` passes through unchanged.
             if let Some(resolved) = super::effects::counters::resolve_counter_match_for_removal(
                 state,
-                source_id,
+                payer,
                 counter_type,
             ) {
                 let count = if *count == REMOVE_COUNTER_COST_ALL {
                     state
                         .objects
-                        .get(&source_id)
+                        .get(&payer)
                         .and_then(|obj| obj.counters.get(&resolved))
                         .copied()
                         .unwrap_or(0)
@@ -1705,7 +1785,7 @@ fn pay_ability_cost_inner(
                     *count
                 };
                 super::effects::counters::remove_counter_with_replacement(
-                    state, source_id, resolved, count, events,
+                    state, payer, resolved, count, events,
                 );
             }
         }
@@ -2412,7 +2492,13 @@ fn can_pay_resolution(
             let count = u32::try_from(resolve_quantity_with_targets(state, count, ability).max(0))
                 .unwrap_or(0) as usize;
             let eligible =
-                find_eligible_discard_targets(state, payer, ability.source_id, filter.as_ref());
+                find_eligible_discard_targets(
+                    state,
+                    payer,
+                    ability.source_id,
+                    ability.context.granting_object,
+                    filter.as_ref(),
+                );
             eligible.len() >= count
         }
         // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
@@ -2430,6 +2516,7 @@ fn can_pay_resolution(
                 state,
                 payer,
                 ability.source_id,
+                ability.context.granting_object,
                 effective_zone,
                 filter.as_ref(),
             );
@@ -2480,6 +2567,7 @@ fn can_pay_resolution(
                 state,
                 payer,
                 ability.source_id,
+                ability.context.granting_object,
                 &cost.target,
             );
             cost.requirement
@@ -2498,6 +2586,7 @@ fn can_pay_resolution(
                     state,
                     payer,
                     ability.source_id,
+                    ability.context.granting_object,
                     costs,
                 )
         }
@@ -3147,6 +3236,50 @@ mod tests {
         )
         .expect("battlefield self-return cost should be payable");
         assert_eq!(scenario.state.objects[&src].zone, Zone::Hand);
+    }
+
+    /// CR 201.5a + CR 400.7 + CR 601.2h: a remove-counter cost naming the granter pays
+    /// from the incarnation stamped on the paying ability, and not from a new object.
+    #[test]
+    fn remove_counter_cost_naming_the_granter_pays_from_the_stamped_granter() {
+        let charge = CounterType::Generic("charge".to_string());
+        for stale in [false, true] {
+            let mut scenario = GameScenario::new();
+            let src = scenario.add_creature(P0, "Host", 2, 2).id();
+            let granter = scenario.add_creature(P0, "Granter", 0, 3).id();
+            scenario.with_counter(src, charge.clone(), 1);
+            scenario.with_counter(granter, charge.clone(), 3);
+            let cost = AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(charge.clone()),
+                target: Some(TargetFilter::GrantingObject { bound: None }),
+                selection: Default::default(),
+            };
+            let mut stamp = ObjectIncarnationRef::from_object(&scenario.state.objects[&granter]);
+            stamp.incarnation += u64::from(stale);
+            let mut def =
+                AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(cost.clone());
+            def.granting_object = Some(stamp);
+            std::sync::Arc::make_mut(&mut scenario.state.objects.get_mut(&src).unwrap().abilities)
+                .push(def);
+            let paid = pay_ability_cost_for_activation(
+                &mut scenario.state,
+                P0,
+                src,
+                &cost,
+                Some(0),
+                &mut Vec::new(),
+            )
+            .is_ok_and(|outcome| matches!(outcome, PaymentOutcome::Paid));
+            assert_eq!(paid, !stale, "stale={stale}");
+            let expected = if stale { 3 } else { 2 };
+            assert_eq!(
+                scenario.state.objects[&granter].counters.get(&charge),
+                Some(&expected),
+                "stale={stale}"
+            );
+            assert_eq!(scenario.state.objects[&src].counters.get(&charge), Some(&1));
+        }
     }
 
     /// Activation-scope `can_pay` against `state` for `source`.
@@ -4563,5 +4696,52 @@ mod tests {
         assert!(!payable_with_hand(&[true]));
         // Hostile: two cards but no Island.
         assert!(!payable_with_hand(&[false, false]));
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: a controller-scoped graveyard exile cost reads the
+    /// payer's storage seat, which holds the shared pile in Dandan.
+    #[test]
+    fn payer_scoped_graveyard_exile_reads_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let payer = PlayerId(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            payer,
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(&mut state, CardId(2), payer, "Bear".into(), Zone::Graveyard);
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+
+        let eligible = find_eligible_exile_targets(
+            &state,
+            payer,
+            source,
+            None,
+            Zone::Graveyard,
+            Some(&filter),
+        );
+
+        assert_eq!(eligible, vec![creature]);
     }
 }

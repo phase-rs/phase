@@ -62,7 +62,7 @@ pub fn resolve(
         .players
         .iter()
         .find(|p| p.id == controller)
-        .map(|p| p.library.len().min(count as usize))
+        .map(|p| state.library_of(p.id).len().min(count as usize))
         .unwrap_or(0);
 
     // The Ripple effect's resolver has run; the reveal decision and its
@@ -111,7 +111,14 @@ pub(crate) fn perform_reveal_and_offer(
         .players
         .iter()
         .find(|p| p.id == controller)
-        .map(|p| p.library.iter().take(count as usize).copied().collect())
+        .map(|p| {
+            state
+                .library_of(p.id)
+                .iter()
+                .take(count as usize)
+                .copied()
+                .collect()
+        })
         .unwrap_or_default();
 
     if revealed.is_empty() {

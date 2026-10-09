@@ -1279,6 +1279,14 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     // by the Mara: "... until they exile a nonland card, then you may cast that
     // card ...") and the lead-in is severed into a failing `Unimplemented{face}`.
     let mut villainous_choice_sticky = false;
+    // CR 603.7b + CR 608.2c: once a chunk opens an inline delayed trigger
+    // ("Whenever … this turn, …" / "Until …, whenever …, …"), a following
+    // sentence whose subject is an anaphor for the trigger's referent is part
+    // of that trigger's effect (The Last Ronin III: "…, put three +1/+1
+    // counters on it. It gains trample, lifelink, and indestructible until end
+    // of turn."), so it stays in the trigger's chunk and reaches the delayed
+    // parser with its anaphors bound. See `continues_inline_delayed_body`.
+    let mut inline_delayed_sticky = false;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -1373,6 +1381,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             {
                 in_single_quote = false;
                 single_quote_is_ability = false;
+                let remainder = chars.clone().collect::<String>();
+                if (inline_delayed_sticky
+                    || opens_inline_delayed_trigger(&current.to_ascii_lowercase()))
+                    && continues_inline_delayed_body(&remainder.trim_start().to_ascii_lowercase())
+                {
+                    inline_delayed_sticky = true;
+                    current.push(ch);
+                    continue;
+                }
+                inline_delayed_sticky = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
@@ -2445,6 +2463,53 @@ fn starts_except_body_continuation(trimmed_lower: &str) -> bool {
     ))
     .parse(body)
     .is_ok()
+}
+
+/// CR 603.7b: does this chunk open an inline delayed trigger — a "whenever"
+/// head scoped by a "this turn"/"this combat" window, or one behind a leading
+/// stated duration ("Until end of turn, whenever …")? The same two shapes
+/// `try_parse_whenever_this_turn` accepts.
+fn opens_inline_delayed_trigger(chunk_lower: &str) -> bool {
+    let chunk = chunk_lower.trim_start();
+    let (head, has_duration) = match super::lower::strip_leading_duration(chunk) {
+        Some((_, rest)) => (rest.trim_start(), true),
+        None => (chunk, false),
+    };
+    tag::<_, _, OracleError<'_>>("whenever ")
+        .parse(head)
+        .is_ok()
+        && (has_duration
+            || nom_primitives::scan_contains(head, "this turn, ")
+            || nom_primitives::scan_contains(head, "this combat, "))
+}
+
+/// CR 608.2c: does the next sentence continue an open inline delayed trigger's
+/// effect at the TEXT level? Only when its subject is an anaphor for the
+/// trigger's own referent — "It gains trample …" (The Last Ronin III: the
+/// creature attacking alone), "If they can't, they sacrifice …" (Davriel: the
+/// attacking opponent). Read outside the trigger, that anaphor would bind the
+/// ability's source instead. Every other following sentence ("Draw a card.",
+/// "You may play it …", "Sacrifice them at the beginning of the next end
+/// step.") stays its own chunk and is placed by the delayed-payload
+/// continuation classifier (`resolve_delayed_payload_placements`), which nests
+/// it only when the payload introduced what it refers to.
+fn continues_inline_delayed_body(remainder_lower: &str) -> bool {
+    let next_sentence = take_until::<_, _, OracleError<'_>>(".")
+        .parse(remainder_lower)
+        .map_or(remainder_lower, |(_, sentence)| sentence);
+    let opens_with_subject_anaphor = alt((
+        tag::<_, _, OracleError<'_>>("it "),
+        tag("they "),
+        tag("he "),
+        tag("she "),
+        tag("if it "),
+        tag("if they "),
+    ))
+    .parse(remainder_lower)
+    .is_ok();
+    opens_with_subject_anaphor
+        && !nom_primitives::scan_contains(next_sentence, "at the beginning of ")
+        && !nom_primitives::scan_contains(next_sentence, "at end of combat")
 }
 
 fn starts_prefix_clause(current_lower: &str) -> bool {
@@ -4283,6 +4348,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         bypass_beneficiary: a_bypass_beneficiary,
         protection_does_not_remove: a_protection_does_not_remove,
         room_door: a_room_door,
+        granting_object: a_granting_object,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4301,6 +4367,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         bypass_beneficiary: b_bypass_beneficiary,
         protection_does_not_remove: b_protection_does_not_remove,
         room_door: b_room_door,
+        granting_object: b_granting_object,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4317,6 +4384,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_bypass_beneficiary == b_bypass_beneficiary
         && a_protection_does_not_remove == b_protection_does_not_remove
         && a_room_door == b_room_door
+        && a_granting_object == b_granting_object
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
@@ -9937,6 +10005,31 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    /// CR 603.7b + CR 608.2c: an inline delayed trigger keeps the following
+    /// sentences of its effect in its own chunk (The Last Ronin III), but a
+    /// sentence opening another trigger or restricting the activation stays
+    /// separate; a chunk that isn't an inline delayed trigger splits as usual.
+    #[test]
+    fn inline_delayed_trigger_keeps_its_trailing_effect_sentences() {
+        let ronin = "Whenever a creature you control attacks alone this turn, put three +1/+1 counters on it. It gains trample, lifelink, and indestructible until end of turn.";
+        let chunks = split_clause_sequence(ronin);
+        assert_eq!(chunks.len(), 1, "{chunks:?}");
+        let davriel = "Until your next turn, whenever an opponent attacks you, they discard a card. If they can't, they sacrifice an attacking creature.";
+        assert_eq!(split_clause_sequence(davriel).len(), 1, "{davriel}");
+        let dagger = "Whenever target creature deals combat damage to a creature this turn, destroy that creature. When the targeted creature leaves the battlefield this turn, sacrifice this artifact.";
+        assert_eq!(split_clause_sequence(dagger).len(), 2, "{dagger}");
+        let boa = "Choose a color. Whenever this creature becomes blocked by a creature of that color this turn, destroy that creature. Activate only as a sorcery.";
+        assert_eq!(split_clause_sequence(boa).len(), 3, "{boa}");
+        let dalkovan = "Whenever you attack this turn, create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step.";
+        assert_eq!(split_clause_sequence(dalkovan).len(), 2, "{dalkovan}");
+        let draught = "Until end of turn, whenever a creature an opponent controls blocks, draw a card. Draw a card.";
+        assert_eq!(split_clause_sequence(draught).len(), 2, "{draught}");
+        let waltz = "Until end of turn, whenever a creature you control dies, exile the top card of your library. You may play it until the end of your next turn.";
+        assert_eq!(split_clause_sequence(waltz).len(), 2, "{waltz}");
+        let plain = "Draw a card. It gains flying until end of turn.";
+        assert_eq!(split_clause_sequence(plain).len(), 2, "{plain}");
+    }
 
     #[test]
     fn source_pronoun_damage_boundaries_compose_pronoun_verb_and_connector() {

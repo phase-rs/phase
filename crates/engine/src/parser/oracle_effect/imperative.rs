@@ -3551,12 +3551,13 @@ pub(super) fn parse_search_and_creation_ast(
     if let Some((owner, quantifier)) = try_parse_multi_zone_same_name_exile(lower) {
         return Some(SearchCreationImperativeAst::MultiZoneSameNameExile { owner, quantifier });
     }
+    let zone_list = super::classify_search_zone_list(lower);
     if starts_with_possessive(lower, "search", "library")
         // CR 701.23a: God-Pharaoh's-Gift-class multi-zone tutors ("search your
         // graveyard, hand, and/or library for ...") — the word after the
         // possessive is a non-library zone, so `starts_with_possessive` misses
-        // them; the zone-list detector routes them through the same lowering.
-        || super::parse_multi_search_zones(lower).is_some()
+        // them; the zone-list classifier routes them through the same lowering.
+        || !matches!(zone_list, SearchZoneList::Unlisted)
         || nom_on_lower(lower, lower, |i| {
             alt((
                 value((), tag("search target opponent's library")),
@@ -3568,6 +3569,20 @@ pub(super) fn parse_search_and_creation_ast(
         .is_some()
     {
         let details = super::parse_search_library_details(lower, ctx);
+        let source_zones = match details.source_zones {
+            SearchZoneList::Unlisted => vec![Zone::Library],
+            SearchZoneList::Zones(zones) => zones,
+            // CR 701.23a: a zone list naming a zone the engine can't search
+            // ("search your library, graveyard, and/or outside the game" —
+            // Invasion of Arcavios). Searching only the readable zones would
+            // drop the rest silently, so the clause fails closed.
+            SearchZoneList::Unrepresentable => {
+                return Some(SearchCreationImperativeAst::Unimplemented {
+                    gap: "search_zone_list",
+                    fragment: text.to_string(),
+                });
+            }
+        };
         return Some(SearchCreationImperativeAst::SearchLibrary {
             filter: details.filter,
             count: details.count,
@@ -3580,7 +3595,7 @@ pub(super) fn parse_search_and_creation_ast(
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
             split: details.split,
-            source_zones: details.source_zones,
+            source_zones,
         });
     }
     // CR 701.20e + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -3912,6 +3927,9 @@ pub(super) fn try_parse_play_from_outside_game(
 
 pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
     match ast {
+        SearchCreationImperativeAst::Unimplemented { gap, fragment } => {
+            Effect::unimplemented(gap, fragment)
+        }
         SearchCreationImperativeAst::SearchLibrary {
             filter,
             count,

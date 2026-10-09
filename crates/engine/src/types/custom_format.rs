@@ -250,7 +250,8 @@ impl CommanderEligibilityRule {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Momir
-            | GameFormat::Freeform => Ok(None),
+            | GameFormat::Freeform
+            | GameFormat::Dandan => Ok(None),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "from_source_format: source must be a built-in GameFormat, never Custom({})",
                 id.0
@@ -582,10 +583,10 @@ impl CustomFormatDef {
         // Closes the general defect class documented on
         // `GameFormat::has_unrepresentable_auxiliary_deck_component`: Planechase
         // (CR 901.15a, shared planar deck), Archenemy (CR 904.3, scheme deck),
-        // and Momir (CR 109.4c / CR 114.1, game-start emblem) each get an
-        // auxiliary deck/component from `deck_loading.rs` keyed on this exact
-        // `GameFormat` literal, with no `StructuralRules` field able to carry
-        // it forward. Checked ahead of the command-zone/eligibility match
+        // Momir (CR 109.4c / CR 114.1, game-start emblem), and Dandân (CR 400.1,
+        // shared library and graveyard) each rely on an auxiliary deck/component
+        // keyed on this exact `GameFormat` literal, with no `StructuralRules`
+        // field able to carry it forward. Checked ahead of the command-zone/eligibility match
         // below because Planechase's `command_zone` is `false` — it would
         // otherwise fall straight through to `CommandZoneMode::Disabled` and
         // save "successfully," silently losing the planar deck. Archenemy and
@@ -597,7 +598,7 @@ impl CustomFormatDef {
             return Err(FormatConfigError(format!(
                 "from_lobby_config cannot save {} as a custom format — its deck_loading.rs \
                  behavior grants an auxiliary deck or component (a shared planar deck, a scheme \
-                 deck, or a game-start emblem) keyed on this literal format, and StructuralRules \
+                 deck, a game-start emblem, or a shared library and graveyard) keyed on this literal format, and StructuralRules \
                  has no representation for it",
                 config.format
             )));

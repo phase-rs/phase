@@ -18,17 +18,12 @@ pub fn resolve_and_apply_library_shuffle(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), ResolvedLibraryShuffleReplayInvariantError> {
-    let precondition_order: Vec<_> = state
-        .players
-        .iter()
-        .find(|candidate| candidate.id == player)
-        .ok_or(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
+    if !state.players.iter().any(|candidate| candidate.id == player) {
+        return Err(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
             player,
-        ))?
-        .library
-        .iter()
-        .copied()
-        .collect();
+        ));
+    }
+    let precondition_order: Vec<_> = state.library_of(player).iter().copied().collect();
 
     // Existing random consumers may have advanced the live stream before their
     // own P2 authority is factored. Synchronize the persisted high-water through
@@ -63,18 +58,16 @@ pub fn apply_resolved_library_shuffle(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), ResolvedLibraryShuffleReplayInvariantError> {
     validate_library_shuffle_receipt(command)?;
-    let player_index = state
+    if !state
         .players
         .iter()
-        .position(|candidate| candidate.id == command.player)
-        .ok_or(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
+        .any(|candidate| candidate.id == command.player)
+    {
+        return Err(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
             command.player,
-        ))?;
-    let current_order: Vec<_> = state.players[player_index]
-        .library
-        .iter()
-        .copied()
-        .collect();
+        ));
+    }
+    let current_order: Vec<_> = state.library_of(command.player).iter().copied().collect();
     if current_order != command.precondition_order {
         return Err(ResolvedLibraryShuffleReplayInvariantError::LibraryOrderPreconditionMismatch);
     }
@@ -99,7 +92,8 @@ pub fn apply_resolved_library_shuffle(
     // CR 701.24a: Install the already-randomized order once. The applier never
     // calls `shuffle_vector`, so retained-prefix replay cannot consume entropy
     // or choose a different permutation.
-    state.players[player_index].library = im::Vector::from(command.resulting_order.clone());
+    // allow-raw-zone: permutation install, not a zone event (CR 701.24a).
+    *state.library_of_mut(command.player) = im::Vector::from(command.resulting_order.clone());
     state.advance_library_knowledge_epoch(command.player);
     state
         .advance_rng_high_water(command.post_word_pos)

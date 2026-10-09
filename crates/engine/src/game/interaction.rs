@@ -310,6 +310,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -567,6 +568,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::DiscardChoice {
             unless_filter: Some(_),
             ..
@@ -4779,6 +4781,7 @@ fn selection_projection(
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -5759,6 +5762,9 @@ fn project_action_payload(
             }
             MulliganChoice::Mulligan => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "mulligan")
+            }
+            MulliganChoice::FreeReveal => {
+                push_value_surface(surfaces, InteractionRoleCode::Mulligan, "freeReveal")
             }
             MulliganChoice::UseSerumPowder { object_id } => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "serumPowder");

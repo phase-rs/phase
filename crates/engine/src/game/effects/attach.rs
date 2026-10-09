@@ -471,17 +471,24 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let host_of = |state: &GameState| state.objects.get(&attachment_id)?.attached_to;
+    let already_on_host = host_of(state) == Some(AttachTarget::Object(target_id));
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
             old_target,
         });
     }
+    // CR 701.3b: a refused or same-host attach did nothing, so it carries no subject.
+    let attached = !already_on_host && host_of(state) == Some(AttachTarget::Object(target_id));
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
         source_id,
-        subject: None,
+        subject: attached
+            .then(|| state.capture_event_object_snapshot(attachment_id))
+            .flatten()
+            .map(Box::new),
     });
 
     crate::game::engine_replacement::apply_pending_post_replacement_effect(
@@ -1312,6 +1319,7 @@ pub(crate) fn resolve_selected_attachment_choice(
                 "Attach EffectZoneChoice missing typed attachment operation".to_string(),
             )
         })?;
+    let events_before = events.len();
     let selecting_host = parked_attach_choice_selects_host(&operation);
     let bound_operation = bind_resolution_attachment_choice(state, operation, attachment_ids)?;
     let operation = {
@@ -1345,6 +1353,25 @@ pub(crate) fn resolve_selected_attachment_choice(
                 .take_active_attachment_choice_continuation()
                 .expect("completed attach choice must retain its active child")
                 .expect("completed attach choice must own its active child");
+            // CR 608.2c: the tail parked under this choice reads whether this answer attached.
+            let performed = !super::compound_run_unperformed(&operation)
+                && super::mandatory_parent_effect_performed(
+                    &operation.effect,
+                    &events[events_before..],
+                );
+            if let Some(tail) = state
+                .active_ability_continuation_frame_mut()
+                .map(|frame| frame.pending.chain.as_mut())
+                .filter(|tail| {
+                    tail.sub_link == crate::types::ability::SubAbilityLink::SequentialSibling
+                        && tail
+                            .condition
+                            .as_ref()
+                            .is_some_and(super::condition_depends_on_effect_performed)
+                })
+            {
+                tail.set_optional_effect_performed_recursive(performed);
+            }
             Ok(true)
         }
     }
@@ -1594,7 +1621,15 @@ fn resolve_object_filter<'a>(
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
     match filter {
-        TargetFilter::SelfRef => Some(ability.source_id),
+        // CR 400.7: the source names itself only while it is the same object.
+        TargetFilter::SelfRef => match &ability.trigger_source {
+            Some(source) if source.identity.reference.object_id != ability.source_id => {
+                Some(ability.source_id)
+            }
+            _ => ability
+                .source_is_current(state)
+                .then_some(ability.source_id),
+        },
         TargetFilter::LastCreated => target_slots
             .find_map(|target| match target {
                 TargetRef::Object(id) => Some(*id),
@@ -5617,6 +5652,7 @@ mod retirement_ownership_tests {
                         TransientContinuousEffectBindings {
                             affected_recipient: Some(reference),
                             duration_subject: Some(reference),
+                            granting_object: None,
                         },
                     )
                     .expect("the fixture's duration begins");
@@ -5730,6 +5766,7 @@ mod retirement_ownership_tests {
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(reference),
                     duration_subject: Some(reference),
+                    granting_object: None,
                 },
             )
             .expect("the fixture's duration begins");

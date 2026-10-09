@@ -505,6 +505,8 @@
     "modelPlaceholder": "ID del modello (es. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://il-tuo-server/v1",
+    "jevEndpointPlaceholder": "Per impostazione predefinita, il tuo server multigiocatore",
+    "jevEndpointHint": "Jev è raggiungibile tramite un server multigiocatore phase, che inoltra ogni richiesta a TypeSafe. La tua chiave viaggia solo all'interno di quella richiesta e non viene mai salvata sul server.",
     "apiKey": "Chiave API",
     "apiKeyPlaceholder": "Incolla la tua chiave API",
     "apiKeyOptional": "Facoltativa per i server locali",

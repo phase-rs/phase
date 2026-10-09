@@ -81,12 +81,14 @@ pub fn resolve(
 
     // Collect the nonland cards in the opponent's library. Lands are skipped per
     // the reminder text ("random nonland cards").
-    let nonland: Vec<ObjectId> = state
+    let opponent_seat = state
         .players
         .iter()
         .find(|p| p.id == opponent)
         .ok_or(EffectError::PlayerNotFound)?
-        .library
+        .id;
+    let nonland: Vec<ObjectId> = state
+        .library_of(opponent_seat)
         .iter()
         .copied()
         .filter(|id| {

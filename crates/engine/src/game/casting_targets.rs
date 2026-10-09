@@ -224,6 +224,7 @@ pub(crate) fn handle_select_modes(
                 &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
+                super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
             return finish_pending_cast_cost_or_pay(
@@ -244,6 +245,7 @@ pub(crate) fn handle_select_modes(
                 &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
+                super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
             return finish_pending_cast_cost_or_pay(
@@ -400,6 +402,7 @@ pub(crate) fn handle_select_targets(
         &announced_targets,
         pending.object_id,
         pending.ability.controller,
+        super::casting::pending_cast_targeter(state, &pending),
         events,
     );
 
@@ -505,6 +508,7 @@ pub(crate) fn handle_choose_target(
                 &announced_targets,
                 pending.object_id,
                 controller,
+                super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
 

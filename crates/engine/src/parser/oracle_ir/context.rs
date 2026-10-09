@@ -164,6 +164,14 @@ impl TriggerZoneChangeProvenance {
     }
 }
 
+/// CR 608.2k: the object a trigger condition introduces for its body's bare
+/// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionObjectAntecedent {
+    /// CR 509.3c: the attacker of a bare "<creature> becomes blocked" condition.
+    BlockedAttacker,
+}
+
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
@@ -264,6 +272,12 @@ pub(crate) struct ParseContext {
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
     /// moves the spell on the stack, not the trigger source or a parent target.
     pub object_pronoun_ref: Option<TargetFilter>,
+    /// CR 509.3c + CR 608.2k: what `object_pronoun_ref` names, when the pinned
+    /// `TargetFilter` alone doesn't say it. `ParentTarget` is also the ordinary
+    /// "it" of a spell's earlier target; under a bare "becomes blocked" trigger
+    /// condition it is the blocked attacker, which some slots (a damage source)
+    /// cannot express. Set only together with the matching pin.
+    pub condition_object_antecedent: Option<ConditionObjectAntecedent>,
     /// CR 608.2c (rules of English — number agreement) + CR 608.2k + CR 406.6:
     /// Antecedent for bare PLURAL object pronouns ("them"/"themselves") in the
     /// current trigger body, introduced by a plural noun phrase in the trigger's

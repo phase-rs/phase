@@ -6,7 +6,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{EndEffectPermission, GameState};
+use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -255,32 +255,41 @@ fn evaluate_static_condition_for_ability(
 fn install_transient(
     state: &mut GameState,
     end_permission: Option<&EndEffectPermission>,
-    source_id: ObjectId,
-    controller: PlayerId,
+    ability: &ResolvedAbility,
     duration: Duration,
     affected: TargetFilter,
     modifications: Vec<ContinuousModification>,
     condition: Option<StaticCondition>,
 ) -> Option<u64> {
-    match end_permission {
-        Some(permission) => state.add_transient_continuous_effect_with_end_permission(
-            source_id,
-            controller,
-            duration,
-            affected,
-            modifications,
-            condition,
-            permission.clone(),
-        ),
-        None => state.add_transient_continuous_effect(
-            source_id,
-            controller,
-            duration,
-            affected,
-            modifications,
-            condition,
-        ),
+    let mut modifications = modifications;
+    // CR 201.5a + CR 400.7 + CR 113.7: a grant names the object whose ability resolved, as
+    // it was then; a resolving spell is still on the stack (CR 608.2n).
+    if let Some(granter) = ability.source_ref(state) {
+        crate::game::layers::latch_grants(
+            &mut modifications,
+            granter,
+            // CR 601.2i + CR 707.10: the caster is fixed when the spell became cast; a copy
+            // that was not cast has none.
+            ability
+                .cast_occurrence
+                .as_ref()
+                .map(|occurrence| occurrence.caster),
+        );
     }
+    state.add_transient_continuous_effect_inner(
+        ability.source_id,
+        ability.controller,
+        duration,
+        affected,
+        modifications,
+        condition,
+        end_permission.cloned(),
+        // CR 201.5a: a granted ability's effect names the object that granted it.
+        TransientContinuousEffectBindings {
+            granting_object: ability.context.granting_object,
+            ..TransientContinuousEffectBindings::default()
+        },
+    )
 }
 
 fn register_transient_effect(
@@ -292,6 +301,7 @@ fn register_transient_effect(
     end_permission: Option<&EndEffectPermission>,
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
+    let modifications = latch_chosen_text_words(state, modifications);
 
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
@@ -317,8 +327,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -355,8 +364,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -389,8 +397,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -444,8 +451,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     affected,
                     modifications,
@@ -491,8 +497,7 @@ fn register_transient_effect(
         install_transient(
             state,
             end_permission,
-            ability.source_id,
-            ability.controller,
+            ability,
             duration.clone(),
             TargetFilter::SpecificObject {
                 id: ability.source_id,
@@ -514,8 +519,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications.clone(),
@@ -551,8 +555,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications,
@@ -635,8 +638,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 bound_filter,
                 modifications.clone(),
@@ -654,8 +656,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer { id: player_id },
                 modifications.clone(),
@@ -674,8 +675,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer {
                     id: ability.controller,
@@ -689,8 +689,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer { id: *id },
                 modifications.clone(),
@@ -780,8 +779,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
@@ -815,8 +813,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
@@ -834,8 +831,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
@@ -862,8 +858,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
@@ -1072,6 +1067,49 @@ pub fn generic_effect_population_filter<'a>(
         .find_map(|static_def| {
             generic_effect_application_filter(target_filter, static_def.affected.as_ref())
         })
+}
+
+/// CR 608.2d + CR 611.2c: the pending `Chosen` modification latches to the `Fixed` pair the controller just named, and the answer is taken so a skipped prompt can never latch a stale earlier one.
+fn latch_chosen_text_words(
+    state: &mut GameState,
+    modifications: Vec<ContinuousModification>,
+) -> Vec<ContinuousModification> {
+    use crate::types::ability::{ChoiceValue, TextSubstitution, TextSubstitutionSpec};
+
+    let has_chosen = modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen { .. },
+            }
+        )
+    });
+    if !has_chosen {
+        return modifications;
+    }
+    let answer = state.last_named_choice.take();
+    modifications
+        .into_iter()
+        .map(|modification| match modification {
+            ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen { domains },
+            } => {
+                let latched = match &answer {
+                    Some(ChoiceValue::Label(label)) => {
+                        TextSubstitution::from_label(label, &domains)
+                    }
+                    _ => None,
+                };
+                ContinuousModification::SubstituteTextWord {
+                    substitution: latched.map_or(
+                        TextSubstitutionSpec::Chosen { domains },
+                        TextSubstitutionSpec::Fixed,
+                    ),
+                }
+            }
+            other => other,
+        })
+        .collect()
 }
 
 fn snapshot_transient_modifications(
@@ -5008,6 +5046,42 @@ mod tests {
                 .affected,
             TargetFilter::SpecificObject { id: army },
             "the grant must name the amassed Army itself"
+        );
+    }
+
+    /// CR 608.2d: the word answer latches once, so a later effect whose prompt was skipped must not read it.
+    #[test]
+    fn text_word_latch_consumes_the_answer() {
+        use crate::types::ability::{
+            ChoiceValue, TextSubstitution, TextSubstitutionSpec, TextWordDomain,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let chosen = || {
+            vec![ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen {
+                    domains: vec![TextWordDomain::BasicLandType],
+                },
+            }]
+        };
+        state.last_named_choice = Some(ChoiceValue::Label("Swamp -> Plains".into()));
+
+        let latched = latch_chosen_text_words(&mut state, chosen());
+        let expected =
+            TextSubstitution::from_label("Swamp -> Plains", &[TextWordDomain::BasicLandType])
+                .expect("valid pair");
+        assert_eq!(
+            latched,
+            [ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Fixed(expected),
+            }]
+        );
+        assert!(state.last_named_choice.is_none(), "the answer is taken");
+
+        assert_eq!(
+            latch_chosen_text_words(&mut state, chosen()),
+            chosen(),
+            "with no fresh answer the effect stays inert"
         );
     }
 }

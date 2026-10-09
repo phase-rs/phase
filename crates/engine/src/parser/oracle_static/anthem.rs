@@ -60,8 +60,8 @@ pub(crate) fn parse_typed_you_control(
                 parse_property_descriptor(&desc_lower, desc_remaining, &extra_props, is_other)
             {
                 let (prop_filter, after_prefix) =
-                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                        (add_property(prop_filter, prop), rest)
+                    if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                        (add_properties(prop_filter, props), rest)
                     } else {
                         (prop_filter, after_prefix)
                     };
@@ -72,10 +72,10 @@ pub(crate) fn parse_typed_you_control(
             if let Some(compound_filter) =
                 try_parse_compound_subtypes(desc_remaining, &extra_props, is_other)
             {
-                // CR 613.7: Check for counter condition before returning
+                // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
                 let (compound_filter, after_prefix) =
-                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                        (add_property(compound_filter, prop), rest)
+                    if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                        (add_properties(compound_filter, props), rest)
                     } else {
                         (compound_filter, after_prefix)
                     };
@@ -201,12 +201,12 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 return None;
             };
-            // CR 613.7: Check for "with [counter] on it/them" condition between
-            // "you control" and the predicate (e.g., "Elf creatures you control
+            // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
+            // between "you control" and the predicate (e.g., "Elf creatures you control
             // with a +1/+1 counter on it has trample").
             let (typed_filter, after_prefix) =
-                if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                    (add_property(typed_filter, prop), rest)
+                if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                    (add_properties(typed_filter, props), rest)
                 } else {
                     (typed_filter, after_prefix)
                 };
@@ -249,10 +249,10 @@ pub(crate) fn parse_typed_you_control(
             if let Some(compound_filter) =
                 try_parse_compound_subtypes(desc_remaining, &extra_props, is_other)
             {
-                // CR 613.7: Check for counter condition before returning
+                // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
                 let (compound_filter, after_prefix) =
-                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                        (add_property(compound_filter, prop), rest)
+                    if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                        (add_properties(compound_filter, props), rest)
                     } else {
                         (compound_filter, after_prefix)
                     };
@@ -331,10 +331,10 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 return None;
             };
-            // CR 613.7: Check for "with [counter] on it/them" condition
+            // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
             let (typed_filter, after_prefix) =
-                if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                    (add_property(typed_filter, prop), rest)
+                if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                    (add_properties(typed_filter, props), rest)
                 } else {
                     (typed_filter, after_prefix)
                 };

@@ -32,6 +32,7 @@ use super::statics::{ActivationExemption, CastFrequency, CostModifyMode, StaticM
 use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
+use crate::game::filter::FilterContext;
 use crate::game::game_object::DisplaySource;
 use crate::types::events::{ClashResult, PlayerActionKind};
 
@@ -1629,6 +1630,122 @@ impl std::str::FromStr for BasicLandType {
             "Forest" => Ok(Self::Forest),
             _ => Err(()),
         }
+    }
+}
+
+/// CR 612.2: the word classes a text-changing effect can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TextWordDomain {
+    ColorWord,
+    BasicLandType,
+}
+
+/// CR 612.2: one concrete from-to word replacement; both words are of one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TextSubstitution {
+    Color {
+        from: ManaColor,
+        to: ManaColor,
+    },
+    BasicLandType {
+        from: BasicLandType,
+        to: BasicLandType,
+    },
+}
+
+/// `Fixed` is what the text layer applies, while `Chosen` is the parse-time form latched to `Fixed` when the effect installs (CR 608.2d + CR 611.2c) and inert if it reaches the layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TextSubstitutionSpec {
+    Fixed(TextSubstitution),
+    Chosen { domains: Vec<TextWordDomain> },
+}
+
+impl TextSubstitution {
+    /// CR 612.2: a color word as printed in Oracle text.
+    fn color_word(color: ManaColor) -> &'static str {
+        match color {
+            ManaColor::White => "White",
+            ManaColor::Blue => "Blue",
+            ManaColor::Black => "Black",
+            ManaColor::Red => "Red",
+            ManaColor::Green => "Green",
+        }
+    }
+
+    /// Builds a color substitution; "it can't change a word to the same word" so
+    /// `from == to` is rejected.
+    pub fn color(from: ManaColor, to: ManaColor) -> Option<Self> {
+        (from != to).then_some(Self::Color { from, to })
+    }
+
+    /// Builds a basic-land-type substitution; `from == to` is rejected.
+    pub fn basic_land_type(from: BasicLandType, to: BasicLandType) -> Option<Self> {
+        (from != to).then_some(Self::BasicLandType { from, to })
+    }
+
+    /// The word class this substitution acts on.
+    pub fn domain(&self) -> TextWordDomain {
+        match self {
+            Self::Color { .. } => TextWordDomain::ColorWord,
+            Self::BasicLandType { .. } => TextWordDomain::BasicLandType,
+        }
+    }
+
+    /// CR 608.2d: every ordered pair the controller may name for `domains`
+    /// (domain order, then WUBRG / Plains-to-Forest order, `from != to`).
+    pub fn options(domains: &[TextWordDomain]) -> Vec<String> {
+        let mut out = Vec::new();
+        for domain in domains {
+            match domain {
+                TextWordDomain::ColorWord => {
+                    for from in ManaColor::ALL {
+                        for to in ManaColor::ALL {
+                            out.extend(Self::color(from, to).map(|s| s.label()));
+                        }
+                    }
+                }
+                TextWordDomain::BasicLandType => {
+                    for from in BasicLandType::all() {
+                        for to in BasicLandType::all() {
+                            out.extend(Self::basic_land_type(*from, *to).map(|s| s.label()));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The (from, to) words as the serialized carriers and the type line spell them.
+    pub fn words(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Color { from, to } => (Self::color_word(*from), Self::color_word(*to)),
+            Self::BasicLandType { from, to } => (from.as_subtype_str(), to.as_subtype_str()),
+        }
+    }
+
+    /// Prompt label, e.g. `"Black -> Blue"`; the inverse of [`Self::from_label`].
+    pub fn label(&self) -> String {
+        let (from, to) = self.words();
+        format!("{from} -> {to}")
+    }
+
+    /// Parses a prompt label back into a substitution, rejecting `from == to`
+    /// and any pair whose class is outside `domains`.
+    pub fn from_label(label: &str, domains: &[TextWordDomain]) -> Option<Self> {
+        let (from, to) = label.split_once(" -> ")?;
+        domains.iter().find_map(|domain| match domain {
+            TextWordDomain::ColorWord => Self::color(
+                from.parse::<ManaColor>().ok()?,
+                to.parse::<ManaColor>().ok()?,
+            ),
+            TextWordDomain::BasicLandType => Self::basic_land_type(
+                from.parse::<BasicLandType>().ok()?,
+                to.parse::<BasicLandType>().ok()?,
+            ),
+        })
     }
 }
 
@@ -7628,18 +7745,15 @@ pub enum TargetFilter {
     /// "Exile <equipment-name>" / "Return <equipment-name> to its owner's
     /// hand"). Distinct from `SelfRef`, which is the object the ability is ON
     /// (the host creature). Emitted at parse time by the quote masker in
-    /// `normalize_card_name_refs`; always concretized to `SpecificObject { id }`
-    /// (the live granting-object id) at grant-clone time (`game/layers.rs`).
-    /// If it ever reaches runtime unconcretized it degrades to the ability
-    /// source (host) — fail-safe, never worse than the pre-fix behavior.
-    ///
-    /// ZONE-MOVE SCOPING (CR 201.5a second sentence + CR 400.7): the grant-time
-    /// concretization snapshots the granter's current battlefield id. CR 201.5a's
-    /// second sentence (a source moved to a new public zone → the name refers to
-    /// the new-zone object) is not modeled; no current card moves its granter and
-    /// then re-references it within one resolution (cost-exile/sacrifice cards
-    /// consume the granter before the effect; boomerangs return themselves last).
-    GrantingObject,
+    /// `normalize_card_name_refs`. It is read against the granter incarnation
+    /// stamped on the enclosing definition; unstamped, it resolves to the current
+    /// ability source, or inside a filter to no object. `bound` pins the stamped
+    /// incarnation into the filter itself for carriers read without the stamp; it
+    /// matches only that incarnation (CR 400.7).
+    GrantingObject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<ObjectIncarnationRef>,
+    },
     /// CR 702.95b: Resolves to the source object and the creature it is paired
     /// with. If the source is not paired, this matches no objects.
     SourceOrPaired,
@@ -8402,6 +8516,16 @@ pub enum ObjectScope {
     /// (Dismantle, Rite of the Serpent); every object-characteristic reader
     /// fail-closes to 0 and is marked `Unhandled` in `game/coverage.rs`.
     ChainRootTarget,
+    /// CR 201.5a: a granted ability's by-name reference to its granting object; unbound,
+    /// it reads as `Source` in counter reads (the one position produced) and fails closed
+    /// everywhere else.
+    GrantingObject,
+    /// CR 201.5a + CR 400.7: one exact object incarnation, read live while it exists in
+    /// any zone. After it changes zones, counter, power/toughness and mana-value reads use
+    /// its last known information only in a resolution that carries its ability
+    /// (CR 608.2h) and read 0 otherwise; color, name, typeline and mana-symbol reads are
+    /// live only and read 0.
+    SpecificObject { object: ObjectIncarnationRef },
 }
 
 /// CR 601.2a: A per-turn action journal — a chronological record of a kind of
@@ -8776,6 +8900,26 @@ pub enum CastManaSpentMetric {
     FromSource { source_filter: TargetFilter },
 }
 
+/// CR 612.2 + CR 107.4: How a mana-spent condition's color was written. A
+/// text-changing effect changes only color WORDS, so a `ManaSymbol` color is
+/// never rewritten while a `ColorWord` color is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SpentColor {
+    /// The color word of "at least three red mana was spent to cast this spell".
+    ColorWord { color: ManaColor },
+    /// The printed mana symbol of "{R} was spent to cast this spell".
+    ManaSymbol { color: ManaColor },
+}
+
+impl SpentColor {
+    pub fn color(self) -> ManaColor {
+        match self {
+            SpentColor::ColorWord { color } | SpentColor::ManaSymbol { color } => color,
+        }
+    }
+}
+
 /// A validated numeric reduction over one characteristic-bearing population.
 ///
 /// CR 202.3 + CR 208.1 + CR 209.1: the source must carry enough snapshot data
@@ -8835,6 +8979,11 @@ impl PropertyAggregate {
 
     pub fn source(&self) -> &CardTypeSetSource {
         &self.source
+    }
+
+    /// Filter rewrites keep every member's kind, so the constructor's invariants hold.
+    pub(crate) fn source_mut(&mut self) -> &mut CardTypeSetSource {
+        &mut self.source
     }
 }
 
@@ -9372,7 +9521,8 @@ pub enum QuantityRef {
     ///
     /// - [`DamageChannel::Total`] (default): the total amount, via
     ///   `GameState::last_effect_amount`. Every non-damage producer (life lost,
-    ///   counters removed, cards drawn) stamps only this channel.
+    ///   counters removed, cards drawn) stamps only this channel; a shared-library
+    ///   simultaneous draw also fills the per-player table.
     /// - [`DamageChannel::Excess`]: the EXCESS amount (CR 120.10) — damage dealt
     ///   beyond lethal — via `GameState::last_effect_excess_amount`. Reads "the
     ///   amount of excess damage dealt to that creature this way" (Goblin
@@ -11130,6 +11280,9 @@ pub enum PlayerFilter {
     /// player facing the choice is the owner of the targeted permanent named in
     /// the prior clause, not the ability controller.
     ParentObjectTargetOwner,
+    /// CR 601.2a + CR 201.5a: the player who cast the granting object; lowered to
+    /// `TargetFilter::SpecificPlayer` when the grant is latched.
+    GrantingObjectCaster,
     /// CR 608.2c + CR 608.2h + CR 109.4 + CR 102.2: Each player matching
     /// `relation` who possessed — per `possession` — at least one member of the
     /// most recent tracked object set matching `filter`, restricted to members
@@ -21644,6 +21797,11 @@ impl TargetFilter {
                 | TargetFilter::ControllerAndControlledPermanents { .. }
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
+                // CR 115.10a: a bound object id is affected, never a declared target.
+                | TargetFilter::SpecificObject { .. }
+                // CR 201.5a + CR 115.10a: a granter named by a granted body is affected, never a
+                // declared target.
+                | TargetFilter::GrantingObject { .. }
         )
     }
 
@@ -26258,6 +26416,8 @@ pub struct AbilityDefinition {
     /// This is deliberately separate from `FaceDownProfile`, which describes
     /// battlefield characteristics only.
     pub face_down_in_exile: ExileConcealment,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -26355,6 +26515,8 @@ struct AbilityDefinitionRepr<'a> {
     unlowered_guard: &'a Option<UnloweredGuard>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
     face_down_in_exile: ExileConcealment,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    granting_object: &'a Option<ObjectIncarnationRef>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -26410,6 +26572,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition,
             unlowered_guard,
             face_down_in_exile,
+            granting_object,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -26460,6 +26623,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition: *sibling_condition,
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
+            granting_object,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -26590,6 +26754,8 @@ struct AbilityDefinitionDe {
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
     face_down_in_exile: ExileConcealment,
+    #[serde(default)]
+    granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -26650,6 +26816,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sibling_condition: de.sibling_condition,
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
+            granting_object: de.granting_object,
         })
     }
 }
@@ -26950,6 +27117,7 @@ impl AbilityDefinition {
             sibling_condition: SiblingCondition::Dependent,
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
+            granting_object: None,
         }
     }
 
@@ -27391,12 +27559,13 @@ pub enum AbilityCondition {
     /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`,
     /// which carries the CR 400.7d subject anaphora as an explicit
     /// `CastManaObjectScope` that this variant cannot express. The leading-word
-    /// Adamant grammar already emits the generic form; this variant survives
-    /// only for the symbolic `{W}{W}` phrasing, which has no
-    /// `parse_inner_condition` grammar and fans into `And`/`Not` compositions.
+    /// Adamant grammar lowers to that generic form, so this variant is the
+    /// symbolic `{W}{W}` phrasing (no `parse_inner_condition` grammar; it fans
+    /// into `And`/`Not` compositions) plus the shadowed word fallback, and
+    /// `SpentColor` is how CR 612.2 tells the two apart.
     /// Retiring it is a semantic migration (per-card scope decision), not a
     /// rename — see `TriggerCondition::ManaColorSpent` for the sibling case.
-    ManaColorSpent { color: ManaColor, minimum: u32 },
+    ManaColorSpent { color: SpentColor, minimum: u32 },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
     /// revealed card's type, or on the just-moved card when the parent effect
     /// changed zones without revealing.
@@ -28339,6 +28508,9 @@ pub struct SpellContext {
     /// ordinary ability-chain handoffs without widening every ability literal.
     #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
     pub face_down_in_exile: ExileConcealment,
+    /// CR 201.5a: the granter stamped on the definition this ability was built from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
     /// CR 603.7 + CR 603.10a + CR 608.2h: The battlefield-departure event a
     /// phase-delayed triggered ability was created under ("When this creature
     /// dies, at the beginning of the next end step, …"). The later phase event
@@ -28469,6 +28641,10 @@ pub struct SpellContext {
     /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
     pub optional_effect_performed: bool,
+    /// CR 118.12: A mandatory instruction of this run ("sacrifice it and attach …")
+    /// that did nothing, so a later member's "if you do" is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unperformed_compound_instruction: Option<EffectKind>,
     /// CR 608.2d: The just-resolved `Effect::OpponentGuess` outcome, stamped onto
     /// the stashed continuation chain by the guess answer handler. Tri-state:
     /// `None` = no guess happened (impossible commit per CR 609.3 / empty hand),
@@ -28991,13 +29167,14 @@ pub enum TriggerCondition {
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
     ///
     /// LEGACY SHAPE, produced by the independent trigger-side grammar in
-    /// `parser::oracle_trigger`. The canonical generic form is
+    /// `parser::oracle_trigger`: the word form by `try_extract_adamant_condition`,
+    /// the symbol form by `SymbolicManaSpentIntro`. The canonical generic form is
     /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`
     /// (see `AbilityCondition::ManaColorSpent`). Converging this one is a
     /// SEMANTIC migration, not a rename: the producer accepts both "this spell"
     /// and "that spell" and records neither, so lowering requires a per-card
     /// CR 400.7d `CastManaObjectScope` decision.
-    ManaColorSpent { color: ManaColor, minimum: u32 },
+    ManaColorSpent { color: SpentColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
     ManaSpentCondition { text: String },
     /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"
@@ -29132,6 +29309,18 @@ pub enum TriggerCondition {
     /// self-referential cases.
     PlacedByAbilitySource,
 
+    /// CR 603.4 + CR 607.1c + CR 106.4: "if you haven't added mana with this ability
+    /// this turn" (Carpet of Flowers) — true when THIS triggered ability's exact
+    /// occurrence (`TriggerDefinitionRef`, CR 113.2c per ability, CR 400.7 per
+    /// object) and this trigger's controller are in
+    /// `GameState::triggered_abilities_added_mana_this_turn`, which is
+    /// written only when mana actually reached a pool, so a declined "you may"
+    /// (CR 603.5) or an X of 0 leaves it false. Negation wraps via `Not`.
+    /// Unanswerable without the trigger's identity: `evaluation_anchor` reports
+    /// `OwnTriggerDefinition`, and the CR 603.4 boundary rejects it rather than
+    /// letting `Not` invert it.
+    AddedManaWithThisAbilityThisTurn,
+
     /// CR 608.2c + CR 603.2 + CR 603.4: "if it targets [filter]" intervening-if
     /// on a spell-cast trigger — true when the triggering spell's committed targets
     /// include at least one object matching `filter`. The trigger source is excluded
@@ -29176,18 +29365,36 @@ pub enum TriggerCondition {
     /// "Whenever two or more <subject> attack" (Argent Dais) compares the number
     /// of attacking objects of the subject class when attackers are declared
     /// (CR 508.1a + CR 603.2); there is no intervening "if" to recheck.
+    /// CR 603.8: a state trigger's own condition ("When there are four or more
+    /// page counters on ~", "When you control no other creatures") is likewise
+    /// its trigger event, read when the game state matches it and not rechecked
+    /// on resolution — Plague Boiler's ruling: removing a counter in response
+    /// won't stop the effect. An intervening "if" beside it is still rechecked.
     EventTime { condition: Box<TriggerCondition> },
 }
 
+/// CR 603.4: what must resolve before a leaf is answerable at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerConditionAnchor<'a> {
+    /// CR 109.4: the player whose designation the leaf tests.
+    Player(&'a PlayerScope),
+    /// CR 607.1c + CR 113.2c: the exact trigger occurrence the leaf is linked to.
+    OwnTriggerDefinition,
+}
+
 impl TriggerCondition {
-    /// CR 109.4 + CR 603.4: the player whose DESIGNATION this leaf tests, when
-    /// the leaf is a designation predicate at all.
+    /// CR 603.4: the anchor this leaf needs resolved before it is answerable,
+    /// when it needs one at all.
+    ///
+    /// Two anchor kinds exist. A designation leaf (CR 109.4) tests a player's
+    /// designation, so it needs its [`PlayerScope`] resolved. A self-linked leaf
+    /// (CR 607.1c) reads this triggered ability's own history, so it needs the
+    /// identity of the trigger occurrence it gates.
     ///
     /// Exhaustive by design — there is deliberately no wildcard arm. This is
     /// the guard that makes the polarity boundary gate in `game::triggers`
-    /// total: adding a future designation leaf that carries a [`PlayerScope`]
-    /// is a COMPILE ERROR here, not a latent fail-open under
-    /// [`TriggerCondition::Not`].
+    /// total: adding a future anchored leaf of either kind is a COMPILE ERROR
+    /// here, not a latent fail-open under [`TriggerCondition::Not`].
     ///
     /// Boolean combinators return `None`; the gate recurses them itself.
     /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
@@ -29196,9 +29403,12 @@ impl TriggerCondition {
     /// and `0 > 0` is false, which inverts under `Not`) is orthogonal, affects
     /// every existing [`PlayerScope::DefendingPlayer`] card, and is deliberately
     /// out of scope here.
-    pub(crate) fn designation_player_anchor(&self) -> Option<&PlayerScope> {
+    pub(crate) fn evaluation_anchor(&self) -> Option<TriggerConditionAnchor<'_>> {
         match self {
-            TriggerCondition::IsMonarch { player } => Some(player),
+            TriggerCondition::IsMonarch { player } => Some(TriggerConditionAnchor::Player(player)),
+            TriggerCondition::AddedManaWithThisAbilityThisTurn => {
+                Some(TriggerConditionAnchor::OwnTriggerDefinition)
+            }
             TriggerCondition::GainedLife { .. }
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
@@ -29958,6 +30168,9 @@ pub struct TriggerDefinition {
     /// every non-Room trigger: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_door: Option<crate::game::game_object::RoomDoor>,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
@@ -30552,6 +30765,7 @@ impl TriggerDefinition {
             mana_ability_produced: None,
             clash_result: None,
             room_door: None,
+            granting_object: None,
         }
     }
 
@@ -30809,6 +31023,9 @@ pub struct StaticDefinition {
     /// static: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_door: Option<crate::game::game_object::RoomDoor>,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -30994,6 +31211,7 @@ impl StaticDefinition {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         }
     }
 
@@ -31822,6 +32040,9 @@ pub struct ReplacementDefinition {
     /// official Vorinclex ruling). Ignored by every non-`AddCounter` event.
     #[serde(default, skip_serializing_if = "CounterReplacementSubject::is_default")]
     pub counter_replacement_subject: CounterReplacementSubject,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl ReplacementDefinition {
@@ -31935,6 +32156,7 @@ impl ReplacementDefinition {
             source_object: None,
             origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
+            granting_object: None,
         }
     }
 
@@ -31967,6 +32189,20 @@ impl ReplacementDefinition {
     pub fn valid_card(mut self, filter: TargetFilter) -> Self {
         self.valid_card = Some(filter);
         self
+    }
+
+    /// CR 201.5a: the context `valid_card` is read in, naming this replacement's granter.
+    pub(crate) fn valid_card_context(
+        &self,
+        state: &super::game_state::GameState,
+        source_id: ObjectId,
+        controller: Option<PlayerId>,
+    ) -> FilterContext<'static> {
+        match controller {
+            Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
+            None => FilterContext::from_source(state, source_id),
+        }
+        .with_granting_object(self.granting_object)
     }
 
     pub fn description(mut self, desc: String) -> Self {
@@ -32436,6 +32672,12 @@ pub enum ContinuousModification {
     /// (Witness Protection). Applied in Layer 3.
     SetTextName {
         name: String,
+    },
+    /// CR 612.1 + CR 612.2 + CR 613.1c: replaces every instance of one word with
+    /// another in the recipient's rules text and type line (Layer 3). Applied by
+    /// the Text pre-pass in `game::layers`, never by the per-modification apply loop.
+    SubstituteTextWord {
+        substitution: TextSubstitutionSpec,
     },
     AddPower {
         value: i32,
@@ -34787,6 +35029,24 @@ impl ResolvedAbility {
             if r.object_id == self.source_id
                 && r.original_stamp == captured
                 && Some(r.current_incarnation) == current_incarnation)
+    }
+
+    /// CR 113.7 + CR 400.7: the ability's source as the object it was when the ability was
+    /// created; a spell, which captures no incarnation, is its current stack object.
+    pub fn source_ref(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+        let incarnation = self.source_incarnation.or_else(|| {
+            state
+                .objects
+                .get(&self.source_id)
+                .map(|obj| obj.incarnation)
+        })?;
+        Some(crate::types::identifiers::ObjectIncarnationRef::of(
+            self.source_id,
+            incarnation,
+        ))
     }
 
     /// CR 400.7: True if the ability's source is still the same object instance it
@@ -38551,6 +38811,7 @@ mod tests {
             mana_ability_produced: None,
             clash_result: None,
             room_door: Some(crate::game::game_object::RoomDoor::Left),
+            granting_object: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
@@ -38611,6 +38872,7 @@ mod tests {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -39115,6 +39377,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
@@ -41711,15 +41974,30 @@ mod monarch_subject_axis_tests {
     }
 
     /// The polarity boundary gates are only sound because these accessors are
-    /// exhaustive. Pin the two answers they must give.
+    /// exhaustive. Pin the answers they must give for each anchor kind.
     #[test]
-    fn designation_player_anchor_reports_the_monarch_subject_and_nothing_else() {
+    fn evaluation_anchor_reports_each_anchor_kind_and_nothing_else() {
         assert_eq!(
             TriggerCondition::IsMonarch {
                 player: PlayerScope::DefendingPlayer
             }
-            .designation_player_anchor(),
-            Some(&PlayerScope::DefendingPlayer)
+            .evaluation_anchor(),
+            Some(TriggerConditionAnchor::Player(
+                &PlayerScope::DefendingPlayer
+            ))
+        );
+        // CR 607.1c + CR 113.2c: the self-linked leaf needs its own trigger
+        // occurrence; the `Not` that negates it is a combinator, not a leaf.
+        assert_eq!(
+            TriggerCondition::AddedManaWithThisAbilityThisTurn.evaluation_anchor(),
+            Some(TriggerConditionAnchor::OwnTriggerDefinition)
+        );
+        assert_eq!(
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+            }
+            .evaluation_anchor(),
+            None
         );
         assert_eq!(
             StaticCondition::IsMonarch {
@@ -41729,10 +42007,7 @@ mod monarch_subject_axis_tests {
             Some((Designation::Monarch, &PlayerScope::ScopedPlayer))
         );
         // CR 725.1: vacancy is a different predicate and carries no subject.
-        assert_eq!(
-            TriggerCondition::NoMonarch.designation_player_anchor(),
-            None
-        );
+        assert_eq!(TriggerCondition::NoMonarch.evaluation_anchor(), None);
         assert_eq!(StaticCondition::NoMonarch.designation_anchor(), None);
         // A quantity tests a quantity, not a designation — by definition.
         assert_eq!(
@@ -41745,7 +42020,7 @@ mod monarch_subject_axis_tests {
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Fixed { value: 0 },
             }
-            .designation_player_anchor(),
+            .evaluation_anchor(),
             None
         );
     }

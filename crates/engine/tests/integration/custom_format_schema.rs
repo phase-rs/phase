@@ -841,6 +841,7 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::CommanderDraft, Some(Standard)),
         (GameFormat::Freeform, None),
         (GameFormat::FreeformCommander, Some(FreeformAnyCastableCard)),
+        (GameFormat::Dandan, None),
     ];
     // This table had NO length assertion at all, despite its name. Ordered
     // equality against the enum is what makes the name true and keeps it true:
@@ -903,6 +904,7 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::CommanderDraft, "CommanderDraft"),
         (GameFormat::Freeform, "Freeform"),
         (GameFormat::FreeformCommander, "FreeformCommander"),
+        (GameFormat::Dandan, "Dandan"),
     ];
     // Replaces `assert_eq!(expectations.len(), 22)`, which could not fail:
     // 22 == 22 holds however the enum grows, and it did — `CommanderDraft`'s
@@ -2394,6 +2396,25 @@ fn from_lobby_config_rejects_momir_source() {
         error.to_string().contains("auxiliary deck or component"),
         "expected the auxiliary-deck-component rejection, got: {error}"
     );
+}
+
+#[test]
+fn from_lobby_config_rejects_dandan_source() {
+    // CR 400.1: Dandân's shared library and graveyard are keyed on
+    // GameFormat::Dandan itself and have no StructuralRules field. Its config
+    // sets `command_zone: false`, so without
+    // has_unrepresentable_auxiliary_deck_component it would save as a plain
+    // format with the zones per-player.
+    let error = CustomFormatDef::from_lobby_config("Dan".to_string(), &FormatConfig::dandan())
+        .expect_err("Dandan must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+    // Reach-guard: an ordinary format saves, so the refusal above is the
+    // predicate and not a blanket refusal.
+    CustomFormatDef::from_lobby_config("Std".to_string(), &FormatConfig::standard())
+        .expect("Standard must be saveable as a custom format");
 }
 
 #[test]

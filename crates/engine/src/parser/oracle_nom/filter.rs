@@ -239,6 +239,65 @@ pub fn parse_with_property(input: &str) -> OracleResult<'_, FilterProp> {
     preceded((tag("with"), space1), parse_with_inner).parse(input)
 }
 
+/// Parse one "with <property>" clause into the conjoined `FilterProp`s it
+/// denotes. Most clauses denote a single property (delegates to
+/// [`parse_with_property`]); the base-P/T designation "with base power and
+/// toughness N/M" denotes two (CR 208.4b), so callers that accumulate a
+/// property list use this entry and `extend` with the result.
+pub fn parse_with_properties(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
+    alt((
+        map(parse_with_base_pt_designation, Vec::from),
+        map(parse_with_property, |prop| vec![prop]),
+    ))
+    .parse(input)
+}
+
+/// "with base power and toughness N/M" — see [`parse_base_pt_designation`].
+pub fn parse_with_base_pt_designation(input: &str) -> OracleResult<'_, [FilterProp; 2]> {
+    preceded((tag("with"), space1), parse_base_pt_designation).parse(input)
+}
+
+/// CR 208.4 + CR 208.4b: "base power and toughness N/M" used as an OBJECT FILTER
+/// ("a creature you control with base power and toughness 2/2" — Duskana, the
+/// Rage Mother; "other creatures you control with base power and toughness 1/1"
+/// — Bess, Soul Nourisher; "tapped creatures you control with base power and
+/// toughness 4/3" — Andrios, Roaming Explorer). Per CR 208.4b the check sees the
+/// creature's P/T after characteristic-defining abilities (CR 613.4a) and
+/// setting effects (CR 613.4b) but ignores counters and modifying effects
+/// (CR 613.4c) — i.e. `PtValueScope::Base`.
+///
+/// Lowers to two exact base-scope comparisons, one per characteristic — the same
+/// two-prop conjunction the leading "N/M creature" designation emits for current
+/// P/T (`oracle_target::parse_leading_pt_designation`). The enclosing
+/// `TypedFilter.properties` list conjoins them, so no conjunction variant exists.
+///
+/// This is the FILTER form only. The P/T-SETTING form ("becomes/is a <type> with
+/// base power and toughness N/M") is owned by the animation and type-change
+/// parsers, which split on that phrase before any type phrase sees it. Distinct
+/// from [`parse_pt_comparison`]: a designation has no comparator tail and
+/// denotes two props.
+fn parse_base_pt_designation(input: &str) -> OracleResult<'_, [FilterProp; 2]> {
+    let (input, _) = tag("base power and toughness ").parse(input)?;
+    let (input, power) = parse_quantity_expr_number(input)?;
+    let (input, _) = tag("/").parse(input)?;
+    let (input, toughness) = parse_quantity_expr_number(input)?;
+    // Word boundary: "2/2s" or any alphanumeric continuation is not a designation.
+    let (input, _) = not(alphanumeric1).parse(input)?;
+    let exact_base = |stat, value| FilterProp::PtComparison {
+        stat,
+        scope: PtValueScope::Base,
+        comparator: Comparator::EQ,
+        value,
+    };
+    Ok((
+        input,
+        [
+            exact_base(PtStat::Power, power),
+            exact_base(PtStat::Toughness, toughness),
+        ],
+    ))
+}
+
 /// CR 113.1 + CR 113.3: an object with none of the four ability categories
 /// (spell, activated, triggered, static) — i.e. "no abilities". Narrow primitive
 /// shared by the target-suffix scanner (oracle_target.rs) and the search-library
@@ -285,6 +344,9 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
 /// - comparison tail: either the postfix `N or less` / `N or greater` form, or
 ///   the infix `less than [or equal to] N` / `greater than [or equal to] N`
 ///   form (resolving to LE/GE with an `Offset` for strict `<`/`>`).
+///
+/// The conjunctive designation "base power and toughness N/M" is not a
+/// comparison and is parsed by [`parse_base_pt_designation`].
 pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     // Optional distributive "each " qualifier (no semantic effect).
     let (input, _) = opt(tag("each ")).parse(input)?;
@@ -1100,6 +1162,102 @@ mod tests {
                 value: QuantityExpr::Fixed { value: 1 },
             }
         );
+    }
+
+    /// The two exact base-scope props a "base power and toughness N/M"
+    /// designation lowers to (CR 208.4b).
+    fn exact_base_pt(power: QuantityExpr, toughness: QuantityExpr) -> [FilterProp; 2] {
+        [
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Base,
+                comparator: Comparator::EQ,
+                value: power,
+            },
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Base,
+                comparator: Comparator::EQ,
+                value: toughness,
+            },
+        ]
+    }
+
+    /// CR 208.4b: the base-P/T designation lowers to one exact base-scope prop
+    /// per characteristic, for symmetric (Duskana 2/2) and asymmetric
+    /// (Andrios 4/3) values, and leaves the following predicate unconsumed.
+    #[test]
+    fn parse_base_pt_designation_symmetric_and_asymmetric() {
+        let (rest, props) = parse_base_pt_designation("base power and toughness 2/2").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            props,
+            exact_base_pt(
+                QuantityExpr::Fixed { value: 2 },
+                QuantityExpr::Fixed { value: 2 }
+            )
+        );
+
+        let (rest, props) = parse_with_base_pt_designation(
+            "with base power and toughness 4/3 have base power and toughness 16/9",
+        )
+        .unwrap();
+        assert_eq!(rest, " have base power and toughness 16/9");
+        assert_eq!(
+            props,
+            exact_base_pt(
+                QuantityExpr::Fixed { value: 4 },
+                QuantityExpr::Fixed { value: 3 }
+            )
+        );
+    }
+
+    /// CR 107.3: an X designation keeps X as a variable on both stats.
+    #[test]
+    fn parse_base_pt_designation_x() {
+        let x = || QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let (rest, props) = parse_base_pt_designation("base power and toughness x/x").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(props, exact_base_pt(x(), x()));
+    }
+
+    /// The designation must not swallow the P/T-setting "each equal to" form,
+    /// an alphanumeric continuation, or the single-stat comparison.
+    #[test]
+    fn parse_base_pt_designation_rejects_non_designations() {
+        // Positive reach-guard: the well-formed designation parses.
+        assert!(parse_base_pt_designation("base power and toughness 1/1").is_ok());
+
+        assert!(parse_base_pt_designation(
+            "base power and toughness each equal to the number of creatures you control"
+        )
+        .is_err());
+        assert!(parse_base_pt_designation("base power and toughness 2/2s").is_err());
+        assert!(parse_with_base_pt_designation("with base power 2").is_err());
+    }
+
+    /// `parse_with_properties` returns both props for the designation and the
+    /// single existing prop for every other "with" clause.
+    #[test]
+    fn parse_with_properties_arity() {
+        let (rest, props) = parse_with_properties("with base power and toughness 1/1").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            props,
+            Vec::from(exact_base_pt(
+                QuantityExpr::Fixed { value: 1 },
+                QuantityExpr::Fixed { value: 1 }
+            ))
+        );
+
+        let (rest, props) = parse_with_properties("with base power 1").unwrap();
+        assert_eq!(rest, "");
+        let (_, single) = parse_with_property("with base power 1").unwrap();
+        assert_eq!(props, vec![single]);
     }
 
     #[test]

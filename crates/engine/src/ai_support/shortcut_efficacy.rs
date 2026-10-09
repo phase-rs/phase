@@ -674,6 +674,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         // See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
         face_down_in_exile: _,
+        granting_object: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);

@@ -33,7 +33,7 @@ use crate::types::game_state::{
     BattlefieldDepartureSourceContext, CastOccurrence, DamageRecord, GameState,
     LinkedExileSnapshot, TargetSelectionConstraint, TriggerSourceContext,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -86,9 +86,39 @@ pub struct QuantityContext {
     /// other context, where `EventContextAmount` keeps its trigger/effect
     /// cascade.
     pub event_amount: Option<i32>,
+    /// CR 201.5a: the granter stamped on the definition this quantity is read for,
+    /// when no resolving ability is in scope to carry it.
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl QuantityContext {
+    /// A context naming only its source; every other binding is absent.
+    pub fn new(source: ObjectId) -> Self {
+        Self {
+            entering: None,
+            source,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            spell: None,
+            event_amount: None,
+            granting_object: None,
+        }
+    }
+
+    /// CR 201.5a + CR 603.4: a context read for a triggered source carries that
+    /// source's definition granter stamp; with no source it names `ObjectId(0)`.
+    pub fn for_trigger_source(trigger_source: Option<&TriggerSourceContext>) -> Self {
+        Self {
+            trigger_source: trigger_source.cloned(),
+            granting_object: trigger_source.and_then(|source| source.granting_object),
+            ..Self::new(
+                trigger_source.map_or(ObjectId(0), |source| source.identity.reference.object_id),
+            )
+        }
+    }
+
     /// Object to resolve "self"-scoped spell refs (e.g., colors spent to cast)
     /// against: the entering object when in ETB scope, else the static source.
     fn self_object(&self) -> ObjectId {
@@ -350,14 +380,8 @@ fn visit_characteristic_leaf<'s>(
                 }
             }
             ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                for player in scoped_players(state, scope, ctx, controller) {
-                    let zone_ids = match zone {
-                        ZoneRef::Graveyard => &player.graveyard,
-                        ZoneRef::Library => &player.library,
-                        ZoneRef::Hand => &player.hand,
-                        ZoneRef::Exile => unreachable!(),
-                    };
-                    for &obj_id in zone_ids {
+                for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
+                    for &obj_id in zone_container(state, zone, player) {
                         if let Some(view) = characteristic_view_for_object(state, obj_id) {
                             visit(CharacteristicMember::Object(obj_id), view, false);
                         }
@@ -641,14 +665,8 @@ pub(crate) fn source_defending_player_for_context_for_test(
     source_defending_player_for_context(
         state,
         &QuantityContext {
-            entering: None,
-            source,
             trigger_source: trigger_source.cloned(),
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
+            ..QuantityContext::new(source)
         },
     )
 }
@@ -680,21 +698,7 @@ pub fn resolve_quantity(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
-    resolve_quantity_with_ctx(
-        state,
-        expr,
-        controller,
-        QuantityContext {
-            entering: None,
-            source: source_id,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        },
-    )
+    resolve_quantity_with_ctx(state, expr, controller, QuantityContext::new(source_id))
 }
 
 /// Resolves a quantity only when its value is available from the present source
@@ -823,6 +827,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
         face_down_in_exile: _,
+        granting_object: _,
     } = definition;
 
     declares_return_result.is_none()
@@ -956,6 +961,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
         face_down_in_exile: _,
+        granting_object: _,
     } = definition
     else {
         return false;
@@ -1355,6 +1361,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         mana_ability_produced: _,
         clash_result: _,
         room_door: _,
+        granting_object: _,
     } = definition
     else {
         return false;
@@ -1427,6 +1434,7 @@ pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefiniti
         bypass_beneficiary: None,
         protection_does_not_remove: None,
         room_door: None,
+        granting_object: None,
     } = definition
     else {
         // This is intentionally a positive proof over every direct static
@@ -1648,14 +1656,8 @@ pub fn resolve_quantity_with_recipient(
         expr,
         controller,
         QuantityContext {
-            entering: None,
-            source: source_id,
-            trigger_source: None,
             recipient: Some(recipient_id),
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
+            ..QuantityContext::new(source_id)
         },
     )
 }
@@ -1676,14 +1678,8 @@ pub fn resolve_quantity_with_spell(
         expr,
         controller,
         QuantityContext {
-            entering: None,
-            source: source_id,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
             spell: Some(spell_id),
+            ..QuantityContext::new(source_id)
         },
     )
 }
@@ -1842,7 +1838,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
 pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExpr) -> bool {
     fn scope_is_resolution_only(scope: ObjectScope) -> bool {
         match scope {
-            ObjectScope::Source | ObjectScope::Recipient => false,
+            // CR 201.5a: a bound incarnation carries its own identity, so a static CDA may read it.
+            ObjectScope::Source | ObjectScope::Recipient | ObjectScope::SpecificObject { .. } => {
+                false
+            }
             ObjectScope::Target
             | ObjectScope::EventSource
             | ObjectScope::EventTarget
@@ -1860,6 +1859,8 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // the ability's own carried context during resolution, never as a
             // static CDA read.
             | ObjectScope::ChainRootTarget
+            // CR 201.5a: never produced in these characteristic refs; a stamped read resolves only with its ability.
+            | ObjectScope::GrantingObject
             // CR 120.1: the per-iteration damage source of an
             // `EachSourceDealsDamage` batch is bound per batch member only at
             // resolution time, never as a static CDA read.
@@ -1985,9 +1986,13 @@ fn resolution_only_scope_referent_present(
     ability: &ResolvedAbility,
 ) -> bool {
     match scope {
-        // Not resolution-only — always bound to the ability's own permanent /
-        // recipient. Never reached via the classifier, answered `true` for safety.
-        ObjectScope::Source | ObjectScope::Recipient => true,
+        // Not resolution-only — `Source` and `Recipient` are always bound to the
+        // ability's own permanent / recipient. Never reached via the classifier,
+        // answered `true` for safety. A bound incarnation's readers own their
+        // live-or-LKI ladder.
+        ObjectScope::Source | ObjectScope::Recipient | ObjectScope::SpecificObject { .. } => true,
+        // CR 201.5a: present once stamped, like the bound incarnation it names.
+        ObjectScope::GrantingObject => ability.context.granting_object.is_some(),
         ObjectScope::Target => targets.iter().any(|t| matches!(t, TargetRef::Object(_))),
         ObjectScope::EventSource => event_source_referent_present(state, Some(ability)),
         ObjectScope::EventTarget => {
@@ -2067,14 +2072,9 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
         ability: &ResolvedAbility,
     ) -> bool {
         let ctx = QuantityContext {
-            entering: None,
-            source: ability.source_id,
             trigger_source: ability.trigger_source.clone(),
-            recipient: None,
             scoped_player: ability.scoped_player,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
+            ..QuantityContext::new(ability.source_id)
         };
         !resolution_only_scope_referent_present(state, scope, ctx, &ability.targets, ability)
     }
@@ -2357,6 +2357,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -3341,16 +3342,8 @@ pub(crate) fn resolve_quantity_for_trigger_check(
     let scoped_player =
         resolution_event.and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
     let ctx = QuantityContext {
-        entering: None,
-        source: source_context
-            .map(|source| source.identity.reference.object_id)
-            .unwrap_or(ObjectId(0)),
-        trigger_source: source_context.cloned(),
-        recipient: None,
         scoped_player,
-        damage_source: None,
-        event_amount: None,
-        spell: None,
+        ..QuantityContext::for_trigger_source(source_context)
     };
 
     // Fast path: when current_trigger_event is already set (resolution-time
@@ -3441,16 +3434,8 @@ pub(crate) fn resolve_player_scope_for_trigger_check(
     }
 
     let ctx = QuantityContext {
-        entering: None,
-        source: source_context
-            .map(|source| source.identity.reference.object_id)
-            .unwrap_or(ObjectId(0)),
-        trigger_source: source_context.cloned(),
-        recipient: None,
         scoped_player,
-        damage_source: None,
-        event_amount: None,
-        spell: None,
+        ..QuantityContext::for_trigger_source(source_context)
     };
 
     match event {
@@ -3771,6 +3756,7 @@ fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
         damage_source: None,
         event_amount: None,
         spell: None,
+        granting_object: None,
     }
 }
 
@@ -3827,14 +3813,10 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
             qty,
             controller,
             QuantityContext {
-                entering: None,
-                source: ability.source_id,
                 trigger_source: ability.trigger_source.clone(),
                 recipient: Some(recipient_id),
                 scoped_player: ability.scoped_player,
-                damage_source: None,
-                event_amount: None,
-                spell: None,
+                ..QuantityContext::new(ability.source_id)
             },
             &ability.targets,
             ability.chosen_x,
@@ -3866,14 +3848,10 @@ pub(crate) fn resolve_quantity_with_targets_and_damage_source(
             qty,
             controller,
             QuantityContext {
-                entering: None,
-                source: ability.source_id,
                 trigger_source: ability.trigger_source.clone(),
-                recipient: None,
                 scoped_player: ability.scoped_player,
                 damage_source: Some(damage_source),
-                event_amount: None,
-                spell: None,
+                ..QuantityContext::new(ability.source_id)
             },
             &ability.targets,
             ability.chosen_x,
@@ -3903,16 +3881,7 @@ pub fn resolve_quantity_with_targets_slice(
             state,
             qty,
             controller,
-            QuantityContext {
-                entering: None,
-                source: source_id,
-                trigger_source: None,
-                recipient: None,
-                scoped_player: None,
-                damage_source: None,
-                event_amount: None,
-                spell: None,
-            },
+            QuantityContext::new(source_id),
             targets,
             None,
             None,
@@ -3934,14 +3903,16 @@ pub fn resolve_quantity_with_targets_slice(
 /// This is the no-target case of [`resolve_quantity_scoped_with_targets`]: it
 /// delegates with an empty `targets` slice so there is a single authoritative
 /// scoped resolver. Callers with no ability target(s) (the condition/restriction
-/// paths in `restrictions.rs`) use this wrapper.
+/// paths in `restrictions.rs`) use this wrapper, passing the granter stamped on
+/// the definition they evaluate (CR 201.5a).
 pub(crate) fn resolve_quantity_scoped(
     state: &GameState,
     expr: &QuantityExpr,
     source_id: ObjectId,
     scope_player: PlayerId,
+    granting_object: Option<ObjectIncarnationRef>,
 ) -> i32 {
-    resolve_quantity_scoped_with_targets(state, expr, source_id, scope_player, &[])
+    resolve_quantity_scoped_in(state, expr, source_id, scope_player, &[], granting_object)
 }
 
 /// Resolve a per-player `DamageEachPlayer` quantity that also references the
@@ -3973,6 +3944,17 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
     scope_player: PlayerId,
     targets: &[TargetRef],
 ) -> i32 {
+    resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None)
+}
+
+fn resolve_quantity_scoped_in(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source_id: ObjectId,
+    scope_player: PlayerId,
+    targets: &[TargetRef],
+    granting_object: Option<ObjectIncarnationRef>,
+) -> i32 {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
     let ability_controller = state
@@ -3988,14 +3970,9 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
             qty,
             ability_controller,
             QuantityContext {
-                entering: None,
-                source: source_id,
-                trigger_source: None,
-                recipient: None,
                 scoped_player: Some(scope_player),
-                damage_source: None,
-                event_amount: None,
-                spell: None,
+                granting_object,
+                ..QuantityContext::new(source_id)
             },
             targets,
             None,
@@ -4004,7 +3981,14 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
         // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
         // inside a composite (e.g. the `right` operand of `Difference`).
         other => fold_compose(other, |inner| {
-            resolve_quantity_scoped_with_targets(state, inner, source_id, scope_player, targets)
+            resolve_quantity_scoped_in(
+                state,
+                inner,
+                source_id,
+                scope_player,
+                targets,
+                granting_object,
+            )
         }),
     }
 }
@@ -4562,7 +4546,7 @@ fn resolve_ref(
             // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
             // the current recipient while ControllerRef::You stays on `controller`.
             fc.scoped_iteration_player = ctx.scoped_player;
-            fc
+            fc.with_granting_object(ctx.granting_object)
         }
     };
     filter_ctx.recipient_id = ctx.recipient;
@@ -4650,11 +4634,16 @@ fn resolve_ref(
                     .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
             }),
         // CR 404: cards in the scoped player(s)' graveyard.
-        QuantityRef::GraveyardSize { player: scope } => {
-            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
-                usize_to_i32_saturating(p.graveyard.len())
-            })
-        }
+        QuantityRef::GraveyardSize { player: scope } => resolve_per_zone_scalar(
+            state,
+            Some(Zone::Graveyard),
+            scope,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |p| usize_to_i32_saturating(state.graveyard_of(p.id).len()),
+        ),
         // CR 810.9a + CR 810.4 + CR 904.5: current shared-resource life
         // (team total in 2HG, individual total elsewhere) minus the selected
         // controller's rules starting total. Single controller bind — no
@@ -5152,7 +5141,8 @@ fn resolve_ref(
                     // any `controller: You` clause inside `filter` read `p`.
                     let pctx = match ability {
                         Some(a) => FilterContext::from_ability_with_controller(a, p.id),
-                        None => FilterContext::from_source_with_controller(source_id, p.id),
+                        None => FilterContext::from_source_with_controller(source_id, p.id)
+                            .with_granting_object(ctx.granting_object),
                     };
                     usize_to_i32_saturating(
                         zone_ids
@@ -5266,8 +5256,10 @@ fn resolve_ref(
                     .iter()
                     .find(|p| p.id == pid)
                     .map_or(0, |p| match zone {
-                        ZoneRef::Library => usize_to_i32_saturating(p.library.len()),
-                        ZoneRef::Graveyard => usize_to_i32_saturating(p.graveyard.len()),
+                        ZoneRef::Library => usize_to_i32_saturating(state.library_of(p.id).len()),
+                        ZoneRef::Graveyard => {
+                            usize_to_i32_saturating(state.graveyard_of(p.id).len())
+                        }
                         ZoneRef::Hand => usize_to_i32_saturating(p.hand.len()),
                         ZoneRef::Exile => usize_to_i32_saturating(
                             state
@@ -5421,14 +5413,8 @@ fn resolve_ref(
             // Per-player zones (graveyard, library)
             match zone {
                 ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                    for player in scoped_players(state, scope, ctx, controller) {
-                        let zone_ids = match zone {
-                            ZoneRef::Graveyard => &player.graveyard,
-                            ZoneRef::Library => &player.library,
-                            ZoneRef::Hand => &player.hand,
-                            ZoneRef::Exile => unreachable!(),
-                        };
-                        for &obj_id in zone_ids {
+                    for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
+                        for &obj_id in zone_container(state, zone, player) {
                             if matches_zone_card_filter(
                                 state,
                                 obj_id,
@@ -5501,7 +5487,8 @@ fn resolve_ref(
                         AggregateFunction::Sum => total,
                         // An absent table means the producer published NO per-player
                         // breakdown: only `Effect::Discard | DiscardCard |
-                        // ChangeZoneAll` populate it; every other producer takes the
+                        // ChangeZoneAll` and the shared-library simultaneous Draw
+                        // dealer populate it; every other producer takes the
                         // `None` arm in `install_previous_effect_counts_by_player`,
                         // which clears it. For a SINGLE-subject producer the scalar
                         // IS the extremum, so the fallback is exact. For a
@@ -6666,6 +6653,55 @@ fn scoped_players<'a>(
     })
 }
 
+/// CR 400.1 + CR 404.1: the seat whose container a `zone` read of `player` lands in;
+/// two seats with equal keys read one container. `None` is a scalar the player holds itself.
+fn zone_dedup_key(state: &GameState, zone: Option<Zone>, player: PlayerId) -> PlayerId {
+    zone.map_or(player, |zone| state.zone_storage_seat(zone, player))
+}
+
+/// `players` with seats that read the same `zone` container collapsed to the first seen,
+/// so an aggregate over a shared pile counts it once.
+fn distinct_zone_holders<'a>(
+    state: &'a GameState,
+    zone: Option<Zone>,
+    players: impl IntoIterator<Item = &'a crate::types::player::Player>,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    let mut seen = HashSet::new();
+    players
+        .into_iter()
+        .filter(move |p| seen.insert(zone_dedup_key(state, zone, p.id)))
+}
+
+/// `scoped_players` for a `CountScope` read of a per-player zone container.
+fn scoped_zone_holders<'a>(
+    state: &'a GameState,
+    zone: &ZoneRef,
+    scope: &'a CountScope,
+    ctx: QuantityContext,
+    controller: PlayerId,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    distinct_zone_holders(
+        state,
+        Some(zone.zone()),
+        scoped_players(state, scope, ctx, controller),
+    )
+}
+
+/// CR 400.1: `player`'s `zone` container resolved through the storage authority.
+/// Exile is a global zone and never reaches here.
+fn zone_container<'a>(
+    state: &'a GameState,
+    zone: &ZoneRef,
+    player: &'a crate::types::player::Player,
+) -> &'a im::Vector<ObjectId> {
+    match zone {
+        ZoneRef::Graveyard => state.graveyard_of(player.id),
+        ZoneRef::Library => state.library_of(player.id),
+        ZoneRef::Hand => &player.hand,
+        ZoneRef::Exile => unreachable!("exile is read by owner predication, not per player"),
+    }
+}
+
 /// CR 608.2 + CR 109.5: Owner-axis owner-match for `CountScope` against a
 /// known object owner. Mirrors `scoped_players` for global zones (exile)
 /// where iteration over players is replaced by per-object owner predication.
@@ -7069,7 +7105,13 @@ fn object_for_scope<'a>(
         // ability and therefore unavailable to this ability-free helper; it is
         // resolved in `resolve_counters_on_scope`.
         | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
         | ObjectScope::AmassedArmy => None,
+        // CR 400.7: only the bound incarnation itself, in whatever zone it is.
+        ObjectScope::SpecificObject { object } => state
+            .objects
+            .get(&object.object_id)
+            .filter(|o| ObjectIncarnationRef::from_object(o) == object),
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
         ObjectScope::BatchSource => ctx.damage_source.and_then(|id| state.objects.get(&id)),
@@ -7150,7 +7192,12 @@ pub(crate) fn object_id_for_scope(
         // CR 601.2c: identity is `ability.context.chain_root_targets` — see the
         // matching arm in `object_for_scope`.
         | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
         | ObjectScope::AmassedArmy => None,
+        // CR 400.7: live only; a departed incarnation has no current id.
+        ObjectScope::SpecificObject { object } => {
+            object.is_current(state).then_some(object.object_id)
+        }
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
         ObjectScope::BatchSource => ctx.damage_source,
@@ -7545,6 +7592,16 @@ fn resolve_counters_on_live_or_lki_scope(
         .unwrap_or(0)
 }
 
+/// CR 201.5a: the incarnation stamped on the definition read — the resolving
+/// ability's when one is in scope, else the context's.
+fn granter_scope(ability: Option<&ResolvedAbility>, ctx: &QuantityContext) -> Option<ObjectScope> {
+    match ability {
+        Some(ability) => ability.context.granting_object,
+        None => ctx.granting_object,
+    }
+    .map(|object| ObjectScope::SpecificObject { object })
+}
+
 fn resolve_counters_on_scope(
     state: &GameState,
     scope: ObjectScope,
@@ -7660,6 +7717,25 @@ fn resolve_counters_on_scope(
                     .unwrap_or(0)
             })
             .unwrap_or(0),
+        // CR 201.5a: the stamped granter; unbound, the symbol reads the ability's source (CR 113.7).
+        ObjectScope::GrantingObject => resolve_counters_on_scope(
+            state,
+            granter_scope(ability, &ctx).unwrap_or(ObjectScope::Source),
+            ctx,
+            targets,
+            ability,
+            counter_type,
+        ),
+        // CR 400.7 + CR 608.2h + CR 122.2: the bound incarnation's counters; once it has
+        // changed zones its counters ceased to exist, so only a resolution reads its LKI.
+        ObjectScope::SpecificObject { object } => read_specific_object(
+            state,
+            object,
+            ability,
+            &|o| Some(counter_count_from_map(&o.counters, counter_type)),
+            &|l| Some(counter_count_from_map(&l.counters, counter_type)),
+        )
+        .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
             .map(|obj| counter_count_from_map(&obj.counters, counter_type))
             .unwrap_or(0),
@@ -7903,6 +7979,37 @@ where
             None
         }
     })
+}
+
+/// CR 400.7 + CR 608.2h: reads the bound incarnation live wherever it is, else its LKI only for
+/// a resolution that carries its ability.
+fn read_specific_object<F, G>(
+    state: &GameState,
+    object: ObjectIncarnationRef,
+    ability: Option<&ResolvedAbility>,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    state
+        .objects
+        .get(&object.object_id)
+        .filter(|o| ObjectIncarnationRef::from_object(o) == object)
+        .and_then(obj_extract)
+        .or_else(|| {
+            ability.and_then(|_| {
+                read_object_pt_by_id_for_incarnation(
+                    state,
+                    object.object_id,
+                    Some(object.incarnation),
+                    obj_extract,
+                    lki_extract,
+                )
+            })
+        })
 }
 
 fn trigger_event_source_identity(
@@ -8240,6 +8347,22 @@ where
         // `ability.context.chain_root_targets`; `game/coverage.rs` reports these
         // characteristic readers as `Unhandled` until then.
         ObjectScope::ChainRootTarget => 0,
+        // CR 201.5a: the stamped granter's P/T; unbound, no referent.
+        ObjectScope::GrantingObject => granter_scope(ability, &ctx).map_or(0, |scope| {
+            resolve_object_pt(
+                state,
+                scope,
+                ctx,
+                targets,
+                ability,
+                obj_extract,
+                lki_extract,
+            )
+        }),
+        // CR 400.7 + CR 608.2h: the bound incarnation's P/T, LKI only while resolving.
+        ObjectScope::SpecificObject { object } => {
+            read_specific_object(state, object, ability, &obj_extract, &lki_extract).unwrap_or(0)
+        }
         // CR 120.1 + CR 208.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
         // damage equal to ITS power"). Guarded live-then-LKI read (a batch
@@ -8557,6 +8680,23 @@ fn resolve_object_mana_value(
         // the `resolve_counters_on_scope` arm against
         // `ability.context.chain_root_targets`.
         ObjectScope::ChainRootTarget => 0,
+        // CR 201.5a: the stamped granter's mana value; unbound, no referent.
+        ObjectScope::GrantingObject => granter_scope(ability, &ctx).map_or(0, |scope| {
+            resolve_object_mana_value(state, scope, ctx, targets, ability)
+        }),
+        // CR 400.7 + CR 608.2h: the bound incarnation's mana value, LKI only while resolving.
+        ObjectScope::SpecificObject { object } => read_specific_object(
+            state,
+            object,
+            ability,
+            &|o| {
+                Some(u32_to_i32_saturating(
+                    o.mana_cost.mana_value_with_x(o.zone, o.cost_x_paid),
+                ))
+            },
+            &|l| Some(u32_to_i32_saturating(l.mana_value)),
+        )
+        .unwrap_or(0),
         // CR 120.1 + CR 202.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN mana value. Live object
         // first, LKI fallback (mirrors the `EventSource` arm), so a batch member
@@ -8661,6 +8801,28 @@ fn resolve_per_player_scalar<F>(
     ctx: QuantityContext,
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
+    extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    resolve_per_zone_scalar(
+        state, None, scope, controller, ctx, targets, ability, extract,
+    )
+}
+
+/// `resolve_per_player_scalar` for a scalar read from a zone container: with `Some(zone)`,
+/// the `Opponent` / `AllPlayers` population counts seats that read one shared container once
+/// (CR 400.1 as modified by the format's shared-zone axis).
+#[allow(clippy::too_many_arguments)]
+fn resolve_per_zone_scalar<F>(
+    state: &GameState,
+    zone: Option<Zone>,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
     mut extract: F,
 ) -> i32
 where
@@ -8720,10 +8882,14 @@ where
         // eliminated player's larger hand must not out-rank the live
         // leader).
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
-            state
-                .players
-                .iter()
-                .filter(|p| p.id != controller && !p.is_eliminated),
+            distinct_zone_holders(
+                state,
+                zone,
+                state
+                    .players
+                    .iter()
+                    .filter(|p| p.id != controller && !p.is_eliminated),
+            ),
             *aggregate,
             &mut extract,
         ),
@@ -8735,10 +8901,14 @@ where
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
             aggregate_over_players(
-                state
-                    .players
-                    .iter()
-                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
+                distinct_zone_holders(
+                    state,
+                    zone,
+                    state
+                        .players
+                        .iter()
+                        .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
+                ),
                 *aggregate,
                 &mut extract,
             )
@@ -8943,14 +9113,8 @@ pub(crate) fn defending_player_for_quantity_context_for_test(
     defending_player_for_quantity_context(
         state,
         QuantityContext {
-            entering: None,
-            source,
             trigger_source: trigger_source.cloned(),
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
+            ..QuantityContext::new(source)
         },
     )
 }
@@ -9317,6 +9481,7 @@ pub(crate) fn resolve_player_count(
         );
     }
 
+    let mut counted_containers = HashSet::new();
     usize_to_i32_saturating(
         state
             .players
@@ -9486,12 +9651,13 @@ pub(crate) fn resolve_player_count(
                             .last_vote_ballots
                             .iter()
                             .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                        // CR 109.4 + CR 108.3 + CR 608.2c: the parent-object-target
-                        // anchors and the resolution-scoped chosen-player anchor
-                        // have no single-player-count meaning here (these resolve
+                        // CR 109.4 + CR 108.3 + CR 601.2a + CR 608.2c: the parent-object-target
+                        // anchors, the granter caster and the resolution-scoped chosen-player
+                        // anchor have no single-player-count meaning here (these resolve
                         // to a single anchored player, not a counted set).
                         PlayerFilter::ParentObjectTargetController
                         | PlayerFilter::ParentObjectTargetOwner
+                        | PlayerFilter::GrantingObjectCaster
                         | PlayerFilter::ChosenPlayer { .. } => false,
                         // CR 109.4 + CR 109.5: "each [player class] who controls
                         // [comparator] [count] [filter]" — count candidates that
@@ -9546,7 +9712,11 @@ pub(crate) fn resolve_player_count(
                                     state, p, controller, attr,
                                 )
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
-                            }
+                            } && counted_containers.insert(zone_dedup_key(
+                                state,
+                                player_attribute_container_zone(attr),
+                                p.id,
+                            ))
                         }
                         // CR 608.2c + CR 608.2h + CR 109.4: "for each opponent
                         // who controlled a creature returned this way" — count
@@ -9576,6 +9746,15 @@ pub(crate) fn resolve_player_count(
             })
             .count(),
     )
+}
+
+/// The zone whose container a `PlayerAttribute` scalar reads, or `None` for a scalar the
+/// candidate holds itself. "Each graveyard with N or more cards" counts a shared pile once.
+fn player_attribute_container_zone(attr: &QuantityRef) -> Option<Zone> {
+    match attr {
+        QuantityRef::GraveyardSize { .. } => Some(Zone::Graveyard),
+        _ => None,
+    }
 }
 
 /// CR 603.2c + CR 608.2c: a resolving triggered ability that says "for each
@@ -11697,13 +11876,7 @@ mod tests {
                 PlayerId(0),
                 QuantityContext {
                     entering: Some(entering),
-                    source: static_source,
-                    trigger_source: None,
-                    recipient: None,
-                    scoped_player: None,
-                    damage_source: None,
-                    event_amount: None,
-                    spell: None,
+                    ..QuantityContext::new(static_source)
                 },
             ),
             1
@@ -19538,16 +19711,7 @@ mod tests {
             caster: PlayerId(0),
             turn_journal_index: 1,
         });
-        let ctx = QuantityContext {
-            entering: None,
-            source,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        };
+        let ctx = QuantityContext::new(source);
         assert_eq!(
             resolve_ref(
                 &state,
@@ -19643,16 +19807,7 @@ mod tests {
                 &state,
                 &qty,
                 PlayerId(1),
-                QuantityContext {
-                    entering: None,
-                    source,
-                    trigger_source: None,
-                    recipient: None,
-                    scoped_player: None,
-                    damage_source: None,
-                    event_amount: None,
-                    spell: None,
-                },
+                QuantityContext::new(source),
                 &[],
                 None,
                 Some(&ability),
@@ -20052,14 +20207,8 @@ mod tests {
                 &expr,
                 PlayerId(0),
                 QuantityContext {
-                    entering: None,
-                    source: ObjectId(1),
-                    trigger_source: None,
-                    recipient: None,
                     scoped_player: Some(scoped_player),
-                    damage_source: None,
-                    event_amount: None,
-                    spell: None,
+                    ..QuantityContext::new(ObjectId(1))
                 },
             ),
             9,
@@ -22860,16 +23009,7 @@ mod tests {
             "fixture reach-guard: the second departure must overwrite the id-keyed LKI cache with the later incarnation's value"
         );
 
-        let ctx = QuantityContext {
-            entering: None,
-            source: ObjectId(99),
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        };
+        let ctx = QuantityContext::new(ObjectId(99));
         let got =
             resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
 
@@ -22929,16 +23069,7 @@ mod tests {
         );
         ability.set_amassed_army_object_recursive(snapshot);
 
-        let ctx = QuantityContext {
-            entering: None,
-            source: ObjectId(99),
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        };
+        let ctx = QuantityContext::new(ObjectId(99));
         let got =
             resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
 
@@ -22993,16 +23124,7 @@ mod tests {
     }
 
     fn chain_root_ctx(spell: ObjectId) -> QuantityContext {
-        QuantityContext {
-            entering: None,
-            source: spell,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            spell: None,
-            event_amount: None,
-        }
+        QuantityContext::new(spell)
     }
 
     /// P1a — CR 702.12b + CR 608.2h: an indestructible chain-root target that was
@@ -23793,16 +23915,7 @@ mod tests {
             dealer,
             PlayerId(0),
         );
-        let ctx = QuantityContext {
-            entering: None,
-            source: dealer,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        };
+        let ctx = QuantityContext::new(dealer);
 
         assert!(
             damage_source_controller_matches(
@@ -23827,5 +23940,172 @@ mod tests {
             "P0 controls the DEALER (CR 120.1) and must NOT match; matching here is the \
              dealer-derived binding this reference replaces"
         );
+    }
+}
+
+#[cfg(test)]
+mod dandan_scoped_zone_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{AggregateFunction, Comparator, PlayerRelation};
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::ZoneChangeRecord;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn dandan() -> GameState {
+        GameState::new(FormatConfig::dandan(), 2, 1)
+    }
+
+    fn standard() -> GameState {
+        GameState::new_two_player(1)
+    }
+
+    fn fill_graveyard(state: &mut GameState, owner: PlayerId, count: u64) {
+        for index in 0..count {
+            create_object(
+                state,
+                CardId(index),
+                owner,
+                format!("Card {index}"),
+                Zone::Graveyard,
+            );
+        }
+    }
+
+    fn holders(state: &GameState, zone: Option<Zone>) -> usize {
+        distinct_zone_holders(state, zone, state.players.iter()).count()
+    }
+
+    /// CR 400.1 as modified by a shared-zone format: seats reading one container are one holder.
+    #[test]
+    fn seats_reading_one_container_are_one_holder() {
+        let shared = dandan();
+        assert_eq!(holders(&shared, Some(Zone::Graveyard)), 1);
+        assert_eq!(holders(&shared, Some(Zone::Library)), 1);
+        assert_eq!(
+            holders(&shared, None),
+            2,
+            "a scalar the player holds itself"
+        );
+        assert_eq!(holders(&shared, Some(Zone::Hand)), 2, "hands are per seat");
+        assert_eq!(holders(&standard(), Some(Zone::Graveyard)), 2);
+    }
+
+    fn graveyard_size(scope: PlayerScope) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::GraveyardSize { player: scope },
+        }
+    }
+
+    fn all_players(aggregate: AggregateFunction) -> PlayerScope {
+        PlayerScope::AllPlayers {
+            aggregate,
+            exclude: None,
+        }
+    }
+
+    /// The `Sum` fold has no supported card; this row guards the keyed population directly.
+    #[test]
+    fn graveyard_aggregates_count_the_shared_pile_once() {
+        let mut shared = dandan();
+        fill_graveyard(&mut shared, P0, 5);
+        let mut split = standard();
+        fill_graveyard(&mut split, P0, 5);
+        fill_graveyard(&mut split, P1, 3);
+        for (aggregate, shared_value, split_value) in [
+            (AggregateFunction::Sum, 5, 8),
+            (AggregateFunction::Max, 5, 5),
+            (AggregateFunction::Min, 5, 3),
+        ] {
+            let expr = graveyard_size(all_players(aggregate));
+            assert_eq!(
+                resolve_quantity(&shared, &expr, P1, ObjectId(1)),
+                shared_value,
+                "{aggregate:?} over the pile"
+            );
+            assert_eq!(
+                resolve_quantity(&split, &expr, P1, ObjectId(1)),
+                split_value,
+                "{aggregate:?} over two graveyards"
+            );
+        }
+        let opponents = graveyard_size(PlayerScope::Opponent {
+            aggregate: AggregateFunction::Sum,
+        });
+        assert_eq!(resolve_quantity(&shared, &opponents, P1, ObjectId(1)), 5);
+        assert_eq!(resolve_quantity(&split, &opponents, P1, ObjectId(1)), 5);
+    }
+
+    fn graveyard_power_leaving_this_turn(state: &GameState, owner: PlayerId) -> i32 {
+        let mut state = state.clone();
+        state.zone_changes_this_turn.push_back(ZoneChangeRecord {
+            owner,
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(50), Some(Zone::Graveyard), Zone::Hand)
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Graveyard),
+                to: Some(Zone::Hand),
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ])),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        resolve_quantity(&state, &expr, P0, ObjectId(1))
+    }
+
+    /// "Your graveyard" is the shared pile, so a card leaving it left every seat's graveyard.
+    #[test]
+    fn zone_change_aggregate_from_the_shared_graveyard_claims_the_pile() {
+        let shared = dandan();
+        assert_eq!(graveyard_power_leaving_this_turn(&shared, P0), 3, "reach");
+        assert_eq!(graveyard_power_leaving_this_turn(&shared, P1), 3);
+        let split = standard();
+        assert_eq!(graveyard_power_leaving_this_turn(&split, P0), 3, "reach");
+        assert_eq!(graveyard_power_leaving_this_turn(&split, P1), 0);
+    }
+
+    fn graveyards_with_seven(state: &GameState, relation: PlayerRelation) -> i32 {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation,
+                    attr: Box::new(QuantityRef::GraveyardSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+            },
+        };
+        resolve_quantity(state, &expr, P0, ObjectId(1))
+    }
+
+    /// "Each graveyard with seven or more cards" counts the shared pile once, whichever
+    /// relation selects the candidates.
+    #[test]
+    fn graveyards_with_n_cards_counts_a_shared_pile_once() {
+        let mut shared = dandan();
+        fill_graveyard(&mut shared, P1, 8);
+        assert_eq!(graveyards_with_seven(&shared, PlayerRelation::All), 1);
+        assert_eq!(graveyards_with_seven(&shared, PlayerRelation::Opponent), 1);
+        assert_eq!(
+            graveyards_with_seven(&shared, PlayerRelation::Controller),
+            1
+        );
+
+        let mut split = standard();
+        fill_graveyard(&mut split, P0, 8);
+        fill_graveyard(&mut split, P1, 8);
+        assert_eq!(graveyards_with_seven(&split, PlayerRelation::All), 2);
+        assert_eq!(graveyards_with_seven(&split, PlayerRelation::Opponent), 1);
     }
 }

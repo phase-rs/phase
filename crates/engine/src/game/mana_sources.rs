@@ -1029,10 +1029,7 @@ pub(crate) fn activate_mana_source_option_with_output(
         )
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
         debug_assert!(tapped, "preflighted land tap must transition status");
-        events.push(GameEvent::PermanentTapped {
-            object_id: option.object_id,
-            caused_by: None,
-        });
+        events.push(GameEvent::permanent_tapped(state, option.object_id, None));
         // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
         // intrinsic mana ability; observe its triggers at that boundary.
         let activation_event = super::casting_targets::emit_ability_activated(

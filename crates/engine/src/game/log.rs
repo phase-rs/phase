@@ -2784,6 +2784,7 @@ mod tests {
                 target: TargetRef::Object(entry),
                 source_id: countered_by,
                 source_controller: PlayerId(1),
+                targeter: None,
             },
             GameEvent::SpellCountered {
                 object_id: entry,
@@ -3502,6 +3503,7 @@ mod tests {
                 to: *to,
                 destination_position: 0,
                 owner: record.owner,
+                rebound_from: None,
                 entry_timestamp: None,
                 turn_zone_change_index: record.turn_zone_change_index,
                 zone_change_record: (**record).clone(),

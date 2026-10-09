@@ -34,16 +34,20 @@ import {
   getBoardChoiceView,
   getAllOpponentIds,
   getOpponentIds,
+  getPlayerZoneIds,
   getSeatCount,
+  getSharedPileHolder,
   getVisibleBoardPlayerIds,
   getWaitingForClickTargetRefs,
   getWaitingForObjectChoiceIds,
   getWaitingForPlayerChoiceIds,
+  getZoneViewerPile,
   isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
   isSplitBoardActive,
   resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
+  resolvePileSeat,
   shouldRenderFocusedOpponentTopRow,
 } from "../gameStateView";
 
@@ -481,6 +485,39 @@ describe("getBoardChoiceView", () => {
       type: "SaddleMount",
       data: { mount_id: 40, creature_ids: [10] },
     });
+  });
+
+  it("offers cancel on the SaddleMount board choice", () => {
+    const choice = getBoardChoiceView({
+      type: "SaddleMount",
+      data: {
+        player: 0,
+        mount_id: 40,
+        saddle_power: 2,
+        eligible_creatures: [10, 11],
+        contributions: [2, 3],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
+  });
+
+  it("offers cancel on the StationTarget board choice", () => {
+    const choice = getBoardChoiceView({
+      type: "StationTarget",
+      data: {
+        player: 0,
+        spacecraft_id: 30,
+        eligible_creatures: [10],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.intent).toBe("station");
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
   });
 
   it("sums raw power for Slaughter keep sets so negative-power creatures lower the total", () => {
@@ -1092,6 +1129,7 @@ const PARTITION_FIXTURES: Record<
   ChooseFromZoneChoice: NO_TARGET_REF_LEGAL_SET,
   BeholdChoice: NO_TARGET_REF_LEGAL_SET,
   EmpowerJaceChoice: NO_TARGET_REF_LEGAL_SET,
+  SpellCopyOrderChoice: NO_TARGET_REF_LEGAL_SET,
   EffectZoneChoice: NO_TARGET_REF_LEGAL_SET,
   DrawnThisTurnTopdeckChoice: NO_TARGET_REF_LEGAL_SET,
   AssistChoosePlayer: NO_TARGET_REF_LEGAL_SET,
@@ -1330,5 +1368,65 @@ describe("the two click-target authorities partition the engine's legal list", (
     expect(players).toEqual(
       fixture.legal.flatMap((ref) => ("Player" in ref ? [ref.Player] : [])),
     );
+  });
+});
+
+describe("shared pile resolution", () => {
+  const shared = buildGameState({
+    players: buildPlayers([
+      { id: 0, graveyard: [101, 102], library: [11, 12] },
+      { id: 1, graveyard: [], library: [] },
+    ]),
+    derived: { shared_piles: { library: 0, graveyard: 0 } },
+  });
+  const perPlayer = buildGameState({
+    players: buildPlayers([
+      { id: 0, graveyard: [101], library: [11] },
+      { id: 1, graveyard: [201], library: [21] },
+    ]),
+  });
+
+  it("names the engine-published holder and resolves either seat to it", () => {
+    expect(getSharedPileHolder(shared, "graveyard")).toBe(0);
+    expect(getSharedPileHolder(shared, "library")).toBe(0);
+    expect(resolvePileSeat(shared, "graveyard", 1)).toBe(0);
+    expect(getPlayerZoneIds(shared, "graveyard", 1)).toEqual([101, 102]);
+    expect(getPlayerZoneIds(shared, "library", 1)).toEqual([11, 12]);
+  });
+
+  it("keeps each seat's own pile when the format publishes no holder", () => {
+    expect(getSharedPileHolder(perPlayer, "graveyard")).toBeNull();
+    expect(resolvePileSeat(perPlayer, "library", 1)).toBe(1);
+    expect(getPlayerZoneIds(perPlayer, "graveyard", 1)).toEqual([201]);
+    expect(getPlayerZoneIds(perPlayer, "library", 1)).toEqual([21]);
+  });
+
+  it("resolves a single shared zone independently of the other", () => {
+    const graveyardOnly = buildGameState({
+      players: perPlayer.players,
+      derived: { shared_piles: { graveyard: 0 } },
+    });
+    expect(resolvePileSeat(graveyardOnly, "graveyard", 1)).toBe(0);
+    expect(resolvePileSeat(graveyardOnly, "library", 1)).toBe(1);
+  });
+
+  it("groups a shared graveyard's cards of both owners into one zone-viewer pile", () => {
+    const p0Card = buildGameObject({ id: 101, zone: "Graveyard", owner: 0 });
+    const p1Card = buildGameObject({ id: 102, zone: "Graveyard", owner: 1 });
+    const piles = [p0Card, p1Card].map((obj) => getZoneViewerPile(shared, obj));
+    expect(piles).toEqual([
+      { zone: "graveyard", playerId: 0 },
+      { zone: "graveyard", playerId: 0 },
+    ]);
+    // Control: without a published holder the two owners stay two piles.
+    expect(
+      [p0Card, p1Card].map((obj) => getZoneViewerPile(perPlayer, obj)?.playerId),
+    ).toEqual([0, 1]);
+  });
+
+  it("keeps exile per seat and ignores other zones", () => {
+    const exiled = buildGameObject({ id: 301, zone: "Exile", owner: 1 });
+    expect(getZoneViewerPile(shared, exiled)).toEqual({ zone: "exile", playerId: 1 });
+    expect(getZoneViewerPile(shared, buildGameObject({ id: 1, zone: "Hand", owner: 1 }))).toBeNull();
   });
 });

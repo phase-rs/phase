@@ -1,14 +1,14 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
+    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ContinuousModification,
     ControllerRef, CountBinding, CounterMoveSelection, DamageSource, EachDamageRecipient, Effect,
     EffectKind, EffectScope, FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition,
     ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
+    TypedFilter,
 };
 // CR 601.2c: mana recipient / count-source role slot gate.
 use crate::types::ability::mana_multi_role;
@@ -160,6 +160,7 @@ pub fn build_resolved_from_def_with_targets(
     resolved.reads_return_result = def.reads_return_result.clone();
     resolved.context.face_down_in_exile = def.face_down_in_exile;
     resolved.context.ability_tag = def.ability_tag;
+    resolved.context.granting_object = def.granting_object;
     resolved.activation_cost_reduction = def.cost_reduction.clone();
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
@@ -775,6 +776,72 @@ pub fn build_target_slots_labelled(
     Ok((acc.slots, acc.labels))
 }
 
+/// CR 608.2h + CR 109.4: The controller of an object reference — live on the
+/// stack or battlefield, else as it last existed on the battlefield.
+/// `reset_for_battlefield_exit()` reverts `controller` to the owner when a
+/// permanent leaves the battlefield, so for any object that is no longer there
+/// the LKI snapshot (captured just before the zone change) holds the pre-exit
+/// controller. Prefer it over the live — post-reset — value, so "its
+/// controller" anchors on who controlled the permanent at departure, not the
+/// owner who now appears to control the exiled/graved object. The single
+/// authority for "that object's controller" over an object reference, whether
+/// the object came from a chosen target or from the trigger event.
+///
+/// NOT incarnation-correct: the LKI cache is keyed by bare `ObjectId`. When the
+/// departed object has already re-entered the battlefield under the same id
+/// (a blink, CR 400.7), the live battlefield row — the NEW object — answers,
+/// not the departed incarnation's last controller.
+pub(crate) fn last_known_permanent_controller(state: &GameState, id: ObjectId) -> Option<PlayerId> {
+    let obj_opt = state.objects.get(&id);
+    // CR 109.4: a permanent on the battlefield answers with its live controller.
+    if let Some(obj) = obj_opt.filter(|obj| obj.zone == Zone::Battlefield) {
+        return Some(obj.controller);
+    }
+    // CR 109.4 + CR 601.2a + CR 608.2h: an object that is live on the stack is
+    // in the zone it was expected to be in, so it uses its current controller
+    // (the spell's caster, or a stack ability's controller) — never a stale
+    // battlefield snapshot left in the LKI cache by an earlier incarnation.
+    // Matched by the stack object's OWN id (`entry.id`): a spell's entry id is
+    // its object id, and a targeted ability is recorded by its entry id. An
+    // entry whose `source_id` names this object is a different object — an
+    // ability exists independently of its source (CR 113.7a) — so a pending
+    // ability never makes its departed source look live on the stack.
+    if let Some(entry) = state.stack.iter().find(|entry| entry.id == id) {
+        return Some(stack_object_controller(state, entry));
+    }
+    // CR 608.2h: off the battlefield and off the stack — last known
+    // information from the battlefield, else the live (post-reset) row.
+    state
+        .lki_cache
+        .get(&id)
+        .map(|lki| lki.controller)
+        .or_else(|| obj_opt.map(|obj| obj.controller))
+}
+
+/// CR 400.7 + CR 608.2h: the controller of one specific incarnation of `id`:
+/// the live permanent's controller while that incarnation is still on the
+/// battlefield, else the incarnation-keyed last known information captured as
+/// it left. `None` when neither exists (the caller falls back to the bare-id
+/// authority, `last_known_permanent_controller`).
+pub(crate) fn incarnation_controller(
+    state: &GameState,
+    id: ObjectId,
+    incarnation: u64,
+) -> Option<PlayerId> {
+    if let Some(obj) = state
+        .objects
+        .get(&id)
+        .filter(|obj| obj.zone == Zone::Battlefield && obj.incarnation == incarnation)
+    {
+        return Some(obj.controller);
+    }
+    state
+        .lki_by_incarnation
+        .get(&id)
+        .and_then(|history| history.get(&incarnation))
+        .map(|lki| lki.controller)
+}
+
 /// CR 109.4 + CR 608.2c: Resolve the controller of an ability's first parent target.
 ///
 /// This is the canonical lookup for `ControllerRef::ParentTargetController` and
@@ -789,40 +856,9 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
         // battlefield — e.g. a token Recoil bounced to hand, which then ceases
         // to exist per CR 704.5d before the chained "that player discards"
         // resolves — fall back to last-known information so the player anaphor
-        // still resolves.
-        // CR 109.4: "Only objects on the stack or on the battlefield have a
-        // controller." The rung matches by `entry.id == id || entry.source_id
-        // == id` — a spell's `source_id == entry.id` (measured), so
-        // `stack_object_controller` is correct on both arms: it reads the
-        // spell's live controller when the object is on the stack, and falls
-        // back to `entry.controller` (CR 113.8) for an ability entry, which has
-        // no `state.objects` row.
-        TargetRef::Object(id) => state
-            .stack
-            .iter()
-            .find(|entry| entry.id == *id || entry.source_id == *id)
-            .map(|entry| stack_object_controller(state, entry))
-            .or_else(|| {
-                let obj_opt = state.objects.get(id);
-                // CR 608.2h: reset_for_battlefield_exit() reverts `controller`
-                // to the owner when a permanent leaves the battlefield. For any
-                // object that is no longer on the battlefield, the LKI snapshot
-                // (captured just before the zone change) holds the correct
-                // pre-exit controller. Prefer it over the live — post-reset —
-                // value so that "its controller" anchors on who controlled the
-                // permanent at departure, not the owner who now appears to
-                // control the exiled/graved object.
-                let off_battlefield = obj_opt.is_none_or(|obj| obj.zone != Zone::Battlefield);
-                if off_battlefield {
-                    state
-                        .lki_cache
-                        .get(id)
-                        .map(|lki| lki.controller)
-                        .or_else(|| obj_opt.map(|obj| obj.controller))
-                } else {
-                    obj_opt.map(|obj| obj.controller)
-                }
-            }),
+        // still resolves. The stack rung and the LKI rung both live in
+        // `last_known_permanent_controller`.
+        TargetRef::Object(id) => last_known_permanent_controller(state, *id),
         TargetRef::Player(pid) => Some(*pid),
     }) {
         return Some(player);
@@ -4918,6 +4954,12 @@ fn union_over_prior_object_candidates(
     legal_targets
 }
 
+/// CR 201.5a + CR 601.2c: a slot is enumerated with its ability in scope when the
+/// filter needs it or the ability carries a granter stamp.
+fn slot_needs_ability_context(filter: &TargetFilter, ability: &ResolvedAbility) -> bool {
+    target_filter_needs_ability_context(filter) || ability.context.granting_object.is_some()
+}
+
 fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
     target_filter_contains_chosen_x_ref(filter)
         || target_filter_contains_quantity_scope(filter, ObjectScope::AmassedArmy)
@@ -6213,7 +6255,8 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost => None,
+        | ContinuousModification::RemoveManaCost
+        | ContinuousModification::SubstituteTextWord { .. } => None,
     }
 }
 
@@ -7003,7 +7046,7 @@ fn legal_targets_for_ability_filter_uncapped(
         return targets;
     }
     let filter = slot.filter();
-    let needs_ability_context = target_filter_needs_ability_context(filter);
+    let needs_ability_context = slot_needs_ability_context(filter, ability);
     // CR 109.5 + CR 108.3: original "your" ownership keeps the declaring
     // ability's authority even when a companion player narrows control.
     let mut bound_filter = filter.clone();
@@ -7417,164 +7460,6 @@ fn rewrite_declared_target_player(
     rewrite_relative_controller(&rewritten, ControllerRef::TargetOpponent, to)
 }
 
-/// CR 201.5a + CR 613.1f: Concretize `TargetFilter::GrantingObject` → the live
-/// granting object once a granted ability is cloned onto its recipient at a
-/// Layer-6 grant (`game/layers.rs` GrantAbility/GrantTrigger). `granter` is the
-/// granting object's id (`effect.source_id` at the grant site). Walks the
-/// definition's cost, effect, and nested sub/else/mode abilities.
-///
-/// This is the single concretization point: at parse time the granted body's
-/// by-name reference to its granting object is a symbolic `GrantingObject`; here
-/// it becomes a concrete `SpecificObject { id }`, so no new runtime resolution
-/// logic is required. Host self-references (`SelfRef`) and every other filter
-/// are left untouched — the dual binding (granter vs. host) is preserved.
-/// Idempotent and re-minted each layer pass (CR 613.1f: Layer 6 ability-adding
-/// effects are applied fresh each pass).
-///
-/// ZONE-MOVE SCOPING (CR 201.5a second sentence + CR 400.7): the snapshot binds
-/// the granter's CURRENT battlefield id. It is correct only while the granter is
-/// not moved-then-re-referenced within a single resolution. CR 201.5a's second
-/// sentence — "if the second ability also moved the first ability's source to a
-/// different public zone, the name refers to the object the source became in its
-/// new zone" — is not modeled: a granter that leaves the battlefield becomes a
-/// new object (CR 400.7), so a later reference would need the new-zone object.
-/// No R4 card requires this today: Hammer/Bracelet move as a *cost* (paid and
-/// gone before the effect, never re-referenced); Trusty/Razor/Toralf Boomerang
-/// return themselves as their final action. A future card that exiles-or-moves
-/// its granter and then references it again in the same resolution must extend
-/// this to carry the post-move incarnation.
-pub(crate) fn concretize_granting_object(def: &mut AbilityDefinition, granter: ObjectId) {
-    if let Some(cost) = def.cost.as_mut() {
-        concretize_granting_object_in_cost(cost, granter);
-    }
-    concretize_granting_object_in_effect(def.effect.as_mut(), granter);
-    if let Some(sub) = def.sub_ability.as_mut() {
-        concretize_granting_object(sub, granter);
-    }
-    if let Some(els) = def.else_ability.as_mut() {
-        concretize_granting_object(els, granter);
-    }
-    for mode in def.mode_abilities.iter_mut() {
-        concretize_granting_object(mode, granter);
-    }
-}
-
-/// CR 201.5a: Concretize `GrantingObject` inside a granted *trigger's* execute
-/// chain (`game/layers.rs` GrantTrigger — e.g. a "you may sacrifice <granter>"
-/// action). The trigger's condition/metadata filters never carry a granter
-/// by-name self-reference, so only `execute` is walked.
-pub(crate) fn concretize_granting_object_in_trigger(
-    trigger: &mut TriggerDefinition,
-    granter: ObjectId,
-) {
-    if let Some(execute) = trigger.execute.as_mut() {
-        concretize_granting_object(execute, granter);
-    }
-}
-
-fn concretize_granting_object_in_filter(filter: &mut TargetFilter, granter: ObjectId) {
-    match filter {
-        TargetFilter::GrantingObject => *filter = TargetFilter::SpecificObject { id: granter },
-        TargetFilter::Not { filter } => concretize_granting_object_in_filter(filter, granter),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            for f in filters {
-                concretize_granting_object_in_filter(f, granter);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn concretize_granting_object_in_cost(cost: &mut AbilityCost, granter: ObjectId) {
-    match cost {
-        AbilityCost::Sacrifice(sac) => {
-            concretize_granting_object_in_filter(&mut sac.target, granter)
-        }
-        AbilityCost::Exile {
-            filter: Some(f), ..
-        }
-        | AbilityCost::ReturnToHand {
-            filter: Some(f), ..
-        }
-        | AbilityCost::RemoveCounter {
-            target: Some(f), ..
-        } => concretize_granting_object_in_filter(f, granter),
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
-            for c in costs.iter_mut() {
-                concretize_granting_object_in_cost(c, granter);
-            }
-        }
-        AbilityCost::EffectCost { effect } => concretize_granting_object_in_effect(effect, granter),
-        _ => {}
-    }
-}
-
-/// Mirrors the canonical target-bearing `Effect` list
-/// (`oracle_effect::rewrite_parent_targets_to_tracked_set`). Effects with no
-/// `target` slot cannot carry a `GrantingObject`, so `_ => {}` is complete for
-/// the emitting parser paths; any future target-bearing effect that is missed
-/// degrades fail-safe (runtime resolves an un-concretized `GrantingObject` to
-/// the ability source — the pre-fix host binding), never worse.
-fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) {
-    match effect {
-        Effect::SetTapState {
-            scope: EffectScope::Single,
-            target,
-            ..
-        }
-        | Effect::Destroy { target, .. }
-        | Effect::GainControl { target }
-        | Effect::Fight { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::DealDamage { target, .. }
-        | Effect::Pump { target, .. }
-        | Effect::Counter { target, .. }
-        // CR 701.27a: only single-scope Transform carries a targetable slot that
-        // can bind a GrantingObject anaphor; the mass (`All`) scope's `target` is a
-        // population filter (mirrors the SetTapState Single-gate above).
-        | Effect::Transform {
-            scope: EffectScope::Single,
-            target,
-            ..
-        }
-        // CR 710.4: same single-target-slot shape as `Transform`'s single scope.
-        | Effect::FlipPermanent { target, .. }
-        | Effect::Connive { target, .. }
-        | Effect::PhaseOut { target }
-        | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target, .. }
-        | Effect::ForceAttack { target, .. }
-        | Effect::CastCopyOfCard { target, .. }
-        | Effect::CopyTokenOf { target, .. }
-        | Effect::PutCounter { target, .. }
-        | Effect::RemoveCounter { target, .. }
-        | Effect::ChangeZone { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
-        | Effect::CastFromZone { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::UnattachAll { target, .. } => {
-            concretize_granting_object_in_filter(target, granter)
-        }
-        // Parity with `rewrite_parent_targets_to_tracked_set`: walk both the
-        // GenericEffect target and any granted static's `affected` filter.
-        Effect::GenericEffect {
-            target,
-            static_abilities,
-            ..
-        } => {
-            if let Some(t) = target {
-                concretize_granting_object_in_filter(t, granter);
-            }
-            for static_def in static_abilities.iter_mut() {
-                if let Some(affected) = static_def.affected.as_mut() {
-                    concretize_granting_object_in_filter(affected, granter);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
     let mut specs = Vec::new();
     // CR 601.2c + CR 115.3: instance ids are allocated densely from 0 as specs
@@ -7758,7 +7643,7 @@ fn legal_targets_for_selected_slot(
             crate::game::perf_counters::record_prior_target_binding_selection();
         }
         let enumeration_ability = bound.as_ref().unwrap_or(ability);
-        if bound.is_some() || target_filter_needs_ability_context(&enumeration_filter) {
+        if bound.is_some() || slot_needs_ability_context(&enumeration_filter, ability) {
             if controller == ability.controller {
                 targeting::find_legal_targets_for_ability(
                     state,
@@ -22124,9 +22009,56 @@ mod tests {
             parent_target_controller(&by_entry_id, &state),
             Some(PlayerId(1))
         );
+        // CR 113.7a: the ability exists independently of its source; its
+        // source's id is not the ability. A source with no object row and no
+        // LKI has no controller to report.
+        assert_eq!(parent_target_controller(&by_source_id, &state), None);
+    }
+
+    /// CR 113.7a + CR 608.2h: a departed source whose ability is still on the
+    /// stack answers with its battlefield LKI controller (P0, who controlled
+    /// it), not the pending ability's controller (P1).
+    #[test]
+    fn parent_target_controller_of_a_departed_source_ignores_its_pending_ability() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Departed Source".to_string(),
+            Zone::Battlefield,
+        );
+        // P0 controlled it on the battlefield; then it left (to hand).
+        state.objects.get_mut(&source_id).unwrap().controller = PlayerId(0);
+        let lki = state.objects[&source_id].snapshot_public_characteristics();
+        assert_eq!(lki.controller, PlayerId(0), "fixture: LKI controller is P0");
+        state.lki_cache.insert(source_id, lki);
+        state.battlefield.retain(|id| *id != source_id);
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.zone = Zone::Hand;
+            obj.controller = PlayerId(1);
+        }
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(77),
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Departed Source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let by_source_id = make_simple_ability(vec![TargetRef::Object(source_id)], ObjectId(0));
         assert_eq!(
             parent_target_controller(&by_source_id, &state),
-            Some(PlayerId(1))
+            Some(PlayerId(0))
         );
     }
 

@@ -454,7 +454,16 @@ fn complete_loyalty_activation(
 
     let assigned_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = super::casting::targets_commit_crime(state, &assigned_targets, player);
-    emit_targeting_events(state, &assigned_targets, pw_id, player, events);
+    emit_targeting_events(
+        state,
+        &assigned_targets,
+        pw_id,
+        player,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Activated,
+        )),
+        events,
+    );
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;

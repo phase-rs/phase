@@ -254,16 +254,8 @@ fn resolve_candidates(
     let mut candidates = Vec::new();
     for zone in zones_to_search {
         let ids: Vec<ObjectId> = match zone {
-            Zone::Library => state.players[player.0 as usize]
-                .library
-                .iter()
-                .copied()
-                .collect(),
-            Zone::Graveyard => state.players[player.0 as usize]
-                .graveyard
-                .iter()
-                .copied()
-                .collect(),
+            Zone::Library => state.library_of(player).iter().copied().collect(),
+            Zone::Graveyard => state.graveyard_of(player).iter().copied().collect(),
             Zone::Hand => state.players[player.0 as usize]
                 .hand
                 .iter()
@@ -548,6 +540,46 @@ fn push_unique_colors(into: &mut Vec<ManaColor>, extra: &[ManaColor]) {
     for color in extra {
         if !into.contains(color) {
             into.push(*color);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: an augment search over the controller's library and graveyard
+    /// reads the shared pile for the non-canonical seat, and the seat's own
+    /// zones otherwise.
+    #[test]
+    fn candidates_read_the_storage_authority() {
+        for (format, shared) in [
+            (FormatConfig::dandan(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 1);
+            let p1 = PlayerId(1);
+            let library = create_object(&mut state, CardId(1), p1, "Library".into(), Zone::Library);
+            let graveyard = create_object(
+                &mut state,
+                CardId(2),
+                p1,
+                "Graveyard".into(),
+                Zone::Graveyard,
+            );
+
+            let found = resolve_candidates(
+                &state,
+                p1,
+                &[Zone::Library, Zone::Graveyard],
+                &TargetFilter::Any,
+            );
+
+            assert_eq!(found, vec![library, graveyard], "shared={shared}");
+            assert_eq!(state.players[1].library.is_empty(), shared);
         }
     }
 }

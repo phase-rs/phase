@@ -124,8 +124,9 @@ pub fn apply_mill_after_replacement(
 
     // CR 701.17b: A player can't mill more cards than are in their library;
     // if instructed to, they mill as many as possible.
-    let count = (count as usize).min(player.library.len());
-    let cards_to_mill: Vec<_> = player.library.iter().take(count).copied().collect();
+    let library = state.library_of(player.id);
+    let count = (count as usize).min(library.len());
+    let cards_to_mill: Vec<_> = library.iter().take(count).copied().collect();
     state.last_effect_count = Some(cards_to_mill.len() as i32);
 
     // CR 701.17a + CR 614.6: Route each milled card through the zone-change

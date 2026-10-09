@@ -2,7 +2,9 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { LLM_ENDPOINTS_KEY } from "../constants/storage";
+import { defaultJevRelayOrigin } from "../services/llm/relayOrigin";
 import type { LlmProfile, LlmProviderCatalogEntry, LlmProviderId } from "../services/llm/types";
+import { useMultiplayerStore } from "./multiplayerStore";
 
 /**
  * How a profile is persisted: everything except the credential.
@@ -92,6 +94,7 @@ const KNOWN_PROVIDERS: readonly LlmProviderId[] = [
   "Gemini",
   "DeepSeek",
   "OpenAiCompatible",
+  "Jev",
 ] as const;
 
 /**
@@ -461,3 +464,39 @@ export function draftProfile(
   if (isProfileUsable(explicit, catalog)) return explicit;
   return state.profiles.find((profile) => isProfileUsable(profile, catalog));
 }
+
+/**
+ * A key is scoped to the endpoint it was entered for. A Jev profile with no
+ * endpoint of its own relays through the hosting server, so that server IS the
+ * key's destination, and `updateProfile`'s retarget rule cannot see it move: the
+ * profile does not change when the player picks another server. Without this, a
+ * key typed while hosting on server A would be sent to a custom server B on the
+ * next probe, game or draft.
+ *
+ * So the key is dropped whenever the derived relay origin changes, the same
+ * consequence `updateProfile` applies when the provider or an explicit endpoint
+ * changes. A profile with an explicit endpoint is unaffected: its destination
+ * does not depend on the hosting server. Subscribing here, beside the store the
+ * keys live in, means it holds whichever surface holds the key.
+ */
+function dropRelayKeysOnOriginChange(): void {
+  // Test doubles for the multiplayer store may not implement `subscribe`.
+  if (typeof useMultiplayerStore?.subscribe !== "function") return;
+  useMultiplayerStore.subscribe((state, previous) => {
+    if (
+      defaultJevRelayOrigin(state.hostingServer) === defaultJevRelayOrigin(previous.hostingServer)
+    ) {
+      return;
+    }
+    const derivesRelay = (profile: LlmProfile) =>
+      profile.provider === "Jev" && !profile.baseUrl?.trim() && profile.apiKey !== "";
+    if (!useLlmStore.getState().profiles.some(derivesRelay)) return;
+    useLlmStore.setState((current) => ({
+      profiles: current.profiles.map((profile) =>
+        derivesRelay(profile) ? { ...profile, apiKey: "" } : profile,
+      ),
+    }));
+  });
+}
+
+dropRelayKeysOnOriginChange();

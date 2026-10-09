@@ -253,6 +253,9 @@ fn handle_activated_mode_choice(
                 &super::ability_utils::declared_targets_in_chain(&resolved),
                 source_id,
                 player,
+                Some(crate::types::events::Targeter::Ability(
+                    crate::types::ability::StackAbilityKind::Activated,
+                )),
                 events,
             );
             let mut pending = PendingCast::for_activation(

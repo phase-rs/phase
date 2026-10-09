@@ -13,7 +13,8 @@ export type LlmProviderId =
   | "Anthropic"
   | "Gemini"
   | "DeepSeek"
-  | "OpenAiCompatible";
+  | "OpenAiCompatible"
+  | "Jev";
 
 /** One row of `phase_llm::catalog::provider_catalog`. */
 export interface LlmModelOption {
@@ -48,12 +49,21 @@ export interface LlmHttpRequestSpec {
   method: string;
   headers: { name: string; value: string }[];
   body: string;
+  /**
+   * What to do with a 3xx answer, as `fetch`'s `redirect` option. The engine
+   * sets `"error"` for a request whose body carries a credential: a followed
+   * 307/308 would replay that body to the origin `Location` names. Absent means
+   * fetch's default.
+   */
+  redirect?: "follow" | "error";
 }
 
 /** Engine output for one game decision request. */
 export interface LlmDecisionRequest {
   fingerprint: string;
   optionCount: number;
+  /** Characters of prompt the request carries (system + user). */
+  promptChars: number;
   request: LlmHttpRequestSpec;
 }
 
@@ -63,7 +73,19 @@ export interface LlmDraftPickRequest {
   fingerprint: string;
   optionCount: number;
   requiredPickCount: number;
+  /** Characters of prompt the request carries (system + user). */
+  promptChars: number;
   request: LlmHttpRequestSpec;
+}
+
+/**
+ * Matches `phase_llm::wire::TokenUsage`: what a provider reported spending on
+ * one call. An absent field is unknown, never zero.
+ */
+export interface LlmTokenUsage {
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cachedInputTokens?: number | null;
 }
 
 /** What the engine did with one seat's draft response. */
@@ -72,6 +94,8 @@ export interface LlmDraftOutcome {
   used: boolean;
   reasoning?: string;
   error?: string;
+  /** Provider-reported token usage for this seat's reply, used or not. */
+  usage?: LlmTokenUsage;
 }
 
 /**

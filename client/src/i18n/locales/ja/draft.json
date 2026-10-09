@@ -796,5 +796,13 @@
     "slotTraditional": "トラディショナル・ドラフト",
     "slotCommanderDraft": "統率者ドラフト",
     "slotWinston": "ウィンストン・ドラフト"
+  },
+  "llmDrafters": {
+    "label": "AIドラフター",
+    "picking": "選択中",
+    "ready": "選択済み",
+    "fallback": "エンジンが選択",
+    "waiting": "全プレイヤーの選択を待っています…",
+    "seatStatus": "{{seat}}：{{status}}"
   }
 }

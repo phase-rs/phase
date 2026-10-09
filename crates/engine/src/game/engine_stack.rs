@@ -39,6 +39,9 @@ pub(super) fn finalize_trigger_target_selection(
         &assigned_targets,
         trigger.source_id,
         trigger.controller,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Triggered,
+        )),
         events,
     );
 

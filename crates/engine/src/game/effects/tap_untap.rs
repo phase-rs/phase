@@ -196,10 +196,11 @@ pub(crate) fn process_one_tap(
                 )
                 .map_err(|_| EffectError::ObjectNotFound(object_id))?
                 {
-                    events.push(GameEvent::PermanentTapped {
+                    events.push(GameEvent::permanent_tapped(
+                        state,
                         object_id,
-                        caused_by: Some(source_id),
-                    });
+                        Some(source_id),
+                    ));
                 }
             }
             Ok(TapUntapOutcome::Complete)
