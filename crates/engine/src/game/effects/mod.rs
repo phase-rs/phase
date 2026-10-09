@@ -7635,8 +7635,9 @@ fn is_multi_target_player_filter(filter: &TargetFilter) -> bool {
 // through `resolve_top`, eliding only the priority checkpoints between them.
 // Admission is layered: Layer A run identity in `game/stack.rs`
 // (`batch_run_key`), Layer B handler purity here and in `token.rs`, and the
-// executor's own member-1 checkpoint, layer, state-trigger and per-member
-// trigger-collection checks. Every gate defaults to "not admitted"; only the
+// executor's own member-1 checkpoint, layer and state-trigger checks, its
+// per-member token-entry event check (`token_entry_events`) and per-member
+// trigger collection. Every gate defaults to "not admitted"; only the
 // Token handler opts in.
 
 /// CR 608.2 + CR 608.2c: Layer B — whether resolving this effect once per

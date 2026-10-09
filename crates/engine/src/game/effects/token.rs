@@ -2655,12 +2655,14 @@ fn bulk_token_shape(
 
 /// CR 608.2 + CR 608.2c: Layer B — the Token-handler bulk admission gate.
 /// Returns `true` iff each of a run of identical untargeted resolutions of this
-/// base `Effect::Token` creates one token from the same spec, emits exactly the
-/// ETB pair, cannot pause for a replacement choice, and has no printed
-/// supertype that trips a pairwise state-based action against an earlier
-/// member's token. The stack's bulk executor still resolves every member
-/// individually through `resolve_top`; this gate only decides that the
-/// checkpoints between them may be elided once member 1's checkpoint is shown
+/// base `Effect::Token` instructs one token from the same spec, whose creation
+/// emits only the ETB pair per token (a mandatory replacement can still change
+/// how many tokens are created, CR 614.1a), cannot pause for a replacement
+/// choice, and has no printed supertype that trips a pairwise state-based
+/// action against an earlier member's token. The stack's bulk executor still
+/// resolves every member individually through `resolve_top`, holds each
+/// member to member 1's token-entry events (`token_entry_events`), and elides
+/// the checkpoints between them only once member 1's checkpoint is shown
 /// inert.
 ///
 /// A `ConditionInstead` sub-ability that is currently NOT met is accepted only
