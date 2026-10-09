@@ -3082,3 +3082,199 @@ fn copiable_prepare_face_survives_serialization_and_rehydration() {
     assert!(runner.state().objects[&token].prepared.is_some());
     exact_linked_copy(runner.state(), token, P0, "Jump");
 }
+
+// ---------------------------------------------------------------------------
+// A prepare spell is not another face. CR 701.27c: only permanents represented
+// by double-faced tokens or cards can transform; CR 701.27d: transforming into
+// an instant or sorcery face does nothing. The Counterpart token copy of
+// Encouraging Aviator carries Jump (an instant) as a copiable value
+// (CR 722.2b) but is a single-faced token, and the printed Aviator is a
+// single-faced preparation card, so neither transforms. Delver of Secrets, a
+// real transforming double-faced card on the same board, is the positive
+// control through the same entry points.
+// ---------------------------------------------------------------------------
+
+/// The Counterpart token copy of P0's Encouraging Aviator, the printed Aviator,
+/// and P0's Delver of Secrets (the transforming control).
+struct TransformBoard {
+    runner: GameRunner,
+    aviator: ObjectId,
+    delver: ObjectId,
+    token: ObjectId,
+}
+
+fn transform_board() -> TransformBoard {
+    let db = db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let codie = scenario
+        .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
+        .id();
+    let bystander = scenario.add_creature(P0, "Ground Bystander", 2, 2).id();
+    let aviator = scenario.add_real_card(P0, "Encouraging Aviator", Zone::Battlefield, db);
+    let delver = scenario.add_real_card(P0, "Delver of Secrets", Zone::Battlefield, db);
+    let counterpart = scenario.add_real_card(P0, "Croaking Counterpart", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(&[ManaType::Green, ManaType::Blue, ManaType::Red]));
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    runner.state_mut().all_creature_types = db.creature_type_vocabulary().to_vec();
+    {
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&delver]
+                .back_face
+                .as_ref()
+                .map(|face| (face.name.as_str(), face.layout_kind)),
+            Some((
+                "Insectile Aberration",
+                Some(engine::types::card::LayoutKind::Transform)
+            )),
+            "the control is a real transforming double-faced card"
+        );
+    }
+    let mut board = CounterpartBoard {
+        runner,
+        codie,
+        bystander,
+        sources: vec![aviator, delver],
+        counterpart,
+    };
+    let token = cast_counterpart(&mut board, aviator, &[]);
+    let back = board.runner.state().objects[&token]
+        .back_face
+        .as_ref()
+        .expect("CR 722.2b: the token copy has the prepare spell");
+    assert_eq!(back.name, "Jump");
+    assert_eq!(back.card_types.core_types, vec![CoreType::Instant]);
+    TransformBoard {
+        runner: board.runner,
+        aviator,
+        delver,
+        token,
+    }
+}
+
+/// The characteristics a transform would change, plus the face flag.
+type Face = (
+    String,
+    Vec<CoreType>,
+    Vec<String>,
+    Option<i32>,
+    Option<i32>,
+    bool,
+    Option<String>,
+);
+
+fn face(state: &GameState, id: ObjectId) -> Face {
+    let object = &state.objects[&id];
+    (
+        object.name.clone(),
+        object.card_types.core_types.clone(),
+        object.card_types.subtypes.clone(),
+        object.power,
+        object.toughness,
+        object.transformed,
+        object.back_face.as_ref().map(|back| back.name.clone()),
+    )
+}
+
+/// CR 701.27c + CR 701.27d through `GameAction::Transform` at P0's priority:
+/// the reducer rejects the action for the token and the printed Aviator, and
+/// neither changes; the same action transforms the Delver control.
+#[test]
+fn copiable_prepare_face_token_cannot_transform_by_action() {
+    let TransformBoard {
+        mut runner,
+        aviator,
+        delver,
+        token,
+    } = transform_board();
+    assert_priority(&runner, P0);
+    let token_before = face(runner.state(), token);
+    let aviator_before = face(runner.state(), aviator);
+    assert_eq!(token_before.2, vec!["Frog"]);
+    assert_eq!((token_before.3, token_before.4), (Some(1), Some(1)));
+    assert_eq!(token_before.6.as_deref(), Some("Jump"));
+
+    for id in [token, aviator] {
+        assert!(
+            runner.act(GameAction::Transform { object_id: id }).is_err(),
+            "CR 701.27c + CR 701.27d: a prepare spell is not a face to transform into"
+        );
+    }
+    assert_eq!(face(runner.state(), token), token_before);
+    assert_eq!(face(runner.state(), aviator), aviator_before);
+    assert_priority(&runner, P0);
+
+    runner
+        .act(GameAction::Transform { object_id: delver })
+        .expect("the transforming double-faced control transforms");
+    let delver_after = &runner.state().objects[&delver];
+    assert_eq!(delver_after.name, "Insectile Aberration");
+    assert!(delver_after.transformed);
+    assert_eq!(face(runner.state(), token), token_before);
+}
+
+/// CR 701.27c + CR 701.27d through the transform effect resolver: a targeted
+/// "transform target creature" at the token or the printed Aviator does
+/// nothing (and is not an error), while the same instruction transforms the
+/// Delver control; a mass transform leaves both prepare-spell holders alone.
+#[test]
+fn copiable_prepare_face_token_ignores_transform_effect() {
+    let TransformBoard {
+        mut runner,
+        aviator,
+        delver,
+        token,
+    } = transform_board();
+    let token_before = face(runner.state(), token);
+    let aviator_before = face(runner.state(), aviator);
+    let transform = |runner: &mut GameRunner, scope, targets: Vec<TargetRef>| {
+        let ability = ResolvedAbility::new(
+            Effect::Transform {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope,
+            },
+            targets,
+            ObjectId(9_001),
+            P0,
+        );
+        let mut events = Vec::new();
+        engine::game::effects::resolve_effect(runner.state_mut(), &ability, &mut events)
+            .expect("a transform that does nothing is not an error");
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::Transformed { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let single = engine::types::ability::EffectScope::Single;
+
+    for id in [token, aviator] {
+        assert!(transform(&mut runner, single, vec![TargetRef::Object(id)]).is_empty());
+    }
+    assert_eq!(face(runner.state(), token), token_before);
+    assert_eq!(face(runner.state(), aviator), aviator_before);
+
+    // Positive control through the same resolver.
+    assert_eq!(
+        transform(&mut runner, single, vec![TargetRef::Object(delver)]),
+        vec![delver]
+    );
+    assert_eq!(runner.state().objects[&delver].name, "Insectile Aberration");
+
+    // "Transform all creatures": only the double-faced Delver turns back over.
+    assert_eq!(
+        transform(
+            &mut runner,
+            engine::types::ability::EffectScope::All,
+            vec![]
+        ),
+        vec![delver]
+    );
+    assert_eq!(runner.state().objects[&delver].name, "Delver of Secrets");
+    assert_eq!(face(runner.state(), token), token_before);
+    assert_eq!(face(runner.state(), aviator), aviator_before);
+}

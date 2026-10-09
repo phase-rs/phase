@@ -14516,6 +14516,14 @@ fn apply_non_priority_pass_action(
                     "Card has no back face".to_string(),
                 ));
             }
+            // CR 701.27c + CR 701.27d: reject what the preflight never offers —
+            // the shared `can_transform` authority — rather than accepting an
+            // action whose transform would do nothing.
+            if !super::transform::can_transform(state, object_id) {
+                return Err(EngineError::InvalidAction(
+                    "This permanent can't transform".to_string(),
+                ));
+            }
             super::transform::transform_permanent(state, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
