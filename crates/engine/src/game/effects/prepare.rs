@@ -12,7 +12,7 @@ use crate::types::zones::Zone;
 use crate::game::ability_utils::build_target_slots;
 use crate::game::casting;
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
-use crate::game::game_object::PreparedState;
+use crate::game::game_object::{GameObject, PreparedState};
 use crate::game::printed_cards::apply_back_face_to_object;
 
 /// An engine-authored prepared-copy announcement for the Priority preflight.
@@ -318,10 +318,39 @@ fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
     }
 }
 
+/// CR 722.3c: The prepared permanent this object is the linked prepare-spell
+/// copy of, if any. The link counts only while the copy is in exile, the zone
+/// CR 722.3c keeps it in; a copy displaced elsewhere is no longer the linked
+/// copy. Single definition of the "linked prepare copy" relation.
+pub(crate) fn linked_prepared_copy_source(object: &GameObject) -> Option<ObjectId> {
+    object
+        .prepared_copy_source
+        .filter(|_| object.zone == Zone::Exile)
+}
+
+/// CR 722.3c + CR 702.26b + CR 702.26d: Whether `object` is a prepared
+/// permanent on the battlefield — it "remains on the battlefield and has the
+/// prepared designation". A phased-out permanent is treated as though it is not
+/// on the battlefield, so it does not qualify while phased out. Shared by
+/// linked-copy retention and the prepared-copy cast gates so the two can never
+/// disagree.
+pub(crate) fn is_prepared_permanent_in_play(object: &GameObject) -> bool {
+    object.zone == Zone::Battlefield && !object.is_phased_out() && object.prepared.is_some()
+}
+
+/// CR 722.3c: The linked copy "remains in exile for as long as the prepared
+/// permanent remains on the battlefield and has the prepared designation. This
+/// is an exception to rule 704.5e." Live read of the source on every call, so a
+/// departed, unprepared, phased-out or missing source never protects its copy.
+pub(crate) fn is_retained_linked_prepared_copy(state: &GameState, object: &GameObject) -> bool {
+    linked_prepared_copy_source(object)
+        .and_then(|source_id| state.objects.get(&source_id))
+        .is_some_and(is_prepared_permanent_in_play)
+}
+
 fn linked_prepared_copy_id(state: &GameState, source_id: ObjectId) -> Option<ObjectId> {
     state.objects.values().find_map(|object| {
-        (object.zone == Zone::Exile && object.prepared_copy_source == Some(source_id))
-            .then_some(object.id)
+        (linked_prepared_copy_source(object) == Some(source_id)).then_some(object.id)
     })
 }
 
@@ -473,10 +502,11 @@ fn can_cast_prepared_copy_now_in_simulated_state(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    // CR 722.3c + CR 702.26b + CR 702.26d: only the controller of a prepared
+    // permanent on the battlefield (phased in) may cast its copy. Checked before
+    // any lazy synthesis so a rejected source never gains a copy.
     if !simulated.objects.get(&source_id).is_some_and(|source| {
-        source.zone == Zone::Battlefield
-            && source.prepared.is_some()
-            && source.controller == controller
+        is_prepared_permanent_in_play(source) && source.controller == controller
     }) {
         return false;
     }
@@ -565,10 +595,11 @@ pub fn cast_prepared_copy(
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, String> {
+    // CR 722.3c + CR 702.26b + CR 702.26d: only the controller of a prepared
+    // permanent on the battlefield (phased in) may cast its copy. Checked before
+    // the lazy re-synthesis below so a rejected cast never resurrects a copy.
     if !state.objects.get(&source_id).is_some_and(|source| {
-        source.zone == Zone::Battlefield
-            && source.prepared.is_some()
-            && source.controller == controller
+        is_prepared_permanent_in_play(source) && source.controller == controller
     }) {
         return Err("source is not a prepared permanent controlled by caster".to_string());
     }
@@ -982,6 +1013,80 @@ mod tests {
         assert!(!state.objects.contains_key(&second_copy));
         assert!(!state.exile.contains(&second_copy));
         assert!(state.objects.contains_key(&unrelated));
+    }
+
+    /// CR 722.3c + CR 704.5e + CR 702.26b/d: the linked-copy retention building
+    /// block. Every false row is built from the same freshly prepared pair as
+    /// the true row and changes exactly one input.
+    #[test]
+    fn linked_copy_retention_requires_prepared_source_in_play_and_copy_in_exile() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+
+        fn prepared_pair() -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.phase = Phase::PreCombatMain;
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            let source = setup_creature(&mut state);
+            state.objects.get_mut(&source).unwrap().back_face = Some(BackFaceForTest::prepare());
+            prepare_object(&mut state, source, &mut Vec::new());
+            let copy = linked_prepared_copy_id(&state, source).expect("prepare creates the copy");
+            (state, source, copy)
+        }
+        fn retained(state: &GameState, copy: ObjectId) -> bool {
+            is_retained_linked_prepared_copy(state, &state.objects[&copy])
+        }
+
+        // True row: prepared source on the battlefield, phased in, copy in exile.
+        let (state, source, copy) = prepared_pair();
+        assert_eq!(
+            linked_prepared_copy_source(&state.objects[&copy]),
+            Some(source)
+        );
+        assert!(retained(&state, copy));
+        assert!(can_cast_prepared_copy_now(&state, PlayerId(0), source));
+
+        // Source loses the designation (field cleared, no eager cleanup).
+        let (mut state, source, copy) = prepared_pair();
+        state.objects.get_mut(&source).unwrap().prepared = None;
+        assert!(!retained(&state, copy));
+
+        // Source is no longer on the battlefield.
+        let (mut state, source, copy) = prepared_pair();
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        assert!(!retained(&state, copy));
+
+        // Source is phased out: treated as not on the battlefield, so the copy
+        // is not retained and the copy can't be cast; phased back in, both hold.
+        let (mut state, source, copy) = prepared_pair();
+        state.objects.get_mut(&source).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert!(!retained(&state, copy));
+        assert!(!can_cast_prepared_copy_now(&state, PlayerId(0), source));
+        state.objects.get_mut(&source).unwrap().phase_status = PhaseStatus::PhasedIn;
+        assert!(retained(&state, copy));
+        assert!(can_cast_prepared_copy_now(&state, PlayerId(0), source));
+
+        // The link names a missing object.
+        let (mut state, _source, copy) = prepared_pair();
+        state.objects.get_mut(&copy).unwrap().prepared_copy_source = Some(ObjectId(9_999));
+        assert!(!retained(&state, copy));
+
+        // The copy is not in exile: the link no longer counts.
+        let (mut state, _source, copy) = prepared_pair();
+        state.objects.get_mut(&copy).unwrap().zone = Zone::Graveyard;
+        assert_eq!(linked_prepared_copy_source(&state.objects[&copy]), None);
+        assert!(!retained(&state, copy));
+
+        // An unlinked copy in exile.
+        let (mut state, _source, copy) = prepared_pair();
+        state.objects.get_mut(&copy).unwrap().prepared_copy_source = None;
+        assert_eq!(linked_prepared_copy_source(&state.objects[&copy]), None);
+        assert!(!retained(&state, copy));
     }
 
     #[test]

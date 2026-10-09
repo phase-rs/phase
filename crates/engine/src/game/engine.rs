@@ -11327,6 +11327,18 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 722.3c + CR 601.2i: the linked prepare-spell copy is cast only
+            // through `CastPreparedCopy`, which unprepares its permanent as the
+            // spell becomes cast; a generic cast of it would skip that.
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| effects::prepare::linked_prepared_copy_source(obj).is_some())
+            {
+                return Err(EngineError::InvalidAction(
+                    "A prepared copy is cast only through its prepared permanent".to_string(),
+                ));
+            }
             casting::handle_cast_spell_with_payment_mode(
                 state,
                 *player,

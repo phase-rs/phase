@@ -2414,7 +2414,9 @@ fn check_counter_cancellation(
 /// non-card objects swept by the same removal loop. The stack is excluded for both
 /// so spell copies (and copies of cards resolving as spells) finish resolving
 /// before the next SBA check; the battlefield is legal for a copy of a card
-/// (CR 707.10f) but not for a token off-battlefield.
+/// (CR 707.10f) but not for a token off-battlefield. CR 722.3c exempts the linked
+/// prepare-spell copy in exile while its prepared permanent remains on the
+/// battlefield; that exemption lives in the shared copy predicate.
 fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     let tokens_to_remove: Vec<(
         crate::types::identifiers::ObjectId,

@@ -57,11 +57,17 @@ pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &Ga
 /// (CR 707.10f makes a permanent copy a token there) and may change zones freely
 /// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
 /// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
+/// CR 722.3c: except the linked prepare-spell copy in exile, which remains for as
+/// long as its prepared permanent remains on the battlefield and has the prepared
+/// designation ("This is an exception to rule 704.5e").
 pub(super) fn copy_of_card_outside_battlefield_and_stack(
     state: &GameState,
     obj: &GameObject,
 ) -> bool {
-    obj.is_copy && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
+    obj.is_copy
+        && obj.zone != Zone::Battlefield
+        && !object_has_stack_residency(state, obj)
+        && !crate::game::effects::prepare::is_retained_linked_prepared_copy(state, obj)
 }
 
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move

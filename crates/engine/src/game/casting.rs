@@ -1485,11 +1485,15 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     // castable by their owner, except PlayFromExile binds to the player the
     // resolving effect granted the permission to. CR 305.1 land exclusion lives
     // in `exile_object_castable_by_permission`.
+    // CR 722.3c + CR 601.2i: the linked prepare-spell copy is cast only through
+    // its prepared permanent's `CastPreparedCopy` action, the one route that
+    // unprepares the permanent as the spell becomes cast and rolls that back on
+    // cancel; both exile passes exclude it.
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
-        state
-            .objects
-            .get(&obj_id)
-            .is_some_and(|obj| exile_object_castable_by_permission(state, obj, player))
+        state.objects.get(&obj_id).is_some_and(|obj| {
+            crate::game::effects::prepare::linked_prepared_copy_source(obj).is_none()
+                && exile_object_castable_by_permission(state, obj, player)
+        })
     }));
 
     // CR 601.2a + CR 611.2a: Opponent's exiled cards with an alt-cost
@@ -1498,6 +1502,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner != player
+                && crate::game::effects::prepare::linked_prepared_copy_source(obj).is_none()
                 && obj.casting_permissions.iter().any(|permission| {
                     exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
                 })
