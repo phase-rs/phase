@@ -25,6 +25,7 @@ import {
   getDeckColorIdentityPips,
 } from "../components/menu/deckHelpers";
 import { ManaSymbol } from "../components/mana/ManaSymbol";
+import { cappedMatchType, useBestOfThreeCeiling } from "../components/lobby/HostSetup";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import {
   ACTIVE_DECK_KEY,
@@ -92,6 +93,9 @@ export function GameSetupPage() {
   const [formatConfig, setFormatConfig] = useState<FormatConfig | null>(null);
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
+  const ceiling = useBestOfThreeCeiling(formatConfig?.format ?? null);
+  const effectiveMatchType = cappedMatchType(matchType, ceiling);
+  const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
   // immutable once the game starts. Available at every player count.
   const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
@@ -219,7 +223,7 @@ export function GameSetupPage() {
     // same channel `useBroker` uses — rather than a URL param, because the
     // native-engine route above deliberately writes no resume pointer.
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}`,
       { state: { formatConfig } },
     );
   };
@@ -339,7 +343,7 @@ export function GameSetupPage() {
           <MyDecks
             mode="select"
             selectedFormat={selectedFormat ?? undefined}
-            selectedMatchType={matchType}
+            selectedMatchType={effectiveMatchType}
             onSelectDeck={handleSelectDeck}
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
@@ -531,7 +535,7 @@ export function GameSetupPage() {
                       type="button"
                       onClick={() => { setMatchType("Bo1"); setLastMatchType("Bo1"); }}
                       className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                        matchType === "Bo1"
+                        effectiveMatchType === "Bo1"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
                       }`}
@@ -541,12 +545,12 @@ export function GameSetupPage() {
                     <button
                       type="button"
                       onClick={() => { setMatchType("Bo3"); setLastMatchType("Bo3"); }}
-                      disabled={playerCount !== 2}
+                      disabled={bo3Disabled}
                       className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                        matchType === "Bo3"
+                        effectiveMatchType === "Bo3"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-                      } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
+                      } ${bo3Disabled ? "cursor-not-allowed opacity-40" : ""}`}
                     >
                       BO3
                     </button>
@@ -620,7 +624,7 @@ export function GameSetupPage() {
               {/* AI opponent configuration */}
               <AiOpponentConfig
                 selectedFormat={formatConfig?.format}
-                selectedMatchType={matchType}
+                selectedMatchType={effectiveMatchType}
                 opponentCount={Math.max(1, playerCount - 1)}
                 onCandidateCountChange={setLegalAiDeckCount}
               />

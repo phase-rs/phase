@@ -1619,6 +1619,30 @@ fn resolve_candidate_cards(
                 state, ability, candidates, filter,
             ));
         }
+        // CR 608.2c + CR 608.2d: the batch the preceding instruction handed
+        // over, still in the requested zone(s).
+        ZoneChoiceCandidateSource::ParentTargets => {
+            let mut zones = Vec::with_capacity(1 + additional_zones.len());
+            zones.push(zone);
+            zones.extend_from_slice(additional_zones);
+            let mut candidates: Vec<ObjectId> = Vec::new();
+            for target in &ability.targets {
+                let TargetRef::Object(id) = target else {
+                    continue;
+                };
+                if !candidates.contains(id)
+                    && state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| zones.contains(&object.zone))
+                {
+                    candidates.push(*id);
+                }
+            }
+            return Ok(retain_matching_candidates(
+                state, ability, candidates, filter,
+            ));
+        }
         ZoneChoiceCandidateSource::Legacy => {}
     }
 
@@ -1860,8 +1884,12 @@ fn object_ids_in_player_zone(state: &GameState, player: PlayerId, zone: Zone) ->
 
     match zone {
         Zone::Hand => player_state.hand.iter().copied().collect(),
-        Zone::Library => player_state.library.iter().copied().collect(),
-        Zone::Graveyard => player_state.graveyard.iter().copied().collect(),
+        Zone::Library => state.library_of(player_state.id).iter().copied().collect(),
+        Zone::Graveyard => state
+            .graveyard_of(player_state.id)
+            .iter()
+            .copied()
+            .collect(),
         Zone::Exile => state
             .exile
             .iter()

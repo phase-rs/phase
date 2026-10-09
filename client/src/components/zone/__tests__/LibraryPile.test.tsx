@@ -8,6 +8,7 @@ import {
 } from "../../../adapter/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
@@ -139,6 +140,76 @@ function setOpponentLibraryTop(
     gameMode: "ai",
   });
 }
+
+function setSharedLibrary({ shared }: { shared: boolean }) {
+  const top = makeObject(11, "Sol Ring");
+  top.display_visible_to_viewer = true;
+  const action = castAction(11);
+  const gameState = buildGameState({
+    active_player: 0,
+    priority_player: 1,
+    objects: buildObjectMap(top),
+    players: buildPlayers([
+      { id: 0, library: [11, 12, 13] },
+      { id: 1, library: [] },
+    ]),
+    battlefield: [],
+    exile: [],
+    stack: [],
+    revealed_cards: [],
+    waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
+    ...(shared ? { derived: { shared_piles: { library: 0, graveyard: 0 } } } : {}),
+  });
+  useGameStore.setState({
+    gameState,
+    waitingFor: gameState.waiting_for,
+    legalActions: [action],
+    legalActionsByObject: { "11": [action] },
+    spellCosts: {},
+    gameMode: "online",
+  });
+  useMultiplayerStore.setState({ activePlayerId: 1 });
+}
+
+describe("LibraryPile shared library", () => {
+  beforeEach(() => {
+    dispatchMock.mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    useMultiplayerStore.setState({ activePlayerId: null });
+  });
+
+  it("renders the holder's pile for the non-holder seat's request", () => {
+    setSharedLibrary({ shared: true });
+    const { container } = render(<LibraryPile playerId={1} />);
+    expect(container.querySelector('[data-library-pile="0"]')).not.toBeNull();
+    expect(container.querySelector('[data-library-pile="1"]')).toBeNull();
+    expect(container.querySelector("button[data-grouped-ids]")).toHaveAttribute(
+      "data-grouped-ids",
+      "11",
+    );
+  });
+
+  it("lets the non-holder seat play from the shared top the engine offers", () => {
+    setSharedLibrary({ shared: true });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /play sol ring from top of library/i });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "CastSpell" }));
+  });
+
+  it("still refuses the opponent's own library when nothing is shared", () => {
+    setSharedLibrary({ shared: false });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /library \(3 cards\)/i });
+    expect(button).toHaveAttribute("data-library-top-cast", "false");
+    fireEvent.click(button);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("LibraryPile play/cast surfacing (#297)", () => {
   beforeEach(() => {

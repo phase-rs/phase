@@ -280,11 +280,11 @@ pub fn resolve(
                         None,
                     );
                 }
-                0
+                None
             }
             // CR 611.2c: install NOTHING rather than a frozen per-object graft.
             // See `SubjectLowering::Unlowerable`.
-            SubjectLowering::Unlowerable => 0,
+            SubjectLowering::Unlowerable => None,
         };
     }
 

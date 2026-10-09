@@ -61,6 +61,8 @@ async function launch(task) {
   const backend = BACKENDS[name];
   if (!backend) fail(`unknown backend ${name}`);
   const model = values.model ?? backend.model;
+  const timeoutMs = Number(values.timeout) * 1000;
+  if (!(timeoutMs > 0)) fail('--timeout must be a positive number of seconds');
   const started = Date.now();
   const child = spawn(name, backend.args({ repo, model, effort: values.effort }), {
     cwd: repo,
@@ -71,7 +73,7 @@ async function launch(task) {
   const deadline = setTimeout(() => {
     child.kill('SIGKILL');
     fail(`${name} did not finish within ${values.timeout} seconds`);
-  }, Number(values.timeout) * 1000);
+  }, timeoutMs);
 
   const usage = { input: 0, output: 0, cacheRead: 0 };
   let report = '';

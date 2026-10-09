@@ -90,7 +90,6 @@ export function ZoneViewer({
 
   const canDelveFromGraveyard =
     zone === "graveyard"
-    && playerId === viewerId
     && canActForWaitingState
     && waitingFor?.type === "ManaPayment"
     && waitingFor.data.convoke_mode === "Delve";

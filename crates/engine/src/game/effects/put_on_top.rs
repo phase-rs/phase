@@ -28,7 +28,7 @@ pub(super) fn private_zone_selection<'a>(
     let player = &state.players[choosing_player.0 as usize];
     let candidates = match source_zone {
         Zone::Hand => &player.hand,
-        Zone::Library => &player.library,
+        Zone::Library => state.library_of(choosing_player),
         Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => {
             return None;
         }
@@ -149,20 +149,76 @@ pub fn resolve(
     // bare form (Chaos Wand's "put the rest on the bottom") or an `And`-composed
     // form (Jodah's "put the rest" = `And { ExiledBySource, DistinctFrom
     // { ParentTarget } }`, which excludes a declined-and-still-exiled hit) —
-    // scans the exile zone. `matches_target_filter` evaluates the full filter,
-    // so every `And` leg (`ExiledBySource` membership + `DistinctFrom` exclusion)
-    // is applied together.
+    // reads the exiled cards: the batch an exile-until loop handed down, or else
+    // a scan of the exile zone. With a batch, batch membership stands in for the
+    // `ExiledBySource` leg and the other legs are applied to it; the scan
+    // evaluates the full filter, every `And` leg together.
     if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        collected_targets = state
-            .objects
-            .iter()
-            .filter(|(id, obj)| {
-                obj.zone == Zone::Exile
-                    && crate::game::filter::matches_target_filter(state, **id, &target_filter, &ctx)
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        // CR 400.7j + CR 608.2c: after an "exile cards … until …" loop, "the
+        // other cards exiled this way" (Invasion of Alara) and "put the rest"
+        // (Jodah, the Unifier) are found among the exact batch that loop handed
+        // down (`SpellContext::exile_until_batch`), with the filter's other legs
+        // applied to it. A triggered ability's `ExiledBySource` would otherwise
+        // read the linked-exile snapshot taken when it triggered, before this
+        // resolution exiled anything. Without a batch the scan below is
+        // unchanged.
+        //
+        // CR 607.2a: Possibility Storm's "all cards exiled with this
+        // enchantment" is every card currently exiled with the source, which
+        // adds the spell its trigger exiled before the loop. The other bare
+        // form, "the exiled cards that weren't cast this way" (Gríma,
+        // Saruman's Footman; CR 608.2c), names this resolution's cards; with
+        // the engine's per-source link ledger that is the same set, because no
+        // card of these forms leaves a linked card in exile, unlike a found
+        // card the rest-forms keep.
+        let resolution_batch = (!ability.context.exile_until_batch.is_empty()).then(|| {
+            ability
+                .context
+                .exile_until_batch
+                .iter()
+                .filter(|pin| pin.is_current(state))
+                .map(|pin| pin.object_id)
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+                })
+                .collect::<Vec<_>>()
+        });
+        collected_targets = match resolution_batch {
+            Some(mut batch) => match target_filter.without_exile_anaphor() {
+                None => {
+                    for id in cards_exiled_with_source_now(state, ability.source_id) {
+                        if !batch.contains(&id) {
+                            batch.push(id);
+                        }
+                    }
+                    batch
+                }
+                Some(residual) => batch
+                    .into_iter()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, &residual, &ctx)
+                    })
+                    .collect(),
+            },
+            None => state
+                .objects
+                .iter()
+                .filter(|(id, obj)| {
+                    obj.zone == Zone::Exile
+                        && crate::game::filter::matches_target_filter(
+                            state,
+                            **id,
+                            &target_filter,
+                            &ctx,
+                        )
+                })
+                .map(|(id, _)| *id)
+                .collect(),
+        };
         // CR 701.20e: Look-then-cast tails put uncast looked-at cards on the
         // bottom via `ExiledBySource`, but those cards remain in the library.
         if collected_targets.is_empty() && !state.last_revealed_ids.is_empty() {
@@ -509,6 +565,27 @@ pub fn resolve(
     );
 
     Ok(())
+}
+
+/// CR 607.2a: the cards in exile linked to `source_id` right now (the live
+/// ledger, not a trigger's snapshot). A bare exiled-cards cleanup after an
+/// exile-until loop adds these to the loop's batch, so the cards the ability
+/// exiled before its loop (Possibility Storm's "exiles it") are included; see
+/// the bare-form note in `resolve` for why that is safe for "this way".
+pub(super) fn cards_exiled_with_source_now(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    crate::game::players::linked_exile_cards_for_source(state, source_id)
+        .into_iter()
+        .map(|entry| entry.exiled_id)
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Exile)
+        })
+        .collect()
 }
 
 #[cfg(test)]

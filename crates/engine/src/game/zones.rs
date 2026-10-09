@@ -804,31 +804,43 @@ pub(crate) fn record_descend_on_graveyard_arrival(
 /// the all-zone bump advanced its epoch. Chains across multiple self-moves in one
 /// resolution: the first self-move sets `original_stamp` (bound to the ability's
 /// captured incarnation); a chained self-move keeps `original_stamp` fixed and only
-/// advances `current_incarnation`. A foreign object, or a move whose pre-move
-/// incarnation matches neither the captured stamp nor the record's current value,
-/// never writes. Call AFTER the bump, passing the pre-bump and post-bump values.
+/// advances `current_incarnation`. A first self-move may also start from the CR
+/// 400.7e successor a zone-change trigger already found in `from` (a dies
+/// trigger returning "this card" from the graveyard). A foreign object, or any
+/// other pre-move incarnation, never writes. Call AFTER the bump but BEFORE the
+/// move is recorded in `zone_changes_this_turn`, passing the pre-bump and
+/// post-bump values and the zone the object left.
 pub(crate) fn record_resolution_source_relatch(
     state: &mut GameState,
     object_id: ObjectId,
+    from: Zone,
     pre_move_incarnation: u64,
     new_incarnation: u64,
 ) {
     // A faithful READ of the resolving ability's captured source identity. The
     // clone is disconnected from the local resolving borrow, so it cannot be the
     // carrier — the record on `state` is (consumed inside `source_is_current`).
-    let Some((source_id, Some(captured))) = state
+    let Some((source_id, Some(captured), successor_start)) = state
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
-        .map(|a| (a.source_id, a.trigger_source_incarnation()))
+        .map(|a| {
+            (
+                a.source_id,
+                a.trigger_source_incarnation().or(a.source_incarnation),
+                a.is_own_departure_successor_in(state, from, Some(pre_move_incarnation)),
+            )
+        })
     else {
         return;
     };
     if object_id != source_id {
         return;
     }
-    // First self-move: pre-move value must equal the ability's captured stamp.
-    let matches_first = pre_move_incarnation == captured;
+    // First self-move: pre-move value must equal the ability's captured stamp,
+    // or the source must be the successor its own triggering move created.
+    // CR 400.7j: other parts of that effect can find the object it moved.
+    let matches_first = pre_move_incarnation == captured || successor_start;
     // Chained self-move: pre-move value must equal the record's current value.
     let chained = state
         .resolution_source_relatch
@@ -853,13 +865,8 @@ fn zone_container_len(
     object_id: ObjectId,
 ) -> usize {
     match zone {
-        Zone::Library => state
-            .players
-            .iter()
-            .find(|player| player.id == owner)
-            .expect("zone command owner exists")
-            .library
-            .len(),
+        // CR 400.1 + CR 400.3: a shared pile is measured in its holder's container.
+        Zone::Library => state.library_of(owner).len(),
         Zone::Hand => state
             .players
             .iter()
@@ -867,13 +874,7 @@ fn zone_container_len(
             .expect("zone command owner exists")
             .hand
             .len(),
-        Zone::Graveyard => state
-            .players
-            .iter()
-            .find(|player| player.id == owner)
-            .expect("zone command owner exists")
-            .graveyard
-            .len(),
+        Zone::Graveyard => state.graveyard_of(owner).len(),
         Zone::Battlefield => state.battlefield.len(),
         Zone::Stack => state.stack.len(),
         Zone::Exile => state.exile.len(),
@@ -921,12 +922,17 @@ fn destination_position_after_removal(
 /// resulting incarnation and destination position, then delegates the exact
 /// installation to [`apply_resolved_zone_change`]. Replay never allocates a
 /// timestamp or a new object identity.
+///
+/// `owner` is the object's owner before the move; `receiver` is `Some` only when
+/// the move rebinds ownership, and then names the new owner whose hand holds the
+/// card.
 pub fn resolve_and_apply_zone_change(
     state: &mut GameState,
     object_id: ObjectId,
     from: Zone,
     to: Zone,
     owner: PlayerId,
+    receiver: Option<PlayerId>,
     mut zone_change_record: crate::types::game_state::ZoneChangeRecord,
 ) -> Result<ResolvedZoneChangeCommand, ResolvedZoneChangeReplayInvariantError> {
     let object = state.objects.get(&object_id).ok_or(
@@ -952,13 +958,21 @@ pub fn resolve_and_apply_zone_change(
     } else {
         occurrence.incarnation
     };
+    let installed_owner = receiver.unwrap_or(owner);
+    let rebound_from = (installed_owner != owner).then_some(owner);
     let destination_position =
-        destination_position_after_removal(state, object_id, from, to, owner);
+        destination_position_after_removal(state, object_id, from, to, installed_owner);
     let turn_zone_change_index = state.zone_changes_this_turn.len();
     zone_change_record.entered_incarnation =
         (to == Zone::Battlefield).then_some(resulting_incarnation);
     zone_change_record.turn_zone_change_index = turn_zone_change_index;
     zone_change_record.recorded_turn_number = state.turn_number;
+    if rebound_from.is_some() {
+        // CR 108.4a + CR 109.4: off the battlefield and stack a card's controller is its owner.
+        zone_change_record.owner = installed_owner;
+        zone_change_record.controller = installed_owner;
+        zone_change_record.sync_trigger_source_context();
+    }
 
     let command = ResolvedZoneChangeCommand {
         object: occurrence,
@@ -966,7 +980,8 @@ pub fn resolve_and_apply_zone_change(
         from,
         to,
         destination_position,
-        owner,
+        owner: installed_owner,
+        rebound_from,
         entry_timestamp,
         turn_zone_change_index,
         zone_change_record,
@@ -1059,6 +1074,16 @@ pub(crate) fn prune_object_bound_effects_on_exit(
     super::layers::prune_affected_object_left_effects(state, object_id);
 }
 
+/// CR 108.3 as modified by a format's hand-entry ownership axis + CR 108.4a +
+/// CR 109.4: the receiving player owns the card, and off the battlefield and
+/// stack its controller is its owner. `base_controller` follows because exit
+/// cleanup computes `controller` from it.
+fn install_rebound_owner(object: &mut crate::game::game_object::GameObject, owner: PlayerId) {
+    object.owner = owner;
+    object.base_controller = Some(owner);
+    object.controller = owner;
+}
+
 pub fn apply_resolved_zone_change(
     state: &mut GameState,
     command: &ResolvedZoneChangeCommand,
@@ -1074,9 +1099,10 @@ pub fn apply_resolved_zone_change(
             found,
         });
     }
-    if object.owner != command.owner {
+    let expected_owner = command.rebound_from.unwrap_or(command.owner);
+    if object.owner != expected_owner {
         return Err(ResolvedZoneChangeReplayInvariantError::OwnerMismatch {
-            expected: command.owner,
+            expected: expected_owner,
             found: object.owner,
         });
     }
@@ -1166,6 +1192,9 @@ pub fn apply_resolved_zone_change(
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
     object.zone = command.to;
+    if command.rebound_from.is_some() {
+        install_rebound_owner(object, command.owner);
+    }
     clear_hand_or_graveyard_casting_permissions_on_exit(object, command.from, command.to);
     // CR 400.7 + CR 601.2i: replay bypasses `apply_zone_exit_cleanup`, so it
     // must reproduce the live Stack-exit carrier clear from the recorded move.
@@ -1238,7 +1267,7 @@ pub fn move_to_zone(
     to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
-    move_to_zone_with_entry_flags(state, object_id, to, events, false);
+    move_to_zone_with_entry_flags(state, object_id, to, events, false, None);
 }
 
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
@@ -1274,12 +1303,17 @@ pub fn move_to_zone(
 /// The `transform_permanent` call in `zone_pipeline::deliver_replaced_zone_change`
 /// is the SINGLE authoritative post-move face swap and already runs on `to == Zone::Battlefield`, so the
 /// guard here only gates eligibility — it never mutates the face.
+///
+/// `hand_receiver` (see `zone_pipeline::hand_entry_receiver`) takes effect only
+/// in the ordinary-container branch, so a CR 717.6 redirect to Command never
+/// rebinds ownership.
 pub(crate) fn move_to_zone_with_entry_flags(
     state: &mut GameState,
     object_id: ObjectId,
     mut to: Zone,
     events: &mut Vec<GameEvent>,
     enter_transformed: bool,
+    hand_receiver: Option<PlayerId>,
 ) {
     // CR 111.8: A token that has left the battlefield can't move to another zone
     // or come back onto the battlefield — "if such a token would change zones, it
@@ -1540,6 +1574,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
                 from,
                 to,
                 owner,
+                hand_receiver,
                 zone_change_record,
             )
             .expect("ordinary zone transition must install its resolved core");
@@ -1562,7 +1597,13 @@ pub(crate) fn move_to_zone_with_entry_flags(
     }
 
     if new_incarnation != pre_bump_incarnation {
-        record_resolution_source_relatch(state, object_id, pre_bump_incarnation, new_incarnation);
+        record_resolution_source_relatch(
+            state,
+            object_id,
+            from,
+            pre_bump_incarnation,
+            new_incarnation,
+        );
     }
 
     // CR 700.11: a permanent card was put into its owner's graveyard.
@@ -2235,19 +2276,11 @@ pub(crate) fn reorder_within_library(
     ordered: &[ObjectId],
     index: Option<usize>,
 ) {
-    let player_state = state
-        .players
-        .iter_mut()
-        .find(|candidate| candidate.id == player)
-        .expect("player exists");
-    player_state.library.retain(|id| !ordered.contains(id));
-    let insert_index = index
-        .unwrap_or(player_state.library.len())
-        .min(player_state.library.len());
+    let library = state.library_of_mut(player);
+    library.retain(|id| !ordered.contains(id));
+    let insert_index = index.unwrap_or(library.len()).min(library.len());
     for (offset, &object_id) in ordered.iter().enumerate() {
-        player_state
-            .library
-            .insert(insert_index + offset, object_id);
+        library.insert(insert_index + offset, object_id);
     }
     state.advance_library_knowledge_epoch(player);
 
@@ -2353,17 +2386,13 @@ pub fn move_to_library_at_index(
     }
 
     // Place at specified index or push to end (bottom)
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == owner)
-        .expect("owner exists");
+    let library = state.library_of_mut(owner);
     match index {
         Some(i) => {
-            let clamped = i.min(player.library.len());
-            player.library.insert(clamped, object_id);
+            let clamped = i.min(library.len());
+            library.insert(clamped, object_id);
         }
-        None => player.library.push_back(object_id),
+        None => library.push_back(object_id),
     }
     state.advance_library_knowledge_epoch(owner);
 
@@ -2380,7 +2409,7 @@ pub fn move_to_library_at_index(
         }
     }
     if let Some((pre, new)) = bump {
-        record_resolution_source_relatch(state, object_id, pre, new);
+        record_resolution_source_relatch(state, object_id, from, pre, new);
     }
 
     super::restrictions::record_zone_change(state, &mut zone_change_record);
@@ -2417,19 +2446,15 @@ pub fn move_to_library_at_index(
 /// Remove an ObjectId from the appropriate zone collection (CR 400.1).
 pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner: PlayerId) {
     match zone {
-        Zone::Library | Zone::Hand | Zone::Graveyard => {
-            let player = state
-                .players
-                .iter_mut()
-                .find(|p| p.id == owner)
-                .expect("owner exists");
-            match zone {
-                Zone::Library => player.library.retain(|id| *id != object_id),
-                Zone::Hand => player.hand.retain(|id| *id != object_id),
-                Zone::Graveyard => player.graveyard.retain(|id| *id != object_id),
-                _ => unreachable!(),
-            }
-        }
+        Zone::Library => state.library_of_mut(owner).retain(|id| *id != object_id),
+        Zone::Graveyard => state.graveyard_of_mut(owner).retain(|id| *id != object_id),
+        Zone::Hand => state
+            .players
+            .iter_mut()
+            .find(|p| p.id == owner)
+            .expect("owner exists")
+            .hand
+            .retain(|id| *id != object_id),
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
         Zone::Stack => {
             // A unique id, so at most ONE entry matches. Routed through the
@@ -2549,19 +2574,15 @@ pub fn apply_resolved_object_cease(
 /// Add an ObjectId to the appropriate zone collection.
 pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner: PlayerId) {
     match zone {
-        Zone::Library | Zone::Hand | Zone::Graveyard => {
-            let player = state
-                .players
-                .iter_mut()
-                .find(|p| p.id == owner)
-                .expect("owner exists");
-            match zone {
-                Zone::Library => player.library.push_back(object_id),
-                Zone::Hand => player.hand.push_back(object_id),
-                Zone::Graveyard => player.graveyard.push_back(object_id),
-                _ => unreachable!(),
-            }
-        }
+        Zone::Library => state.library_of_mut(owner).push_back(object_id),
+        Zone::Graveyard => state.graveyard_of_mut(owner).push_back(object_id),
+        Zone::Hand => state
+            .players
+            .iter_mut()
+            .find(|p| p.id == owner)
+            .expect("owner exists")
+            .hand
+            .push_back(object_id),
         // CR 400.4a: Instants/sorceries blocked by early check in move_to_zone.
         Zone::Battlefield => state.battlefield.push_back(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
@@ -2974,6 +2995,224 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn resolution_source_relatch_uses_activated_source_stamp() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let foreign = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Foreign".into(),
+            Zone::Graveyard,
+        );
+        let captured = state.objects[&source].incarnation;
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::NoOp,
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(captured);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability.clone()),
+            },
+        });
+        record_resolution_source_relatch(
+            &mut state,
+            foreign,
+            Zone::Battlefield,
+            captured,
+            captured + 1,
+        );
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            captured + 99,
+            captured + 100,
+        );
+        assert!(state.resolution_source_relatch.is_none());
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        let current = state.objects[&source].incarnation;
+        assert_eq!(
+            state.resolution_source_relatch,
+            Some(ResolutionSourceRelatch {
+                object_id: source,
+                original_stamp: captured,
+                current_incarnation: current
+            })
+        );
+        assert!(ability.source_is_current(&state));
+        state.resolution_source_relatch = None;
+        state.resolving_stack_entry = None;
+        record_resolution_source_relatch(&mut state, source, Zone::Battlefield, captured, current);
+        assert!(state.resolution_source_relatch.is_none());
+        assert!(!ability.source_is_current(&state));
+    }
+
+    #[test]
+    fn resolution_source_relatch_starts_only_from_immediate_departure_successor() {
+        // CR 400.7e + CR 400.7j: a dies trigger that returns the card it found
+        // in the graveyard relatches; a card that left and came back before
+        // resolution is a different object and must not, and a trigger cannot
+        // find the card it moved into a hidden zone.
+        for (departure, left_and_returned, relatches) in [
+            (Zone::Graveyard, false, true),
+            (Zone::Graveyard, true, false),
+            (Zone::Hand, false, false),
+        ] {
+            let mut state = setup();
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".into(),
+                Zone::Battlefield,
+            );
+            let mut dies_events = Vec::new();
+            move_to_zone(&mut state, source, departure, &mut dies_events);
+            let dies_event = dies_events
+                .into_iter()
+                .find(|event| {
+                    matches!(event, GameEvent::ZoneChanged { object_id, to, .. }
+                        if *object_id == source && *to == departure)
+                })
+                .expect("dies event");
+            let GameEvent::ZoneChanged { record, .. } = &dies_event else {
+                unreachable!("filtered to ZoneChanged");
+            };
+            let mut ability = crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.set_trigger_source_recursive(
+                record
+                    .trigger_source_context()
+                    .cloned()
+                    .expect("dies record carries its source identity"),
+            );
+            if left_and_returned {
+                move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+                move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+            }
+            state.current_trigger_event = Some(dies_event);
+            state.resolving_stack_entry = Some(StackEntry {
+                id: ObjectId(900),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                },
+            });
+
+            move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+
+            assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+            assert_eq!(
+                state.resolution_source_relatch.is_some(),
+                relatches,
+                "departure={departure:?} left_and_returned={left_and_returned}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_source_relatch_preserves_trigger_stamp_and_rejects_foreign_or_stale_moves() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let foreign = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Foreign".into(),
+            Zone::Graveyard,
+        );
+        let captured = state.objects[&source].incarnation;
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::NoOp,
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.set_test_trigger_source_recursive(captured, CardId(1));
+        ability.source_incarnation = Some(captured + 50);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            captured + 50,
+            captured + 51,
+        );
+        assert!(
+            state.resolution_source_relatch.is_none(),
+            "trigger authority must win over conflicting activated fallback"
+        );
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        let first = state
+            .resolution_source_relatch
+            .expect("trigger-stamped own move must latch");
+        assert_eq!(first.original_stamp, captured);
+        assert_eq!(
+            first.current_incarnation,
+            state.objects[&source].incarnation
+        );
+        move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+        let second = state
+            .resolution_source_relatch
+            .expect("chained own move must advance");
+        assert_eq!(second.original_stamp, captured);
+        assert_eq!(
+            second.current_incarnation,
+            state.objects[&source].incarnation
+        );
+        assert_ne!(second.current_incarnation, first.current_incarnation);
+        record_resolution_source_relatch(
+            &mut state,
+            foreign,
+            Zone::Battlefield,
+            second.current_incarnation,
+            second.current_incarnation + 1,
+        );
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            first.current_incarnation,
+            second.current_incarnation + 1,
+        );
+        assert_eq!(state.resolution_source_relatch, Some(second));
     }
 
     #[test]
@@ -4320,7 +4559,7 @@ mod tests {
         }
 
         let mut events = Vec::new();
-        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true);
+        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true, None);
 
         assert_eq!(
             state.objects[&id].zone,
@@ -4430,7 +4669,7 @@ mod tests {
         // back_face intentionally left None (single-faced; the GameState default).
 
         let mut events = Vec::new();
-        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true);
+        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true, None);
 
         assert_eq!(
             state.objects[&id].zone,
@@ -4905,6 +5144,7 @@ mod tests {
             Zone::Stack,
             Zone::Graveyard,
             PlayerId(0),
+            None,
             record,
         )
         .expect("live transition must resolve");
@@ -4954,6 +5194,7 @@ mod tests {
                 Zone::Stack,
                 destination,
                 PlayerId(0),
+                None,
                 record,
             )
             .expect("live Stack exit resolves");
@@ -5635,6 +5876,162 @@ mod tests {
                 )
             }),
             "SBA zone movement must still publish the unattach event for triggers"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hand_entry_rebind_tests {
+    use super::*;
+    use crate::types::format::FormatConfig;
+    use crate::types::resolved_commands::{ResolvedRulesCommand, ResolvedRulesJournal};
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// A Dandân state holding one P0-owned pile card, moved into P1's hand with
+    /// P1 as receiver. Returns the pre-move state, the live state, the card and
+    /// the journaled command.
+    fn rebound_move(
+        from: Zone,
+        to: Zone,
+    ) -> (GameState, GameState, ObjectId, ResolvedZoneChangeCommand) {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let card = create_object(&mut state, CardId(1), P0, "Pile Card".to_string(), from);
+        let pre = state.clone();
+        let record = state.objects[&card].snapshot_for_zone_change(card, Some(from), to);
+        let command =
+            resolve_and_apply_zone_change(&mut state, card, from, to, P0, Some(P1), record)
+                .expect("the rebinding move applies");
+        (pre, state, card, command)
+    }
+
+    fn journal_wire(state: &GameState) -> serde_json::Value {
+        serde_json::to_value(&state.resolved_rules_journal).expect("journal serializes")
+    }
+
+    fn command_json(
+        wire: &mut serde_json::Value,
+    ) -> &mut serde_json::Map<String, serde_json::Value> {
+        wire["entries"]
+            .as_array_mut()
+            .expect("journal entries")
+            .iter_mut()
+            .find_map(|entry| entry["command"]["ZoneChange"].as_object_mut())
+            .expect("a zone-change command")
+    }
+
+    fn journal_is_accepted(wire: serde_json::Value) -> bool {
+        serde_json::from_value::<ResolvedRulesJournal>(wire).is_ok()
+    }
+
+    #[test]
+    fn replaying_the_command_reproduces_the_live_rebind() {
+        let (pre, live, card, command) = rebound_move(Zone::Library, Zone::Hand);
+        assert_eq!(command.rebound_from, Some(P0), "reach: the move rebound");
+        assert_eq!(command.owner, P1);
+
+        let mut replay = pre;
+        apply_resolved_zone_change(&mut replay, &command).expect("replay applies");
+
+        for state in [&live, &replay] {
+            let object = &state.objects[&card];
+            assert_eq!(object.owner, P1);
+            assert_eq!(object.controller, P1);
+            assert_eq!(object.base_controller, Some(P1));
+            assert_eq!(object.zone, Zone::Hand);
+            assert!(state.players[1].hand.contains(&card));
+            assert!(state.players[0].hand.is_empty());
+        }
+        assert_eq!(live.players[1].hand, replay.players[1].hand);
+        assert_eq!(live.players[0].library, replay.players[0].library);
+    }
+
+    #[test]
+    fn the_replay_precondition_is_the_pre_rebind_owner() {
+        let (mut pre, _, card, command) = rebound_move(Zone::Library, Zone::Hand);
+        pre.objects.get_mut(&card).unwrap().owner = P1;
+
+        assert!(matches!(
+            apply_resolved_zone_change(&mut pre, &command),
+            Err(ResolvedZoneChangeReplayInvariantError::OwnerMismatch {
+                expected: P0,
+                found: P1,
+            })
+        ));
+    }
+
+    #[test]
+    fn a_later_zone_change_does_not_resurrect_the_old_owner_as_controller() {
+        let (_, mut live, card, _) = rebound_move(Zone::Library, Zone::Hand);
+        let mut events = Vec::new();
+
+        move_to_zone(&mut live, card, Zone::Graveyard, &mut events);
+
+        let object = &live.objects[&card];
+        assert_eq!(object.owner, P1);
+        assert_eq!(object.controller, P1);
+        assert!(live.players[0].graveyard.contains(&card));
+    }
+
+    #[test]
+    fn the_journal_validator_accepts_the_rebind_and_refuses_each_malformed_form() {
+        let (_, live, _, _) = rebound_move(Zone::Library, Zone::Hand);
+        assert!(
+            journal_is_accepted(journal_wire(&live)),
+            "reach: the well-formed rebind validates"
+        );
+
+        let mut wire = journal_wire(&live);
+        command_json(&mut wire).insert("rebound_from".to_string(), serde_json::json!(P1));
+        assert!(!journal_is_accepted(wire), "a rebind to the same owner");
+
+        let (_, to_graveyard, _, _) = rebound_move(Zone::Library, Zone::Graveyard);
+        assert!(
+            !journal_is_accepted(journal_wire(&to_graveyard)),
+            "a rebind whose destination is not Hand"
+        );
+
+        let (_, from_exile, _, _) = rebound_move(Zone::Exile, Zone::Hand);
+        assert!(
+            !journal_is_accepted(journal_wire(&from_exile)),
+            "a rebind out of a zone no format shares"
+        );
+    }
+
+    #[test]
+    fn an_unrebound_command_omits_the_field_and_old_saves_default_it() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let card = create_object(&mut state, CardId(1), P0, "Own".to_string(), Zone::Library);
+        let record =
+            state.objects[&card].snapshot_for_zone_change(card, Some(Zone::Library), Zone::Hand);
+        let command = resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Library,
+            Zone::Hand,
+            P0,
+            None,
+            record,
+        )
+        .expect("an ordinary move applies");
+        assert_eq!(command.rebound_from, None);
+
+        let wire =
+            serde_json::to_value(ResolvedRulesCommand::ZoneChange(Box::new(command.clone())))
+                .expect("serializes");
+        assert!(wire["ZoneChange"].get("rebound_from").is_none());
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesCommand>(wire).expect("legacy shape reads"),
+            ResolvedRulesCommand::ZoneChange(Box::new(command)),
+        );
+
+        let (_, _, _, command) = rebound_move(Zone::Library, Zone::Hand);
+        let wire = serde_json::to_value(ResolvedRulesCommand::ZoneChange(Box::new(command)))
+            .expect("serializes");
+        assert!(
+            wire["ZoneChange"].get("rebound_from").is_some(),
+            "reach: a rebound command carries the key"
         );
     }
 }

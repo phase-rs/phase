@@ -46,7 +46,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Collect library IDs (top to bottom)
-    let library: Vec<ObjectId> = player.library.iter().copied().collect();
+    let library: Vec<ObjectId> = state.library_of(player.id).iter().copied().collect();
     let mut exiled_misses: Vec<ObjectId> = Vec::new();
     let mut hit_card: Option<ObjectId> = None;
 

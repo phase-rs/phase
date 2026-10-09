@@ -1,6 +1,7 @@
 use super::*;
+use crate::game::ability_utils::ability_definition_supported;
 use crate::game::scenario::{GameScenario, P0, P1};
-use crate::parser::oracle::parse_oracle_text;
+use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
 use crate::parser::oracle_classifier::has_trigger_prefix;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -20,6 +21,9 @@ use crate::types::ability::{
     PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality,
     SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+};
+use crate::types::ability::{
+    EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, SpentColor,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5926,6 +5930,181 @@ fn trigger_attacks_enchanted_player_scopes_to_attached_player() {
         def.valid_target,
         Some(TargetFilter::AttachedTo),
         "'attacks enchanted player' must scope the defender to the attached player"
+    );
+}
+
+/// CR 102.1 + CR 508.1b: Preacher of the Schism — BOTH attack triggers keep their
+/// life-total gate. Before, each came out with no condition and no defender scope,
+/// so the token AND the card arrived on every attack.
+#[test]
+fn preacher_of_the_schism_keeps_both_life_gates() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks the player with the most life or tied for most life, create a 1/1 white Vampire creature token with lifelink.",
+        "Preacher of the Schism",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    let vt = format!("{:?}", triggers[0].valid_target);
+    assert!(
+        vt.contains("PlayerAttribute") && vt.contains("LifeTotal") && vt.contains("GE"),
+        "defender must be scoped to the most-life player, got {vt}"
+    );
+
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life, you draw a card and you lose 1 life.",
+        "Preacher of the Schism",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    let cond = format!("{:?}", triggers[0].condition);
+    assert!(
+        cond.contains("LifeTotal { player: Controller }")
+            && cond.contains("GE")
+            && cond.contains("AllPlayers"),
+        "while-gate must be your life >= max life, got {cond}"
+    );
+}
+
+/// CR 603.2 + CR 508.1m: an attack `while` gate must consume its whole
+/// qualification; a partially parsed controller gate stays unsupported.
+#[test]
+fn attacks_while_controller_gate_rejects_unconsumed_rider() {
+    let complete = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life, draw a card.",
+        "Probe",
+    );
+    assert_eq!(complete.len(), 1);
+    assert_eq!(complete[0].mode, TriggerMode::Attacks);
+    let condition = format!("{:?}", complete[0].condition);
+    assert!(
+        condition.contains("EventTime")
+            && condition.contains("LifeTotal { player: Controller }")
+            && condition.contains("AllPlayers")
+            && condition.contains("GE"),
+        "the complete controller gate must qualify the attack: {condition}"
+    );
+
+    let conjunction = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life and you control a Forest, draw a card.",
+        "Probe",
+    );
+    assert_eq!(conjunction.len(), 1);
+    assert_eq!(conjunction[0].mode, TriggerMode::Attacks);
+    let Some(TriggerCondition::EventTime { condition }) = &conjunction[0].condition else {
+        panic!("the complete conjunction must qualify the attack: {conjunction:?}");
+    };
+    let TriggerCondition::And { conditions } = condition.as_ref() else {
+        panic!("both state conditions must survive: {condition:?}");
+    };
+    assert_eq!(conditions.len(), 2);
+    assert!(matches!(
+        &conditions[0],
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            },
+        }
+    ));
+    let TriggerCondition::ControlsType {
+        filter: TargetFilter::Typed(filter),
+    } = &conditions[1]
+    else {
+        panic!("Forest control must survive: {:?}", conditions[1]);
+    };
+    assert_eq!(
+        filter.type_filters,
+        vec![TypeFilter::Subtype("Forest".to_string())]
+    );
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: Zone::Battlefield,
+    }));
+
+    let partial = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life but not if you control a Forest, draw a card.",
+        "Probe",
+    );
+    assert_eq!(partial.len(), 1);
+    assert!(
+        matches!(partial[0].mode, TriggerMode::Unknown(_)),
+        "an unconsumed state rider must remain explicitly unsupported: {partial:?}"
+    );
+}
+
+/// The "the player" arm only binds when the most-life qualifier follows.
+#[test]
+fn attacks_the_player_without_most_life_qualifier_does_not_bind_player_scope() {
+    // CR 508.1b: unmodelled "the player …" qualifiers — no "or tied" tail, a
+    // different superlative, and speed (no per-candidate reader) — must stay
+    // explicitly unsupported. The discriminating check is that NO `Attacks`
+    // trigger comes out at all: an unscoped one would fire on every attack.
+    for text in [
+        "Whenever this creature attacks the player with the fewest cards in hand, draw a card.",
+        "Whenever this creature attacks the player with the most life, draw a card.",
+        "Whenever this creature attacks the player with the most speed or tied for most speed, draw a card.",
+        // Partially recognised: the leader grammar matches a prefix, but the
+        // qualifier continues past it — the terminator check must decline.
+        "Whenever this creature attacks the player with the most life or tied for most life and controls a Forest, draw a card.",
+    ] {
+        let triggers = parse_trigger_lines(text, "Probe");
+        assert!(
+            !triggers.is_empty(),
+            "{text}: the line must still surface (as unsupported), not vanish"
+        );
+        assert!(
+            triggers
+                .iter()
+                .all(|t| !matches!(t.mode, TriggerMode::Attacks)),
+            "{text}: no generic Attacks trigger may escape: {triggers:?}"
+        );
+    }
+    // Positive reach guard for the partial case above: the SAME qualifier,
+    // ending at the clause boundary, binds the scoped leader filter — so the
+    // decline is caused by the trailing rider, not by the grammar failing.
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks the player with the most life or tied for most life, draw a card.",
+        "Probe",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    let vt = format!("{:?}", triggers[0].valid_target);
+    assert!(
+        vt.contains("LifeTotal") && vt.contains("GE"),
+        "the complete qualifier must scope the defender, got {vt}"
+    );
+
+    // Reach guard: the same grammar reads another property, not just life.
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks the player with the most cards in hand or tied for most cards in hand, draw a card.",
+        "Probe",
+    );
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    let vt = format!("{:?}", triggers[0].valid_target);
+    assert!(
+        vt.contains("HandSize") && vt.contains("GE"),
+        "defender must be scoped to the most-cards player, got {vt}"
     );
 }
 
@@ -19932,7 +20111,10 @@ fn resolution_optional_payment_sacrifice_allowlist_fails_closed() {
     );
     for forbidden in [
         AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
-        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::GrantingObject, 1)),
+        AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::GrantingObject { bound: None },
+            1,
+        )),
         AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
         AbilityCost::Sacrifice(SacrificeCost::count(typed.clone(), 0)),
         AbilityCost::Sacrifice(SacrificeCost::count(typed.clone(), u32::MAX)),
@@ -22410,6 +22592,72 @@ fn harsh_mentor_ability_activation_trigger_accepts_oxford_type_list() {
     );
 }
 
+// SHAPE: actor scope is independent of loyalty kind and source-object scope.
+#[test]
+fn loyalty_ability_trigger_actor_scopes_shape() {
+    let opponent = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+    for (line, expected) in [
+        ("Whenever an opponent activates a loyalty ability, Gideon deals 1 damage to that player.", opponent),
+        ("Whenever you activate a loyalty ability, draw a card.", TargetFilter::Controller),
+        ("When a player activates a loyalty ability, draw a card.", TargetFilter::Player),
+    ] {
+        let def = parse_trigger_line(line, "Gideon the Oathless");
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(def.valid_target, Some(expected));
+        assert_eq!(def.valid_card, None);
+        assert_no_unimplemented(def.execute.as_deref().expect("recognized effect"));
+    }
+    // The positives above guard these strict grammar refusals.
+    for line in [
+        "Whenever you activates a loyalty ability, draw a card.",
+        "Whenever an opponent activate a loyalty ability, draw a card.",
+        "Whenever a player activates a loyalty ability with an unsupported rider, draw a card.",
+    ] {
+        assert_ne!(
+            parse_trigger_line(line, "Synthetic loyalty grammar").mode,
+            TriggerMode::LoyaltyAbilityActivated
+        );
+    }
+}
+
+// SHAPE: full verbatim Oracle must retain both printed triggers and Ward.
+#[test]
+fn gideon_the_oathless_full_oracle_shape() {
+    let oracle = "Ward—Discard a card.\nWhenever a creature an opponent controls enters, Gideon deals 1 damage to that player.\nWhenever an opponent activates a loyalty ability, Gideon deals 1 damage to that player.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Gideon the Oathless",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Mercenary".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 2);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::ChangesZone);
+    let loyalty = &parsed.triggers[1];
+    assert_eq!(loyalty.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(
+        loyalty.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    for trigger in &parsed.triggers {
+        assert_no_unimplemented(
+            trigger
+                .execute
+                .as_deref()
+                .expect("recognized printed effect"),
+        );
+    }
+    for ability in &parsed.abilities {
+        assert_no_unimplemented(ability);
+    }
+    assert!(parsed.extracted_keywords.iter().any(|kw| matches!(
+        kw,
+        Keyword::Ward(crate::types::keywords::WardCost::DiscardCard)
+    )));
+}
+
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
 /// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
@@ -22421,6 +22669,7 @@ fn loyalty_ability_trigger_without_planeswalker_qualifier() {
         "Ajani Unrelenting",
     );
     assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(def.valid_card, None);
     let execute = def.execute.as_ref().expect("execute ability present");
     assert!(
@@ -22441,6 +22690,7 @@ fn loyalty_ability_trigger_chandra_subtype_regulator() {
             "Chandra's Regulator",
         );
     assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.valid_card,
         Some(TargetFilter::Typed(
@@ -22464,6 +22714,7 @@ fn loyalty_ability_trigger_chandra_subtype_keral_keep() {
             "Keral Keep Disciples",
         );
     assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.valid_card,
         Some(TargetFilter::Typed(
@@ -22487,6 +22738,7 @@ fn loyalty_ability_trigger_enchanted_elspeth() {
             "Elspeth's Talent",
         );
     assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
     let execute = def.execute.as_ref().expect("execute ability present");
     assert!(
@@ -22505,6 +22757,7 @@ fn loyalty_ability_trigger_enchanted_rowan() {
             "Rowan's Talent",
         );
     assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
     let execute = def.execute.as_ref().expect("execute ability present");
     assert!(
@@ -23025,6 +23278,118 @@ fn trigger_one_or_more_put_into_your_graveyard_with_unconsumed_origin_tail_stays
         matches!(def.mode, TriggerMode::Unknown(_)),
         "an unconsumed batched origin remainder must fail the arm, got {:?}",
         def.mode
+    );
+}
+
+/// Reach-guard for the honest-red pins below: the same sentence with a
+/// recognized origin parses through the single put-into-exile arm, so the
+/// pins' `Unknown` result can only come from the origin, not an upstream bail.
+#[test]
+fn trigger_put_into_exile_from_your_library_parses_origin() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into exile from your library, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Library));
+    assert_eq!(def.destination, Some(Zone::Exile));
+}
+
+/// Honest-red (#9505): an origin the single put-into-exile arm cannot parse
+/// fails the arm instead of silently becoming an unconstrained exile trigger
+/// that fires on exile from any zone.
+#[test]
+fn trigger_put_into_exile_from_unparseable_origin_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into exile from an opponent's library, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unparseable exile origin must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// Honest-red (#9505): a recognized origin followed by an unconsumed tail
+/// fails the arm instead of silently dropping the remainder.
+#[test]
+fn trigger_put_into_exile_with_unconsumed_origin_tail_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into exile from your library or an opponent's hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unconsumed exile origin remainder must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// Honest-red (#9505, batched fall-through): a batched exile line whose origin
+/// the batched arm rejects must not be rescued by the single arm via subject
+/// decomposition as an unconstrained exile trigger. The reach-guard is the
+/// your-qualified batched sibling (Rakshasa Vizier shape), which differs only
+/// in the origin possessive.
+#[test]
+fn trigger_one_or_more_put_into_exile_from_unparseable_origin_stays_unknown() {
+    let accepted = parse_trigger_line(
+        "Whenever one or more cards are put into exile from your library, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(
+        accepted.mode,
+        TriggerMode::ChangesZoneAll,
+        "reach-guard: the your-qualified batched line must parse"
+    );
+
+    let def = parse_trigger_line(
+        "Whenever one or more cards are put into exile from an opponent's library, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unparseable batched exile origin must not fall through as unconstrained, got {:?}",
+        def.mode
+    );
+}
+
+/// Positive controls: every origin the single put-into-exile arm recognizes
+/// still parses to a `ChangesZone` trigger with the expected scalar origin.
+#[test]
+fn trigger_put_into_exile_accepted_origins() {
+    let cases = [
+        ("the battlefield", Some(Zone::Battlefield)),
+        ("anywhere", None),
+        ("your library", Some(Zone::Library)),
+        ("your hand", Some(Zone::Hand)),
+        ("your graveyard", Some(Zone::Graveyard)),
+    ];
+    for (origin_text, expected_origin) in cases {
+        let line =
+            format!("Whenever a creature card is put into exile from {origin_text}, draw a card.");
+        let def = parse_trigger_line(&line, "Some Card");
+        assert_eq!(def.mode, TriggerMode::ChangesZone, "{line}");
+        assert_eq!(def.origin, expected_origin, "{line}");
+        assert_eq!(def.destination, Some(Zone::Exile), "{line}");
+    }
+}
+
+/// Self-referential shape (Urza's Sylex): "When ~ is put into exile from the
+/// battlefield" keeps its battlefield origin and exile look-back zone.
+#[test]
+fn trigger_self_put_into_exile_from_battlefield() {
+    let def = parse_trigger_line(
+        "When Urza's Sylex is put into exile from the battlefield, you may pay {2}.",
+        "Urza's Sylex",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Exile));
+    assert!(
+        def.trigger_zones.contains(&Zone::Exile),
+        "self-referential exile trigger must look back from exile, got {:?}",
+        def.trigger_zones
     );
 }
 
@@ -26477,11 +26842,17 @@ fn managorger_phoenix_perpetual_clause_fails_closed_instead_of_pumping() {
     );
 
     let execute = def.execute.as_ref().expect("trigger must execute");
-    // Reach guard: the counter clause still parses, so the gap below is the
-    // conditional sibling and not a wholesale parse failure.
+    // Reach guard: the counter clause is recognized, and its unsupported
+    // "for each {R} in that spell's mana cost" count is an explicit counter-tail
+    // gap rather than a silent one-counter placement (CR 608.2c), so the gap
+    // below is the conditional sibling and not a wholesale parse failure.
     assert!(
-        matches!(&*execute.effect, Effect::PutCounter { .. }),
-        "the flame-counter clause must still lower, got {:?}",
+        matches!(
+            &*execute.effect,
+            Effect::Unimplemented { name, description: Some(fragment) }
+                if name == "put_counter_tail" && fragment.contains("for each {R}")
+        ),
+        "the flame-counter clause must surface its count tail, got {:?}",
         execute.effect
     );
     let perpetual_branch = execute
@@ -26923,7 +27294,9 @@ fn extract_adamant_three_red() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 3,
         }
     );
@@ -26943,7 +27316,9 @@ fn extract_symbolic_mana_spent_two_green() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Green,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Green,
+            },
             minimum: 2,
         }
     );
@@ -26957,7 +27332,9 @@ fn extract_symbolic_mana_spent_two_blue_with_trailing_effect() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Blue,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Blue,
+            },
             minimum: 2,
         }
     );
@@ -26970,7 +27347,9 @@ fn extract_symbolic_mana_spent_single_red_this_spell() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 1,
         }
     );
@@ -26984,7 +27363,9 @@ fn extract_symbolic_unless_mana_spent_single_blue() {
         cond.unwrap(),
         TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Blue,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Blue,
+                },
                 minimum: 1,
             }),
         }
@@ -26999,7 +27380,9 @@ fn extract_symbolic_unless_mana_spent_two_black() {
         cond.unwrap(),
         TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Black,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Black,
+                },
                 minimum: 2,
             }),
         }
@@ -27179,7 +27562,9 @@ fn extract_symbolic_mana_spent_mid_sentence() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 3,
         }
     );
@@ -27200,7 +27585,9 @@ fn extract_symbolic_mana_spent_lowercase_input() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Green,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Green,
+            },
             minimum: 2,
         }
     );
@@ -27219,11 +27606,15 @@ fn extract_symbolic_mana_spent_mixed_colors() {
         conditions,
         vec![
             TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Green,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Green,
+                },
                 minimum: 1,
             },
             TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Blue,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Blue,
+                },
                 minimum: 1,
             },
         ]
@@ -27717,6 +28108,17 @@ fn cast_trigger_lowers_to_control_next_turn_effect() {
     }
 }
 
+/// CR 603.8 + CR 603.4: a state trigger's own condition is its trigger event, so
+/// the parser lowers it inside `TriggerCondition::EventTime` (read when the game
+/// state matches, never rechecked on resolution). Returns the wrapped head and
+/// fails the test if the wrapper is missing.
+fn state_trigger_head(def: &TriggerDefinition) -> &TriggerCondition {
+    match &def.condition {
+        Some(TriggerCondition::EventTime { condition }) => condition,
+        other => panic!("expected an EventTime-wrapped state-trigger condition, got {other:?}"),
+    }
+}
+
 #[test]
 fn state_trigger_control_no_islands() {
     let def = parse_trigger_line(
@@ -27724,7 +28126,7 @@ fn state_trigger_control_no_islands() {
         "Dandân",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsNone { filter }) = &def.condition {
+    if let TriggerCondition::ControlsNone { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(
                 tf.type_filters
@@ -27755,7 +28157,7 @@ fn state_trigger_control_no_other_creatures() {
         "Emperor Crocodile",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsNone { filter }) = &def.condition {
+    if let TriggerCondition::ControlsNone { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(tf.properties.contains(&FilterProp::Another));
             assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -27775,7 +28177,7 @@ fn state_trigger_control_no_artifacts() {
         "Covetous Dragon",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsNone { filter }) = &def.condition {
+    if let TriggerCondition::ControlsNone { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         } else {
@@ -27798,7 +28200,7 @@ fn state_trigger_control_a_creature_with_toughness() {
         "Endangered Armodon",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsType { filter }) = &def.condition {
+    if let TriggerCondition::ControlsType { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(
                 tf.type_filters.contains(&TypeFilter::Creature),
@@ -27950,11 +28352,11 @@ fn state_trigger_has_no_ice_counters() {
         "Dark Depths",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(
             *counters,
@@ -27981,11 +28383,11 @@ fn state_trigger_has_no_plus1_counters() {
         "Afiya Grove",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(*counters, CounterMatch::OfType(CounterType::Plus1Plus1));
         assert_eq!(*minimum, 0);
@@ -28003,11 +28405,11 @@ fn state_trigger_has_no_counters_bare() {
         "TestCard",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(*counters, CounterMatch::Any);
         assert_eq!(*minimum, 0);
@@ -28026,11 +28428,11 @@ fn state_trigger_has_twenty_or_more_charge_counters() {
         "Darksteel Reactor",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(
             *counters,
@@ -28162,6 +28564,118 @@ fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
         ),
         "game must end with player 0 as winner after Darksteel Reactor fires; got {:?}",
         state.waiting_for,
+    );
+}
+
+/// CR 603.8 + CR 122.1: the source-counter state-condition authority accepts
+/// both surface grammars (possessive / existential) in the depletion and
+/// threshold forms, and is all-consuming — trailing text after the counter
+/// phrase is not a source-counter state condition.
+#[test]
+fn source_counter_state_condition_accepts_whole_condition_only() {
+    for accepted in [
+        "there are four or more page counters on ~",
+        "~ has no ice counters on it",
+        "~ has twenty or more charge counters on it",
+    ] {
+        assert!(
+            parse_source_counter_state_condition(accepted).is_some(),
+            "{accepted:?} must be recognized as a source-counter state condition"
+        );
+    }
+    for rejected in [
+        "there are four or more page counters on ~ and you control an artifact",
+        "~ has no ice counters on it during your turn",
+        "you control no islands",
+    ] {
+        assert!(
+            parse_source_counter_state_condition(rejected).is_none(),
+            "{rejected:?} must not be recognized as a source-counter state condition"
+        );
+    }
+}
+
+/// CR 608.2k + CR 603.8 + CR 400.7: in a source-counter state trigger, the body's
+/// bare "it" ("exile it") names the ability's own source, so it lowers to
+/// `SelfRef` (whose resolver applies the new-object guard) rather than the
+/// untargeted `ParentTarget` fallback. Verbatim Oracle text (MTGJSON).
+#[test]
+fn source_counter_state_trigger_bare_it_binds_source() {
+    const MAZEMIND_TOME: &str = "{T}, Put a page counter on this artifact: Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\n{2}, {T}, Put a page counter on this artifact: Draw a card.\nWhen there are four or more page counters on this artifact, exile it. If you do, you gain 4 life.";
+    const NINE_LIVES: &str = "Hexproof\nIf a source would deal damage to you, prevent that damage and put an incarnation counter on this enchantment.\nWhen there are nine or more incarnation counters on this enchantment, exile it.\nWhen this enchantment leaves the battlefield, you lose the game.";
+    for (oracle, name, core_type, keywords) in [
+        (MAZEMIND_TOME, "Mazemind Tome", "Artifact", vec![]),
+        (
+            NINE_LIVES,
+            "Nine Lives",
+            "Enchantment",
+            vec!["Hexproof".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &keywords, &[core_type.to_string()], &[]);
+        let state_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::StateCondition)
+            .unwrap_or_else(|| panic!("{name} must parse a StateCondition trigger"));
+        let execute = state_trigger
+            .execute
+            .as_deref()
+            .expect("state trigger must have an execute ability");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "{name}: \"exile it\" must exile the source (SelfRef), got {:?}",
+            execute.effect
+        );
+    }
+}
+
+/// CR 608.2k: the source pin is the OUTERMOST antecedent — a typed referent
+/// introduced earlier in the same chain still owns a later bare "it". Synthetic
+/// source-counter state trigger whose body targets a creature and then refers
+/// back to it.
+#[test]
+fn source_counter_state_trigger_chain_typed_referent_keeps_parent_target() {
+    let parsed = parse_oracle_text(
+        "When there are three or more charge counters on this artifact, tap target creature. Put a stun counter on it.",
+        "Corvane Stunlatch",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let state_trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::StateCondition)
+        .expect("the synthetic line must parse a StateCondition trigger");
+    let effects = trigger_chain_effects(state_trigger);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        )),
+        "reach guard: the chain must open with the typed tap target, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )),
+        "\"put a stun counter on it\" must stay bound to the tapped creature \
+         (ParentTarget), not the source, got {effects:?}"
     );
 }
 
@@ -28725,33 +29239,46 @@ fn head_shape_inside_the_subject_truncates_but_stays_honest() {
     assert_eq!(triggers[1].valid_card, None);
 }
 
-/// KNOWN EXPOSURE E2.
+/// KNOWN EXPOSURE E2: the open event-head splitter still separates these
+/// predicates, but unsupported `while` tails must not become broad attacks.
 #[test]
 fn comparison_predicate_siblings_are_unguarded_but_honest() {
-    for (text, expected_unknown) in [
-        (
-            "Whenever this creature attacks while your life total is greater than 20 or is less than 5, draw a card.",
-            "Whenever ~ is less than 5",
-        ),
-        (
-            "Whenever this creature attacks while your life total is even or is odd, draw a card.",
-            "Whenever ~ is odd",
-        ),
-    ] {
-        let triggers = parse_trigger_lines(text, "~");
-        assert_eq!(triggers.len(), 2, "{text}");
-        assert_eq!(triggers[0].mode, TriggerMode::Attacks, "{text}");
-        assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef), "{text}");
-        assert_eq!(
-            triggers[1].mode,
-            TriggerMode::Unknown(expected_unknown.to_string()),
-            "{text}"
-        );
-        assert_eq!(triggers[1].valid_card, None, "{text}");
-    }
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while your life total is greater than 20 or is less than 5, draw a card.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert!(matches!(
+        &triggers[0].condition,
+        Some(TriggerCondition::EventTime { .. })
+    ));
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("Whenever ~ is less than 5".to_string())
+    );
+    assert_eq!(triggers[1].valid_card, None);
+
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while your life total is even or is odd, draw a card.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(
+        triggers[0].mode,
+        TriggerMode::Unknown("Whenever ~ attacks while your life total is even".to_string())
+    );
+    assert_eq!(triggers[0].valid_card, None);
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("Whenever ~ is odd".to_string())
+    );
+    assert_eq!(triggers[1].valid_card, None);
 }
 
-/// KNOWN EXPOSURE E3.
+/// KNOWN EXPOSURE E3: the open `becomes` head splits this non-event predicate;
+/// the unsupported `while` tail stays Unknown rather than becoming an attack.
 #[test]
 fn becomes_voice_non_event_predicate_is_unguarded_but_honest() {
     let triggers = parse_trigger_lines(
@@ -28759,8 +29286,13 @@ fn becomes_voice_non_event_predicate_is_unguarded_but_honest() {
         "~",
     );
     assert_eq!(triggers.len(), 2);
-    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
-    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        triggers[0].mode,
+        TriggerMode::Unknown(
+            "Whenever ~ attacks while its power becomes greater than 4".to_string()
+        )
+    );
+    assert_eq!(triggers[0].valid_card, None);
     assert_eq!(
         triggers[1].mode,
         TriggerMode::Unknown("Whenever ~ becomes less than 2".to_string())
@@ -32390,23 +32922,13 @@ fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
 
 // --- issue #640: reanimator-Aura GRANT-shape ETB whole-body recognizer (Necromancy) ---
 
-/// Verbatim Necromancy Oracle text (Scryfall, 2026-07). Unlike Animate Dead,
-/// Necromancy is a plain (non-Aura) Enchantment whose ETB ability BOTH becomes
-/// an Aura AND targets the graveyard creature to reanimate ("Put target creature
-/// card from a graveyard onto the battlefield ...").
+/// Verbatim Necromancy Oracle text.
 const NECROMANCY_ORACLE: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with Necromancy.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
 
-/// SHAPE test — assert Necromancy's ETB trigger lowers to the 4-node
-/// reanimator-Aura chain with the GRANT shape: the root `ChangeZone` targets a
-/// genuinely-parsed creature-card-in-a-graveyard `Typed` filter (NOT
-/// `AttachedTo`, unlike the swap shape — this is the #640 fix), and the
-/// `GenericEffect` grants the Aura subtype and the Enchant keyword for the first
-/// time (`AddSubtype` + `AddKeyword`, with NO `RemoveKeyword`). Runtime behavior
-/// is exercised separately in `casting_tests.rs`.
+/// CR 201.5a: the granted enchant restriction names Necromancy where the masker refuses the
+/// name, so the ETB line lowers to the granter residual rather than the reanimator chain.
 #[test]
-fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
-    use crate::types::zones::Zone;
-
+fn necromancy_etb_lowers_to_the_granter_residual() {
     let parsed = parse_oracle_text(
         NECROMANCY_ORACLE,
         "Necromancy",
@@ -32414,9 +32936,39 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
         &["Enchantment".to_string()],
         &[],
     );
-    // Necromancy has TWO enters-battlefield triggers: its first ability (the
-    // cleanup-step sacrifice for flash-casts) and this reanimator ETB. Select
-    // the reanimator one by its root `Effect::ChangeZone` body.
+    assert!(
+        !parsed.triggers.iter().any(|t| matches!(
+            t.execute.as_deref().map(|d| d.effect.as_ref()),
+            Some(Effect::ChangeZone { .. })
+        )),
+        "{parsed:#?}"
+    );
+    assert!(
+        parsed.abilities.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
+        )),
+        "{parsed:#?}"
+    );
+}
+
+/// Necromancy's printed text with a granted enchant restriction that does not name the card.
+const REANIMATOR_AURA_GRANT_ORACLE: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with this enchantment.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
+
+/// SHAPE test — the GRANT-shape ETB lowers to the 4-node reanimator-Aura chain: the root
+/// `ChangeZone` targets the graveyard creature card itself (not `AttachedTo`), and the
+/// `GenericEffect` grants the Aura subtype and Enchant keyword with no `RemoveKeyword`.
+#[test]
+fn reanimator_aura_grant_etb_lowers_to_grant_chain() {
+    let parsed = parse_oracle_text(
+        REANIMATOR_AURA_GRANT_ORACLE,
+        "Necro Probe",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // The first ability's cleanup-step sacrifice is also an enters trigger; select the
+    // reanimator one by its root `Effect::ChangeZone` body.
     let root = parsed
         .triggers
         .iter()
@@ -32425,7 +32977,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
         .find(|def| matches!(def.effect.as_ref(), Effect::ChangeZone { .. }))
         .unwrap_or_else(|| {
             panic!(
-                "Necromancy: expected a reanimator ETB trigger with a root ChangeZone, got {:?}",
+                "expected a reanimator ETB trigger with a root ChangeZone, got {:?}",
                 parsed.triggers
             )
         });
@@ -32434,7 +32986,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     // graveyard-creature-card filter (NOT AttachedTo).
     assert!(
         root.forward_result,
-        "Necromancy: root ChangeZone must set forward_result"
+        "root ChangeZone must set forward_result"
     );
     let Effect::ChangeZone {
         origin,
@@ -32445,36 +32997,26 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
         ..
     } = root.effect.as_ref()
     else {
-        panic!(
-            "Necromancy: expected root Effect::ChangeZone, got {:?}",
-            root.effect
-        );
+        panic!("expected root Effect::ChangeZone, got {:?}", root.effect);
     };
-    assert_eq!(*origin, Some(Zone::Graveyard), "Necromancy: origin");
-    assert_eq!(*destination, Zone::Battlefield, "Necromancy: destination");
-    assert_eq!(
-        *enters_under,
-        Some(ControllerRef::You),
-        "Necromancy: enters_under"
-    );
-    // Untapped: "onto the battlefield" with no trailing " tapped".
+    assert_eq!(*origin, Some(Zone::Graveyard), "origin");
+    assert_eq!(*destination, Zone::Battlefield, "destination");
+    assert_eq!(*enters_under, Some(ControllerRef::You), "enters_under");
     assert!(
         !enter_tapped.is_tapped(),
-        "Necromancy: creature enters untapped ({enter_tapped:?})"
+        "creature enters untapped ({enter_tapped:?})"
     );
-    // The #640 fix: the target is a genuinely-parsed creature-card-in-a-graveyard
-    // filter (owner-agnostic — "a graveyard"), NOT `TargetFilter::AttachedTo`.
     assert_ne!(
         *target,
         TargetFilter::AttachedTo,
-        "Necromancy: ETB must target the graveyard creature itself, not AttachedTo"
+        "ETB must target the graveyard creature itself, not AttachedTo"
     );
     assert_eq!(
         *target,
         TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
             zone: Zone::Graveyard
         }])),
-        "Necromancy: ETB ChangeZone target"
+        "ETB ChangeZone target"
     );
 
     // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
@@ -32482,29 +33024,26 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     let generic = root
         .sub_ability
         .as_deref()
-        .expect("Necromancy: ChangeZone has no GenericEffect sub");
+        .expect("ChangeZone has no GenericEffect sub");
     let Effect::GenericEffect {
         static_abilities,
         duration,
         ..
     } = generic.effect.as_ref()
     else {
-        panic!(
-            "Necromancy: expected GenericEffect, got {:?}",
-            generic.effect
-        );
+        panic!("expected GenericEffect, got {:?}", generic.effect);
     };
     assert_eq!(
         *duration,
         Some(Duration::Permanent),
-        "Necromancy: grant is stamped to Duration::Permanent (CR 611.2a)"
+        "grant is stamped to Duration::Permanent (CR 611.2a)"
     );
-    assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
+    assert_eq!(static_abilities.len(), 1, "one grant static");
     let sd = &static_abilities[0];
     assert_eq!(
         sd.affected,
         Some(TargetFilter::OriginalSource),
-        "Necromancy: grant must target OriginalSource (the enchantment), not SelfRef"
+        "grant must target OriginalSource (the enchantment), not SelfRef"
     );
     assert_eq!(
         sd.modifications,
@@ -32516,63 +33055,52 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
                 keyword: Keyword::Enchant(TargetFilter::ParentTarget),
             },
         ],
-        "Necromancy: grant modifications (AddSubtype + AddKeyword, no RemoveKeyword)"
+        "grant modifications (AddSubtype + AddKeyword, no RemoveKeyword)"
     );
 
     // Node 3: Attach — SelfRef (the enchantment) onto ParentTarget (the creature).
     let attach = generic
         .sub_ability
         .as_deref()
-        .expect("Necromancy: GenericEffect has no Attach sub");
+        .expect("GenericEffect has no Attach sub");
     let Effect::Attach {
         attachment, target, ..
     } = attach.effect.as_ref()
     else {
-        panic!("Necromancy: expected Attach, got {:?}", attach.effect);
+        panic!("expected Attach, got {:?}", attach.effect);
     };
-    assert_eq!(
-        *attachment,
-        TargetFilter::SelfRef,
-        "Necromancy: attach attachment"
-    );
-    assert_eq!(
-        *target,
-        TargetFilter::ParentTarget,
-        "Necromancy: attach host"
-    );
+    assert_eq!(*attachment, TargetFilter::SelfRef, "attach attachment");
+    assert_eq!(*target, TargetFilter::ParentTarget, "attach host");
 
     // Node 4: CreateDelayedTrigger — WhenLeavesPlayFiltered{SelfRef} -> Sacrifice{ParentTarget}.
     let delayed = attach
         .sub_ability
         .as_deref()
-        .expect("Necromancy: Attach has no CreateDelayedTrigger sub");
+        .expect("Attach has no CreateDelayedTrigger sub");
     let Effect::CreateDelayedTrigger {
         condition, effect, ..
     } = delayed.effect.as_ref()
     else {
-        panic!(
-            "Necromancy: expected CreateDelayedTrigger, got {:?}",
-            delayed.effect
-        );
+        panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
     };
     assert_eq!(
         *condition,
         DelayedTriggerCondition::WhenLeavesPlayFiltered {
             filter: TargetFilter::SelfRef,
         },
-        "Necromancy: delayed leaves-battlefield condition on the enchantment (SelfRef)"
+        "delayed leaves-battlefield condition on the enchantment (SelfRef)"
     );
     let Effect::Sacrifice { target, .. } = effect.effect.as_ref() else {
-        panic!("Necromancy: expected Sacrifice, got {:?}", effect.effect);
+        panic!("expected Sacrifice, got {:?}", effect.effect);
     };
     assert_eq!(
         *target,
         TargetFilter::ParentTarget,
-        "Necromancy: sacrifice targets the reanimated creature"
+        "sacrifice targets the reanimated creature"
     );
     assert!(
         delayed.sub_ability.is_none(),
-        "Necromancy: chain ends at the delayed trigger"
+        "chain ends at the delayed trigger"
     );
 }
 
@@ -36114,6 +36642,165 @@ fn split_graveyard_origin_owner_axes() {
         );
     }
 }
+/// Expected `Or[entered-from-graveyard, was-cast-from-graveyard]` for the
+/// graveyard-origin intervening-if (owner/caster axes explicit).
+fn graveyard_origin_or(
+    entered_owner: Option<ControllerRef>,
+    cast_owner: Option<ControllerRef>,
+    caster: Option<ControllerRef>,
+) -> TriggerCondition {
+    TriggerCondition::Or {
+        conditions: vec![
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                filter: entered_owner.map_or(TargetFilter::Any, |owner| {
+                    with_owner_scope(TargetFilter::Any, owner)
+                }),
+            },
+            TriggerCondition::WasCast {
+                zone: Some(Zone::Graveyard),
+                controller: caster,
+                owner: cast_owner,
+            },
+        ],
+    }
+}
+
+/// SHAPE: the batch partitive subject "one or more of them" and the passive
+/// "(was|were) cast from" split-form cast clause (Kotis, Celes) parse to the
+/// same typed `Or`, with no caster scope for the passive wording. The active
+/// "you cast it" form still scopes the caster (reach-guard on the caster axis).
+#[test]
+fn batched_partitive_graveyard_origin_positive_matrix() {
+    let owners = [("a", None), ("your", Some(ControllerRef::You))];
+    for (entered_phrase, entered_owner) in &owners {
+        for (cast_phrase, cast_owner) in &owners {
+            for verb in ["was", "were"] {
+                let text = format!(
+                    "if one or more of them entered from {entered_phrase} graveyard or {verb} cast from {cast_phrase} graveyard"
+                );
+                let (rest, condition) = parse_graveyard_origin_intervening_if(&text)
+                    .unwrap_or_else(|_| panic!("must parse: {text}"));
+                assert!(rest.is_empty(), "{text}");
+                assert_eq!(
+                    condition,
+                    graveyard_origin_or(entered_owner.clone(), cast_owner.clone(), None),
+                    "{text}"
+                );
+            }
+            // Active form behind the same subject keeps Some(You) as caster.
+            let text = format!(
+                "if one or more of them entered from {entered_phrase} graveyard or you cast it from {cast_phrase} graveyard"
+            );
+            let (_, condition) = parse_graveyard_origin_intervening_if(&text).unwrap();
+            assert_eq!(
+                condition,
+                graveyard_origin_or(
+                    entered_owner.clone(),
+                    cast_owner.clone(),
+                    Some(ControllerRef::You)
+                ),
+                "{text}"
+            );
+        }
+    }
+    // The comma-terminated clause (the printed shape) stops before the comma.
+    let (rest, condition) = parse_graveyard_origin_intervening_if(
+        "if one or more of them entered from a graveyard or was cast from a graveyard, put two +1/+1 counters on ~.",
+    )
+    .unwrap();
+    assert_eq!(rest, ", put two +1/+1 counters on ~.");
+    assert_eq!(condition, graveyard_origin_or(None, None, None));
+    // Subject axis on the compact and bare-cast arms.
+    let (rest, condition) = parse_graveyard_origin_intervening_if(
+        "if one or more of them entered or were cast from a graveyard",
+    )
+    .unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(condition, graveyard_origin_or(None, None, None));
+    let (rest, condition) =
+        parse_graveyard_origin_intervening_if("if one or more of them was cast from a graveyard")
+            .unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(
+        condition,
+        TriggerCondition::WasCast {
+            zone: Some(Zone::Graveyard),
+            controller: None,
+            owner: None,
+        }
+    );
+}
+
+/// Hostile inputs for the graveyard-origin intervening-if. Every decline is
+/// paired with the positive control it was mutated from.
+#[test]
+fn batched_partitive_graveyard_origin_hostile_declines() {
+    let positive = "if one or more of them entered from a graveyard or was cast from a graveyard";
+    assert!(
+        parse_graveyard_origin_intervening_if(positive).is_ok(),
+        "positive control must parse"
+    );
+    for hostile in [
+        // N1: "and" for "or".
+        "if one or more of them entered from a graveyard and was cast from a graveyard",
+        // N2: wrong zone on either leg.
+        "if one or more of them entered from exile or was cast from a graveyard",
+        "if one or more of them entered from a graveyard or was cast from exile",
+        // N3: trailing garbage after an otherwise valid clause.
+        "if one or more of them entered from a graveyard or was cast from a graveyard card",
+        "if one or more of them entered from a graveyard or was cast from a graveyard and ~ is tapped",
+        "if one or more of them entered or were cast from a graveyard card",
+        "if one or more of them was cast from a graveyard card",
+        "if it entered from a graveyard or you cast it from a graveyard card",
+        // N4: owner phrase mixed with the wrong zone.
+        "if one or more of them entered from your exile or was cast from a graveyard",
+        // N5: mixed caster clause.
+        "if one or more of them entered from a graveyard or you were cast from a graveyard",
+        // N6: truncated disjunction / missing leg.
+        "if one or more of them entered from a graveyard or",
+        "if one or more of them entered from a graveyard",
+        // Partitive misspelled / different quantifier.
+        "if none of them entered from a graveyard or was cast from a graveyard",
+        "if one or more entered from a graveyard or was cast from a graveyard",
+    ] {
+        assert!(
+            parse_graveyard_origin_intervening_if(hostile).is_err(),
+            "must decline: {hostile}"
+        );
+    }
+}
+
+/// Kotis / Celes Oracle clause through the full trigger-line pipeline: the
+/// intervening-if is a typed condition, is excised from the effect text, and
+/// a trailing-garbage mutation of the same line is NOT mis-scoped into one.
+#[test]
+fn batched_partitive_graveyard_origin_trigger_line_scoping() {
+    let kotis = parse_trigger_line(
+        "Whenever one or more creatures you control enter, if one or more of them entered from a graveyard or was cast from a graveyard, put two +1/+1 counters on Kotis.",
+        "Kotis, Sibsig Champion",
+    );
+    assert!(kotis.batched);
+    assert_eq!(kotis.condition, Some(graveyard_origin_or(None, None, None)));
+    let execute = kotis.execute.as_deref().expect("Kotis body");
+    assert!(
+        matches!(&*execute.effect, Effect::PutCounter { .. }),
+        "got {:?}",
+        execute.effect
+    );
+
+    let hostile = parse_trigger_line(
+        "Whenever one or more creatures you control enter, if one or more of them entered from a graveyard or was cast from a graveyard card, put two +1/+1 counters on Kotis.",
+        "Kotis, Sibsig Champion",
+    );
+    assert_ne!(
+        hostile.condition,
+        Some(graveyard_origin_or(None, None, None)),
+        "trailing garbage must not be accepted as the graveyard-origin Or"
+    );
+}
+
 /// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
 /// combat-damage triggers establish TriggeringPlayer as the relative player
 /// scope for "that player" / "they" references in their effect bodies.
@@ -36818,4 +37505,280 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
     }
+}
+
+/// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+const GILDED_DRAKE_TEXT: &str = "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+/// Gilded Drake's trigger body as printed (the text after "When this creature enters, ").
+const GILDED_DRAKE_BODY: &str = "exchange control of this creature and up to one target creature \
+    an opponent controls. If you don't or can't make an exchange, sacrifice this creature. This \
+    ability still resolves if its target becomes illegal.";
+
+/// Parse `text` through the whole-card pipeline as a Drake creature and return
+/// its single trigger's execute.
+fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        text,
+        "Gilded Drake",
+        &[],
+        &["Creature".to_string()],
+        &["Drake".to_string()],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+    };
+    trigger
+        .execute
+        .as_deref()
+        .cloned()
+        .expect("the trigger has an execute")
+}
+
+/// Every node reachable through `sub_ability` / `else_ability`, root first.
+fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut nodes = vec![root];
+    let mut index = 0;
+    while let Some(node) = nodes.get(index).copied() {
+        nodes.extend(node.sub_ability.as_deref());
+        nodes.extend(node.else_ability.as_deref());
+        index += 1;
+    }
+    nodes
+}
+
+fn has_unbound_subject_node(root: &AbilityDefinition) -> bool {
+    chain_nodes(root).iter().any(|node| {
+        matches!(&*node.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject")
+    })
+}
+
+/// PU3 (CR 101.1 + CR 608.2b): Gilded Drake's verbatim text parses fully. The
+/// trailing override sentence becomes the execute root's disposition instead of
+/// a strict-failure node; the exchange and its rider are unchanged.
+///
+/// Fails on revert: the sentence stays an `unbound_subject` node and the root
+/// keeps the default disposition.
+#[test]
+fn gilded_drake_trailing_still_resolves_sentence_stamps_the_execute_root() {
+    let execute = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
+
+    let opponent_creature =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+    assert_eq!(
+        *execute.effect,
+        Effect::ExchangeControl {
+            target_a: TargetFilter::SelfRef,
+            target_b: opponent_creature,
+        },
+        "REACH GUARD: the execute is the paired exchange"
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "phase 1's up-to-one slot is preserved"
+    );
+    assert!(
+        !has_unimplemented(&execute),
+        "no strict-failure node remains anywhere in the chain: {execute:?}"
+    );
+    assert!(ability_definition_supported(&execute));
+    assert_eq!(
+        execute.illegal_targets_disposition,
+        IllegalTargetsDisposition::StillResolves
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the sacrifice rider follows the exchange");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected the rider to sacrifice the Drake, got {:?}",
+        rider.effect
+    );
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            }),
+        }),
+        "CR 608.2c: \"If you don't or can't make an exchange\" gates the rider"
+    );
+    assert_eq!(
+        rider.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve,
+        "the disposition is stamped on the root only"
+    );
+    assert!(rider.sub_ability.is_none(), "nothing follows the rider");
+}
+
+/// PU4: the same text without the override sentence parses to the same chain
+/// with the CR 608.2b default disposition. Paired positive: PU3.
+#[test]
+fn gilded_drake_text_without_the_override_keeps_the_default_disposition() {
+    let execute = drake_shaped_trigger_execute(
+        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
+         target creature an opponent controls. If you don't or can't make an exchange, sacrifice \
+         this creature.",
+    );
+    assert_eq!(
+        execute.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve
+    );
+
+    let mut with_override = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
+    with_override.illegal_targets_disposition = IllegalTargetsDisposition::DoesNotResolve;
+    assert_eq!(
+        execute, with_override,
+        "the override sentence changes nothing but the root's disposition"
+    );
+}
+
+/// PU5 (CR 101.1 + CR 608.2b): the override is detached only when it is the
+/// last sentence of the body and an effect precedes it. Any other placement
+/// returns the text unchanged with the default, so the sentence stays a strict
+/// failure. Paired positives: the verbatim-body leg below and PU3.
+#[test]
+fn still_resolves_sentence_is_detached_only_as_the_last_sentence() {
+    let (kept, disposition) = extract_illegal_targets_disposition(GILDED_DRAKE_BODY);
+    assert_eq!(disposition, IllegalTargetsDisposition::StillResolves);
+    assert_eq!(
+        kept,
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         If you don't or can't make an exchange, sacrifice this creature.",
+        "the previous sentence keeps its period"
+    );
+
+    for unchanged in [
+        // Not the last sentence.
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         This ability still resolves if its target becomes illegal. Draw a card.",
+        // Inside a longer sentence, not a sentence of its own.
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         If you don't or can't make an exchange, sacrifice this creature; this ability still \
+         resolves if its target becomes illegal.",
+        // The whole body: no effect for the override to govern.
+        "This ability still resolves if its target becomes illegal.",
+    ] {
+        let (kept, disposition) = extract_illegal_targets_disposition(unchanged);
+        assert_eq!(kept, unchanged);
+        assert_eq!(disposition, IllegalTargetsDisposition::DoesNotResolve);
+    }
+
+    // Full pipeline: the sentence placed before the rider is not detached.
+    let not_trailing = drake_shaped_trigger_execute(
+        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
+         target creature an opponent controls. This ability still resolves if its target becomes \
+         illegal. If you don't or can't make an exchange, sacrifice this creature.",
+    );
+    assert!(
+        matches!(&*not_trailing.effect, Effect::ExchangeControl { .. }),
+        "REACH GUARD: the body parsed past the exchange, got {:?}",
+        not_trailing.effect
+    );
+    assert!(has_unbound_subject_node(&not_trailing));
+    assert!(chain_nodes(&not_trailing)
+        .iter()
+        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
+
+    // Full pipeline: a body that is only the sentence stays a strict failure.
+    let only_override = drake_shaped_trigger_execute(
+        "When this creature enters, this ability still resolves if its target becomes illegal.",
+    );
+    assert!(has_unbound_subject_node(&only_override));
+    assert!(!ability_definition_supported(&only_override));
+    assert_eq!(
+        only_override.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve
+    );
+}
+
+/// PU6 (CR 603.12 + CR 608.2b): a shape fixture, not a printed card. When the
+/// targeted exchange sits on a reflexive "When you do" node, that node is a
+/// separate triggered ability with its own targets, so a stamp on the chain's
+/// root could not govern "its target". The override fails closed: the sentence
+/// stays a strict failure and no node carries the override.
+///
+/// Fails on revert of the fail-close: the root is stamped and the card reports
+/// supported while the reflexive ability would still fizzle. Paired positive: PU3.
+#[test]
+fn still_resolves_sentence_fails_closed_beside_a_reflexive_when_you_do_node() {
+    let execute = drake_shaped_trigger_execute(
+        "When this creature enters, you may pay {1}. When you do, exchange control of this \
+         creature and up to one target creature an opponent controls. This ability still \
+         resolves if its target becomes illegal.",
+    );
+    let nodes = chain_nodes(&execute);
+    assert!(
+        nodes.iter().any(|node| node
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)),
+        "REACH GUARD: the chain carries the reflexive marker the fail-close reads: {execute:?}"
+    );
+    assert!(nodes
+        .iter()
+        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
+    assert!(has_unimplemented(&execute));
+    assert!(!ability_definition_supported(&execute));
+}
+
+/// PU7 (CR 603.12): the reflexive-node predicate descends effect-carried
+/// definitions, not only `sub_ability` / `else_ability`. Each positive is paired
+/// with the same shape minus the "When you do" marker.
+#[test]
+fn chain_creates_reflexive_ability_descends_nested_definitions() {
+    let draw = || Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    let plain_sub = AbilityDefinition::new(AbilityKind::Spell, draw());
+    let reflexive_sub = plain_sub.clone().condition(AbilityCondition::WhenYouDo);
+    let branch_with_reflexive =
+        AbilityDefinition::new(AbilityKind::Spell, draw()).sub_ability(reflexive_sub);
+    let branch_without_reflexive =
+        AbilityDefinition::new(AbilityKind::Spell, draw()).sub_ability(plain_sub);
+
+    let flip_coin = |win: AbilityDefinition| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+    };
+    assert!(chain_creates_reflexive_ability(&flip_coin(
+        branch_with_reflexive.clone()
+    )));
+    assert!(!chain_creates_reflexive_ability(&flip_coin(
+        branch_without_reflexive.clone()
+    )));
+
+    let choose_one_of = |branch: AbilityDefinition| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(AbilityKind::Spell, draw()), branch],
+            },
+        )
+    };
+    assert!(chain_creates_reflexive_ability(&choose_one_of(
+        branch_with_reflexive
+    )));
+    assert!(!chain_creates_reflexive_ability(&choose_one_of(
+        branch_without_reflexive
+    )));
 }

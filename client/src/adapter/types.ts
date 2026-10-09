@@ -1,6 +1,7 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
+  InteractionId,
   InteractionPreview,
   InteractionPreviewRequest,
   InteractionSubmission,
@@ -168,7 +169,8 @@ export type BuiltInGameFormat =
   | "Momir"
   | "CommanderDraft"
   | "Freeform"
-  | "FreeformCommander";
+  | "FreeformCommander"
+  | "Dandan";
 
 /**
  * Wire form of `GameFormat::Custom(CustomFormatId)`.
@@ -2498,6 +2500,7 @@ export type WaitingFor =
       data: {
         pending: { player: PlayerId; mulligan_count: number; phase: MulliganDecisionPhase }[];
         free_first_mulligan: boolean;
+        declared?: { player: PlayerId; mulligan_count: number; kind: MulliganDeclarationKind }[];
       };
     }
   | {
@@ -2675,6 +2678,7 @@ export type WaitingFor =
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
   | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EmpowerJaceChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[]; count: number } }
+  | { type: "SpellCopyOrderChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
       cards: ObjectId[];
@@ -2868,6 +2872,9 @@ export type LearnOption =
 
 // ── Mulligan ─────────────────────────────────────────────────────────────
 
+// CR 103.5: what a held mulligan does when the declare round closes.
+export type MulliganDeclarationKind = { type: "Regular" } | { type: "FreeReveal" };
+
 // CR 103.5 + 103.5b: Player decision at a MulliganDecision prompt.
 //   Keep            — lock in the opening hand (CR 103.5).
 //   Mulligan        — shuffle hand back, redraw the starting hand size (CR 103.5).
@@ -2875,10 +2882,13 @@ export type LearnOption =
 //                     the same number; mulligan counter unchanged (CR 103.5b
 //                     + Serum Powder Oracle text). `object_id` must reference
 //                     a card named "Serum Powder" in the actor's hand.
+//   FreeReveal      — Dandan: reveal a qualifying hand, return it and redraw
+//                     without taking a regular mulligan (CR 103.5 as modified).
 export type MulliganChoice =
   | { type: "Keep" }
   | { type: "Mulligan" }
-  | { type: "UseSerumPowder"; data: { object_id: ObjectId } };
+  | { type: "UseSerumPowder"; data: { object_id: ObjectId } }
+  | { type: "FreeReveal" };
 
 // ── Distribution ─────────────────────────────────────────────────────────
 
@@ -3880,6 +3890,13 @@ export type TargetChoiceKind =
   | { type: "Objects"; data: { category: TargetObjectCategory } }
   | { type: "ObjectsAndPlayers"; data: { category: TargetObjectCategory } };
 
+export interface SharedPilesView {
+  /** The seat whose `Player.library` stores the shared library. */
+  library?: PlayerId;
+  /** The seat whose `Player.graveyard` stores the shared graveyard. */
+  graveyard?: PlayerId;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -3889,6 +3906,8 @@ export type TargetChoiceKind =
  */
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
+  scry_prompt_id?: InteractionId;
   /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
   visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**
@@ -3897,6 +3916,12 @@ export interface DerivedViews {
    * browser consumes this separately authorized projection.
    */
   debug_library_cards?: DebugLibraryCardView[];
+  /**
+   * Mirrors `engine::game::derived_views::SharedPilesView`. Present only for a
+   * format that shares a library or graveyard; a missing key means that zone is
+   * per-player.
+   */
+  shared_piles?: SharedPilesView;
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing
@@ -4992,6 +5017,8 @@ export interface LlmDecisionRequestResult {
   optionCount?: number;
   request?: LlmHttpRequestSpec;
   error?: string;
+  /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */
+  errorKind?: { kind: string };
 }
 
 /** Result of submitting an opaque AI proposal to its issuing authority. */

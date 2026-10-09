@@ -740,33 +740,25 @@ fn an_accepted_chimera_exchange_that_happened_still_offers_the_retarget() {
     );
 }
 
-/// BLAST-RADIUS PIN (review round 2) — Gilded Drake's disposition when its
-/// sole declared target becomes illegal while staying on the battlefield.
+/// CR 608.2b default-disposition pin: an `ExchangeControl` ability whose sole
+/// declared target stops matching its filter, while staying on the
+/// battlefield, does not resolve.
 ///
-/// `validate_targets_in_chain`'s `ExchangeControl` arm re-validates against
-/// each declared filter, where the generic branch it replaced checked only
-/// `state.battlefield.contains`. For Gilded Drake ("exchange control of this
-/// creature and up to one target creature an opponent controls. If you don't
-/// or can't make an exchange, sacrifice this creature.") that flips the
-/// outcome when the target stops being a creature in response:
+/// `validate_targets_in_chain`'s `ExchangeControl` arm re-validates each
+/// declared target against its own filter, not merely against battlefield
+/// presence. A target that stops being a creature is therefore illegal, and
+/// with the ability's only target illegal, CR 608.2b says it doesn't resolve,
+/// so the sacrifice rider never runs.
 ///
-///   * BEFORE — the target survived re-validation, so the ability resolved
-///     and the exchange RAN against an illegal target. Plainly wrong.
-///   * AFTER  — the target is illegal, it is this ability's only instance of
-///     the word "target", so per CR 608.2b the ability doesn't resolve. This
-///     is the correct DEFAULT, and it is what this row pins.
-///
-/// KNOWN GAP, deliberately not fixed here: Gilded Drake's printed "This
-/// ability still resolves if its target becomes illegal" is an explicit CR
-/// 608.2b exception that the parser does not model at all — the clause is
-/// dropped, and `optional_targeting` is `false` despite "up to one target".
-/// With it modelled, the ability would resolve, the exchange would not
-/// happen, and the Drake would be sacrificed. Representing that exception is
-/// a parser + AST change well outside this run; this row exists so the
-/// current disposition is a recorded decision rather than an unnoticed side
-/// effect, and so it fails loudly when the exception is implemented.
+/// The ability here is hand-built without the card's override:
+/// `ResolvedAbility::new` defaults to `IllegalTargetsDisposition::DoesNotResolve`
+/// and it has no `multi_target`. It is exercised through
+/// `validate_targets_in_chain` + `check_fizzle`, which read no disposition, so
+/// this row pins the rules default. Gilded Drake's printed override ("This
+/// ability still resolves if its target becomes illegal", CR 101.1) is covered
+/// on the real pipeline by T2 and T3 in `exchange_control_up_to_one_target.rs`.
 #[test]
-fn gilded_drake_sole_target_that_stops_matching_its_filter_stops_the_ability() {
+fn exchange_sole_target_turning_illegal_does_not_resolve_by_default() {
     use engine::game::ability_utils::validate_targets_in_chain;
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -1079,44 +1071,84 @@ fn chimera_retarget_pool_is_built_for_the_new_controller() {
 ///
 /// Shared by V5 and its positive control so the two rows differ in exactly one
 /// thing — whether the response is cast — and nothing else.
+///
+/// CR 115.6: "up to one target creature an opponent controls" is an optional
+/// slot, so the engine raises a `TriggerTargetSelection` prompt even when the
+/// bear is the only legal choice (declining is also a legal choice). The helper
+/// answers that prompt with the bear explicitly, so both rows always reach the
+/// exchange with a declared target and never through the zero-target route.
 fn stage_gilded_drake_trigger(
     runner: &mut engine::game::scenario::GameRunner,
     drake: engine::types::identifiers::ObjectId,
+    bear: engine::types::identifiers::ObjectId,
 ) -> CastCommit<'_> {
     let mut commit = runner.cast(drake).commit();
+    let mut prompts_answered = 0;
     let mut staged = false;
     for _ in 0..40 {
+        let state = commit.state();
         let on_battlefield =
-            commit.state().objects.get(&drake).map(|obj| obj.zone) == Some(Zone::Battlefield);
-        if on_battlefield && commit.state().stack.len() == 1 {
+            state.objects.get(&drake).map(|obj| obj.zone) == Some(Zone::Battlefield);
+        // A trigger still waiting on its target prompt already occupies the
+        // stack as the pending trigger entry; it is staged only once that
+        // prompt has been answered.
+        if on_battlefield && state.stack.len() == 1 && state.pending_trigger_entry.is_none() {
             staged = true;
             break;
         }
-        match commit.state().waiting_for {
+        match &state.waiting_for {
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                let [slot] = target_slots.as_slice() else {
+                    panic!("the Drake's trigger must declare exactly one slot: {target_slots:?}");
+                };
+                assert!(
+                    slot.optional && slot.legal_targets.contains(&TargetRef::Object(bear)),
+                    "the Drake's slot must be optional and offer the bear: {slot:?}"
+                );
+                commit
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(bear)),
+                    })
+                    .expect("choosing the bear for the Drake's trigger should be accepted");
+                prompts_answered += 1;
+            }
             WaitingFor::Priority { .. } => {
                 assert!(
-                    !commit.state().stack.is_empty(),
+                    !state.stack.is_empty(),
                     "the stack emptied before the Drake's ETB trigger could be staged"
                 );
                 commit
                     .act(GameAction::PassPriority)
                     .expect("PassPriority should succeed while staging the trigger");
             }
-            ref other => panic!("unexpected waiting state while staging the trigger: {other:?}"),
+            other => panic!("unexpected waiting state while staging the trigger: {other:?}"),
         }
     }
     // REACH GUARD: the Drake really is on the battlefield and its ETB trigger
     // really is on the stack, unresolved — the only window in which a response
     // can change who controls the Drake before the exchange resolves.
-    //
-    // NOTE the trigger raises no `TriggerTargetSelection` here: "up to one
-    // target creature an opponent controls" has exactly one legal choice on
-    // this board, so the engine binds it without prompting. The two rows below
-    // assert on the bound target's disposition instead.
     assert!(
         staged,
         "REACH GUARD: the Drake must be on the battlefield with its ETB trigger on the stack"
     );
+    assert_eq!(
+        prompts_answered, 1,
+        "REACH GUARD: the Drake's target prompt must be raised and answered exactly once"
+    );
+    let declared_targets = commit
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == drake)
+        .and_then(|entry| entry.ability())
+        .map(|ability| ability.targets.clone());
+    assert!(
+        declared_targets.is_some_and(|targets| targets.contains(&TargetRef::Object(bear))),
+        "REACH GUARD: the staged trigger must carry the bear as its declared target"
+    );
+
+    // Only now, with the prompt answered and the trigger a real stack entry, is
+    // priority handed to P1 so a response can be cast.
     {
         let state = commit.state_mut();
         state.priority_player = P1;
@@ -1203,7 +1235,7 @@ fn gilded_drake_sacrifice_rider_fires_when_the_exchange_does_nothing() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
-    let mut commit = stage_gilded_drake_trigger(&mut runner, drake);
+    let mut commit = stage_gilded_drake_trigger(&mut runner, drake, bear);
     let outcome = commit
         .cast(steal)
         .target_objects(&[drake])
@@ -1285,7 +1317,7 @@ fn gilded_drake_sacrifice_rider_stays_silent_when_the_exchange_happens() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
-    let commit = stage_gilded_drake_trigger(&mut runner, drake);
+    let commit = stage_gilded_drake_trigger(&mut runner, drake, bear);
     let outcome = commit.resolve();
 
     // CR 701.12b: different controllers, so the exchange really happens.

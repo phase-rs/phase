@@ -125,6 +125,24 @@ pub(in crate::parser) fn parse_player_property_keyword(
     .parse(input)
 }
 
+/// CR 102.1: the superlative-or-tie tail "most `<property>` or [are] tied for
+/// most `<property>`" — read by both the defender qualifier ("attacks the
+/// player with the most life or tied for most life") and the controller gate
+/// ("while you have the most life or are tied for most life"). Both property
+/// words must agree; `Speed` declines, like `player_property_leader_filter`,
+/// because `candidate_player_scalar` has no speed arm.
+pub(in crate::parser) fn parse_most_or_tied_for_most(
+    input: &str,
+) -> OracleResult<'_, PlayerProperty> {
+    let (rest, property) = preceded(tag("most "), parse_player_property_keyword).parse(input)?;
+    let (rest, _) = (tag(" or "), opt(tag("are ")), tag("tied for most ")).parse(rest)?;
+    let (rest, repeated) = parse_player_property_keyword(rest)?;
+    if repeated != property || property == PlayerProperty::Speed {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, property))
+}
+
 /// Build the `QuantityRef` for a player-property of the given player scope.
 /// Infallible — every arm has a runtime resolver, but NOT a single shared one:
 /// `Speed` and `HandSize` resolve through
@@ -1610,7 +1628,8 @@ fn parse_number_of_counters_it_had(input: &str) -> OracleResult<'_, QuantityRef>
     ))
 }
 
-/// Parse the object scope for counter references: "it", "that creature", "that permanent", etc.
+/// Parse the object scope for counter references: the granter placeholder, "it",
+/// "that creature", "that permanent", etc.
 ///
 /// CR 122.1 + CR 608.2k: A creature's ability that counts "+1/+1 counters on
 /// him" / "on her" / "on them" refers to that same source object's counters
@@ -1621,6 +1640,11 @@ fn parse_number_of_counters_it_had(input: &str) -> OracleResult<'_, QuantityRef>
 /// the self-reference token `~`) so it cannot drift from the other sites.
 fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
+        // CR 201.5a: a granted body's by-name counter read names the granting object.
+        value(
+            ObjectScope::GrantingObject,
+            super::target::parse_granting_object_ref,
+        ),
         value(
             ObjectScope::Source,
             alt((tag("~"), super::primitives::parse_object_recipient_pronoun)),
@@ -2877,7 +2901,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -3013,7 +3037,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -6979,7 +7003,8 @@ fn parse_for_each_controlled_type_with_keyword(input: &str) -> OracleResult<'_, 
 /// shared property predicate after "with". This is intentionally broader than
 /// the card that first needs it: extending the existing property axis keeps P/T
 /// comparisons and future typed properties in the same for-each building block
-/// as keyword and counter predicates.
+/// as keyword and counter predicates. A base-P/T designation ("with base power
+/// and toughness 2/2", CR 208.4b — Duskana) contributes two conjoined props.
 fn parse_for_each_controlled_type_with_property(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, has_other) =
         opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
@@ -6990,13 +7015,13 @@ fn parse_for_each_controlled_type_with_property(input: &str) -> OracleResult<'_,
     // its own `with` dispatch token. Returning after the bare controller phrase
     // would otherwise leave the comparison suffix unconsumed.
     let (rest, _) = tag(" control ").parse(rest)?;
-    let (rest, property) = super::filter::parse_with_property(rest)?;
+    let (rest, with_props) = super::filter::parse_with_properties(rest)?;
 
     let mut properties = Vec::new();
     if has_other.is_some() {
         properties.push(FilterProp::Another);
     }
-    properties.push(property);
+    properties.extend(with_props);
 
     Ok((
         rest,
@@ -8532,6 +8557,36 @@ mod tests {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(tf.properties.contains(&FilterProp::Another));
                 assert!(tf.properties.contains(&FilterProp::PowerExceedsBase));
+            }
+            other => panic!("expected ObjectCount(Typed), got {other:?}"),
+        }
+    }
+
+    /// CR 208.4b + CR 109.4 + CR 109.5: a base-P/T designation in the controller-scoped
+    /// for-each population contributes both exact base-scope props (Duskana,
+    /// the Rage Mother: "for each creature you control with base power and
+    /// toughness 2/2").
+    #[test]
+    fn parse_for_each_controlled_type_with_base_pt_designation() {
+        let (rest, q) =
+            parse_for_each_clause_ref("creature you control with base power and toughness 2/2")
+                .unwrap();
+        assert_eq!(rest, "");
+        let base_eq = |stat| FilterProp::PtComparison {
+            stat,
+            scope: crate::types::ability::PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 2 },
+        };
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(
+                    tf.properties,
+                    vec![base_eq(PtStat::Power), base_eq(PtStat::Toughness)]
+                );
             }
             other => panic!("expected ObjectCount(Typed), got {other:?}"),
         }

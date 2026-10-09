@@ -129,6 +129,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
@@ -860,7 +861,7 @@ pub(crate) fn identity_projection_for_viewer(
         .players
         .iter()
         .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
-        .filter_map(|p| p.library.front().copied())
+        .filter_map(|p| state.library_of(p.id).front().copied())
         .collect();
     let all_library_ids: Vec<ObjectId> = state
         .players
@@ -8477,6 +8478,7 @@ mod tests {
                 remaining: vec![remaining],
                 linked_batch: Vec::new(),
                 cumulative: 0,
+                hits: Vec::new(),
             },
         ));
         let authoritative = serde_json::to_string(&state.pending_exile_from_top_until)

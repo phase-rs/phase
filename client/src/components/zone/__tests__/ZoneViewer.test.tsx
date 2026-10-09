@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildGameObjectWithCoreTypes,
@@ -19,6 +20,7 @@ import {
 } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
+  buildManaPaymentWaitingFor,
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
@@ -638,5 +640,60 @@ describe("ZoneViewer", () => {
 
     expect(screen.getByLabelText("2")).toBeInTheDocument();
     expect(screen.queryByText(/suspend/i)).not.toBeInTheDocument();
+  });
+
+  describe("delve from a shared graveyard", () => {
+    const delveTap: GameAction = {
+      type: "TapForConvoke",
+      data: { object_id: 7, mana_type: "Colorless" },
+    };
+
+    function seatOneDelving({ withAction }: { withAction: boolean }) {
+      const object = makeObject();
+      const gameState = buildGameState({
+        active_player: 1,
+        priority_player: 1,
+        players: buildPlayers([{ id: 0, graveyard: [object.id] }, { id: 1 }]),
+        objects: buildObjectMap(object),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildManaPaymentWaitingFor({
+          data: { player: 1, convoke_mode: "Delve" },
+        }),
+        derived: { shared_piles: { library: 0, graveyard: 0 } },
+      });
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: withAction ? [delveTap] : [],
+        legalActionsByObject: withAction ? { "7": [delveTap] } : {},
+        gameMode: "online",
+      });
+      useMultiplayerStore.setState({ activePlayerId: 1 });
+    }
+
+    afterEach(() => {
+      useMultiplayerStore.setState({ activePlayerId: null });
+    });
+
+    it("offers the engine's delve action to the seat that is not the holder", () => {
+      seatOneDelving({ withAction: true });
+      render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+      fireEvent.click(screen.getByTestId("card-image"));
+
+      expect(targetDispatch).toHaveBeenCalledWith(delveTap);
+    });
+
+    it("offers nothing for a card the engine reports no delve action for", () => {
+      seatOneDelving({ withAction: false });
+      render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+      expect(screen.getByTestId("card-image")).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId("card-image"));
+
+      expect(targetDispatch).not.toHaveBeenCalled();
+    });
   });
 });

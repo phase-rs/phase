@@ -39,8 +39,8 @@ use crate::types::ability::{
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, DamageChannel, DigSource, Duration,
     Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SpentColor, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5112,12 +5112,18 @@ fn parse_symbolic_mana_color_spent_condition(
     let (rest, _) = parse_spent_to_cast_tail(rest)?;
     let condition = if counts.len() == 1 {
         let (color, minimum) = counts[0];
-        AbilityCondition::ManaColorSpent { color, minimum }
+        AbilityCondition::ManaColorSpent {
+            color: SpentColor::ManaSymbol { color },
+            minimum,
+        }
     } else {
         AbilityCondition::And {
             conditions: counts
                 .into_iter()
-                .map(|(color, minimum)| AbilityCondition::ManaColorSpent { color, minimum })
+                .map(|(color, minimum)| AbilityCondition::ManaColorSpent {
+                    color: SpentColor::ManaSymbol { color },
+                    minimum,
+                })
                 .collect(),
         }
     };
@@ -5125,7 +5131,8 @@ fn parse_symbolic_mana_color_spent_condition(
 }
 
 /// CR 106.3 + CR 601.2h: legacy leading-word form, "at least N <color> mana was
-/// spent to cast <self>" → `AbilityCondition::ManaColorSpent`.
+/// spent to cast <self>" → `AbilityCondition::ManaColorSpent` with a
+/// `SpentColor::ColorWord` color (CR 612.2).
 ///
 /// SHADOWED, kept as a fallback only. `parse_mana_color_spent_condition_text`
 /// has exactly one caller (`parse_condition_text`), and every non-test caller of
@@ -5139,8 +5146,7 @@ fn parse_symbolic_mana_color_spent_condition(
 /// `ManaColorSpent` cannot express.
 ///
 /// `parse_symbolic_mana_color_spent_condition` above is NOT shadowed — the
-/// `{W}{W}` symbolic form has no `parse_inner_condition` grammar and stays live
-/// for 22 cards.
+/// `{W}{W}` symbolic form has no `parse_inner_condition` grammar and stays live.
 fn parse_word_mana_color_spent_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
@@ -5150,7 +5156,13 @@ fn parse_word_mana_color_spent_condition(
     let (rest, color) = nom_primitives::parse_color(rest)?;
     let (rest, _) = tag(" mana").parse(rest)?;
     let (rest, _) = parse_spent_to_cast_tail(rest)?;
-    Ok((rest, AbilityCondition::ManaColorSpent { color, minimum }))
+    Ok((
+        rest,
+        AbilityCondition::ManaColorSpent {
+            color: SpentColor::ColorWord { color },
+            minimum,
+        },
+    ))
 }
 
 fn parse_spent_to_cast_tail(input: &str) -> super::super::oracle_nom::error::OracleResult<'_, ()> {
@@ -11235,7 +11247,9 @@ mod tests {
         assert_eq!(
             condition,
             Some(AbilityCondition::ManaColorSpent {
-                color: ManaColor::Black,
+                color: SpentColor::ManaSymbol {
+                    color: ManaColor::Black
+                },
                 minimum: 1,
             })
         );
@@ -11249,13 +11263,54 @@ mod tests {
             panic!("expected And condition");
         };
         assert!(conditions.contains(&AbilityCondition::ManaColorSpent {
-            color: ManaColor::White,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::White
+            },
             minimum: 1,
         }));
         assert!(conditions.contains(&AbilityCondition::ManaColorSpent {
-            color: ManaColor::Black,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::Black
+            },
             minimum: 1,
         }));
+    }
+
+    /// CR 612.2 + CR 107.4: each emitter records how its color was written.
+    #[test]
+    fn mana_color_spent_emitters_record_word_versus_symbol() {
+        let symbol = |color| SpentColor::ManaSymbol { color };
+        let spent = |color, minimum| AbilityCondition::ManaColorSpent { color, minimum };
+
+        let (rest, parsed) =
+            parse_symbolic_mana_color_spent_condition("{g}{g} was spent to cast ~")
+                .expect("the symbolic parser accepts {G}{G}");
+        assert_eq!(rest, "");
+        assert_eq!(parsed, spent(symbol(ManaColor::Green), 2));
+
+        let (rest, parsed) =
+            parse_word_mana_color_spent_condition("at least three red mana was spent to cast ~")
+                .expect("the shadowed word parser accepts the Adamant phrasing");
+        assert_eq!(rest, "");
+        assert_eq!(
+            parsed,
+            spent(
+                SpentColor::ColorWord {
+                    color: ManaColor::Red
+                },
+                3
+            )
+        );
+
+        assert_eq!(
+            parse_condition_text("{G}{U} was spent to cast this spell"),
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    spent(symbol(ManaColor::Green), 1),
+                    spent(symbol(ManaColor::Blue), 1),
+                ],
+            })
+        );
     }
 
     #[test]

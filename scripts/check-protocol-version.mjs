@@ -34,6 +34,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // option's `additional_cost`, and the announced graveyard permission (the
 // option's `authority`, the slot prompt's `permission`, the latched terms).
 // v91 retypes PendingManaAbility's required chosen-counter count (#9207).
+// v92 serializes the reveal-until whiff verdict (ParentTargetMissingReason).
 // v93 adds the SacrificedForCost reduction provenance.
 // v97 adds TargetReadOrigin instruction provenance.
 // v99 adds the GraveyardCastPermission pool.
@@ -43,6 +44,21 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
 // `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
 // `AbilityActivationRecord.source_zone`.
+// v109 carries the CR 201.5a granter binding (ObjectScope + granting_object).
+// v110 adds deferred spell delivery after a free-cast window and the
+// spell-copy order choice.
+// v111 adds the `Dandan` GameFormat name.
+// v112 adds the `SubstituteTextWord` text-changing modification (CR 612.1).
+// v113 adds `ResolvedZoneChangeCommand.rebound_from` (the Dandan hand-entry
+// ownership rebind).
+// v114 adds `WaitingFor::MulliganDecision.declared` (the CR 103.5 declare round).
+// v115 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind` (the Dandan
+// free reveal mulligan).
+// v116 adds the simultaneous-draw dealer to the multi-draw resolution frame
+// (`RESOLUTION_STATE_WIRE_VERSION` 5).
+// v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// v118 retypes the `ManaColorSpent` color of `AbilityCondition` and `TriggerCondition`
+// to `SpentColor` (word versus symbol provenance, CR 612.2).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -82,11 +98,24 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // the FinalizeDelvedCast completion; DelveManaPayment removed).
 // +34: v105 adds the nominal base quantity to deferred mana-source selections.
 // +35: v106 adds exact replacement-choice preferences and remembered response actions.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 35;
+// +36: v107 adds the counted exile-until loop and the ParentTargets zone choice.
+// +37: v108 adds serialized IllegalTargetsDisposition.StillResolves.
+// +38: the v109 CR 201.5a granter binding.
+// +39: v110 adds the deferred spell delivery after a free-cast window and the
+//      spell-copy order choice.
+// +40: the v111 `Dandan` GameFormat name.
+// +41: the v112 `SubstituteTextWord` text-changing modification.
+// +42: v113 adds `ResolvedZoneChangeCommand.rebound_from`.
+// +43: v114 adds `WaitingFor::MulliganDecision.declared`.
+// +44: v115 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind`.
+// +45: v116 adds the simultaneous-draw dealer to the multi-draw resolution frame.
+// +46: v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// +47: v118 retypes the `ManaColorSpent` color to `SpentColor` (word versus symbol).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 47;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 15;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 16;
 // The capability FLOOR for correlated tournament settlement — a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the
@@ -142,7 +171,20 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +32: wire 86 moves with full-game v104 for the delve payment state shape.
 // +33: wire 87 moves with full-game v105 for deferred mana-source quantities.
 // +34: wire 88 moves with full-game v106 for remembered replacement choices.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 34;
+// +35: wire 89 moves with full-game v107 for the counted exile-until loop.
+// +36: wire 90 moves with full-game v108 for illegal-target resolution disposition.
+// +37: wire 91 moves with full-game v109 for the CR 201.5a granter binding.
+// +38: wire 92 moves with full-game v110 for the deferred spell delivery and
+//      the spell-copy order choice.
+// +39: wire 93 moves with full-game v111 for the `Dandan` GameFormat name.
+// +40: wire 94 moves with full-game v112 for the `SubstituteTextWord` modification.
+// +41: wire 95 moves with full-game v113 for the journaled `rebound_from`.
+// +42: wire 96 moves with full-game v114 for `MulliganDecision.declared`.
+// +43: wire 97 moves with full-game v115 for the free reveal mulligan.
+// +44: wire 98 moves with full-game v116 for the simultaneous-draw dealer.
+// +45: wire 99 moves with full-game v117 for `DerivedViews.shared_piles`.
+// +46: wire 100 moves with full-game v118 for `SpentColor` on `ManaColorSpent`.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 46;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
@@ -294,6 +336,8 @@ const AUTHORED_LITERALS = [
     "MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION",
     // Client-only frozen floor for the format names lobby 11 introduced; no Rust mirror.
     "MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS",
+    // Client-only frozen floor for the format name lobby 16 introduced; no Rust mirror.
+    "MIN_LOBBY_PROTOCOL_FOR_DANDAN",
     "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
     "PROTOCOL_VERSION",
   ]],

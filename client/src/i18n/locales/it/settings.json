@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nuove",
       "classic": "Classiche"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Passa il mouse per l'anteprima",
+    "cardAnimationPreviewHintTap": "Tocca per l'anteprima"
   },
   "flexLayout": {
     "title": "Layout flessibile",
@@ -503,14 +505,28 @@
     "modelPlaceholder": "ID del modello (es. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://il-tuo-server/v1",
+    "jevEndpointPlaceholder": "Per impostazione predefinita, il tuo server multigiocatore",
+    "jevEndpointHint": "Jev è raggiungibile tramite un server multigiocatore phase, che inoltra ogni richiesta a TypeSafe. La tua chiave viaggia solo all'interno di quella richiesta e non viene mai salvata sul server.",
     "apiKey": "Chiave API",
     "apiKeyPlaceholder": "Incolla la tua chiave API",
     "apiKeyOptional": "Facoltativa per i server locali",
+    "apiKeyMissing": "Inserisci di nuovo la tua chiave API. Le chiavi non vengono conservate dopo un ricaricamento e questo provider non viene usato per i posti IA o i bot del draft finché non lo fai.",
     "apiKeyStorage": "Conservata in memoria solo per questa sessione del browser. Le chiavi API non vengono mai scritte su disco e sono escluse dall'esportazione di backup e dalla sincronizzazione cloud: dopo un ricaricamento dovrai reinserirla. Una chiave API richiede inoltre un endpoint https://, a meno che il server non sia su localhost.",
     "apiKeyGet": "Ottieni una chiave",
     "test": "Prova connessione",
     "testing": "Prova in corso…",
     "testOk": "Connesso.",
+    "defaultPrompt": {
+      "connected": "Connesso. Usarlo come avversario predefinito?",
+      "ready": "Usare questo provider come avversario predefinito?",
+      "action": "Usa come predefinito",
+      "badge": "Avversario predefinito"
+    },
+    "defaultOpponent": {
+      "label": "Avversario predefinito",
+      "hint": "Gli avversari IA usano questo provider, a meno che non ne scelga un altro per un posto durante la configurazione della partita. Vale anche per l'avversario delle partite di draft.",
+      "engine": "IA integrata del motore"
+    },
     "draftToggle": {
       "label": "Usa per i bot del draft",
       "hint": "I posti bot di un draft scelgono con il modello, usando il contesto dei set del formato.",

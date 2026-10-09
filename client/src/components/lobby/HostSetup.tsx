@@ -30,6 +30,7 @@ import { refreshServerDirectory, type DirectorySource } from "../../services/ser
 import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
 import {
   deleteSavedCustomFormat,
   loadSavedCustomFormats,
@@ -289,6 +290,37 @@ function BotGlyph({ className = "h-4 w-4" }: { className?: string }) {
   );
 }
 
+/**
+ * The engine's best-of-three ceiling for `format`, or `null` until it resolves
+ * for exactly this format. A failed lookup answers `"Bo1"` so Bo3 is never
+ * offered on an unknown ceiling.
+ */
+export function useBestOfThreeCeiling(format: GameFormat | null): MatchType | null {
+  const [answer, setAnswer] = useState<{ format: GameFormat; ceiling: MatchType } | null>(null);
+  useEffect(() => {
+    if (format === null) return;
+    let cancelled = false;
+    void (async () => {
+      let ceiling: MatchType;
+      try {
+        ceiling = await bestOfThreeCeilingForFormat(format);
+      } catch {
+        ceiling = "Bo1";
+      }
+      if (!cancelled) setAnswer({ format, ceiling });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [format]);
+  return format !== null && answer?.format === format ? answer.ceiling : null;
+}
+
+/** Bo3 is the one value the engine's answer admits; anything else plays Bo1. */
+export function cappedMatchType(selected: MatchType, ceiling: MatchType | null): MatchType {
+  return ceiling === "Bo3" ? selected : "Bo1";
+}
+
 export function HostSetup({
   onHost,
   onBack,
@@ -468,7 +500,9 @@ export function HostSetup({
   /** Monotonic token for format resolves. A resolve that finishes after a newer
    *  one started must not write its stale config into state. */
   const formatResolveSeq = useRef(0);
-  const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
+  const ceiling = useBestOfThreeCeiling(formatConfig.format);
+  const effectiveMatchType = playerCount === 2 ? cappedMatchType(matchType, ceiling) : "Bo1";
+  const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   const aiDeckCatalog = useAiDeckCatalog({
     selectedFormat: formatConfig.format,
     selectedMatchType: effectiveMatchType,
@@ -723,7 +757,7 @@ export function HostSetup({
         // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
         savedCustomFormatId,
         playerCount,
-        matchType: effectiveMatchType,
+        matchType,
         loopDetection,
         isPublic,
         startWhenFull,
@@ -1001,14 +1035,14 @@ export function HostSetup({
 
             <Field label={t("hostSetup.matchType")}>
               <div className={segWrap}>
-                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(matchType === "Bo1")}>
+                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(effectiveMatchType === "Bo1")}>
                   {t("hostSetup.bo1")}
                 </button>
                 <button
                   type="button"
                   onClick={() => setMatchType("Bo3")}
-                  disabled={playerCount !== 2}
-                  className={seg(matchType === "Bo3", playerCount !== 2 ? "cursor-not-allowed opacity-40" : "")}
+                  disabled={bo3Disabled}
+                  className={seg(effectiveMatchType === "Bo3", bo3Disabled ? "cursor-not-allowed opacity-40" : "")}
                 >
                   {t("hostSetup.bo3")}
                 </button>

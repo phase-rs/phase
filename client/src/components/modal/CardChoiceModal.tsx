@@ -123,6 +123,7 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
+type SpellCopyOrderChoice = Extract<WaitingFor, { type: "SpellCopyOrderChoice" }>;
 
 function selectionInteractionId(
   interaction: ViewerInteraction | null,
@@ -173,13 +174,23 @@ export function CardChoiceModal() {
   const activeSelectInteractionId = useGameStore((s) =>
     selectionInteractionId(s.viewerInteraction),
   );
+  const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
 
   if (!waitingFor) return null;
 
   switch (waitingFor.type) {
     case "ScryChoice":
       if (!canActForWaitingState) return null;
-      return <ScryModal data={waitingFor.data} />;
+      return (
+        <ScryModal
+          key={
+            activeSelectInteractionId ??
+            scryPromptId ??
+            `${waitingFor.data.player}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
     case "ArrangePlanarDeckTopChoice":
       if (!canActForWaitingState) return null;
       return <ArrangePlanarDeckTopModal data={waitingFor.data} />;
@@ -276,6 +287,9 @@ export function CardChoiceModal() {
     case "EmpowerJaceChoice":
       if (!canActForWaitingState) return null;
       return <EmpowerJaceChoiceModal data={waitingFor.data} />;
+    case "SpellCopyOrderChoice":
+      if (!canActForWaitingState) return null;
+      return <SpellCopyOrderChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -1150,6 +1164,41 @@ function BeholdChoiceModal({ data }: { data: BeholdChoice["data"] }) {
 // token dispatches a single-object SelectCards.
 function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   const { t } = useTranslation("game");
+  return (
+    <SingleObjectPickModal
+      title={t("cardChoice.empowerJace.title")}
+      subtitle={t("cardChoice.empowerJace.subtitle", { count: data.count })}
+      choices={data.choices}
+    />
+  );
+}
+
+// CR 405.3 + CR 707.10: the controller of a batch of spell copies picks the
+// spell whose copy goes on the stack next. Display-only: the engine supplies
+// `choices` and enforces legality; clicking a spell dispatches a single-object
+// SelectCards.
+function SpellCopyOrderChoiceModal({ data }: { data: SpellCopyOrderChoice["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <SingleObjectPickModal
+      title={t("cardChoice.spellCopyOrder.title")}
+      subtitle={t("cardChoice.spellCopyOrder.subtitle")}
+      choices={data.choices}
+    />
+  );
+}
+
+// A strip of engine-offered objects; clicking one dispatches it as a
+// single-object SelectCards.
+function SingleObjectPickModal({
+  title,
+  subtitle,
+  choices,
+}: {
+  title: string;
+  subtitle: string;
+  choices: ObjectId[];
+}) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
@@ -1164,12 +1213,9 @@ function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   if (!objects) return null;
 
   return (
-    <ChoiceOverlay
-      title={t("cardChoice.empowerJace.title")}
-      subtitle={t("cardChoice.empowerJace.subtitle", { count: data.count })}
-    >
+    <ChoiceOverlay title={title} subtitle={subtitle}>
       <ScrollableCardStrip>
-        {data.choices.map((id, index) => {
+        {choices.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           return (

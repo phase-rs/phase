@@ -1290,6 +1290,32 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Make this card an artifact creature.
+    pub fn as_artifact_creature(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.core_types.contains(&CoreType::Artifact) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
+    /// Make this card an artifact land.
+    pub fn as_artifact_land(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.core_types.contains(&CoreType::Artifact) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// CR 305: Make this card a land. Strips the Creature core type pushed by
     /// `add_creature_to_graveyard` and adds Land. Mirrors `as_artifact`/
     /// `as_enchantment`; reusable for graveyard-return targeting tests.
@@ -2059,6 +2085,7 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
+            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",

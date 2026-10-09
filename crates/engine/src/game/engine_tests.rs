@@ -2314,20 +2314,22 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
         .push(CoreType::Creature);
 
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    let effect_id = state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
-        }],
-        None,
-    );
+    let effect_id = state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
 
     assert_eq!(
@@ -2424,20 +2426,22 @@ fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
     }
 
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    let effect_id = state.add_transient_continuous_effect(
-        room,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: room },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
-        }],
-        None,
-    );
+    let effect_id = state
+        .add_transient_continuous_effect(
+            room,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: room },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&room].name, "Bright Hall",
@@ -2487,20 +2491,22 @@ fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
         Zone::Battlefield,
     );
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
 
     // CR 707.3: the bear's CURRENT copiable values are the Room's — including
@@ -2606,20 +2612,22 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
         chained.name, "Wrong Turn",
         "CR 707.9b: the exception is part of the snapshot a later copy takes"
     );
-    state.add_transient_continuous_effect(
-        bear2,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear2 },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(chained),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear2,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear2 },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(chained),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear2].name, "Wrong Turn",
@@ -2630,20 +2638,22 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
     // marker must reset with it, so the door gate applies again. The bear's
     // left door is still unlocked from above, so the copied left name shows.
     let plain = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(plain),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(plain),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear].name, "Bright Hall",

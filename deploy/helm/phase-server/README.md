@@ -379,8 +379,8 @@ helm upgrade phase-server deploy/helm/phase-server -n phase \
 The digest is required; see [Building the image](#building-the-image) for the
 one case where you trade it for `web.image.followServerTag: true` instead.
 
-The site is then at `https://phase.example.com/`, and `/ws`, `/health` and
-`/p2p-draft-backup` still reach the server. `/admin` is deliberately not routed
+The site is then at `https://phase.example.com/`, and `/ws`, `/health`,
+`/p2p-draft-backup` and `/jev` (the Jev relay) still reach the server. `/admin` is deliberately not routed
 with or without the SPA — it stays operator-only over `kubectl port-forward`, so
 a request for it from the public edge lands on the site and 404s there.
 Routing rests on longest-prefix matching for the plain Ingress and on Traefik's

@@ -106,6 +106,24 @@
     "grant": "Aprobar",
     "decline": "Conservar prioridad"
   },
+  "sandboxLifeCorrection": {
+    "open": "Corregir vidas",
+    "title": "Corrección de vidas de Sandbox",
+    "description": "Usa los controles normales de la mano y la pila para lanzar y resolver una criatura. Este panel envía la acción SetLife de Sandbox mediante el adaptador de juego existente.",
+    "scopeNote": "Corrige las vidas mediante la ruta de edición de jugadores del motor; no representa daño ni un efecto de carta. Esta versión no incluye revelar manos ocultas, descartar según las reglas ni deshacer antes de lanzar con acuerdo previo.",
+    "target": "Jugador",
+    "player": "{{name}} (jugador {{seat}})",
+    "you": "Tú",
+    "opponent": "Oponente",
+    "currentLife": "Vidas actuales",
+    "newLife": "Nuevas vidas",
+    "submit": "Aplicar corrección",
+    "submitting": "Corrección enviada; cerrar este panel no la cancela.",
+    "applied": "Vidas actuales confirmadas para {{player}}: {{life}}.",
+    "notApplied": "El motor no confirmó esta corrección. Comprueba el snapshot actual antes de volver a intentarlo.",
+    "failed": "No se pudo enviar la corrección.",
+    "stale": "La partida cambió durante la edición. Cierra y vuelve a abrir este panel para empezar desde el snapshot actual."
+  },
   "debugCreate": {
     "copies": "Copias",
     "asToken": "Crear como ficha",
@@ -843,6 +861,7 @@
     "chooseNewTargetForCopy": "Elige un nuevo objetivo para la copia",
     "chooseTargetForCopy": "Elige objetivo para la copia",
     "chooseCreatureToExplore": "Elige qué criatura explora a continuación",
+    "chooseCreatureToEquip": "Elige una criatura para equipar",
     "chooseCreatureTokenToPopulate": "Elige una ficha de criatura para poblar",
     "chooseReturnAsAuraTarget": "Elige un permanente para encantar",
     "tapUntappedCreatures_one": "Gira {{count}} criatura sin girar",
@@ -1134,6 +1153,8 @@
       "usePowder": "Usar {{name}}",
       "powderDescription": "Exilia todas las cartas de la mano, roba el mismo número — no es un mulligan",
       "powderTooltip": "Exilia todas las cartas de tu mano y roba el mismo número. No es un mulligan — el recuento y los fondos no se ven afectados.",
+      "freeReveal": "Revelar y robar de nuevo (gratis)",
+      "freeRevealDescription": "Revela tu mano, barájala y roba 7 — gratis, sin cartas al fondo, no es un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londres",
       "eyebrowOpening": "Mano inicial · Mulligan de Londres",
       "reviewTitle": "Revisa tu mano inicial",
@@ -1698,6 +1719,10 @@
     "empowerJace": {
       "title": "Potenciar a Jace",
       "subtitle": "Elige una ficha de Jace que controles para que obtenga +{{count}} de lealtad"
+    },
+    "spellCopyOrder": {
+      "title": "Ordenar las copias",
+      "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
     },
     "collectEvidence": {
       "title": "Recabar pruebas",

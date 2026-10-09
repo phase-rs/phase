@@ -6,7 +6,7 @@ use crate::types::game_state::{
     ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume, LookGrant,
     RepeatUntilStopWitness, StackEntryKind,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -332,14 +332,8 @@ fn resolving_exile_supplier(state: &GameState, source_id: ObjectId) -> Option<Li
     };
     // CR 400.7 + CR 113.7a: the push-time capture names the object that put
     // the ability on the stack even after it changed zones.
-    let incarnation = ability.source_incarnation.or_else(|| {
-        state
-            .objects
-            .get(&source_id)
-            .map(|object| object.incarnation)
-    })?;
     Some(LinkedAbilitySource {
-        creator: ObjectIncarnationRef::of(source_id, incarnation),
+        creator: ability.source_ref(state)?,
         characteristic_set,
     })
 }
@@ -626,7 +620,7 @@ mod tests {
         AbilityDefinition, AbilityKind, CastingPermission, Effect, ManaProduction, PlayerFilter,
         QuantityExpr, QuantityRef, TargetFilter,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::CastFrequency;
     use crate::types::zones::{EtbTapState, Zone};

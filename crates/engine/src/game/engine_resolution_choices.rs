@@ -932,6 +932,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -2140,10 +2141,11 @@ pub(super) fn handle_resolution_choice(
                 .filter(|id| !top_cards.contains(id))
                 .copied()
                 .collect();
+            let holder = state.zone_storage_seat(Zone::Library, player);
             let player_state = state
                 .players
                 .iter_mut()
-                .find(|candidate| candidate.id == player)
+                .find(|candidate| candidate.id == holder)
                 .expect("player exists");
             // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
             player_state.library.retain(|id| !all_cards.contains(id));
@@ -3901,6 +3903,27 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
+            WaitingFor::SpellCopyOrderChoice {
+                player, choices, ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // CR 405.3 + CR 707.10: the chosen spell supplies the batch's next
+            // copy, above the copies already on the stack.
+            let [spell] = chosen.as_slice() else {
+                return Err(EngineError::InvalidAction(format!(
+                    "Choose exactly one spell to copy next, got {}",
+                    chosen.len()
+                )));
+            };
+            if !choices.contains(spell) || !effects::order_next_spell_copy(state, *spell) {
+                return Err(EngineError::InvalidAction(
+                    "That spell has no copy left to make".to_string(),
+                ));
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
             WaitingFor::EmpowerJaceChoice {
                 player,
                 source_id,
@@ -4520,10 +4543,11 @@ pub(super) fn handle_resolution_choice(
                 .collect();
             if kept_destination == Some(Zone::Library) {
                 let move_unkept_to = {
+                    let holder = state.zone_storage_seat(Zone::Library, library_owner);
                     let player_state = state
                         .players
                         .iter_mut()
-                        .find(|candidate| candidate.id == library_owner)
+                        .find(|candidate| candidate.id == holder)
                         .expect("player exists");
                     // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                     player_state.library.retain(|id| !cards.contains(id));
@@ -4663,7 +4687,8 @@ pub(super) fn handle_resolution_choice(
                             obj_id,
                             kept_zone,
                             dig_source_id.unwrap_or(obj_id),
-                        );
+                        )
+                        .hand_taker(player);
                         if kept_zone == Zone::Battlefield {
                             request.mods.enter_tapped =
                                 crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
@@ -8981,37 +9006,39 @@ fn effect_zone_library_placement_order(
     }
 }
 
-/// CR 401.4: Deliver Hand-origin cards in the order whose resulting relative
-/// order matches the raw mixed-source placement. The later Library-only replay
-/// can change their interleaving with library cards, but never their own order.
+/// The distinct library holders of `cards`, in first-seen order. CR 400.3: a
+/// card goes to its owner's library, which a shared-library format stores in
+/// one container, so a mixed-owner batch is replayed once per container.
+fn library_holders_of(
+    state: &GameState,
+    cards: &[ObjectId],
+) -> Vec<crate::types::player::PlayerId> {
+    let mut holders = Vec::new();
+    for &card_id in cards {
+        let holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
+        if !holders.contains(&holder) {
+            holders.push(holder);
+        }
+    }
+    holders
+}
+
+/// CR 401.4 + CR 400.3: Deliver Hand-origin cards in the order whose resulting
+/// relative order matches the raw mixed-source placement. The later
+/// Library-only replay can change their interleaving with library cards, but
+/// never their own order.
 fn effect_zone_non_library_delivery_order(
     state: &GameState,
     chosen: &[ObjectId],
     library_origin: &[ObjectId],
     library_position: &LibraryPosition,
 ) -> Vec<ObjectId> {
-    let mut owners = Vec::new();
-    for &card_id in chosen {
-        let owner = state.objects[&card_id].owner;
-        if !owners.contains(&owner) {
-            owners.push(owner);
-        }
-    }
-
     let mut delivery_order = Vec::new();
-    for owner in owners {
-        let library = state
-            .players
-            .iter()
-            .find(|player| player.id == owner)
-            .expect("library owner exists")
-            .library
-            .iter()
-            .copied()
-            .collect();
+    for holder in library_holders_of(state, chosen) {
+        let library = state.library_of(holder).iter().copied().collect();
         let desired = replay_effect_zone_library_placement(
             state,
-            owner,
+            holder,
             library,
             chosen,
             chosen,
@@ -9036,14 +9063,15 @@ fn effect_zone_non_library_delivery_order(
 
 fn replay_effect_zone_library_placement(
     state: &GameState,
-    owner: crate::types::player::PlayerId,
+    holder: crate::types::player::PlayerId,
     mut library: Vec<ObjectId>,
     chosen: &[ObjectId],
     placed: &[ObjectId],
     library_position: &LibraryPosition,
 ) -> Vec<ObjectId> {
     for card_id in effect_zone_library_placement_order(chosen, library_position) {
-        if state.objects[&card_id].owner != owner || !placed.contains(&card_id) {
+        let card_holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
+        if card_holder != holder || !placed.contains(&card_id) {
             continue;
         }
         library.retain(|id| *id != card_id);
@@ -9093,7 +9121,7 @@ fn move_library_origin_cards_in_selection_order(
     }
 }
 
-/// CR 401.4 + CR 608.2c: Preserve the raw arm's selected-card interleaving
+/// CR 401.4 + CR 400.3 + CR 608.2c: Preserve the raw arm's selected-card interleaving
 /// after the Hand-origin delivery batch has settled. Reconstruct each affected
 /// library without the newly delivered cards, replay the original placement
 /// order using only cards that actually landed in a library, then reposition
@@ -9115,28 +9143,16 @@ fn reposition_library_origins_after_batch_delivery(
                 .is_some_and(|object| object.zone == Zone::Library)
         })
         .collect();
-    let mut owners = Vec::new();
-    for &card_id in library_origin {
-        let owner = state.objects[&card_id].owner;
-        if !owners.contains(&owner) {
-            owners.push(owner);
-        }
-    }
-
-    for owner in owners {
+    for holder in library_holders_of(state, library_origin) {
         let library = state
-            .players
-            .iter()
-            .find(|player| player.id == owner)
-            .expect("library owner exists")
-            .library
+            .library_of(holder)
             .iter()
             .copied()
             .filter(|id| library_origin.contains(id) || !chosen.contains(id))
             .collect();
         let desired = replay_effect_zone_library_placement(
             state,
-            owner,
+            holder,
             library,
             chosen,
             &library_placed,
@@ -13837,6 +13853,135 @@ mod tests {
             BoundaryHold::ALL.len(),
             "every item-level non-push exit in the loop must be a labelled BoundaryHold, and every \
              BoundaryHold must be one of those exits"
+        );
+    }
+
+    /// A format with a shared library: ten pile cards owned alternately by P0
+    /// and P1, all stored in the canonical seat's container.
+    fn dandan_pile() -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::dandan(), 2, 1);
+        let pile: Vec<ObjectId> = (0..10u32)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(100 + u64::from(i)),
+                    PlayerId((i % 2) as u8),
+                    format!("Pile {i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        assert_eq!(state.players[0].library.len(), 10, "reach: pile built");
+        assert!(state.players[1].library.is_empty());
+        (state, pile)
+    }
+
+    /// The same ten cards with each owner's five in the owner's own library.
+    fn standard_libraries() -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(1);
+        let pile: Vec<ObjectId> = (0..10u32)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(100 + u64::from(i)),
+                    PlayerId((i % 2) as u8),
+                    format!("Pile {i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        assert_eq!(state.players[1].library.len(), 5, "reach: own libraries");
+        (state, pile)
+    }
+
+    fn hand_card(state: &mut GameState, owner: PlayerId, n: u32) -> ObjectId {
+        create_object(
+            state,
+            CardId(200 + u64::from(n)),
+            owner,
+            format!("Hand {n}"),
+            Zone::Hand,
+        )
+    }
+
+    #[test]
+    fn nth_from_top_pair_reads_the_shared_pile_not_the_empty_seat() {
+        let nth = LibraryPosition::NthFromTop { n: 3 };
+        for (mut state, expected_shared) in
+            [(dandan_pile().0, true), (standard_libraries().0, false)]
+        {
+            let c1 = hand_card(&mut state, PlayerId(1), 1);
+            let c2 = hand_card(&mut state, PlayerId(1), 2);
+            let order = effect_zone_non_library_delivery_order(&state, &[c1, c2], &[], &nth);
+            assert_eq!(order, vec![c1, c2], "shared={expected_shared}");
+        }
+    }
+
+    #[test]
+    fn mixed_owner_top_batch_is_one_pass_over_the_shared_pile() {
+        let top = LibraryPosition::Top;
+        let (mut shared, _) = dandan_pile();
+        shared.seat_order.rotate_left(1);
+        let a = hand_card(&mut shared, PlayerId(0), 1);
+        let b = hand_card(&mut shared, PlayerId(1), 2);
+        assert_eq!(
+            effect_zone_non_library_delivery_order(&shared, &[a, b], &[], &top),
+            vec![b, a],
+            "the first chosen card ends on top of the one pile"
+        );
+
+        let (mut standard, _) = standard_libraries();
+        let a = hand_card(&mut standard, PlayerId(0), 1);
+        let b = hand_card(&mut standard, PlayerId(1), 2);
+        assert_eq!(
+            effect_zone_non_library_delivery_order(&standard, &[a, b], &[], &top),
+            vec![a, b],
+            "separate libraries are delivered grouped by owner"
+        );
+    }
+
+    #[test]
+    fn library_origin_reposition_sees_one_pile_across_owners() {
+        let nth = LibraryPosition::NthFromTop { n: 3 };
+        let (mut shared, pile) = dandan_pile();
+        let p1c = pile[7];
+        reposition_library_origins_after_batch_delivery(
+            &mut shared,
+            &[p1c],
+            &[p1c],
+            &nth,
+            &mut Vec::new(),
+        );
+        let mut expected: Vec<ObjectId> = pile.iter().copied().filter(|id| *id != p1c).collect();
+        expected.insert(2, p1c);
+        assert_eq!(
+            shared.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            expected,
+            "a P1-owned card is placed third from the top of the one pile"
+        );
+        assert!(shared.players[1].library.is_empty());
+
+        let (mut standard, pile) = standard_libraries();
+        let p1c = pile[7];
+        reposition_library_origins_after_batch_delivery(
+            &mut standard,
+            &[p1c],
+            &[p1c],
+            &nth,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            standard.players[1]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![pile[1], pile[3], p1c, pile[5], pile[9]],
+            "separate libraries place the card third from the top of its owner's"
         );
     }
 }

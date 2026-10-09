@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nuevas",
       "classic": "Clásicas"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Pasa el cursor para ver",
+    "cardAnimationPreviewHintTap": "Toca para ver"
   },
   "flexLayout": {
     "title": "Diseño flexible",
@@ -503,14 +505,28 @@
     "modelPlaceholder": "ID del modelo (p. ej. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://tu-servidor/v1",
+    "jevEndpointPlaceholder": "Por defecto, tu servidor multijugador",
+    "jevEndpointHint": "Jev se alcanza a través de un servidor multijugador de phase, que reenvía cada solicitud a TypeSafe. Tu clave viaja solo dentro de esa solicitud y nunca se guarda en el servidor.",
     "apiKey": "Clave de API",
     "apiKeyPlaceholder": "Pega tu clave de API",
     "apiKeyOptional": "Opcional para servidores locales",
+    "apiKeyMissing": "Vuelve a introducir tu clave de API. Las claves no se conservan al recargar, y este proveedor no se usa para los asientos de IA ni para los bots del draft hasta que lo hagas.",
     "apiKeyStorage": "Se mantiene en memoria solo durante esta sesión del navegador. Las claves de API nunca se escriben en disco y quedan excluidas de la copia de seguridad y de la sincronización en la nube, así que tendrás que volver a introducirla tras recargar. Además, una clave de API exige un endpoint https:// salvo que el servidor esté en localhost.",
     "apiKeyGet": "Obtener una clave",
     "test": "Probar conexión",
     "testing": "Probando…",
     "testOk": "Conectado.",
+    "defaultPrompt": {
+      "connected": "Conectado. ¿Usarlo como tu oponente predeterminado?",
+      "ready": "¿Usar este proveedor como tu oponente predeterminado?",
+      "action": "Usar como predeterminado",
+      "badge": "Oponente predeterminado"
+    },
+    "defaultOpponent": {
+      "label": "Oponente predeterminado",
+      "hint": "Los oponentes de IA usan este proveedor salvo que elijas otro para un asiento al preparar una partida. Incluye al oponente de las partidas de draft.",
+      "engine": "IA integrada del motor"
+    },
     "draftToggle": {
       "label": "Usar para los bots del draft",
       "hint": "Los asientos de bot de un draft eligen con el modelo, usando el contexto de sets del formato.",

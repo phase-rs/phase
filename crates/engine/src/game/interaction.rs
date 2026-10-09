@@ -310,6 +310,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -567,6 +568,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::DiscardChoice {
             unless_filter: Some(_),
             ..
@@ -717,6 +719,33 @@ fn interaction_serial_is_valid(value: &str) -> bool {
 
 fn interaction_session_is_valid(session: &InteractionSessionId) -> bool {
     !session.0.is_empty() && session.0.len() <= MAX_INTERACTION_SESSION_ID_LEN
+}
+
+/// Read the authorized viewer's existing Scry identity independently of the
+/// bounded interaction payload. This getter never allocates or rotates a slot.
+pub(crate) fn scry_prompt_id_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<InteractionId> {
+    let WaitingFor::ScryChoice { player, .. } = &state.waiting_for else {
+        return None;
+    };
+    if interaction_submitter_for_owner(state, *player) != viewer
+        || state
+            .interaction_session_id
+            .as_ref()
+            .is_none_or(|session| !interaction_session_is_valid(session))
+        || !interaction_serial_is_valid(&state.next_interaction_serial)
+    {
+        return None;
+    }
+    state
+        .active_interaction_slots
+        .iter()
+        .find(|slot| {
+            slot.semantic_owner == player.0 && slot.slot_kind == InteractionSlotKind::Single
+        })
+        .map(|slot| slot.interaction_id.clone())
 }
 
 fn increment_decimal(value: &str) -> Option<String> {
@@ -4752,6 +4781,7 @@ fn selection_projection(
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -5732,6 +5762,9 @@ fn project_action_payload(
             }
             MulliganChoice::Mulligan => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "mulligan")
+            }
+            MulliganChoice::FreeReveal => {
+                push_value_surface(surfaces, InteractionRoleCode::Mulligan, "freeReveal")
             }
             MulliganChoice::UseSerumPowder { object_id } => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "serumPowder");

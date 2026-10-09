@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use rand_chacha::ChaCha20Rng;
@@ -2547,6 +2548,7 @@ fn collect_matching_triggers_inner(
             .map(|(i, (kind, def))| (printed_trigger_count + i, None, def, Some(*kind))),
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
+        let source_context = source_context_for_definition(&source_context, trig_def);
         // Synthesized granted-keyword companion triggers carry a keyword-keyed
         // `MayTriggerOrigin` — the synthetic `trig_idx` points past
         // `trigger_definitions` and must not be used as a `Printed` index.
@@ -3659,6 +3661,7 @@ fn inline_tap_mana_trigger_abilities(
         for active in super::functioning_abilities::active_trigger_definitions(state, object) {
             let definition_ref = active.definition_ref.clone();
             let trigger_definition = active.definition;
+            let source_context = source_context_for_definition(&source_context, trigger_definition);
             if !matches!(
                 trigger_definition.mode,
                 TriggerMode::TapsForMana | TriggerMode::ManaAbilityProduced
@@ -4275,6 +4278,7 @@ fn collect_latched_batched_zone_triggers(
             let Some(source_context) = latched.source_context_at(observation_time) else {
                 continue;
             };
+            let stamped = source_context_for_definition(source_context, &latched.definition);
             let (_, suppressors) = match observation_time {
                 TriggerObservationTime::ImmediatelyBefore => group
                     .immediately_before_latches()
@@ -4287,15 +4291,15 @@ fn collect_latched_batched_zone_triggers(
             if event_is_suppressed_by_static_triggers_cached(
                 state,
                 event,
-                Some(source_context),
+                Some(&*stamped),
                 &suppressors,
-            ) || !matcher(event, &latched.definition, source_context, state)
+            ) || !matcher(event, &latched.definition, &stamped, state)
                 || !check_trigger_constraint_with_ref(
                     state,
                     &latched.definition,
                     Some(&latched.definition_ref),
-                    Some(source_context),
-                    source_context.lki.controller,
+                    Some(&*stamped),
+                    stamped.lki.controller,
                     Some(event),
                 )
                 || !latched
@@ -4306,8 +4310,8 @@ fn collect_latched_batched_zone_triggers(
                         check_trigger_condition_with_source(
                             state,
                             condition,
-                            source_context.lki.controller,
-                            Some(source_context),
+                            stamped.lki.controller,
+                            Some(&*stamped),
                             Some(event),
                         )
                     })
@@ -4315,9 +4319,10 @@ fn collect_latched_batched_zone_triggers(
                 continue;
             }
             if let Some(contextual_event) =
-                contextual_batched_trigger_event(state, event, &latched.definition, source_context)
+                contextual_batched_trigger_event(state, event, &latched.definition, &stamped)
             {
-                admitted.push((source_context, contextual_event));
+                // CR 201.5a: the count reads the subjects through the context admission read.
+                admitted.push((stamped, contextual_event));
             }
         }
 
@@ -8960,7 +8965,7 @@ pub(crate) enum TriggerDispatchDisposition {
     /// fallback below.
     DroppedNoLegalRequiredTarget,
     /// A target/resolution slot could not be auto-resolved (`build_target_slots`,
-    /// `auto_select_targets_for_ability`, or `assign_targets_in_chain` returned
+    /// `auto_select_targets_for_ability`, or `assign_selected_slots_in_chain` returned
     /// `Err`). For a genuine CR 115.1d target with no legal option this matches
     /// CR 603.3d removal; but `build_target_slots` also surfaces resolution-time
     /// filter slots that are *not* CR 115.1d targets (e.g. Good King Mog's "a
@@ -9071,7 +9076,7 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
 
     match auto_targets {
         Ok(Some(targets)) => {
-            if super::ability_utils::assign_targets_in_chain(
+            if super::ability_utils::assign_selected_slots_in_chain(
                 &prepared_state,
                 &mut prepared_trigger.ability,
                 &targets,
@@ -11125,7 +11130,11 @@ pub fn check_state_triggers(state: &mut GameState) {
         // phased-out / command-zone gate. We clone the yielded triggers to a
         // local Vec so the mutable-state pass below (push_pending_trigger_to_stack)
         // doesn't collide with the shared borrow on `state.objects`.
-        let (controller, timestamp, trigger_defs): (PlayerId, u32, Vec<TriggerDefinition>) = {
+        let (controller, timestamp, trigger_defs): (
+            PlayerId,
+            u32,
+            Vec<(TriggerDefinitionRef, TriggerDefinition)>,
+        ) = {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
             };
@@ -11136,20 +11145,27 @@ pub fn check_state_triggers(state: &mut GameState) {
                 obj.controller,
                 obj.entered_battlefield_turn.unwrap_or(0),
                 super::functioning_abilities::active_trigger_definitions(state, obj)
-                    .map(|active| active.definition.clone())
+                    .filter(|active| active.definition.mode == TriggerMode::StateCondition)
+                    .map(|active| (active.definition_ref, active.definition.clone()))
                     .collect(),
             )
         };
 
-        for trigger in &trigger_defs {
-            if trigger.mode != TriggerMode::StateCondition {
-                continue;
-            }
-
-            // CR 603.8: Don't re-trigger if this state trigger is already on the stack.
+        for (definition_ref, trigger) in &trigger_defs {
+            // CR 603.8: "A state-triggered ability doesn't trigger again until
+            // the ability has resolved, has been countered, or has otherwise
+            // left the stack." Only an instance of THIS ability suppresses it:
+            // another triggered ability of the same source on the stack does
+            // not. (A copy of the ability carries the same definition ref and
+            // holds it back too, as before.) The ref's source pins the source
+            // incarnation, so a pending trigger of an object that left the
+            // battlefield never suppresses the new object it became (CR 400.7).
             let already_on_stack = state.stack.iter().any(|entry| {
-                entry.source_id == obj_id
-                    && matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if ability.trigger_definition_ref.as_ref() == Some(definition_ref)
+                )
             });
             if already_on_stack {
                 continue;
@@ -11159,6 +11175,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                 continue;
             };
             let source_context = trigger_source_context_for_latch(state, source);
+            let source_context = source_context_for_definition(&source_context, trigger);
 
             // Evaluate the condition and build the pending ability from this
             // same observation; a state-trigger source must not later rebind.
@@ -11184,12 +11201,25 @@ pub fn check_state_triggers(state: &mut GameState) {
                 });
 
                 let target_constraints = execute.target_constraints.clone();
-                let ability =
-                    build_triggered_ability_from_context(state, trigger, &source_context, None);
+                // The exact occurrence rides on the stacked ability; it is the
+                // identity the CR 603.8 self-suppression check above reads.
+                let ability = build_triggered_ability_from_context(
+                    state,
+                    trigger,
+                    &source_context,
+                    Some(definition_ref),
+                );
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
-                    condition: trigger.condition.clone(),
+                    // CR 603.8 + CR 603.4: the state condition was read above as
+                    // the trigger event (an `EventTime` wrapper, stripped here) and
+                    // is not rechecked on resolution; only an intervening "if"
+                    // beside it reaches the stacked condition.
+                    condition: trigger
+                        .condition
+                        .as_ref()
+                        .and_then(|condition| stack_condition_for_trigger(trigger, condition)),
                     ability: Box::new(ability),
                     timestamp,
                     target_constraints,
@@ -11841,7 +11871,13 @@ fn quantity_expr_binding_diverges(expr: &QuantityExpr) -> bool {
 /// deletes a real ability.
 fn object_scope_unbound_at_fire_time(scope: ObjectScope) -> bool {
     match scope {
-        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::EventTarget => false,
+        ObjectScope::Source
+        | ObjectScope::EventSource
+        | ObjectScope::EventTarget
+        // CR 201.5a: a bound incarnation is context-free, and the unbound symbol reads as
+        // `Source` in counters (0 on both legs elsewhere).
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => false,
         ObjectScope::Target
         | ObjectScope::Recipient
         | ObjectScope::CostPaidObject
@@ -12278,14 +12314,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // CR 113.7a + CR 608.2h: source-relative reads, all served by the
         // `TriggerSourceContext` the fire-time leg carries — the same authority
         // `ObjectScope::Source` is adjudicated non-divergent under.
-        // `OriginalSource` and `GrantingObject` are concretized to
-        // `SpecificObject` before runtime and degrade to the source if not;
         // CR 400.3 `Owner` and `SourceController` project a player off it;
         // CR 301.5 / CR 303.4 `AttachedTo` and CR 702.95b `SourceOrPaired` read
         // the source's attachment / pairing.
         | TargetFilter::SelfRef
         | TargetFilter::OriginalSource
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceController
         | TargetFilter::Owner
         | TargetFilter::AttachedTo
@@ -12650,10 +12684,11 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
-        // CR 109.4 + CR 115.1: the anchor lives on the resolving ability
-        // (`targets` / `chosen_players`).
+        // CR 109.4 + CR 115.1 + CR 601.2a: the anchor lives on the resolving ability
+        // (`targets` / `chosen_players` / `cast_occurrence`).
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. }
         // CR 608.2c: ledgers a RESOLUTION publishes — the zone-change and action
         // "this way" lists, the CR 701.38 vote ballots, the tracked sets, and
@@ -15093,10 +15128,12 @@ fn evaluate_trigger_condition_with_source(
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
-            // CR 108.3 + CR 608.2c: parent-target-owner and resolution-scoped
-            // chosen-player anchors are effect-resolution references, not
-            // turn-binding predicates — no "whose turn" semantic. Fail-closed.
+            // CR 108.3 + CR 601.2a + CR 608.2c: parent-target-owner, granter-caster
+            // and resolution-scoped chosen-player anchors are effect-resolution
+            // references, not turn-binding predicates — no "whose turn" semantic.
+            // Fail-closed.
             | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::GrantingObjectCaster
             | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
@@ -15351,7 +15388,11 @@ fn evaluate_trigger_condition_with_source(
         // Reads the per-color tally recorded in casting::pay_mana_cost.
         TriggerCondition::ManaColorSpent { color, minimum } => {
             source_context.is_some_and(|source| {
-                source.source_read(state).colors_spent_to_cast().get(*color) >= *minimum
+                source
+                    .source_read(state)
+                    .colors_spent_to_cast()
+                    .get(color.color())
+                    >= *minimum
             })
         }
         // CR 601.2h: "if no mana was spent to cast it/them" — check the cast or
@@ -15494,9 +15535,10 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_event,
         ),
-        // CR 508.1m + CR 603.4: an event-time gate evaluates its wrapped
-        // condition when the trigger event occurs; it never reaches the
-        // resolution recheck (`stack_condition_for_trigger` drops it).
+        // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
+        // a state trigger's own condition) evaluates its wrapped condition when
+        // the ability triggers; it never reaches the resolution recheck
+        // (`stack_condition_for_trigger` drops it).
         TriggerCondition::EventTime { condition } => evaluate_trigger_condition_with_source(
             state,
             condition,
@@ -15951,8 +15993,9 @@ fn stack_condition_for_trigger(
     }
 
     match condition {
-        // CR 508.1m + CR 603.4: a "while" gate was read at the trigger event and
-        // is not an intervening `if`, so it never becomes a resolution recheck.
+        // CR 508.1m + CR 603.4 / CR 603.8: a "while" gate, or a state trigger's
+        // own condition, was read when the ability triggered and is not an
+        // intervening `if`, so it never becomes a resolution recheck.
         TriggerCondition::EventTime { .. } => None,
         TriggerCondition::And { conditions } => {
             let mut remaining: Vec<TriggerCondition> = conditions
@@ -16481,6 +16524,20 @@ fn ability_condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool
     }
 }
 
+/// CR 201.5a + CR 603.2 + CR 603.4: the source context a trigger definition is
+/// matched, checked and instantiated with carries exactly that definition's granter stamp.
+pub(super) fn source_context_for_definition<'a>(
+    source_context: &'a TriggerSourceContext,
+    trig_def: &TriggerDefinition,
+) -> Cow<'a, TriggerSourceContext> {
+    if source_context.granting_object == trig_def.granting_object {
+        return Cow::Borrowed(source_context);
+    }
+    let mut stamped = source_context.clone();
+    stamped.granting_object = trig_def.granting_object;
+    Cow::Owned(stamped)
+}
+
 /// Builds a triggered ability exclusively from the source observation that
 /// matched it. The only live reads below are documented game-global event
 /// channels (`announced_source_x` and `active_player`), never a rebind of the
@@ -16491,6 +16548,8 @@ pub(super) fn build_triggered_ability_from_context(
     source_context: &TriggerSourceContext,
     definition_ref: Option<&TriggerDefinitionRef>,
 ) -> ResolvedAbility {
+    let source_context = source_context_for_definition(source_context, trig_def);
+    let source_context: &TriggerSourceContext = &source_context;
     let source_id = source_context.identity.reference.object_id;
     let controller = source_context.lki.controller;
     if let Some(definition_ref) = definition_ref {
@@ -16870,9 +16929,9 @@ pub mod tests {
         FilterProp, GuessSubject, KickerVariant, ModalChoice, MultiTargetSpec, PlayerFilter,
         PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -19277,6 +19336,61 @@ pub mod tests {
                 "{mode:?}: the intervening-if beside it must stay on the stack"
             );
         }
+    }
+
+    /// CR 603.8 + CR 603.4: a parsed state trigger stacks exactly its intervening
+    /// "if" — the state condition itself is the trigger event (lowered as
+    /// `EventTime`) and is never rechecked on resolution. A state trigger with no
+    /// intervening "if" stacks no condition at all. Verbatim Oracle text (MTGJSON).
+    #[test]
+    fn parsed_state_trigger_stacks_only_its_intervening_if() {
+        let state_trigger = |oracle: &str, name: &str, core_type: &str| {
+            crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &[core_type.to_string()],
+                &[],
+            )
+            .triggers
+            .into_iter()
+            .find(|t| t.mode == TriggerMode::StateCondition)
+            .unwrap_or_else(|| panic!("{name} must parse a StateCondition trigger"))
+        };
+
+        let hidden_predators = state_trigger(
+            "When an opponent controls a creature with power 4 or greater, if this permanent is an enchantment, it becomes a 4/4 Beast creature.",
+            "Hidden Predators",
+            "Enchantment",
+        );
+        let condition = hidden_predators
+            .condition
+            .as_ref()
+            .expect("Hidden Predators' state trigger must carry a condition");
+        assert!(
+            matches!(
+                stack_condition_for_trigger(&hidden_predators, condition),
+                Some(TriggerCondition::SourceMatchesFilter { .. })
+            ),
+            "only the intervening \"if this permanent is an enchantment\" may be \
+             rechecked on resolution; stacked {:?} from {condition:?}",
+            stack_condition_for_trigger(&hidden_predators, condition),
+        );
+
+        let emperor_crocodile = state_trigger(
+            "When you control no other creatures, sacrifice this creature.",
+            "Emperor Crocodile",
+            "Creature",
+        );
+        let condition = emperor_crocodile
+            .condition
+            .as_ref()
+            .expect("Emperor Crocodile's state trigger must carry a condition");
+        assert_eq!(
+            stack_condition_for_trigger(&emperor_crocodile, condition),
+            None,
+            "a state trigger without an intervening \"if\" stacks no recheck"
+        );
     }
 
     #[test]
@@ -25070,6 +25184,23 @@ pub mod tests {
              creature card in the controller's graveyard), so a fire-time deletion would \
              have destroyed an ability that was supposed to resolve"
         );
+    }
+
+    /// CR 201.5 + CR 603.4: unbound, `GrantingObject` counters read exactly `Source`'s, so
+    /// they must hoist to fire time the same way.
+    #[test]
+    fn granting_object_counters_bind_at_fire_time_like_source() {
+        let counters = |scope| QuantityRef::CountersOn {
+            scope,
+            counter_type: None,
+        };
+        assert_eq!(
+            quantity_ref_binding_diverges(&counters(ObjectScope::GrantingObject)),
+            quantity_ref_binding_diverges(&counters(ObjectScope::Source)),
+        );
+        assert!(!quantity_ref_binding_diverges(&counters(
+            ObjectScope::GrantingObject
+        )));
     }
 
     #[test]
@@ -31755,7 +31886,9 @@ pub mod tests {
     fn test_adamant_true_when_enough_color_spent() {
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         assert!(check_trigger_condition(
@@ -31771,7 +31904,9 @@ pub mod tests {
     fn test_adamant_false_when_not_enough() {
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 4,
         };
         assert!(!check_trigger_condition(
@@ -31787,7 +31922,9 @@ pub mod tests {
     fn test_adamant_false_when_wrong_color() {
         let (state, src) = setup_with_colored_cast(ManaColor::Green, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         assert!(!check_trigger_condition(
@@ -31804,7 +31941,9 @@ pub mod tests {
         // minimum: 1 with one red spent → true
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 1);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 1,
         };
         assert!(check_trigger_condition(
@@ -31818,7 +31957,9 @@ pub mod tests {
         // minimum: 1 with zero red spent → false
         let (state, src) = setup_with_colored_cast(ManaColor::Green, 5);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 1,
         };
         assert!(!check_trigger_condition(
@@ -37293,7 +37434,9 @@ pub mod tests {
         clear_post_collection_transients(&mut state);
 
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::White,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::White,
+            },
             minimum: 2,
         };
         assert!(
@@ -37424,6 +37567,93 @@ pub mod tests {
         assert!(
             !graveyard_state.stack.is_empty() || graveyard_state.pending_trigger.is_some(),
             "Twilight Diviner must trigger when a creature enters from a graveyard"
+        );
+    }
+
+    /// CR 603.2c + CR 603.4 + CR 603.6a: Kotis, Sibsig Champion's batched
+    /// "one or more of them entered from a graveyard or was cast from a
+    /// graveyard" intervening-if is existential over the simultaneous batch:
+    /// it fires exactly once when at least one entrant satisfies either leg,
+    /// regardless of the other entrants or their order, and not at all when
+    /// none does.
+    #[test]
+    fn kotis_batched_graveyard_origin_condition_is_existential_over_batch() {
+        #[derive(Clone, Copy)]
+        enum Origin {
+            /// Entered the battlefield directly from a graveyard (reanimated).
+            GraveyardEntry,
+            /// Cast from a graveyard, entering from the stack.
+            CastFromGraveyard,
+            /// Cast from hand, entering from the stack.
+            CastFromHand,
+        }
+
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever one or more creatures you control enter, if one or more of them entered from a graveyard or was cast from a graveyard, put two +1/+1 counters on Kotis.",
+            "Kotis, Sibsig Champion",
+        );
+        assert!(
+            matches!(trigger.condition, Some(TriggerCondition::Or { .. })),
+            "Kotis must carry the typed graveyard-origin Or condition; got {:?}",
+            trigger.condition
+        );
+
+        let stacked_triggers = |batch: &[Origin]| -> usize {
+            let mut state = setup();
+            install_twilight_diviner_trigger(&mut state, trigger.clone());
+            let mut events = Vec::new();
+            for (index, origin) in batch.iter().enumerate() {
+                let id = create_entering_creature(
+                    &mut state,
+                    &format!("Entrant {index}"),
+                    Zone::Battlefield,
+                );
+                let (from, cast_from) = match origin {
+                    Origin::GraveyardEntry => (Zone::Graveyard, None),
+                    Origin::CastFromGraveyard => (Zone::Stack, Some(Zone::Graveyard)),
+                    Origin::CastFromHand => (Zone::Stack, Some(Zone::Hand)),
+                };
+                state.objects.get_mut(&id).unwrap().cast_from_zone = cast_from;
+                events.push(zone_changed_event(
+                    id,
+                    from,
+                    Zone::Battlefield,
+                    vec![CoreType::Creature],
+                    Vec::new(),
+                ));
+            }
+            process_triggers(&mut state, &events);
+            state.stack.len() + usize::from(state.pending_trigger.is_some())
+        };
+
+        // (i) graveyard entry + hand cast: one firing (the existential leg is A).
+        assert_eq!(
+            stacked_triggers(&[Origin::GraveyardEntry, Origin::CastFromHand]),
+            1
+        );
+        // (iii) same pair, other order.
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromHand, Origin::GraveyardEntry]),
+            1
+        );
+        // (ii) graveyard entry + cast from graveyard: both legs hold, still once.
+        assert_eq!(
+            stacked_triggers(&[Origin::GraveyardEntry, Origin::CastFromGraveyard]),
+            1
+        );
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromGraveyard, Origin::GraveyardEntry]),
+            1
+        );
+        // Cast-from-graveyard alone reaches the WasCast leg.
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromHand, Origin::CastFromGraveyard]),
+            1
+        );
+        // (iv) neither entrant qualifies: no firing (reach-guard for the above).
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromHand, Origin::CastFromHand]),
+            0
         );
     }
 
@@ -41938,6 +42168,7 @@ pub mod tests {
             condition: None,
             duration_subject: None,
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: "Jhoira".to_string(),
         };
@@ -42033,6 +42264,7 @@ pub mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                granting_object: None,
                 duration_event_source: None,
                 source_name: "Grant source".to_string(),
             });
@@ -42179,6 +42411,7 @@ pub mod tests {
                     condition: None,
                     duration_subject: None,
                     end_permission: None,
+                    granting_object: None,
                     duration_event_source: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
                 },

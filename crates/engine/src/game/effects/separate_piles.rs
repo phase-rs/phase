@@ -197,7 +197,7 @@ fn resolve_revealed_from_library_top(
         .iter()
         .find(|p| p.id == controller)
         .ok_or(EffectError::PlayerNotFound)?;
-    let reveal_count = (count as usize).min(player.library.len());
+    let reveal_count = (count as usize).min(state.library_of(player.id).len());
 
     if reveal_count == 0 {
         events.push(GameEvent::EffectResolved {
@@ -208,7 +208,12 @@ fn resolve_revealed_from_library_top(
         return Ok(());
     }
 
-    let revealed_ids: Vec<ObjectId> = player.library.iter().take(reveal_count).copied().collect();
+    let revealed_ids: Vec<ObjectId> = state
+        .library_of(player.id)
+        .iter()
+        .take(reveal_count)
+        .copied()
+        .collect();
 
     // CR 701.20a: Mark cards as revealed and emit CardsRevealed event.
     for &card_id in &revealed_ids {
@@ -459,6 +464,7 @@ fn sub_effect_as_resolved(
     resolved.description = def.description.clone();
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
+    resolved.illegal_targets_disposition = def.illegal_targets_disposition;
     resolved.forward_result = def.forward_result;
     // CR 700.3: The per-object loop in `apply_pile_effect` already iterates
     // over each pile member — the parsed `player_scope` (e.g. "Each opponent")

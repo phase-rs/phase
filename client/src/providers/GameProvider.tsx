@@ -225,9 +225,10 @@ function setupDraftMatchAvatars(seed: string) {
  * wire-assigned mode re-establishes the seat when its effect re-runs:
  * draft-match re-runs `setupDraftMatchAvatars`, and a fresh WS/P2P-guest
  * adapter re-emits `playerIdentity` from `GameStarted` / `reconnect_ack`. The
- * P2P HOST is the one path with no re-emit (it emits only from its game-start
- * flow) — it is unaffected because the host is always seat 0, which is exactly
- * what `resolveLocalSeat` falls back to.
+ * P2P HOST is the one path with no remount re-emit (it emits only from its
+ * game-start flow and from a resumed `initialize`) — it is unaffected because
+ * the host is always seat 0, which is exactly what `resolveLocalSeat` falls
+ * back to.
  */
 function clearWireAssignedSeat(): void {
   useMultiplayerStore.getState().setActivePlayerId(null);
