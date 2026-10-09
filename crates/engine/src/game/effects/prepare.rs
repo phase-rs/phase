@@ -441,8 +441,10 @@ pub(crate) fn replay_remove_linked_prepared_copy_if_idle(
 /// Fields not cleared here are either rewritten for the copy afterwards (the
 /// prepare-face characteristics via `apply_back_face_to_object`, plus the
 /// identity, zone, link and permission assignments in
-/// `synthesize_prepared_copy_object`) or are derived display values recomputed
-/// on every state derivation.
+/// `synthesize_prepared_copy_object`) or are inert on an exile object, which no
+/// layer pass re-seeds: printed front-face metadata, `intensity`,
+/// `perpetual_mods`, `transformation_count`, `trigger_occurrence_state` and
+/// `timestamp`.
 fn strip_non_copiable_state(copy: &mut GameObject) {
     // CR 400.7: the battlefield-exit authority clears the designations, cast
     // provenance, cast-payment stamps and merge identity that belong to the
@@ -629,9 +631,9 @@ fn can_cast_prepared_copy_now_in_simulated_state(
 }
 
 /// Fast castability probe for `GameAction::CastPreparedCopy` candidate
-/// generation. Synthesizes the same ephemeral copy object used by the actual
-/// cast path in a temporary game-state clone, then asks the canonical casting
-/// predicate whether that copy is castable right now.
+/// generation. Probes the linked copy, synthesizing a throwaway one in a
+/// temporary game-state clone when it is missing, then asks the canonical
+/// casting predicate whether that copy is castable right now.
 pub fn can_cast_prepared_copy_now(
     state: &GameState,
     controller: PlayerId,
@@ -726,7 +728,8 @@ pub fn cast_prepared_copy(
     };
 
     // CR 601.2i + CR 722.3c: If the cast is cancelled before completion,
-    // restore the source's prepared marker and remove the synthetic copy.
+    // restore the source's prepared marker and leave the linked copy waiting in
+    // exile (the cast announcement never moved it).
     mark_prepare_copy_cancel_rollback(state, &mut waiting, source_id, copy_id);
 
     // CR 722.3c: "Doing so unprepares it." Unprepare-at-cast, not at resolve —
@@ -1224,8 +1227,8 @@ mod tests {
         assert_eq!(state.objects[&copy].owner, PlayerId(0));
     }
 
-    /// CR 722.3c + CR 109.4 + CR 108.4a: the copy's controller (the prepared
-    /// permanent's controller) creates it and owns it; its owner-seeded
+    /// CR 722.3c + CR 111.2 / CR 707.10 by analogy: the copy's controller (the
+    /// prepared permanent's controller) creates it and owns it; its owner-seeded
     /// `base_controller` names that player, never the source card's owner.
     #[test]
     fn prepared_copy_of_a_stolen_permanent_is_owned_and_controlled_by_its_controller() {
