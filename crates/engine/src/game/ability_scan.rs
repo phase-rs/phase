@@ -9099,11 +9099,6 @@ mod tests {
                  zones (CR 601.2f); battlefield path is source/ParentTarget-bounded",
             ),
             (
-                "search_outside_game.rs",
-                false,
-                "zone-disjoint: outside-the-game pool, not the battlefield growth class",
-            ),
-            (
                 "token_copy.rs",
                 false,
                 "CopyTokenOf source_filter scan is scan_effect-CONSERVATIVE-vetoed (safe via \
