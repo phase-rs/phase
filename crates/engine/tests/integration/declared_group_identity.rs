@@ -1752,71 +1752,96 @@ fn g2_gate_on_a_carried_player_who_left_does_nothing() {
     );
 }
 
-/// A gate on a carried player who left the game reads that player's empty population at the
-/// event and at resolution alike (CR 603.4 + CR 800.4a): the ability is put on the stack, and
-/// takes effect, exactly when the gate is true of nothing.
+/// CR 603.4 + CR 800.4a: a gate on a carried player who left the game is read once, at
+/// resolution: the ability is put on the stack as the ungated payload is, and its body takes
+/// effect exactly when resolution alone decides the same gate. While the player is present, a
+/// false gate still keeps the ability off the stack.
 #[test]
-fn g3_gate_on_a_carried_player_who_left_reads_an_empty_population() {
+fn g3_gate_on_a_carried_player_who_left_is_read_at_resolution() {
     let creatures = || creature_of(G);
     let not = |c| AbilityCondition::Not {
         condition: Box::new(c),
     };
-    let run = |condition: &AbilityCondition, after| {
+    let zone_changes = |comparator, n| AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: None,
+                filter: TargetFilter::Typed(creatures()),
+            },
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed { value: n },
+    };
+    let gated = |condition: &AbilityCondition, else_ability: bool, after| {
         let mut payload = def(lose(TargetFilter::Controller));
         payload.condition = Some(condition.clone());
+        if else_ability {
+            payload.else_ability = Some(Box::new(noop_payload()));
+        }
         payload_run(payload, After::Nothing, after)
     };
     let ungated = |after| payload_run(def(lose(TargetFilter::Controller)), After::Nothing, after);
-    for (name, condition, true_of_one, true_of_none) in [
+    let untouched = payload_run(noop_payload(), After::Nothing, After::Eliminate);
+    let effective = |out: &Out| out.life[0] != untouched.life[0];
+    let (mut took_effect, mut did_not) = (false, false);
+    for (name, condition, true_of_one) in [
         (
             "presence",
             count_check(creatures(), Comparator::GE, 1),
             true,
-            false,
         ),
         (
-            "comparison, false of none",
+            "comparison",
             count_check(creatures(), Comparator::GE, 5),
             false,
-            false,
         ),
         (
-            "comparison, true of none",
+            "at most none",
             count_check(creatures(), Comparator::LE, 0),
             false,
-            true,
         ),
         (
-            "not, true of none",
+            "not presence",
             not(count_check(creatures(), Comparator::GE, 1)),
             false,
-            true,
         ),
         (
-            "not, false of none",
+            "not at most none",
             not(count_check(creatures(), Comparator::LE, 0)),
             true,
-            false,
+        ),
+        ("zone changes", zone_changes(Comparator::GE, 1), false),
+        ("no zone changes", zone_changes(Comparator::LE, 0), true),
+        (
+            "not zone changes",
+            not(zone_changes(Comparator::GE, 1)),
+            true,
         ),
     ] {
-        for (after, expected) in [
-            (After::Nothing, true_of_one),
-            (After::Eliminate, true_of_none),
-        ] {
-            let reference = ungated(after);
-            let untouched = payload_run(noop_payload(), After::Nothing, after);
-            let out = run(&condition, after);
-            assert_eq!(
-                (out.pushed, out.life[0]),
-                if expected {
-                    (reference.pushed, reference.life[0])
-                } else {
-                    (reference.pushed - 1, untouched.life[0])
-                },
-                "{name}, {after:?}"
-            );
-        }
+        let present = gated(&condition, false, After::Nothing);
+        assert_eq!(
+            present.pushed,
+            ungated(After::Nothing).pushed - usize::from(!true_of_one),
+            "{name}: with P1 present a false gate stays off the stack"
+        );
+        let gone = gated(&condition, false, After::Eliminate);
+        let by_resolution = gated(&condition, true, After::Eliminate);
+        assert!(by_resolution.pushed > 0, "{name}: reach guard");
+        assert_eq!(
+            gone.pushed,
+            ungated(After::Eliminate).pushed,
+            "{name}: put on the stack as the ungated payload is"
+        );
+        assert_eq!(
+            effective(&gone),
+            effective(&by_resolution),
+            "{name}: takes effect exactly when resolution alone decides"
+        );
+        took_effect |= effective(&by_resolution);
+        did_not |= !effective(&by_resolution);
     }
+    assert!(took_effect && did_not, "reach guard: both outcomes occur");
 }
 
 /// A declared player who was an illegal target as the creating chain began to resolve names no

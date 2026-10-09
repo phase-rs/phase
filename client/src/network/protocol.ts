@@ -106,15 +106,15 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  103 — game_setup and state_update carry GameState's successful-mana-history
- *       ledger as (trigger definition, receiving player) pairs. A v102 peer
- *       cannot decode a nonempty pair ledger. Bumped with full-game 121.
  *  104 — game_setup and state_update carry GameState, whose abilities may now
  *       serialize TargetFilter::DeclaredPlayer. A v103 peer cannot deserialize
  *       it, so first contact rejects the skew. SpellContext also gains
  *       outer_declared_players (CR 603.7a), the players a delayed ability's
  *       creating chain named by group, omitted when empty; amended in place, not
  *       bumped. Bumped in lockstep with full-game protocol 122.
+ *  103 — game_setup and state_update carry GameState's successful-mana-history
+ *       ledger as (trigger definition, receiving player) pairs. A v102 peer
+ *       cannot decode a nonempty pair ledger. Bumped with full-game 121.
  *  102 — GameState carries the CR 601.2a spell announcement and the
  *       BecomesTarget targeter. Bumped with full-game protocol 120. (101 is
  *       reserved for the Legends of Jidoor PR.)

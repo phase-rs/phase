@@ -3352,6 +3352,9 @@ mod tests {
     /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
+    /// The successful-mana-history ledger now stores the actual receiving
+    /// player with each trigger definition. A v120 peer cannot decode a
+    /// nonempty pair ledger, so it must be refused before v121 state.
     /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
     /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
     /// a v119 peer cannot decode v120 state, so it must be refused before state

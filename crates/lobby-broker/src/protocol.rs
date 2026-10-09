@@ -60,11 +60,6 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 121 — `GameState::triggered_abilities_added_mana_this_turn` records
-///       (trigger definition, receiving player), so copied triggers check
-///       their own controller's successful mana history. A v120 peer cannot
-///       decode a nonempty pair ledger. P2P moves in lockstep (wire 103);
-///       lobby-only messages are unchanged.
 /// 122 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
 ///      the player a later clause names after a declared target player. It
 ///      reaches every serialized ability, so a v121 peer cannot deserialize it
@@ -73,6 +68,11 @@ pub struct TournamentRequestId(pub u64);
 ///      ability's creating chain named by group, omitted when empty; amended in
 ///      place, not bumped. Full-game peers and P2P move in lockstep (wire 104);
 ///      lobby messages are unchanged.
+/// 121 — `GameState::triggered_abilities_added_mana_this_turn` records
+///       (trigger definition, receiving player), so copied triggers check
+///       their own controller's successful mana history. A v120 peer cannot
+///       decode a nonempty pair ledger. P2P moves in lockstep (wire 103);
+///       lobby-only messages are unchanged.
 /// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
 ///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
