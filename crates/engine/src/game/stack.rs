@@ -10746,8 +10746,8 @@ mod tests {
             let src = add_scute_source(&mut state);
 
             // sub: CopyTokenOf gated by a MET ConditionInstead (lands >= 1) so the
-            // copy branch is selected, then assert refusal (copy path falls back
-            // wholesale in v1 — so a copy-source observer never batches).
+            // copy branch is selected, then assert refusal: the copy target is a
+            // specific object, not `SelfRef`, so the copy arm's shape gate refuses.
             let copy_effect = Effect::CopyTokenOf {
                 target: TargetFilter::SpecificObject { id: copy_source },
                 owner: TargetFilter::Controller,
@@ -11083,7 +11083,7 @@ mod tests {
         }
 
         // §9.4b / §9.2 — ConditionInstead DIFFERENTIAL harness: run BOTH the
-        // not-met (batches) and met (falls back) cases through the real pipeline
+        // not-met (base arm) and met (copy arm) cases through the real pipeline
         // and assert each produces the correct final state vs the sequential path.
         #[test]
         fn condition_instead_differential_not_met_and_met() {
