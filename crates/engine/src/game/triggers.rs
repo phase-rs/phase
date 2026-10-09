@@ -12979,22 +12979,19 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 /// (the controller-scoped `QuantityCheck` populations pinned by
 /// `non_battlefield_presence_gate_declines_the_fire_time_hoist` and its
 /// siblings) — buying nothing and costing CR 603.4's fire-time half.
-fn delayed_intervening_if(
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> Option<TriggerCondition> {
+fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition> {
     if delayed_body_outlives_a_false_gate(ability) {
         return None;
     }
-    // CR 603.7a + CR 608.2c: both CR 603.4 legs evaluate the condition with no ability, so a
-    // carried declared player is bound into it first; a group the payload declares itself stays
-    // unbound and declines the hoist.
+    // CR 603.7a + CR 603.4: both legs evaluate the condition with no ability, so the carried
+    // declared player is bound by identity, departed or not, and both legs read the same
+    // population; a group the payload declares itself stays unbound and declines the hoist.
     let mut condition = ability.condition.clone()?;
     crate::game::filter::rebind_declared_groups_in_condition(&mut condition, &mut |group| {
         if super::ability_utils::declared_group_player_slot(ability, group).is_some() {
             return None;
         }
-        super::targeting::carried_declared_player(state, ability, group)
+        super::targeting::carried_declared_identity(ability, group)
     });
     if gate_binding_diverges_at_fire_time(&condition) {
         return None;
@@ -13104,7 +13101,7 @@ fn delayed_trigger_to_context(
     // ability exactly as it does to a printed one. `delayed_intervening_if` is
     // the SAME authority the collection gate below used, so the two halves of
     // the CR 603.4 pair cannot read different predicates.
-    let condition = delayed_intervening_if(state, &trigger.ability);
+    let condition = delayed_intervening_if(&trigger.ability);
     // CR 603.2c: a batched ("one or more") delayed trigger reads "that many" as
     // the number of matching subjects in its whole firing group, through the
     // same counting authority printed batched triggers use.
@@ -13188,7 +13185,7 @@ fn delayed_whenever_event_firings(
     // CR 603.4: the definition's own condition (a head qualifier such as
     // "attacks alone") and the body's hoisted intervening-if are separate
     // inputs; only the body-if is rechecked on resolution.
-    let body_if = delayed_intervening_if(state, &delayed.ability);
+    let body_if = delayed_intervening_if(&delayed.ability);
     let conditions = FiringConditions {
         head: trigger.condition.as_ref(),
         body_if: body_if.as_ref(),
@@ -13327,7 +13324,7 @@ fn collect_matching_delayed_triggers(
             // `check_trigger_condition_with_source` is the same fire-time
             // evaluator printed triggers use, given the delayed ability's own
             // CR 400.7 source context and the matched event.
-            if let Some(condition) = delayed_intervening_if(state, &delayed.ability) {
+            if let Some(condition) = delayed_intervening_if(&delayed.ability) {
                 if !check_trigger_condition_with_source(
                     state,
                     &condition,
@@ -26489,9 +26486,9 @@ pub mod tests {
         );
     }
 
-    /// CR 603.7a + CR 603.4: the hoisted gate binds the group the payload CARRIES, not whatever
-    /// a same-source entry on the stack declares under the same id; a group the payload declares
-    /// itself, or does not carry, stays unbound and declines the hoist.
+    /// CR 603.7a + CR 603.4: the hoisted gate binds the group the payload CARRIES by identity,
+    /// whether or not that player is still in the game; a group the payload declares itself, or
+    /// does not carry, stays unbound and declines the hoist.
     #[test]
     fn delayed_intervening_if_binds_the_carried_group() {
         use crate::types::ability::ChosenGroupId;
@@ -26523,26 +26520,6 @@ pub mod tests {
                 carried.map(|p| (group, p)).into_iter().collect();
             ability
         };
-        let mut state = setup();
-        let mut resident = ResolvedAbility::new(
-            Effect::TargetOnly {
-                target: TargetFilter::Player,
-            },
-            vec![TargetRef::Player(PlayerId(0))],
-            ObjectId(9),
-            PlayerId(0),
-        );
-        resident.declares_chosen_group = Some(group);
-        state.stack.push_back(StackEntry {
-            id: ObjectId(50),
-            source_id: ObjectId(9),
-            controller: PlayerId(0),
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: ObjectId(9),
-                ability: Box::new(resident),
-            },
-        });
-
         let bound = |player: PlayerId| {
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
@@ -26558,25 +26535,19 @@ pub mod tests {
             })
         };
         assert_eq!(
-            delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
+            delayed_intervening_if(&payload(Some(PlayerId(1)), false)),
             bound(PlayerId(1)),
-            "the carried player, although a same-source stack entry declares the id as P0"
+            "the carried player, whether or not still in the game"
         );
         assert_eq!(
-            delayed_intervening_if(&state, &payload(None, false)),
+            delayed_intervening_if(&payload(None, false)),
             None,
             "a group the payload does not carry declines the hoist"
         );
         assert_eq!(
-            delayed_intervening_if(&state, &payload(Some(PlayerId(1)), true)),
+            delayed_intervening_if(&payload(Some(PlayerId(1)), true)),
             None,
             "a group the payload declares itself is not the carried player"
-        );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
-        assert_eq!(
-            delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
-            None,
-            "a carried player who left names no one"
         );
     }
 

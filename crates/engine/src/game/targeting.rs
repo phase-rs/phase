@@ -1332,11 +1332,20 @@ pub(crate) fn carried_declared_player(
     root: &ResolvedAbility,
     group: crate::types::ability::ChosenGroupId,
 ) -> Option<PlayerId> {
+    carried_declared_identity(root, group).filter(|&player| super::players::is_alive(state, player))
+}
+
+/// CR 603.7a: the player the creating chain announced for `group`, whether or not they are still
+/// in the game; a player who left controls nothing (CR 800.4a), so a population read keyed on
+/// them is already empty.
+pub(crate) fn carried_declared_identity(
+    root: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
     root.context
         .outer_declared_players
         .iter()
         .find_map(|&(carried, player)| (carried == group).then_some(player))
-        .filter(|&player| super::players::is_alive(state, player))
 }
 
 /// CR 603.7a + CR 608.2c: every declared group the creating `ability` can name, with its player

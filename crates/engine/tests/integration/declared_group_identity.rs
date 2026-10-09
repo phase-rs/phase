@@ -1752,6 +1752,73 @@ fn g2_gate_on_a_carried_player_who_left_does_nothing() {
     );
 }
 
+/// A gate on a carried player who left the game reads that player's empty population at the
+/// event and at resolution alike (CR 603.4 + CR 800.4a): the ability is put on the stack, and
+/// takes effect, exactly when the gate is true of nothing.
+#[test]
+fn g3_gate_on_a_carried_player_who_left_reads_an_empty_population() {
+    let creatures = || creature_of(G);
+    let not = |c| AbilityCondition::Not {
+        condition: Box::new(c),
+    };
+    let run = |condition: &AbilityCondition, after| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = Some(condition.clone());
+        payload_run(payload, After::Nothing, after)
+    };
+    let ungated = |after| payload_run(def(lose(TargetFilter::Controller)), After::Nothing, after);
+    for (name, condition, true_of_one, true_of_none) in [
+        (
+            "presence",
+            count_check(creatures(), Comparator::GE, 1),
+            true,
+            false,
+        ),
+        (
+            "comparison, false of none",
+            count_check(creatures(), Comparator::GE, 5),
+            false,
+            false,
+        ),
+        (
+            "comparison, true of none",
+            count_check(creatures(), Comparator::LE, 0),
+            false,
+            true,
+        ),
+        (
+            "not, true of none",
+            not(count_check(creatures(), Comparator::GE, 1)),
+            false,
+            true,
+        ),
+        (
+            "not, false of none",
+            not(count_check(creatures(), Comparator::LE, 0)),
+            true,
+            false,
+        ),
+    ] {
+        for (after, expected) in [
+            (After::Nothing, true_of_one),
+            (After::Eliminate, true_of_none),
+        ] {
+            let reference = ungated(after);
+            let untouched = payload_run(noop_payload(), After::Nothing, after);
+            let out = run(&condition, after);
+            assert_eq!(
+                (out.pushed, out.life[0]),
+                if expected {
+                    (reference.pushed, reference.life[0])
+                } else {
+                    (reference.pushed - 1, untouched.life[0])
+                },
+                "{name}, {after:?}"
+            );
+        }
+    }
+}
+
 /// A declared player who was an illegal target as the creating chain began to resolve names no
 /// one at install, so the payload's slot offers none of their objects.
 #[test]
