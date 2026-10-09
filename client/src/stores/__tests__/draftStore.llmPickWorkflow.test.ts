@@ -367,3 +367,92 @@ describe("LLM draft pick workflow", () => {
     expect(wasm.buildLlmDraftPickRequests.mock.calls[0]).toHaveLength(2);
   });
 });
+
+describe("LLM picks start when the pack opens", () => {
+  function packView(pool: DraftCardInstance[], pack: DraftCardInstance[]): DraftPlayerView {
+    return { ...view(pool), current_pack: pack };
+  }
+
+  async function openPack(): Promise<void> {
+    wasm.start_quick_draft.mockReturnValue(packView([], [card("a"), card("b")]));
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+  }
+
+  it("asks the providers as soon as a pack is open, and the pick reuses those replies", async () => {
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    await openPack();
+
+    // Before the player has done anything, the drafter has already answered.
+    await vi.waitFor(() => {
+      expect(useDraftStore.getState().llmDrafters).toEqual([{ seat: 1, state: "ready" }]);
+    });
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+    expect(await useDraftStore.getState().pickCard("a")).toEqual({ status: "acknowledged" });
+
+    // No second request for the same pack, and nothing to wait on.
+    expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(1);
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+    // The next step starts with no chips from the pack that just passed.
+    expect(useDraftStore.getState().llmDrafters).toEqual([]);
+    expect(useDraftStore.getState().awaitingDrafters).toBe(false);
+  });
+
+  it("accepts the player's pick while a drafter is still picking, and holds the pack until it is done", async () => {
+    let release!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    transport.executeLlmRequest.mockImplementation(async () => {
+      await hung;
+      return { status: 200, body: '{"choice":0}' };
+    });
+    await openPack();
+    await vi.waitFor(() => {
+      expect(useDraftStore.getState().llmDrafters).toEqual([{ seat: 1, state: "picking" }]);
+    });
+
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+    const pick = useDraftStore.getState().pickCard("a");
+
+    await vi.waitFor(() => expect(useDraftStore.getState().awaitingDrafters).toBe(true));
+    expect(useDraftStore.getState().pendingPickIntent).toMatchObject({ instanceIds: ["a"] });
+    // The pack does not pass while a drafter is still picking.
+    expect(wasm.submitPickWithLlmBotPicks).not.toHaveBeenCalled();
+
+    release();
+    expect(await pick).toEqual({ status: "acknowledged" });
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+    expect(useDraftStore.getState().awaitingDrafters).toBe(false);
+  });
+
+  it("starts the round at the pick when drafting is switched on after the pack opened", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    await openPack();
+    useLlmStore.getState().setDraftEnabled(true);
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+
+    expect(await useDraftStore.getState().pickCard("a")).toEqual({ status: "acknowledged" });
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start a round for a pack when LLM drafting is off", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    await openPack();
+    await Promise.resolve();
+
+    expect(catalogMock.loadProviderCatalog).not.toHaveBeenCalled();
+    expect(wasm.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().llmDrafters).toEqual([]);
+  });
+});

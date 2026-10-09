@@ -7,6 +7,7 @@
 //! [`extract_completion_text`]. No decision, credential handling, or payload
 //! shaping happens outside this module.
 
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::error::{LlmError, LlmResult};
@@ -400,6 +401,68 @@ fn join_text_parts(parts: &[Value], field: &str) -> String {
         .filter_map(|part| part.get(field).and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// The token accounting a provider reported for one call.
+///
+/// Read from the response envelope so the effect of prompt-size work can be
+/// measured against what the provider actually billed, not against an
+/// estimate. Every field is optional: compatible servers vary in what they
+/// report, and a field that is absent is unknown, never zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    /// Input tokens served from the provider's prompt cache, when it says.
+    pub cached_input_tokens: Option<u64>,
+}
+
+/// The token usage a response body reports, if it reports any.
+///
+/// Status-blind on purpose: a refused or undecodable reply still consumed the
+/// prompt, and that spend is exactly what a measurement needs to see. Purely
+/// diagnostic — nothing about a decision depends on it.
+pub fn token_usage(provider: LlmProvider, body: &str) -> Option<TokenUsage> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let count = |container: Option<&Value>, field: &str| {
+        container
+            .and_then(|object| object.get(field))
+            .and_then(Value::as_u64)
+    };
+    let usage = match provider.wire() {
+        WireProtocol::OpenAiChat => {
+            let usage = value.get("usage");
+            TokenUsage {
+                input_tokens: count(usage, "prompt_tokens"),
+                output_tokens: count(usage, "completion_tokens"),
+                cached_input_tokens: count(
+                    usage.and_then(|usage| usage.get("prompt_tokens_details")),
+                    "cached_tokens",
+                ),
+            }
+        }
+        WireProtocol::AnthropicMessages => {
+            let usage = value.get("usage");
+            TokenUsage {
+                input_tokens: count(usage, "input_tokens"),
+                output_tokens: count(usage, "output_tokens"),
+                cached_input_tokens: count(usage, "cache_read_input_tokens"),
+            }
+        }
+        WireProtocol::GeminiGenerateContent => {
+            let usage = value.get("usageMetadata");
+            TokenUsage {
+                input_tokens: count(usage, "promptTokenCount"),
+                output_tokens: count(usage, "candidatesTokenCount"),
+                cached_input_tokens: count(usage, "cachedContentTokenCount"),
+            }
+        }
+        // The System One relay answers a typed question; its envelope carries
+        // no token counts in a documented shape, so none are claimed.
+        WireProtocol::SystemOneRelay => return None,
+    };
+    (usage != TokenUsage::default()).then_some(usage)
 }
 
 #[cfg(test)]
@@ -843,6 +906,61 @@ mod tests {
         assert_eq!(
             build_chat_request(&local, &prompt()).unwrap().url,
             "http://localhost:9374/jev/systemone"
+        );
+    }
+
+    #[test]
+    fn token_usage_is_read_from_every_documented_envelope() {
+        let openai = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 40,
+                "prompt_tokens_details": { "cached_tokens": 1024 },
+            },
+        })
+        .to_string();
+        assert_eq!(
+            token_usage(LlmProvider::OpenAi, &openai),
+            Some(TokenUsage {
+                input_tokens: Some(1200),
+                output_tokens: Some(40),
+                cached_input_tokens: Some(1024),
+            })
+        );
+
+        let anthropic = json!({
+            "content": [],
+            "usage": { "input_tokens": 900, "output_tokens": 30 },
+        })
+        .to_string();
+        assert_eq!(
+            token_usage(LlmProvider::Anthropic, &anthropic),
+            Some(TokenUsage {
+                input_tokens: Some(900),
+                output_tokens: Some(30),
+                cached_input_tokens: None,
+            })
+        );
+
+        let gemini = json!({
+            "candidates": [],
+            "usageMetadata": { "promptTokenCount": 700, "candidatesTokenCount": 20 },
+        })
+        .to_string();
+        assert_eq!(
+            token_usage(LlmProvider::Gemini, &gemini).and_then(|usage| usage.input_tokens),
+            Some(700)
+        );
+    }
+
+    #[test]
+    fn a_response_without_usage_reports_none_rather_than_zero() {
+        assert_eq!(token_usage(LlmProvider::OpenAi, r#"{"choices": []}"#), None);
+        assert_eq!(token_usage(LlmProvider::Anthropic, "not json"), None);
+        assert_eq!(
+            token_usage(LlmProvider::Jev, &jev_answer("0", json!({}), 0.5)),
+            None
         );
     }
 

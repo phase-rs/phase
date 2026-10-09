@@ -18,7 +18,7 @@ use crate::error::{LlmError, LlmResult};
 use crate::fingerprint::fingerprint_of;
 use crate::format_guidance::game_format_brief;
 use crate::prompt::{
-    decode_choice, difficulty_brief, history_window, numbered_options, option_domain_statement,
+    decode_choice, difficulty_brief, history_budget, numbered_options, option_domain_statement,
     option_value, untrusted_block, DecisionFrame, LlmPrompt, RESPONSE_CONTRACT,
     UNTRUSTED_DATA_DECLARATION,
 };
@@ -42,7 +42,7 @@ pub struct GameDecisionRequest {
 /// text — and withholding the text is the lever that produces that.
 fn render_options(difficulty: AiDifficulty) -> GameRenderOptions {
     GameRenderOptions {
-        history_lines: history_window(difficulty),
+        history: history_budget(difficulty),
         include_oracle_text: !matches!(difficulty, AiDifficulty::VeryEasy),
         oracle_text_budget: match difficulty {
             AiDifficulty::VeryEasy | AiDifficulty::Easy => 160,
@@ -51,6 +51,23 @@ fn render_options(difficulty: AiDifficulty) -> GameRenderOptions {
         },
     }
 }
+
+/// Standing guidance on mana, part of every seat's brief.
+///
+/// CR 605.1a: a mana ability is any activated ability that could add mana
+/// without targeting — a Sol Ring's as much as a Forest's. The engine already
+/// counts every such source when it decides which spells and abilities a seat
+/// can afford, so the options are right; this keeps the MODEL's own planning
+/// from undercounting them, and tells it what to do on the decisions where it
+/// pays mana by hand.
+const MANA_GUIDANCE: &str = "MANA: every untapped mana source you control counts toward what you \
+     can pay — mana artifacts, mana creatures and Treasures exactly as much as lands. The \
+     position lists them under YOUR AVAILABLE MANA with how much each produces. Casting a \
+     spell or activating an ability taps the sources it needs automatically, so every option \
+     you are offered is one you can already afford. When a decision asks you to pay mana \
+     yourself, activate artifact and creature mana sources as well as lands when that lets \
+     you make a stronger play, holding back only the sources you need for something else \
+     this turn.";
 
 /// Render the option domain exactly once, so the prompt the model reads and the
 /// fingerprint that guards it are derived from the same strings.
@@ -105,6 +122,15 @@ pub fn build_game_decision_prompt(
             detail: "the engine issued no candidate actions".to_string(),
         });
     }
+    // A forced move is not a decision. Asking a provider to choose the only
+    // legal option spends a round trip and a prompt's worth of tokens to learn
+    // nothing; the caller takes it through the heuristic path instead, which
+    // `UnsupportedDecision` already means and does not count as a failure.
+    if options.len() == 1 {
+        return Err(LlmError::UnsupportedDecision {
+            detail: "only one legal option; there is nothing to decide".to_string(),
+        });
+    }
 
     let viewer = contract.semantic_owner;
     // The engine's own visibility authority decides what this seat may read.
@@ -118,7 +144,7 @@ pub fn build_game_decision_prompt(
 
     let brief = format!(
         "You are playing a game of Magic: The Gathering as Player {}. You are one \
-         seat at the table and you play to win.\n\n{}\n\n{}",
+         seat at the table and you play to win.\n\n{}\n\n{}\n\n{MANA_GUIDANCE}",
         viewer.0,
         difficulty_brief(difficulty),
         format_brief,
@@ -243,7 +269,9 @@ mod tests {
     use engine::types::custom_format::old_school_93_94;
     use engine::types::format::FormatConfig;
     use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::log::{LogCategory, LogPresentation, LogSegment, LogVisibility};
+    use engine::types::log::{
+        LogCategory, LogImportance, LogPresentation, LogSegment, LogVisibility,
+    };
     use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
@@ -692,6 +720,8 @@ mod tests {
             category: LogCategory::Zone,
             segments: vec![LogSegment::Text(text.to_string())],
             presentation: LogPresentation {
+                // Casts and attacks are what the engine marks essential.
+                importance: LogImportance::Essential,
                 visibility,
                 ..LogPresentation::default()
             },
@@ -749,6 +779,8 @@ mod tests {
             category,
             segments: vec![LogSegment::Text(text.to_string())],
             presentation: LogPresentation {
+                // Casts and attacks are what the engine marks essential.
+                importance: LogImportance::Essential,
                 visibility,
                 ..LogPresentation::default()
             },
@@ -825,6 +857,7 @@ mod tests {
             category: LogCategory::Stack,
             segments,
             presentation: LogPresentation {
+                importance: LogImportance::Essential,
                 visibility: LogVisibility::Public,
                 ..LogPresentation::default()
             },
@@ -941,6 +974,7 @@ mod tests {
             category: LogCategory::Stack,
             segments: vec![LogSegment::Text(forged)],
             presentation: LogPresentation {
+                importance: LogImportance::Essential,
                 visibility: LogVisibility::Public,
                 ..LogPresentation::default()
             },
@@ -1054,6 +1088,181 @@ mod tests {
         );
     }
 
+    /// One legal option is not a question: no prompt is built, so no request is
+    /// made, and the refusal is the kind the caller treats as "the heuristic
+    /// plays this", not as a provider failure.
+    #[test]
+    fn a_forced_move_is_never_put_to_a_provider() {
+        let state = GameState::default();
+        assert!(matches!(
+            build_game_decision_prompt(
+                &state,
+                &contract(vec![GameAction::PassPriority]),
+                AiDifficulty::Medium,
+                None,
+                &[]
+            ),
+            Err(LlmError::UnsupportedDecision { .. })
+        ));
+    }
+
+    /// The measurable goal: a prompt late in a long game carries no more
+    /// history than one early in a short game at the same difficulty.
+    #[test]
+    fn prompt_size_does_not_grow_with_the_length_of_the_game() {
+        let history = |turns: u32| -> Vec<GameLogEntry> {
+            (1..=turns)
+                .flat_map(|turn| {
+                    (0..6).map(move |index| GameLogEntry {
+                        seq: 0,
+                        turn,
+                        phase: Phase::PreCombatMain,
+                        category: LogCategory::Stack,
+                        segments: vec![LogSegment::Text(format!(
+                            "Player 1 casts Spell {turn}-{index}"
+                        ))],
+                        presentation: LogPresentation {
+                            importance: LogImportance::Essential,
+                            ..LogPresentation::default()
+                        },
+                    })
+                })
+                .collect()
+        };
+        let prompt_at = |turns: u32| {
+            let mut state = GameState::new(FormatConfig::modern(), 2, 1);
+            state.turn_number = turns;
+            build_game_decision_prompt(
+                &state,
+                &two_option_contract(),
+                AiDifficulty::VeryHard,
+                None,
+                &history(turns),
+            )
+            .unwrap()
+            .prompt
+        };
+        // Same digit width, so the comparison is history volume alone.
+        let early = prompt_at(109);
+        let late = prompt_at(999);
+        assert!(
+            late.char_count() <= early.char_count(),
+            "early={} late={}\n{}",
+            early.char_count(),
+            late.char_count(),
+            late.user
+        );
+        assert!(late.estimated_tokens() < late.char_count());
+    }
+
+    /// End to end through the engine's own contract: a spell that only a mana
+    /// artifact makes affordable is offered, and the prompt shows the artifact
+    /// as available mana beside the land that cannot pay for it alone.
+    #[test]
+    fn a_spell_only_a_mana_artifact_makes_affordable_is_offered_with_its_mana_shown() {
+        use crate::test_support::mana_rock_ability;
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::{ManaColor, ManaCost};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Red);
+        scenario
+            .add_creature(PlayerId(0), "Sol Ring", 0, 0)
+            .as_artifact()
+            .with_ability_definition(mana_rock_ability(2));
+        let spell = {
+            let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Three Drop", false);
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            });
+            builder.id()
+        };
+        let runner = scenario.build();
+        let state = runner.state();
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        assert!(
+            contract.candidates.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == spell
+            )),
+            "a land and a Sol Ring pay for three mana"
+        );
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let user = &request.prompt.user;
+        assert!(user.contains("Sol Ring (Artifact): 2 mana, {C}"), "{user}");
+        assert!(user.contains("up to 3 more mana available now"), "{user}");
+        assert!(user.contains("Three Drop — Cast Spell"), "{user}");
+    }
+
+    /// When a seat pays mana by hand, the engine offers each mana source's
+    /// activation as an option. An artifact's option reads as that artifact,
+    /// so the model can tell its Sol Ring from its lands.
+    #[test]
+    fn a_mana_artifacts_activation_option_leads_with_its_name() {
+        use crate::test_support::mana_rock_ability;
+        use engine::game::mana_sources::activatable_mana_source_selections;
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::ManaColor;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Red);
+        scenario
+            .add_creature(PlayerId(0), "Sol Ring", 0, 0)
+            .as_artifact()
+            .with_ability_definition(mana_rock_ability(2));
+        let runner = scenario.build();
+        let state = runner.state();
+
+        let mut actions: Vec<GameAction> = activatable_mana_source_selections(state, PlayerId(0))
+            .into_iter()
+            .map(|selection| GameAction::ActivateManaSource { selection })
+            .collect();
+        assert_eq!(
+            actions.len(),
+            2,
+            "the land and the artifact are both sources"
+        );
+        actions.push(GameAction::PassPriority);
+        let lines = option_lines(state, &contract(actions));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Sol Ring — Activate Mana Source")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Mountain — Activate Mana Source")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn every_brief_counts_mana_artifacts_as_mana_sources() {
+        for difficulty in [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Medium,
+            AiDifficulty::CEDH,
+        ] {
+            let request = build_game_decision_prompt(
+                &GameState::default(),
+                &two_option_contract(),
+                difficulty,
+                None,
+                &[],
+            )
+            .unwrap();
+            assert!(request.prompt.frame.brief.contains(MANA_GUIDANCE));
+            assert!(request.prompt.system.contains("mana artifacts"));
+        }
+    }
+
     #[test]
     fn an_empty_candidate_domain_is_refused_before_any_network_call() {
         let state = GameState::default();
@@ -1109,7 +1318,7 @@ mod tests {
     #[test]
     fn the_lowest_difficulty_sees_no_history_and_no_oracle_text() {
         let options = render_options(AiDifficulty::VeryEasy);
-        assert_eq!(options.history_lines, 0);
+        assert_eq!(options.history.current_cycle_entries, 0);
         assert!(!options.include_oracle_text);
         assert!(render_options(AiDifficulty::VeryHard).include_oracle_text);
     }
