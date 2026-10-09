@@ -39624,6 +39624,7 @@ mod tests {
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
             room_halves: None,
+            prepare_face: None,
             name_origin: Default::default(),
         })
     }

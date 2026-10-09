@@ -2565,3 +2565,520 @@ fn exile_card_population_leave_the_game_sweep_still_reaches_objects() {
         .iter()
         .all(|id| state.objects[id].zone != Zone::Exile));
 }
+
+// ---------------------------------------------------------------------------
+// The prepare spell is a copiable value (CR 722.2b). Croaking Counterpart
+// ("Create a token that's a copy of target non-Frog creature, except it's a
+// 1/1 green Frog.") copying a preparation creature makes a token with the same
+// prepare spell, so Codie's activation prepares the token and its CR 722.3c
+// copy has only the prepare spell's characteristics (the CR 722.3c example).
+// ---------------------------------------------------------------------------
+
+/// A real card on the battlefield and the prepare face it must hydrate.
+struct CounterpartSource {
+    controller: PlayerId,
+    name: &'static str,
+    prepare_face: Option<&'static str>,
+}
+
+/// P0 controls Codie and a non-flying bystander; each `sources` card is on its
+/// controller's battlefield; Croaking Counterpart is in P0's hand and P0's
+/// pool pays its {1}{G}{U} exactly.
+struct CounterpartBoard {
+    runner: GameRunner,
+    codie: ObjectId,
+    bystander: ObjectId,
+    sources: Vec<ObjectId>,
+    counterpart: ObjectId,
+}
+
+fn build_counterpart_board(db: &CardDatabase, sources: &[CounterpartSource]) -> CounterpartBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let codie = scenario
+        .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
+        .id();
+    let bystander = scenario.add_creature(P0, "Ground Bystander", 2, 2).id();
+    let source_ids: Vec<ObjectId> = sources
+        .iter()
+        .map(|source| scenario.add_real_card(source.controller, source.name, Zone::Battlefield, db))
+        .collect();
+    let counterpart = scenario.add_real_card(P0, "Croaking Counterpart", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(&[ManaType::Green, ManaType::Blue, ManaType::Red]));
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    // CR 205.3m: seed the creature-type vocabulary from the card corpus, as a
+    // production game load does, so "it's a 1/1 green Frog" can replace the
+    // copied creature types.
+    runner.state_mut().all_creature_types = db.creature_type_vocabulary().to_vec();
+    for (source, id) in sources.iter().zip(&source_ids) {
+        let back = runner.state().objects[id].back_face.as_ref();
+        assert_eq!(
+            back.map(|face| face.name.as_str()),
+            source.prepare_face,
+            "{} must hydrate exactly its printed prepare face",
+            source.name
+        );
+        if source.prepare_face.is_some() {
+            assert_eq!(
+                back.and_then(|face| face.layout_kind),
+                Some(engine::types::card::LayoutKind::Prepare)
+            );
+        }
+    }
+    CounterpartBoard {
+        runner,
+        codie,
+        bystander,
+        sources: source_ids,
+        counterpart,
+    }
+}
+
+fn add_p0_mana(runner: &mut GameRunner, colors: &[ManaType]) {
+    for color in colors {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            *color,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+}
+
+/// Casts Croaking Counterpart targeting `target` and returns the single token
+/// it created, asserting the copy exceptions (CR 707.9b) and the token's owner
+/// and controller (CR 111.2). `etb_players` answers a player target of the
+/// token's own enters trigger, if the copied creature has one.
+fn cast_counterpart(
+    board: &mut CounterpartBoard,
+    target: ObjectId,
+    etb_players: &[PlayerId],
+) -> ObjectId {
+    let name = board.runner.state().objects[&target].name.clone();
+    let outcome = board
+        .runner
+        .cast(board.counterpart)
+        .target_object(target)
+        .target_players(etb_players)
+        .resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { player } if *player == P0
+    ));
+    let state = board.runner.state();
+    assert!(state.stack.is_empty());
+    assert!(state.players[0].mana_pool.mana.is_empty());
+    let tokens: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].is_token && state.objects[id].name == name)
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        1,
+        "Croaking Counterpart creates one token copy"
+    );
+    let token = &state.objects[&tokens[0]];
+    // CR 111.2: the player who creates a token owns and controls it.
+    assert_eq!(token.owner, P0);
+    assert_eq!(token.controller, P0);
+    // CR 707.9b: "except it's a 1/1 green Frog".
+    assert_eq!((token.power, token.toughness), (Some(1), Some(1)));
+    assert_eq!(token.color, vec![engine::types::mana::ManaColor::Green]);
+    assert_eq!(token.card_types.subtypes, vec!["Frog"]);
+    tokens[0]
+}
+
+/// CR 115.10a + CR 117.4: Codie's untargeted activation, paid from a fresh
+/// {W}{U}{B}{R}{G}, resolves and priority returns to P0 with an empty stack.
+fn activate_codie(runner: &mut GameRunner, codie: ObjectId) -> Vec<GameEvent> {
+    add_p0_mana(runner, WUBRG);
+    let visited = drive_activation(runner, codie, 0);
+    assert!(
+        !visited.contains(&"TargetSelection"),
+        "CR 115.10a: Codie's activation announces no target; visited {visited:?}"
+    );
+    let events = pass_twice(runner);
+    assert_priority(runner, P0);
+    assert!(runner.state().stack.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: engine::types::ability::EffectKind::BecomePrepared,
+            ..
+        }
+    )));
+    events
+}
+
+/// The board after Codie's activation prepared both the Counterpart token and
+/// its uncopied source.
+struct PreparedCounterpart {
+    board: CounterpartBoard,
+    token: ObjectId,
+    token_copy: ObjectId,
+    source_copy: ObjectId,
+}
+
+/// Counterpart copies a P0 preparation creature, then Codie's activation
+/// prepares the token AND the uncopied source (the paired control). Each has
+/// exactly one linked CR 722.3c copy in exile, which has only the prepare
+/// spell's characteristics: a one-pip `cost` instant of colour `color`, never
+/// the token's 1/1 green Frog exceptions (the CR 722.3c example).
+fn counterpart_token_prepared_by_codie(
+    source_name: &'static str,
+    prepare_face: &'static str,
+    cost: ManaCostShard,
+    color: engine::types::mana::ManaColor,
+    etb_players: &[PlayerId],
+) -> PreparedCounterpart {
+    let mut board = build_counterpart_board(
+        db(),
+        &[CounterpartSource {
+            controller: P0,
+            name: source_name,
+            prepare_face: Some(prepare_face),
+        }],
+    );
+    let source = board.sources[0];
+    let token = cast_counterpart(&mut board, source, etb_players);
+    {
+        let state = board.runner.state();
+        // CR 722.2b: the token's copiable values include the prepare spell.
+        let back = state.objects[&token]
+            .back_face
+            .as_ref()
+            .expect("CR 722.2b: the token copy has the source's prepare spell");
+        assert_eq!(back.name, prepare_face);
+        assert_eq!(
+            back.layout_kind,
+            Some(engine::types::card::LayoutKind::Prepare)
+        );
+        assert_eq!(
+            Some(back),
+            state.objects[&source].back_face.as_ref(),
+            "the token's prepare spell is the source's"
+        );
+        // CR 707.2: the copy does not gain the designation by being created.
+        assert!(state.objects[&token].prepared.is_none());
+        assert!(state.objects[&source].prepared.is_none());
+        assert!(linked_copies(state, token).is_empty());
+    }
+
+    let events = activate_codie(&mut board.runner, board.codie);
+    let state = board.runner.state();
+    let mut prepared: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::BecamePrepared { object_id } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    prepared.sort_by_key(|id| id.0);
+    let mut expected = vec![source, token];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(prepared, expected);
+    assert!(state.objects[&token].prepared.is_some());
+    assert!(state.objects[&source].prepared.is_some());
+    assert!(state.objects[&board.codie].prepared.is_none());
+    assert!(state.objects[&board.bystander].prepared.is_none());
+
+    let token_copy = exact_linked_copy(state, token, P0, prepare_face);
+    let source_copy = exact_linked_copy(state, source, P0, prepare_face);
+    assert_ne!(token_copy, source_copy);
+    assert_eq!(
+        exile_ids(state),
+        exile_ids_of(&[token_copy, source_copy]),
+        "one retained copy per prepared permanent and nothing else in exile"
+    );
+
+    // CR 722.3c: the token's copy has only the prepare spell's characteristics.
+    let copy = &state.objects[&token_copy];
+    assert_eq!(copy.card_types.core_types, vec![CoreType::Instant]);
+    assert!(copy.card_types.subtypes.is_empty(), "not a Frog");
+    assert_eq!(copy.color, vec![color], "not green");
+    assert_eq!((copy.power, copy.toughness), (None, None), "not a 1/1");
+    assert_eq!(
+        copy.mana_cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![cost],
+        }
+    );
+    // The paired uncopied control's copy agrees on every characteristic.
+    let control = &state.objects[&source_copy];
+    assert_eq!(copy.name, control.name);
+    assert_eq!(copy.card_types, control.card_types);
+    assert_eq!(copy.color, control.color);
+    assert_eq!(copy.mana_cost, control.mana_cost);
+    assert!(*copy.abilities == *control.abilities);
+    assert_eq!(copy.prepared_copy_source, Some(token));
+    assert_eq!(control.prepared_copy_source, Some(source));
+
+    // Being prepared changes nothing about the token itself.
+    let token_obj = &state.objects[&token];
+    assert_eq!((token_obj.power, token_obj.toughness), (Some(1), Some(1)));
+    assert_eq!(token_obj.card_types.subtypes, vec!["Frog"]);
+
+    // CR 722.3c + CR 704.5e: the copies survive further state-based actions.
+    engine::game::sba::check_state_based_actions(board.runner.state_mut(), &mut Vec::new());
+    assert_eq!(
+        exact_linked_copy(board.runner.state(), token, P0, prepare_face),
+        token_copy
+    );
+
+    PreparedCounterpart {
+        board,
+        token,
+        token_copy,
+        source_copy,
+    }
+}
+
+/// The maintainer's board: Croaking Counterpart copies Encouraging Aviator,
+/// Codie prepares the Frog token, the token's linked copy is a blue instant
+/// named Jump (the CR 722.3c example), it is cast, Codie copies it
+/// (CR 722.3d), and both resolve. The uncopied Aviator is the paired control.
+#[test]
+fn copiable_prepare_face_counterpart_token_of_aviator_is_prepared_by_codie() {
+    let PreparedCounterpart {
+        mut board,
+        token,
+        token_copy,
+        source_copy,
+    } = counterpart_token_prepared_by_codie(
+        "Encouraging Aviator",
+        "Jump",
+        ManaCostShard::Blue,
+        engine::types::mana::ManaColor::Blue,
+        &[],
+    );
+    let aviator = board.sources[0];
+    let codie = board.codie;
+    let bystander = board.bystander;
+    let flying = |runner: &mut GameRunner, id: ObjectId| {
+        engine::game::layers::evaluate_layers(runner.state_mut());
+        engine::game::keywords::has_keyword(
+            &runner.state().objects[&id],
+            &engine::types::keywords::Keyword::Flying,
+        )
+    };
+    assert!(!flying(&mut board.runner, codie));
+    assert!(!flying(&mut board.runner, bystander));
+
+    // Positive castability for {U}: both prepared permanents offer the cast.
+    assert!(!has_cast_prepared_copy(board.runner.state(), token));
+    add_p0_mana(&mut board.runner, &[ManaType::Blue]);
+    assert!(has_cast_prepared_copy(board.runner.state(), token));
+    assert!(has_cast_prepared_copy(board.runner.state(), aviator));
+
+    // CR 722.3c + CR 601.2i: cast the token's copy; it is the object cast and
+    // the token is unprepared as the spell becomes cast.
+    let spell = start_prepared_cast(&mut board.runner, token);
+    assert_eq!(spell, token_copy);
+    drive_cast_to_stack(&mut board.runner, Some(codie));
+    assert_priority(&board.runner, P0);
+    {
+        let state = board.runner.state();
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert_eq!(state.objects[&spell].prepared_copy_source, Some(token));
+        assert!(state.objects[&token].prepared.is_none());
+        assert_eq!(
+            triggers_from(state, codie),
+            1,
+            "CR 722.3d: casting the token's prepared spell triggers Codie"
+        );
+        // The control is untouched: still prepared with its own copy.
+        assert!(state.objects[&aviator].prepared.is_some());
+        assert_eq!(exact_linked_copy(state, aviator, P0, "Jump"), source_copy);
+    }
+
+    // CR 707.10c: Codie's copy of Jump is retargeted to the bystander.
+    pass_twice(&mut board.runner);
+    assert!(matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::CopyRetarget { player, .. } if player == P0
+    ));
+    board
+        .runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bystander)),
+        })
+        .expect("choose the copy's new target");
+    board.runner.advance_until_stack_empty();
+    assert!(board.runner.state().stack.is_empty());
+    // "Target creature gains flying until end of turn." resolved twice.
+    assert!(flying(&mut board.runner, codie));
+    assert!(flying(&mut board.runner, bystander));
+}
+
+/// The same class through Emeritus of Truce, whose prepare spell is the white
+/// instant Swords to Plowshares. The token's own enters trigger ("target player
+/// creates a 1/1 ... Inkling") targets P0; P1 controls no creature, so that
+/// trigger does not prepare the token, and Codie's activation does.
+#[test]
+fn copiable_prepare_face_counterpart_token_of_emeritus_is_prepared_by_codie() {
+    let PreparedCounterpart {
+        mut board, token, ..
+    } = counterpart_token_prepared_by_codie(
+        "Emeritus of Truce",
+        "Swords to Plowshares",
+        ManaCostShard::White,
+        engine::types::mana::ManaColor::White,
+        &[P0],
+    );
+    assert!(!has_cast_prepared_copy(board.runner.state(), token));
+    add_p0_mana(&mut board.runner, &[ManaType::White]);
+    assert!(
+        has_cast_prepared_copy(board.runner.state(), token),
+        "CR 722.3c: the token's Swords copy is castable for {{W}}"
+    );
+}
+
+/// A token copy of a creature without a prepare spell has none (CR 722.3a:
+/// it can't become prepared). Paired positive on the same board: the same
+/// activation prepares an uncopied Encouraging Aviator.
+#[test]
+fn copiable_prepare_face_non_prepare_token_stays_unprepared() {
+    let mut board = build_counterpart_board(
+        db(),
+        &[
+            CounterpartSource {
+                controller: P0,
+                name: "Grizzly Bears",
+                prepare_face: None,
+            },
+            CounterpartSource {
+                controller: P0,
+                name: "Encouraging Aviator",
+                prepare_face: Some("Jump"),
+            },
+        ],
+    );
+    let bears = board.sources[0];
+    let aviator = board.sources[1];
+    let token = cast_counterpart(&mut board, bears, &[]);
+    assert!(board.runner.state().objects[&token].back_face.is_none());
+
+    activate_codie(&mut board.runner, board.codie);
+    let state = board.runner.state();
+    assert!(state.objects[&token].prepared.is_none());
+    assert!(linked_copies(state, token).is_empty());
+    assert!(state.objects[&bears].prepared.is_none());
+    assert!(state.objects[&aviator].prepared.is_some());
+    let aviator_copy = exact_linked_copy(state, aviator, P0, "Jump");
+    assert_eq!(exile_ids(state), vec![aviator_copy]);
+}
+
+/// CR 707.2 + CR 110.5: the prepared designation is not a copiable value.
+/// Counterpart copying an already-prepared Aviator makes an unprepared token
+/// with no linked copy, while the Aviator keeps its single copy; the token
+/// can still become prepared because it has the prepare spell (CR 722.3a).
+#[test]
+fn copiable_prepare_face_designation_is_not_copied() {
+    let mut board = build_counterpart_board(
+        db(),
+        &[CounterpartSource {
+            controller: P0,
+            name: "Encouraging Aviator",
+            prepare_face: Some("Jump"),
+        }],
+    );
+    let aviator = board.sources[0];
+    set_prepared(&mut board.runner, aviator);
+    let aviator_copy = exact_linked_copy(board.runner.state(), aviator, P0, "Jump");
+
+    let token = cast_counterpart(&mut board, aviator, &[]);
+    {
+        let state = board.runner.state();
+        assert!(state.objects[&token].prepared.is_none());
+        assert!(linked_copies(state, token).is_empty());
+        assert_eq!(exact_linked_copy(state, aviator, P0, "Jump"), aviator_copy);
+        // Reach guard: the token has the prepare spell, so it could be prepared.
+        assert_eq!(
+            state.objects[&token]
+                .back_face
+                .as_ref()
+                .map(|face| face.name.as_str()),
+            Some("Jump")
+        );
+    }
+
+    let events = activate_codie(&mut board.runner, board.codie);
+    let prepared: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::BecamePrepared { object_id } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    // CR 722.3a: the already-prepared Aviator can't gain the designation again.
+    assert_eq!(prepared, vec![token]);
+    let state = board.runner.state();
+    let token_copy = exact_linked_copy(state, token, P0, "Jump");
+    assert_eq!(exact_linked_copy(state, aviator, P0, "Jump"), aviator_copy);
+    assert_eq!(exile_ids(state), exile_ids_of(&[aviator_copy, token_copy]));
+}
+
+/// Owner versus controller: P0's Counterpart copies P1's Aviator. The token is
+/// P0's (CR 111.2), so P0's Codie prepares it and its copy is P0's; P1's
+/// Aviator is not a creature P0 controls and stays unprepared.
+#[test]
+fn copiable_prepare_face_token_owner_is_the_creator() {
+    let mut board = build_counterpart_board(
+        db(),
+        &[CounterpartSource {
+            controller: P1,
+            name: "Encouraging Aviator",
+            prepare_face: Some("Jump"),
+        }],
+    );
+    let aviator = board.sources[0];
+    let token = cast_counterpart(&mut board, aviator, &[]);
+    activate_codie(&mut board.runner, board.codie);
+    let state = board.runner.state();
+    assert!(state.objects[&token].prepared.is_some());
+    let token_copy = exact_linked_copy(state, token, P0, "Jump");
+    assert!(state.objects[&aviator].prepared.is_none());
+    assert!(linked_copies(state, aviator).is_empty());
+    assert_eq!(exile_ids(state), vec![token_copy]);
+}
+
+/// The token's prepare spell is serialized token state: a save/load and the
+/// card-database rehydration keep it unchanged, and the reloaded token is
+/// prepared by Codie. (Not revert-discriminating after the reload: the
+/// rehydration's `populate_back_face_if_dfc` would also give a token whose
+/// `printed_ref` names a preparation card its printed other face; the
+/// discriminating assertion is the pre-save `back_face`.)
+#[test]
+fn copiable_prepare_face_survives_serialization_and_rehydration() {
+    let db = db();
+    let mut board = build_counterpart_board(
+        db,
+        &[CounterpartSource {
+            controller: P0,
+            name: "Encouraging Aviator",
+            prepare_face: Some("Jump"),
+        }],
+    );
+    let aviator = board.sources[0];
+    let token = cast_counterpart(&mut board, aviator, &[]);
+    let before = board.runner.state().objects[&token]
+        .back_face
+        .clone()
+        .expect("CR 722.2b: the token has the prepare spell before saving");
+
+    let json = serde_json::to_string(board.runner.state()).expect("state serializes");
+    let mut restored: GameState = serde_json::from_str(&json).expect("state deserializes");
+    engine::game::rehydrate_game_from_card_db(&mut restored, db);
+    assert_eq!(restored.objects[&token].back_face.as_ref(), Some(&before));
+
+    let mut runner = GameRunner::from_state(restored);
+    activate_codie(&mut runner, board.codie);
+    assert!(runner.state().objects[&token].prepared.is_some());
+    exact_linked_copy(runner.state(), token, P0, "Jump");
+}

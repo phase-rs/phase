@@ -397,6 +397,9 @@ fn merged_copiable_values(
         // An augment merge is a Host+Augment creature, never a Room — augment
         // is an Un-set mechanic with no Comprehensive Rules entry to cite.
         room_halves: None,
+        // CR 722.2b: the merged object's prepare spell, if any, follows its
+        // host's copiable values, as the loyalty characteristic does above.
+        prepare_face: host_values.prepare_face.clone(),
         name_origin: Default::default(),
     };
 

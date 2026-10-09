@@ -624,10 +624,29 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
             .iter()
             .any(|s| s == "Room")
             .then(|| crate::game::room::own_room_halves(obj)),
+        prepare_face: copiable_prepare_face(obj),
         // CR 707.9b exceptions are folded in by `compute_current_copiable_values`,
         // never by the printed form.
         name_origin: Default::default(),
     }
+}
+
+/// CR 722.2a + CR 722.2b: the prepare spell an object's copiable values carry —
+/// the single capture authority for `CopiableValues::prepare_face`.
+///
+/// CR 708.2: a face-down object has only the characteristics its face-down
+/// rule lists, so it has no prepare spell to copy. Otherwise the stored face is
+/// captured only when it is a prepare spell (`LayoutKind::Prepare`): a
+/// Transform/Modal/Meld back face is not a copiable value of the face that is
+/// up (CR 707.8), and an Adventure/Omen/Flip face is not a prepare spell.
+pub(crate) fn copiable_prepare_face(obj: &GameObject) -> Option<Arc<BackFaceData>> {
+    if obj.face_down {
+        return None;
+    }
+    obj.back_face
+        .as_ref()
+        .filter(|face| matches!(face.layout_kind, Some(LayoutKind::Prepare)))
+        .map(|face| Arc::new(face.clone()))
 }
 
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
@@ -754,6 +773,11 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         replacement_definitions: Arc::new(result_face.replacements.clone()),
         // A format-pool face is never a Room half pair.
         room_halves: None,
+        // A lone `CardFace` carries no sibling face. A meld result is not a
+        // preparation card, but a format-pool draw of a preparation creature
+        // (Momir Basic) therefore lacks its prepare spell: a known gap for the
+        // pool producer, not a rules reading (CR 722.2b).
+        prepare_face: None,
         name_origin: Default::default(),
         static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
@@ -846,6 +870,11 @@ pub fn apply_copiable_values(
     // CR 709.5b + CR 707.2: carry the copied Room half data. Layer-derived —
     // the Step-1 seed clears it, so it expires with this copy effect.
     obj.copied_room_halves = values.room_halves.clone();
+    // `values.prepare_face` is deliberately not applied here: whether a
+    // permanent has a prepare spell is read from its stored `back_face`, which
+    // only `install_copiable_values_as_base` writes from copiable values. A
+    // Layer-1 copy of a preparation creature therefore does not yet gain (or
+    // lose) the prepare spell — a known gap, not a rules reading (CR 722.2b).
     // CR 707.9b + CR 707.3 + CR 613.1a: EVERY applied copy assigns the name
     // origin — a later ordinary copy therefore resets an earlier exception,
     // and a chained copy of an exception-named copy keeps the folded
@@ -918,6 +947,14 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
                 mana_cost: right.mana_cost.clone(),
                 ..Default::default()
             });
+    }
+    // CR 722.2b + CR 707.2: a materialized copy of an object with a prepare
+    // spell (a token copy, a conjured duplicate) has that prepare spell too, so
+    // it can become prepared (CR 722.3a) and its CR 722.3c copy takes the
+    // prepare spell's characteristics. Mutually exclusive with the Room branch
+    // above: a Room is not a preparation card.
+    if let Some(prepare_face) = &values.prepare_face {
+        obj.back_face = Some(BackFaceData::clone(prepare_face));
     }
     // CR 707.9b: a folded name EXCEPTION is part of the materialized base —
     // the Step-1 seed restores the runtime marker from this every pass.
@@ -2933,6 +2970,135 @@ mod tests {
             Vec::new(),
             "CR 107.3g: a copied X-loyalty permanent that is not resolving a spell has X=0"
         );
+    }
+
+    /// A battlefield creature whose stored other face is `face`.
+    fn creature_with_stored_face(face: Option<BackFaceData>) -> GameObject {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Battlefield,
+        );
+        obj.base_card_types.core_types.push(CoreType::Creature);
+        obj.back_face = face;
+        obj
+    }
+
+    /// An instant face stored with `layout_kind`.
+    fn stored_instant_face(layout_kind: Option<LayoutKind>) -> BackFaceData {
+        BackFaceData {
+            name: "Inset Spell".to_string(),
+            card_types: CardType {
+                core_types: vec![CoreType::Instant],
+                ..CardType::default()
+            },
+            mana_cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            },
+            color: vec![ManaColor::Blue],
+            layout_kind,
+            ..BackFaceData::default()
+        }
+    }
+
+    /// CR 722.2b + CR 707.8 + CR 708.2: the capture carries only a prepare
+    /// spell, and only for a face-up object; the base install writes it back.
+    #[test]
+    fn copiable_prepare_face_ignores_non_prepare_back_faces() {
+        let prepare = stored_instant_face(Some(LayoutKind::Prepare));
+        let captured = intrinsic_copiable_values(&creature_with_stored_face(Some(prepare.clone())))
+            .prepare_face
+            .expect("CR 722.2b: a prepare spell is a copiable value");
+        assert_eq!(*captured, prepare);
+
+        // CR 707.8: the other face of a double-faced permanent is not a copiable
+        // value of the face that is up; the remaining layouts are not prepare
+        // spells; a stored face without a layout is not one either.
+        for layout_kind in [
+            Some(LayoutKind::Transform),
+            Some(LayoutKind::Modal),
+            Some(LayoutKind::Meld),
+            Some(LayoutKind::Adventure),
+            Some(LayoutKind::Omen),
+            Some(LayoutKind::Flip),
+            Some(LayoutKind::Split),
+            Some(LayoutKind::Single),
+            None,
+        ] {
+            let obj = creature_with_stored_face(Some(stored_instant_face(layout_kind)));
+            assert_eq!(
+                intrinsic_copiable_values(&obj).prepare_face,
+                None,
+                "{layout_kind:?} must not be captured as a prepare spell"
+            );
+        }
+        assert_eq!(
+            intrinsic_copiable_values(&creature_with_stored_face(None)).prepare_face,
+            None
+        );
+
+        // CR 708.2: a face-down object has no prepare spell.
+        let mut face_down = creature_with_stored_face(Some(prepare.clone()));
+        face_down.face_down = true;
+        assert_eq!(intrinsic_copiable_values(&face_down).prepare_face, None);
+
+        // The base install gives a fresh object the captured prepare spell ...
+        let values = intrinsic_copiable_values(&creature_with_stored_face(Some(prepare.clone())));
+        let mut copy = GameObject::new(
+            ObjectId(2),
+            CardId(0),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(&mut copy, &values);
+        assert_eq!(copy.back_face.as_ref(), Some(&prepare));
+        // ... and a copy of a creature without one stays without one.
+        let mut plain_copy = GameObject::new(
+            ObjectId(3),
+            CardId(0),
+            PlayerId(0),
+            "Plain Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(
+            &mut plain_copy,
+            &intrinsic_copiable_values(&creature_with_stored_face(None)),
+        );
+        assert_eq!(plain_copy.back_face, None);
+    }
+
+    /// The field is additive serialized state: absent from a snapshot without a
+    /// prepare spell (byte-compatible with earlier saves), defaulted to `None`
+    /// when missing, and round-tripped when present.
+    #[test]
+    fn copiable_prepare_face_serde_is_additive() {
+        let plain = intrinsic_copiable_values(&creature_with_stored_face(None));
+        let json = serde_json::to_value(&plain).expect("serialize copiable values");
+        assert!(
+            json.get("prepare_face").is_none(),
+            "no prepare_face key without a prepare spell"
+        );
+        assert!(
+            json.get("room_halves").is_none(),
+            "reach guard: the sibling skip-when-None field is absent too"
+        );
+        let back: CopiableValues =
+            serde_json::from_value(json).expect("a payload without the key deserializes");
+        assert_eq!(back.prepare_face, None);
+        assert_eq!(back, plain);
+
+        let prepared = intrinsic_copiable_values(&creature_with_stored_face(Some(
+            stored_instant_face(Some(LayoutKind::Prepare)),
+        )));
+        let json = serde_json::to_value(&prepared).expect("serialize copiable values");
+        assert!(json.get("prepare_face").is_some());
+        let back: CopiableValues =
+            serde_json::from_value(json).expect("the prepare spell round-trips");
+        assert_eq!(back, prepared);
     }
 
     /// CR 712.12: MDFC land face selection requires `LayoutKind::Modal` on the back

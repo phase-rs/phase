@@ -25947,6 +25947,7 @@ mod tests {
             replacement_definitions: Default::default(),
             static_definitions: Default::default(),
             room_halves: None,
+            prepare_face: None,
             name_origin: Default::default(),
         };
         let _ = state
@@ -28817,6 +28818,7 @@ mod tests {
                     replacement_definitions: Arc::new(Vec::new()),
                     static_definitions: Arc::new(Vec::new()),
                     room_halves: None,
+                    prepare_face: None,
                     name_origin: Default::default(),
                 }),
                 display_source: Default::default(),

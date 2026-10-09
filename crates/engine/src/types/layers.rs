@@ -311,6 +311,7 @@ mod tests {
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
                     room_halves: None,
+                    prepare_face: None,
                     name_origin: Default::default(),
                 }),
                 display_source: crate::game::game_object::DisplaySource::Card,

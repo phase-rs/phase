@@ -33,7 +33,7 @@ use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::filter::FilterContext;
-use crate::game::game_object::DisplaySource;
+use crate::game::game_object::{BackFaceData, DisplaySource};
 use crate::types::events::{ClashResult, PlayerActionKind};
 
 // ---------------------------------------------------------------------------
@@ -32530,6 +32530,15 @@ pub struct CopiableValues {
     /// serialized snapshots, via the serde default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_halves: Option<RoomCopiableHalves>,
+    /// CR 722.2a + CR 722.2b: the copied object's prepare spell — "the
+    /// existence and values of these alternative characteristics are part of
+    /// the object's copiable values". Present iff the copied object has a
+    /// prepare spell (its stored face has `LayoutKind::Prepare`); never a
+    /// Transform/Modal back face, because a copy of a double-faced permanent
+    /// takes only the face currently up (CR 707.8). `None` for every other
+    /// source (and in pre-existing serialized snapshots, via the serde default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_face: Option<Arc<BackFaceData>>,
     /// CR 707.9b: where `name` came from — a folded copy-effect name
     /// EXCEPTION ("except its name is X") stays the copy's final name: a
     /// later copy of this copy keeps X (CR 707.3), and the Room door gate

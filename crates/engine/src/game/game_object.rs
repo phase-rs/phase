@@ -216,7 +216,7 @@ pub enum PhaseOutCause {
 
 /// Stored back-face data for double-faced cards (DFCs).
 /// Populated when a Transform-layout card enters the game.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackFaceData {
     pub name: String,
     pub power: Option<i32>,
