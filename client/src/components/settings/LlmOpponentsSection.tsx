@@ -315,7 +315,12 @@ function ProfileCard({
           type="url"
           inputMode="url"
           value={endpointDraft}
-          placeholder={entry?.defaultBaseUrl ?? t("llm.endpointPlaceholder")}
+          placeholder={
+            entry?.defaultBaseUrl
+            ?? (profile.provider === "Jev"
+              ? t("llm.jevEndpointPlaceholder")
+              : t("llm.endpointPlaceholder"))
+          }
           aria-label={t("llm.endpoint")}
           // Committed on blur (or Enter), never per keystroke. Changing the
           // endpoint clears the credential — it is scoped to the server it was
@@ -328,6 +333,11 @@ function ProfileCard({
           }}
           className={FIELD_CLASS}
         />
+        {profile.provider === "Jev" ? (
+          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+            {t("llm.jevEndpointHint")}
+          </p>
+        ) : null}
       </Field>
 
       <Field label={t("llm.apiKey")}>

@@ -3976,7 +3976,14 @@ pub fn build_llm_decision_request(
         };
         let http = match phase_llm::build_chat_request(&endpoint, &request.prompt) {
             Ok(http) => http,
-            Err(error) => return Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+            // The kind rides along so the caller can tell "this provider cannot
+            // be asked this decision" (a forced move put to Jev) from a
+            // misconfigured endpoint, and only count the latter against the seat.
+            Err(error) => {
+                return Ok(to_js(
+                    &serde_json::json!({ "error": error.to_string(), "errorKind": error }),
+                ))
+            }
         };
         Ok(to_js(&serde_json::json!({
             "fingerprint": request.fingerprint,
@@ -4008,13 +4015,19 @@ pub fn get_ai_action_proposal_from_llm_response(
         let contract = AiDecisionContract::issue(state, semantic_owner);
 
         // Status-aware: a non-2xx response is refused however its body parses,
-        // so a gateway or proxy error cannot masquerade as a decision.
-        let completion = match phase_llm::completion_from_response(provider, status, response_body)
-        {
-            Ok(text) => text,
-            Err(error) => return Ok(llm_failure(&error)),
-        };
-        let selection = match phase_llm::select_action(state, &contract, fingerprint, &completion) {
+        // so a gateway or proxy error cannot masquerade as a decision. The reply
+        // is read against the options THIS contract issues, never against
+        // whatever the provider claims it was offered.
+        let selection = match phase_llm::select_action_from_response(
+            state,
+            &contract,
+            fingerprint,
+            phase_llm::LlmReply {
+                provider,
+                status,
+                body: response_body,
+            },
+        ) {
             Ok(selection) => selection,
             Err(error) => return Ok(llm_failure(&error)),
         };

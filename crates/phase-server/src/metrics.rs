@@ -59,6 +59,79 @@ impl RejectReason {
     }
 }
 
+/// How a `/jev/systemone` relay request ended. The first four are the
+/// upstream's own answer passed through; the rest are answered by the relay.
+///
+/// A typed outcome rather than a `&str` label for the same reason as
+/// [`RejectReason`]: the increment site and the exposition cannot disagree
+/// about the spelling of a label value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JevRelayStatus {
+    /// The upstream answered with a 2xx status, passed through.
+    Upstream2xx,
+    /// The upstream answered with a 4xx status, passed through.
+    Upstream4xx,
+    /// The upstream answered with a 5xx status, passed through.
+    Upstream5xx,
+    /// The upstream answered with any other status (1xx, 3xx), passed through.
+    UpstreamOther,
+    /// The relay refused a body that is not a valid envelope.
+    BadRequest,
+    /// The relay refused a body over its size limit.
+    PayloadTooLarge,
+    /// The relay refused a request because its in-flight cap was reached.
+    Busy,
+    /// The upstream did not answer within the relay's timeout.
+    UpstreamTimeout,
+    /// The upstream could not be reached, or its answer could not be read.
+    UpstreamUnreachable,
+}
+
+impl JevRelayStatus {
+    /// Every variant, in exposition order. Exhaustively matched in
+    /// [`ServerMetrics::jev_relay_count`], so a new variant fails to compile
+    /// until it is counted and listed here.
+    pub const ALL: [Self; 9] = [
+        Self::Upstream2xx,
+        Self::Upstream4xx,
+        Self::Upstream5xx,
+        Self::UpstreamOther,
+        Self::BadRequest,
+        Self::PayloadTooLarge,
+        Self::Busy,
+        Self::UpstreamTimeout,
+        Self::UpstreamUnreachable,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Upstream2xx => "upstream_2xx",
+            Self::Upstream4xx => "upstream_4xx",
+            Self::Upstream5xx => "upstream_5xx",
+            Self::UpstreamOther => "upstream_other",
+            Self::BadRequest => "bad_request",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::Busy => "busy",
+            Self::UpstreamTimeout => "upstream_timeout",
+            Self::UpstreamUnreachable => "upstream_unreachable",
+        }
+    }
+
+    /// Classify an upstream answer that the relay passes through, by status
+    /// class.
+    pub fn from_upstream(status: http::StatusCode) -> Self {
+        if status.is_success() {
+            Self::Upstream2xx
+        } else if status.is_client_error() {
+            Self::Upstream4xx
+        } else if status.is_server_error() {
+            Self::Upstream5xx
+        } else {
+            Self::UpstreamOther
+        }
+    }
+}
+
 /// Process-wide counters that cannot be recovered by reading live state.
 ///
 /// Everything else in [`Snapshot`] is sampled from the session/connection maps
@@ -68,6 +141,15 @@ pub struct ServerMetrics {
     connection_limit: AtomicU64,
     game_limit: AtomicU64,
     origin_not_allowed: AtomicU64,
+    jev_upstream_2xx: AtomicU64,
+    jev_upstream_4xx: AtomicU64,
+    jev_upstream_5xx: AtomicU64,
+    jev_upstream_other: AtomicU64,
+    jev_bad_request: AtomicU64,
+    jev_payload_too_large: AtomicU64,
+    jev_busy: AtomicU64,
+    jev_upstream_timeout: AtomicU64,
+    jev_upstream_unreachable: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -85,6 +167,29 @@ impl ServerMetrics {
 
     pub fn reject_count(&self, reason: RejectReason) -> u64 {
         self.counter(reason).load(Ordering::Relaxed)
+    }
+
+    fn jev_relay_counter(&self, status: JevRelayStatus) -> &AtomicU64 {
+        match status {
+            JevRelayStatus::Upstream2xx => &self.jev_upstream_2xx,
+            JevRelayStatus::Upstream4xx => &self.jev_upstream_4xx,
+            JevRelayStatus::Upstream5xx => &self.jev_upstream_5xx,
+            JevRelayStatus::UpstreamOther => &self.jev_upstream_other,
+            JevRelayStatus::BadRequest => &self.jev_bad_request,
+            JevRelayStatus::PayloadTooLarge => &self.jev_payload_too_large,
+            JevRelayStatus::Busy => &self.jev_busy,
+            JevRelayStatus::UpstreamTimeout => &self.jev_upstream_timeout,
+            JevRelayStatus::UpstreamUnreachable => &self.jev_upstream_unreachable,
+        }
+    }
+
+    pub fn record_jev_relay(&self, status: JevRelayStatus) {
+        self.jev_relay_counter(status)
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn jev_relay_count(&self, status: JevRelayStatus) -> u64 {
+        self.jev_relay_counter(status).load(Ordering::Relaxed)
     }
 }
 
@@ -125,6 +230,8 @@ pub struct Snapshot {
     /// no ordinal, and emitting a placeholder would make "ordinal 0" ambiguous.
     pub replica_ordinal: Option<u32>,
     pub rejects: Vec<(RejectReason, u64)>,
+    /// `/jev/systemone` relay requests by outcome.
+    pub jev_relay: Vec<(JevRelayStatus, u64)>,
     pub build: BuildInfo,
 }
 
@@ -197,6 +304,10 @@ pub async fn collect(app: &AppState) -> Snapshot {
         rejects: RejectReason::ALL
             .iter()
             .map(|&reason| (reason, app.context.metrics.reject_count(reason)))
+            .collect(),
+        jev_relay: JevRelayStatus::ALL
+            .iter()
+            .map(|&status| (status, app.context.metrics.jev_relay_count(status)))
             .collect(),
         build: BuildInfo::current(app.mode),
     }
@@ -303,6 +414,19 @@ pub fn render(snapshot: &Snapshot) -> String {
 
     let _ = writeln!(
         &mut out,
+        "# HELP phase_jev_relay_requests_total Requests answered by the /jev/systemone relay, by outcome."
+    );
+    let _ = writeln!(&mut out, "# TYPE phase_jev_relay_requests_total counter");
+    for (status, count) in &snapshot.jev_relay {
+        let _ = writeln!(
+            &mut out,
+            "phase_jev_relay_requests_total{{status=\"{}\"}} {count}",
+            status.label()
+        );
+    }
+
+    let _ = writeln!(
+        &mut out,
         "# HELP phase_build_info Build identity of this process; the value is always 1."
     );
     let _ = writeln!(&mut out, "# TYPE phase_build_info gauge");
@@ -341,6 +465,17 @@ mod tests {
                 (RejectReason::ConnectionLimit, 5),
                 (RejectReason::GameLimit, 0),
                 (RejectReason::OriginNotAllowed, 2),
+            ],
+            jev_relay: vec![
+                (JevRelayStatus::Upstream2xx, 11),
+                (JevRelayStatus::Upstream4xx, 0),
+                (JevRelayStatus::Upstream5xx, 0),
+                (JevRelayStatus::UpstreamOther, 0),
+                (JevRelayStatus::BadRequest, 4),
+                (JevRelayStatus::PayloadTooLarge, 0),
+                (JevRelayStatus::Busy, 0),
+                (JevRelayStatus::UpstreamTimeout, 1),
+                (JevRelayStatus::UpstreamUnreachable, 0),
             ],
             build: BuildInfo {
                 version: "1.2.3".to_string(),
@@ -385,6 +520,17 @@ mod tests {
             "phase_admission_rejects_total{reason=\"connection_limit\"} 5\n",
             "phase_admission_rejects_total{reason=\"game_limit\"} 0\n",
             "phase_admission_rejects_total{reason=\"origin_not_allowed\"} 2\n",
+            "# HELP phase_jev_relay_requests_total Requests answered by the /jev/systemone relay, by outcome.\n",
+            "# TYPE phase_jev_relay_requests_total counter\n",
+            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11\n",
+            "phase_jev_relay_requests_total{status=\"upstream_4xx\"} 0\n",
+            "phase_jev_relay_requests_total{status=\"upstream_5xx\"} 0\n",
+            "phase_jev_relay_requests_total{status=\"upstream_other\"} 0\n",
+            "phase_jev_relay_requests_total{status=\"bad_request\"} 4\n",
+            "phase_jev_relay_requests_total{status=\"payload_too_large\"} 0\n",
+            "phase_jev_relay_requests_total{status=\"busy\"} 0\n",
+            "phase_jev_relay_requests_total{status=\"upstream_timeout\"} 1\n",
+            "phase_jev_relay_requests_total{status=\"upstream_unreachable\"} 0\n",
             "# HELP phase_build_info Build identity of this process; the value is always 1.\n",
             "# TYPE phase_build_info gauge\n",
             "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1\n",
@@ -486,5 +632,91 @@ mod tests {
         // Untouched reasons must not move: one shared counter behind all three
         // labels would still pass the two assertions above.
         assert_eq!(metrics.reject_count(RejectReason::GameLimit), 0);
+    }
+
+    #[test]
+    fn every_jev_relay_status_gets_its_own_line_in_the_render() {
+        // Same reminder as for `RejectReason`: adding a variant stops
+        // compiling here until it is also listed in `ALL`.
+        match JevRelayStatus::Upstream2xx {
+            JevRelayStatus::Upstream2xx
+            | JevRelayStatus::Upstream4xx
+            | JevRelayStatus::Upstream5xx
+            | JevRelayStatus::UpstreamOther
+            | JevRelayStatus::BadRequest
+            | JevRelayStatus::PayloadTooLarge
+            | JevRelayStatus::Busy
+            | JevRelayStatus::UpstreamTimeout
+            | JevRelayStatus::UpstreamUnreachable => {}
+        }
+        assert_eq!(JevRelayStatus::ALL.len(), 9);
+
+        let body = render(&Snapshot {
+            jev_relay: JevRelayStatus::ALL
+                .iter()
+                .map(|status| (*status, 0))
+                .collect(),
+            ..snapshot()
+        });
+
+        for status in JevRelayStatus::ALL {
+            let line = format!(
+                "phase_jev_relay_requests_total{{status=\"{}\"}} 0",
+                status.label()
+            );
+            assert_eq!(
+                body.matches(&line).count(),
+                1,
+                "{} should appear exactly once in:\n{body}",
+                status.label()
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_jev_relay_requests_are_counted_per_status() {
+        let metrics = ServerMetrics::default();
+        metrics.record_jev_relay(JevRelayStatus::Upstream2xx);
+        metrics.record_jev_relay(JevRelayStatus::Upstream2xx);
+        metrics.record_jev_relay(JevRelayStatus::Busy);
+
+        assert_eq!(metrics.jev_relay_count(JevRelayStatus::Upstream2xx), 2);
+        assert_eq!(metrics.jev_relay_count(JevRelayStatus::Busy), 1);
+        // Untouched statuses must not move: one shared counter behind every
+        // label would still pass the two assertions above.
+        for status in JevRelayStatus::ALL {
+            if !matches!(status, JevRelayStatus::Upstream2xx | JevRelayStatus::Busy) {
+                assert_eq!(metrics.jev_relay_count(status), 0, "{}", status.label());
+            }
+        }
+    }
+
+    #[test]
+    fn from_upstream_classifies_by_status_class() {
+        use http::StatusCode;
+        for (status, want) in [
+            (StatusCode::OK, JevRelayStatus::Upstream2xx),
+            (StatusCode::NO_CONTENT, JevRelayStatus::Upstream2xx),
+            (StatusCode::UNAUTHORIZED, JevRelayStatus::Upstream4xx),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                JevRelayStatus::Upstream4xx,
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JevRelayStatus::Upstream5xx,
+            ),
+            (StatusCode::SERVICE_UNAVAILABLE, JevRelayStatus::Upstream5xx),
+            (
+                StatusCode::SWITCHING_PROTOCOLS,
+                JevRelayStatus::UpstreamOther,
+            ),
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                JevRelayStatus::UpstreamOther,
+            ),
+        ] {
+            assert_eq!(JevRelayStatus::from_upstream(status), want, "{status}");
+        }
     }
 }

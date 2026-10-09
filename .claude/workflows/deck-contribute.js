@@ -432,10 +432,60 @@ function clusterVerifyPrompt(mechanic, cards) {
     `order, fixing in-loop on failure (max ${MAX_VERIFY_RETRIES} retries per ` +
     `command):\n` +
     `1. cargo fmt --all\n` +
-    `2. ./scripts/check-parser-combinators.sh (Gate A)\n` +
+    `2. Before EVERY Gate A invocation, including after cargo fmt and every in-loop fix, inspect ` +
+    `\`git status --short\`, \`git diff\`, and \`git diff --cached\`. Reconcile the exact owned ` +
+    `parser paths for this unit using raw \`git diff --no-renames --name-status\`, ` +
+    `\`git diff --cached --no-renames --name-status\`, and ` +
+    `\`git ls-files --others --exclude-standard -- crates/engine/src/parser\`. Account for added, ` +
+    `modified, deleted, and both sides of renamed paths (including moves into/out of the parser) ` +
+    `from all implementation and fix rounds, not just the initial filesChanged list; inspect new ` +
+    `files too, including tests and Markdown excluded by the gate. Stop with passed=false and record the ` +
+    `failure if ownership is ambiguous or an owned path contains any unowned working-tree or ` +
+    `staged hunks. Also refuse verification before staging if any unowned parser path has unstaged ` +
+    `or untracked changes, even if excluded by the gate: cached mode cannot examine that work. ` +
+    `Preserve all foreign files and index entries; never discard, unstage, edit, or stage foreign ` +
+    `work, or ask its author to fix it for this unit.\n` +
+    `Stage only those wholly owned parser files with \`git add -- <OWNED_PARSER_PATHS>\`: replace ` +
+    `the placeholder with one explicit repo-relative literal pathspec per file, single-quoted for ` +
+    `the shell, e.g. ':(literal)crates/engine/src/parser/oracle.rs'. Escape embedded apostrophes by ` +
+    `closing the quote, backslash-escaping the apostrophe, and reopening the quote. No directory, ` +
+    `glob, broad staging, or JSON.stringify shell quoting. Inspect the cached name-status and diff ` +
+    `for those exact paths; require \`git diff --exit-code -- <OWNED_PARSER_PATHS>\` to be empty ` +
+    `and exit 0, with every owned new file present in the index and foreign cached entries unchanged. ` +
+    `If no owned parser paths exist, do not stage unrelated paths to manufacture a scan.\n` +
+    `Resolve \`parser_gate_base="$(git merge-base upstream/main HEAD)"\` and ` +
+    `\`parser_gate_head="$(git rev-parse HEAD)"\`, checking each command's exit and nonempty SHA ` +
+    `before selecting either gate command. If either resolution fails, stop with passed=false; ` +
+    `never pass an empty base, use the script's origin/main default, or fall back to an older base. ` +
+    `If the resolved SHAs differ, run ` +
+    `\`./scripts/check-parser-combinators.sh "$parser_gate_base"\` normally, without an index ` +
+    `override: retain its full committed and working-tree range, not just this unit's staged files. ` +
+    `If the resolved SHAs are equal, first resolve ` +
+    `\`parser_gate_index="$(git rev-parse --git-path index)"\`, requiring exit 0 and a nonempty path, ` +
+    `then run \`GIT_INDEX_FILE="$parser_gate_index" ./scripts/check-parser-combinators.sh "$parser_gate_base"\`. ` +
+    `This is the unchanged gate's documented pre-commit mode against the ACTUAL current index; ` +
+    `apply the environment only to this command. Never create, filter, copy, replace, or reset an ` +
+    `index. The owned parser snapshot must match current working-tree contents. Run the whole gate ` +
+    `in either mode even with empty or excluded-only parser scope: whole-file Gate G always runs. ` +
+    `Foreign staged parser changes remain ` +
+    `in the gate's scan: their violations also fail verification; do not edit or unstage them to ` +
+    `obtain a PASS. If any later command or fix changes parser source, repeat ownership checks, ` +
+    `owned staging, and Gate A on the final contents before passed=true; an earlier PASS does not ` +
+    `cover later edits. ` +
+    `Treat any non-zero gate exit as an unresolved verification failure and retain its actual ` +
+    `code and output: exit 3 is CANNOT ANSWER, never PASS. Only an actual exit 0 with Gate A SKIPPED ` +
+    `may count as a clean empty diff scan. Record that exact status/reason, Gate G PASS, and exit 0 ` +
+    `together; explain tests-only/excluded-only scope when applicable. SKIPPED means no files in the ` +
+    `gate's effective scan scope, not that no parser files changed or that lines were scanned. ` +
+    `Never skip the command or Gate G, or reinterpret a non-zero result as green.\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
-    `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else ` +
-    `cargo clippy-strict && cargo test -p phase-engine && ./scripts/gen-card-data.sh\n` +
+    `./scripts/tilt-wait.sh --timeout 240 clippy test-engine test-ai wasm card-data ; else ` +
+    `cargo clippy-strict && cargo test -p phase-engine && cargo test -p phase-ai && cargo wasm && ./scripts/gen-card-data.sh\n` +
+    `   (If this change adds or removes a variant on an engine enum — Effect, TriggerMode, ` +
+    `StaticCondition, GameEvent, EffectKind — keep clippy WORKSPACE-wide, never narrowed to ` +
+    `\`-p phase-engine\`; in the Tilt branch, wait for \`test-ai\` and \`wasm\`, and in the no-Tilt fallback ` +
+    `run \`cargo test -p phase-ai\` and \`cargo wasm\`: phase-ai and engine-wasm match these enums ` +
+    `exhaustively, so an engine-only check cannot observe a non-exhaustive-match break in those crates.)\n` +
     `4. cargo coverage — confirm EACH of these cards is now supported:true gap:0; ` +
     `list the ones that are in cardsSupported:\n${cards.map((c) => `- ${c}`).join('\n')}\n` +
     `5. cargo semantic-audit — confirm none of these cards has findings -> ` +
@@ -465,10 +515,31 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
   return (
     `Commit the working-tree change for the "${mechanic}" mechanic, push the ` +
     `branch to your fork, and open a PR to phase-rs/phase with base main.\nRun:\n` +
-    `git add -A && git commit -m ${JSON.stringify(title)} && git push -u origin HEAD\n` +
+    `Before staging, inspect \`git status --short\`, \`git diff\`, and \`git diff --cached\`, ` +
+    `including any unrelated already-staged files. Reconcile the initial Files changed list below ` +
+    `with the final owned, reviewed changes, including all review-fix, cross-check, and verification ` +
+    `rounds: fix agents return no filesChanged schema, so the initial list may be stale. Account for ` +
+    `added, modified, deleted, and renamed paths. Stop and return opened=false if ownership is ` +
+    `ambiguous, a path includes unowned edits, or any final owned change lacks a clean review. ` +
+    `Leave unowned files AND index entries untouched; do not discard or unstage them.\n` +
+    `Do not stage build-generated noise in crates/engine/data/known-tokens.toml or ` +
+    `crates/engine/data/oracle-subtypes.json. Leave that working-tree dirt unstaged. ` +
+    `data/engine-inventory.json is ignored and needs neither staging nor cleanup.\n` +
+    `Replace <OWNED_PATHS> in BOTH commands below with the same explicit final reviewed filenames. ` +
+    `Use one repo-relative literal Git pathspec per file, single-quoted for the shell, for example ` +
+    `':(literal)crates/engine/src/parser/oracle.rs'; escape any embedded apostrophe by closing ` +
+    `the quote, backslash-escaping the apostrophe, and reopening the quote. Do not use ` +
+    `JSON.stringify as shell quoting, directory or glob pathspecs, or broad staging.\n` +
+    `git add -- <OWNED_PATHS>\n` +
+    `Inspect \`git diff --cached --name-status\` and the cached diff for those exact owned paths; ` +
+    `confirm their contents match the final reviewed scope and unrelated staged entries are unchanged.\n` +
+    `git commit --only -m ${JSON.stringify(title)} -- <OWNED_PATHS>\n` +
+    `Confirm \`git show --name-status --format= HEAD\` contains exactly the final owned paths, ` +
+    `then git push -u origin HEAD\n` +
     `Then: gh pr create --base main --title ${JSON.stringify(title)} --body <BODY> ` +
     `(do NOT pass --label; the upstream auto-labeler handles it).\n\n` +
-    `Use exactly this PR body:\n\n${body}\n\nReturn opened=true and the prUrl.`
+    `Use this PR body, reconciling its Files changed section to the final owned paths actually ` +
+    `committed; leave the other sections as supplied:\n\n${body}\n\nReturn opened=true and the prUrl.`
   )
 }
 
@@ -517,7 +588,7 @@ async function implementMechanicCluster(mechanic, cards, heterogeneous) {
     cards,
     branch: branch && branch.branch ? branch.branch : null,
     prUrl: pr && pr.prUrl ? pr.prUrl : null,
-    status: partial ? 'partial' : 'success',
+    status: pr.opened === false ? 'aborted' : partial ? 'partial' : 'success',
   }
 }
 
@@ -612,6 +683,8 @@ for (const unit of toRun) {
       const r = await implementMechanicCluster(unit.mechanic, unit.cards, unit.heterogeneous)
       results.push(r)
       log(`${name}: ${r.status}${r.prUrl ? ' -> ' + r.prUrl : ''}`)
+      // Preserve a declined unit's tree and index before any next reset.
+      if (r.status === 'aborted') break
     } else {
       const summary = await workflow({ scriptPath: CONTRIBUTE_CARD }, unit.card)
       const entry = Array.isArray(summary) && summary[0] ? summary[0] : { card: unit.card, status: 'unknown' }

@@ -1,6 +1,7 @@
 mod admin;
 mod data_bootstrap;
 mod draft_pools;
+mod jev_relay;
 mod logging;
 mod metrics;
 mod persistence;
@@ -841,7 +842,8 @@ impl Default for Limits {
 /// Ambient per-process context every admission decision needs: what the limits
 /// are, and where a refusal gets counted. Threaded through the socket handlers
 /// rather than held in a global so tests can drive a handler at a small cap
-/// without perturbing the rest of the suite.
+/// without perturbing the rest of the suite. It also carries the Jev relay,
+/// whose in-flight cap is an admission limit of the same kind.
 #[derive(Clone, Default)]
 struct ServerContext {
     limits: Limits,
@@ -851,6 +853,8 @@ struct ServerContext {
     /// has no way to turn a label back into a number.
     replica_ordinal: Option<u32>,
     metrics: Arc<metrics::ServerMetrics>,
+    /// The outbound `/jev/systemone` relay: its upstream, client and in-flight cap.
+    jev_relay: jev_relay::JevRelay,
 }
 
 // The lobby-only broker capacity cap (`MAX_LOBBY_ENTRIES`) now lives in
@@ -2546,6 +2550,11 @@ async fn serve() {
         ServerMode::Full
     };
     info!(?mode, "server mode selected");
+    let jev_relay_config = jev_relay::JevRelayConfig::from_env()
+        .unwrap_or_else(|error| panic!("invalid Jev relay configuration: {error}"));
+    let jev_relay = jev_relay::JevRelay::new(jev_relay_config)
+        .unwrap_or_else(|error| panic!("could not build the Jev relay HTTP client: {error}"));
+    info!(upstream = %jev_relay.upstream_origin(), "jev relay upstream resolved");
     let server_context = ServerContext {
         limits: Limits {
             max_connections: cli.max_connections,
@@ -2553,6 +2562,7 @@ async fn serve() {
         },
         replica_ordinal: cli.replica_ordinal,
         metrics: Arc::new(metrics::ServerMetrics::default()),
+        jev_relay,
     };
     info!(
         max_connections = server_context.limits.max_connections,
@@ -4031,7 +4041,7 @@ fn admin_token_from_env() -> Option<String> {
 /// keeping the layer off that route entirely removes any dependence on that
 /// implementation detail continuing to hold across axum/tower-http upgrades.
 /// Every other route (health check, the `lobby_broker::directory::INFO_PATH`
-/// identity document, the P2P draft backup API, and — when `admin_token` is
+/// identity document, the P2P draft backup API, the Jev relay, and — when `admin_token` is
 /// set — the bearer-guarded `/admin/*` routes) is served through gzip
 /// `CompressionLayer` so JSON/text responses shrink whenever the client
 /// advertises `Accept-Encoding: gzip`.
@@ -4047,7 +4057,8 @@ fn build_router(app_state: AppState, cors: CorsLayer, admin_token: Option<&str>)
         .route(
             "/p2p-draft-backup/{code}",
             get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        );
+        )
+        .route("/jev/systemone", jev_relay::method_router());
     if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
         http_router = mount_admin_routes(http_router, token);
     }
@@ -22391,6 +22402,182 @@ mod compression_tests {
         assert!(recorded_player_counts(&log).iter().all(|count| *count == 3));
         handle.abort();
         recorder.abort();
+    }
+
+    /// The Jev relay through the production router: route mount, outer CORS
+    /// layer and compression, in the lobby-only mode production runs.
+    mod jev_relay_routes {
+        use http::HeaderValue;
+
+        use super::*;
+        use crate::jev_relay::test_support::{
+            client, envelope, hits, relay_config, spawn_recording_upstream, MockReply, TEST_KEY,
+        };
+        use crate::jev_relay::JevRelay;
+
+        const ORIGIN: &str = "https://phase-rs.dev";
+
+        /// `build_router` over a lobby-only state whose relay points at
+        /// `upstream`, served on an ephemeral port.
+        async fn spawn_router(
+            temp_dir: &tempfile::TempDir,
+            cors: CorsLayer,
+            upstream: Url,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let mut state = test_app_state(temp_dir, ServerMode::LobbyOnly);
+            state.context.jev_relay = JevRelay::new(relay_config(upstream)).expect("relay client");
+            let app = build_router(state, cors, None);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("test server");
+            });
+            (format!("http://{addr}"), server)
+        }
+
+        /// The browser's simple request: `text/plain`, an `Origin`, and no
+        /// `Authorization` header.
+        async fn post_simple(base: &str, body: String) -> reqwest::Response {
+            client()
+                .post(format!("{base}/jev/systemone"))
+                .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
+                .header(reqwest::header::ORIGIN, ORIGIN)
+                .body(body)
+                .send()
+                .await
+                .expect("relay request")
+        }
+
+        fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+        }
+
+        /// The two CORS layers are expression-identical to the two arms of
+        /// `let cors = match cli.cors_origin.as_deref()` in `serve()` at
+        /// `73d05fe632b4fd6c352b8daef0a8da0c590f193e`:
+        /// `Some("*") | None => CorsLayer::permissive()` and
+        /// `Some(origin) => CorsLayer::new().allow_origin(origin.parse::<HeaderValue>().expect("invalid CORS origin"))`.
+        #[tokio::test]
+        async fn simple_request_is_relayed_with_allow_origin_in_both_cors_modes() {
+            /// (CORS layer constructor, expected `Access-Control-Allow-Origin`)
+            type CorsMode = (fn() -> CorsLayer, &'static str);
+            let modes: [CorsMode; 2] = [
+                (CorsLayer::permissive, "*"),
+                (
+                    || {
+                        CorsLayer::new().allow_origin(
+                            "https://phase-rs.dev"
+                                .parse::<HeaderValue>()
+                                .expect("invalid CORS origin"),
+                        )
+                    },
+                    ORIGIN,
+                ),
+            ];
+            let replies = [
+                (StatusCode::OK, r#"{"pick":2}"#),
+                (StatusCode::UNPROCESSABLE_ENTITY, r#"{"title":"bad pack"}"#),
+            ];
+            for (cors, want_origin) in modes {
+                for (want_status, want_body) in replies {
+                    let temp = tempfile::tempdir().expect("temp dir");
+                    let (upstream, log, mock) = spawn_recording_upstream(MockReply::Respond {
+                        status: want_status,
+                        content_type: Some("application/json"),
+                        body: want_body,
+                    })
+                    .await;
+                    let (base, server) = spawn_router(&temp, cors(), upstream).await;
+
+                    let response =
+                        post_simple(&base, envelope(serde_json::json!({ "model": "jev" }))).await;
+                    let case = format!("{want_origin} / {want_status}");
+                    assert_eq!(response.status(), want_status, "{case}");
+                    assert_eq!(
+                        header(&response, "access-control-allow-origin"),
+                        Some(want_origin),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        header(&response, "access-control-allow-credentials"),
+                        None,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        header(&response, "content-type"),
+                        Some("application/json"),
+                        "{case}"
+                    );
+                    let body = response.text().await.expect("body");
+                    assert_eq!(body, want_body, "{case}");
+                    assert!(!body.contains(TEST_KEY), "{case}");
+                    assert_eq!(hits(&log), 1, "{case}");
+
+                    server.abort();
+                    mock.abort();
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn oversize_is_413_with_allow_origin() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let (upstream, log, mock) = spawn_recording_upstream(MockReply::Respond {
+                status: StatusCode::OK,
+                content_type: Some("application/json"),
+                body: "{}",
+            })
+            .await;
+            let (base, server) = spawn_router(&temp, CorsLayer::permissive(), upstream).await;
+
+            let oversize = envelope(serde_json::json!({ "pad": "a".repeat(600 * 1024) }));
+            let response = post_simple(&base, oversize).await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(header(&response, "access-control-allow-origin"), Some("*"));
+            assert_eq!(hits(&log), 0);
+
+            // Reach guard: a valid envelope through the same router reaches it.
+            let response =
+                post_simple(&base, envelope(serde_json::json!({ "model": "jev" }))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(hits(&log), 1);
+
+            server.abort();
+            mock.abort();
+        }
+
+        #[tokio::test]
+        async fn health_keeps_allow_origin_with_relay_mounted() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let (upstream, _log, mock) = spawn_recording_upstream(MockReply::Hang).await;
+            let cors = CorsLayer::new().allow_origin(
+                "https://phase-rs.dev"
+                    .parse::<HeaderValue>()
+                    .expect("invalid CORS origin"),
+            );
+            let (base, server) = spawn_router(&temp, cors, upstream).await;
+
+            let response = client()
+                .get(format!("{base}/health"))
+                .header(reqwest::header::ORIGIN, ORIGIN)
+                .send()
+                .await
+                .expect("health request");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                header(&response, "access-control-allow-origin"),
+                Some(ORIGIN)
+            );
+            assert_eq!(response.text().await.expect("body"), "ok");
+
+            server.abort();
+            mock.abort();
+        }
     }
 }
 

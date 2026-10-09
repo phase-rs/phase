@@ -969,17 +969,26 @@ fn resolve_llm_draft_pick(
         return Err(phase_llm::LlmError::StaleDecision);
     };
     let provider = phase_llm::LlmProvider::from_label(&response.provider);
-    let completion =
-        phase_llm::completion_from_response(provider, response.status, &response.body)?;
     // CR 905.1a / CR 903.13b: the configured procedure supplies the ordinary or Commander Draft pick-step count.
     let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
-    phase_llm::select_picks(
-        response.seat,
-        pack,
-        required,
-        &response.fingerprint,
-        &completion,
-    )
+    // The reply is read against the option lines the REQUEST rendered: the same
+    // pack, card database and difficulty `build_llm_draft_pick_requests` used.
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        phase_llm::select_picks_from_response(
+            response.seat,
+            pack,
+            required,
+            &response.fingerprint,
+            (db_borrow.as_ref(), difficulty),
+            phase_llm::LlmReply {
+                provider,
+                status: response.status,
+                body: &response.body,
+            },
+        )
+    })
 }
 
 /// The engine-owned LLM provider catalog, mirrored here so a draft-only client
@@ -2494,6 +2503,75 @@ mod llm_draft_resolution_tests {
             resolve_llm_draft_pick(&session, &reply),
             Err(phase_llm::LlmError::StaleDecision)
         ));
+    }
+
+    /// The production response-to-pick path for Jev: the reply is read against
+    /// the criterion names the REQUEST carried for this seat's pack, so a valid
+    /// option number with a label the pack never offered is not that card.
+    #[test]
+    fn a_jev_reply_resolves_only_through_the_criteria_the_request_issued() {
+        let session = started_quick_pod();
+        session_cell::install(session.clone());
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"Jev","baseUrl":"https://relay.test","apiKey":"k","model":"jev-latest"}"#,
+            "{}",
+        )
+        .unwrap();
+        session_cell::clear();
+        let issued = requests.iter().find(|request| request.seat == 1).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&issued.request.body).unwrap();
+        let keys: Vec<String> = envelope["request"]["questions"]["pick"]["criteria"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(keys.len(), issued.option_count);
+
+        let reply = |choice: &str, probabilities: serde_json::Value| LlmDraftResponse {
+            seat: 1,
+            fingerprint: issued.fingerprint.clone(),
+            provider: "Jev".to_string(),
+            status: 200,
+            body: serde_json::json!({
+                "answers": { "pick": {
+                    "type": "choice",
+                    "choice": choice,
+                    "probabilities": probabilities,
+                    "confidence": 0.9,
+                }},
+            })
+            .to_string(),
+        };
+        let projected = filter_for_player(&session, 1).current_pack.unwrap();
+
+        let good = reply(
+            &keys[1],
+            serde_json::json!({ &keys[0]: 0.1, &keys[1]: 0.9 }),
+        );
+        let selection = resolve_llm_draft_pick(&session, &good).unwrap();
+        assert_eq!(
+            selection.card_instance_ids,
+            vec![projected[1].instance_id.clone()]
+        );
+
+        let unissued_label = "01: A card that is not in this pack";
+        let wrong_choice = reply(
+            unissued_label,
+            serde_json::json!({ &keys[0]: 0.1, unissued_label: 0.9 }),
+        );
+        let wrong_probability = reply(
+            &keys[1],
+            serde_json::json!({ &keys[1]: 0.8, "00: Invented": 0.2 }),
+        );
+        for bad in [wrong_choice, wrong_probability] {
+            assert!(matches!(
+                resolve_llm_draft_pick(&session, &bad),
+                Err(phase_llm::LlmError::MalformedResponse { .. })
+            ));
+        }
     }
 
     #[test]
