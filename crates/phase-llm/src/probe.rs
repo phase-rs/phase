@@ -9,14 +9,18 @@
 //! the reply. Anything the game path would refuse, the probe refuses too.
 
 use crate::error::LlmResult;
-use crate::prompt::{decode_choice, LlmPrompt};
-use crate::provider::LlmProvider;
+use crate::prompt::{decode_choice, DecisionFrame, LlmPrompt};
+use crate::provider::{LlmProvider, WireProtocol};
 use crate::wire::completion_from_response;
 
-/// The option count the probe offers. One option means a working model has
+/// The option count a chat probe offers. One option means a working model has
 /// exactly one legal answer, so a decode failure is a real signal about the
 /// endpoint rather than a judgement call the model got wrong.
 const PROBE_OPTION_COUNT: usize = 1;
+
+/// The option count a System One probe offers: a typed Choice needs at least
+/// two options, and either is a legal answer to the probe.
+const SYSTEM_ONE_PROBE_OPTION_COUNT: usize = 2;
 
 /// A minimal decision in the same shape as a real one.
 ///
@@ -31,6 +35,13 @@ pub fn connection_probe_prompt() -> LlmPrompt {
         user: "Your legal options:\n  [0] Pass priority\n\nReply with ONLY this JSON \
                object: {\"choice\": 0, \"reason\": \"ok\"}"
             .to_string(),
+        frame: DecisionFrame {
+            brief: "You are being checked for connectivity by a Magic: The Gathering client."
+                .to_string(),
+            position: "Nothing is happening: this is a connection test.".to_string(),
+            instruction: "Choose either option.".to_string(),
+            options: vec!["Pass priority".to_string(), "Take no action".to_string()],
+        },
     }
 }
 
@@ -40,8 +51,15 @@ pub fn connection_probe_prompt() -> LlmPrompt {
 /// body carries one); a provider error envelope on an otherwise-2xx response;
 /// an empty completion; and a reply the engine cannot bind to a legal option.
 pub fn validate_probe_response(provider: LlmProvider, status: u16, body: &str) -> LlmResult<()> {
-    let completion = completion_from_response(provider, status, body)?;
-    decode_choice(&completion, PROBE_OPTION_COUNT, 1)?;
+    let issued = connection_probe_prompt().frame.options;
+    let completion = completion_from_response(provider, status, body, &issued)?;
+    let option_count = match provider.wire() {
+        WireProtocol::SystemOneRelay => SYSTEM_ONE_PROBE_OPTION_COUNT,
+        WireProtocol::OpenAiChat
+        | WireProtocol::AnthropicMessages
+        | WireProtocol::GeminiGenerateContent => PROBE_OPTION_COUNT,
+    };
+    decode_choice(&completion, option_count, 1)?;
     Ok(())
 }
 

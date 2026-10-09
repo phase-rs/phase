@@ -126,6 +126,14 @@ name = "TURN_LIMIT"
 namespace_id = "1005"
 simple = { limit = 30, period = 60 }
 
+# Bound the Jev relay (`POST /jev/systemone`) per client IP. A game or draft seat
+# makes a request per decision, so this is generous for a real player and still
+# stops the route being used as an open proxy to TypeSafe.
+[[ratelimits]]
+name = "JEV_LIMIT"
+namespace_id = "1007"
+simple = { limit = 120, period = 60 }
+
 # Workers Logs — persistent logs in the dashboard Observability tab. We keep this
 # ON for our structured console.* output: relay-mint failures surface via
 # `console.error({event:"turn_mint_failed"})` in turn.ts (the always-on Workers
@@ -256,6 +264,11 @@ simple = { limit = 60, period = 60 }
 name = "TURN_LIMIT"
 namespace_id = "1006"
 simple = { limit = 30, period = 60 }
+
+[[env.preview.ratelimits]]
+name = "JEV_LIMIT"
+namespace_id = "1008"
+simple = { limit = 120, period = 60 }
 
 [env.preview.vars]
 TURN_KEY_ID = "97c7984d6c155084f9d0fdf8090e02f8"

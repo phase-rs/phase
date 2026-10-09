@@ -1531,6 +1531,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_occurrence: Option<CastOccurrence>,
 
+    /// CR 601.2a + CR 400.7: this spell's identity while it is announced and on
+    /// the stack (`GameState::mint_spell_announcement`). Survives the
+    /// origin→stack move at finalization; cleared on stack exit and on a
+    /// cancelled cast (CR 733.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spell_announcement: Option<crate::types::game_state::SpellAnnouncement>,
+
     /// CR 601.2a + CR 603.4: Transient field tracking the player who cast the
     /// spell that became this permanent. Paired with `cast_from_zone` for
     /// intervening-if clauses such as "if you cast it from your graveyard".
@@ -1839,6 +1846,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // COMPARED: finalized-cast provenance can affect resolution semantics while
         // this object remains a spell on the stack (types/game_state.rs).
         cast_occurrence: _,
+        // COMPARED: which spell on the stack this object is (CR 601.2a).
+        spell_announcement: _,
         cast_controller: _,
         cast_spell_keywords: _,
         exile_from_stack_linked_source: _,
@@ -3058,6 +3067,7 @@ impl GameObject {
             class_level: None,
             cast_from_zone: None,
             cast_occurrence: None,
+            spell_announcement: None,
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,

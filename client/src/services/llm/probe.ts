@@ -12,8 +12,8 @@
 
 import { ensureWasmInit } from "../engineRuntime";
 import { executeLlmRequest, LlmTransportError } from "./llmClient";
+import { resolvedEndpointOf } from "./endpoint";
 import {
-  endpointOf,
   type LlmFailure,
   type LlmHttpRequestSpec,
   type LlmProfile,
@@ -48,7 +48,7 @@ export async function testLlmEndpoint(
 
   // The engine refuses here for a missing model, a missing key, or a credential
   // bound for a plaintext endpoint — before anything reaches the network.
-  const built = wasm.buildLlmProbeRequest(JSON.stringify(endpointOf(profile))) as ProbeRequestResult;
+  const built = wasm.buildLlmProbeRequest(JSON.stringify(resolvedEndpointOf(profile))) as ProbeRequestResult;
   if (!built?.request) {
     // `built.error` is the ENGINE's own refusal (no model, missing key, a
     // credential bound for a plaintext endpoint). It is data, shown verbatim.

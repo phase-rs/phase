@@ -1008,7 +1008,8 @@ jobs:
   lobby-worker-test:
     name: Lobby worker (pnpm test)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Cache-hit npm ci runs have exceeded five minutes; leave room for the measured slow tail.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

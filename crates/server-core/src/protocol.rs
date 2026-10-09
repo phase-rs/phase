@@ -3347,8 +3347,12 @@ mod tests {
     }
 
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
-    /// (CR 608.2c + CR 115.1a); a v118 peer cannot deserialize it, so it must be
-    /// refused before it receives v119 state.
+    /// (CR 608.2c + CR 115.1a); a v120 peer cannot deserialize it, so it must be
+    /// refused before it receives v121 state.
+    /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
+    /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
+    /// a v119 peer cannot decode v120 state, so it must be refused before state
+    /// delivery. (v119 is reserved for the Legends of Jidoor PR.)
     /// `ManaColorSpent` on `AbilityCondition` and `TriggerCondition` retypes `color`
     /// to `SpentColor` (word versus symbol provenance, CR 612.2); a v117 peer cannot
     /// deserialize the tagged color, so it must be refused before it receives v118
@@ -3464,8 +3468,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_119_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 119);
+    fn protocol_version_is_121_for_declared_player_reference() {
+        assert_eq!(PROTOCOL_VERSION, 121);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3476,7 +3480,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_119_for_declared_player_reference` stays
+    /// `protocol_version_is_121_for_declared_player_reference` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

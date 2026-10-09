@@ -13,7 +13,8 @@ export type LlmProviderId =
   | "Anthropic"
   | "Gemini"
   | "DeepSeek"
-  | "OpenAiCompatible";
+  | "OpenAiCompatible"
+  | "Jev";
 
 /** One row of `phase_llm::catalog::provider_catalog`. */
 export interface LlmModelOption {
@@ -48,6 +49,13 @@ export interface LlmHttpRequestSpec {
   method: string;
   headers: { name: string; value: string }[];
   body: string;
+  /**
+   * What to do with a 3xx answer, as `fetch`'s `redirect` option. The engine
+   * sets `"error"` for a request whose body carries a credential: a followed
+   * 307/308 would replay that body to the origin `Location` names. Absent means
+   * fetch's default.
+   */
+  redirect?: "follow" | "error";
 }
 
 /** Engine output for one game decision request. */

@@ -92,6 +92,9 @@ export async function executeLlmRequest(
       method: spec.method,
       headers: Object.fromEntries(spec.headers.map((header) => [header.name, header.value])),
       body: spec.body,
+      // The engine decides, because only it knows where the credential sits:
+      // a key in the body must never ride a redirect to another origin.
+      redirect: spec.redirect ?? "follow",
       signal: controller.signal,
       // Never attach the player's cookies to a third-party AI endpoint.
       credentials: "omit",

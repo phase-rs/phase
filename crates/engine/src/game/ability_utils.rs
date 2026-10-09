@@ -806,6 +806,72 @@ pub fn build_target_slots_labelled(
     Ok((acc.slots, acc.labels))
 }
 
+/// CR 608.2h + CR 109.4: The controller of an object reference — live on the
+/// stack or battlefield, else as it last existed on the battlefield.
+/// `reset_for_battlefield_exit()` reverts `controller` to the owner when a
+/// permanent leaves the battlefield, so for any object that is no longer there
+/// the LKI snapshot (captured just before the zone change) holds the pre-exit
+/// controller. Prefer it over the live — post-reset — value, so "its
+/// controller" anchors on who controlled the permanent at departure, not the
+/// owner who now appears to control the exiled/graved object. The single
+/// authority for "that object's controller" over an object reference, whether
+/// the object came from a chosen target or from the trigger event.
+///
+/// NOT incarnation-correct: the LKI cache is keyed by bare `ObjectId`. When the
+/// departed object has already re-entered the battlefield under the same id
+/// (a blink, CR 400.7), the live battlefield row — the NEW object — answers,
+/// not the departed incarnation's last controller.
+pub(crate) fn last_known_permanent_controller(state: &GameState, id: ObjectId) -> Option<PlayerId> {
+    let obj_opt = state.objects.get(&id);
+    // CR 109.4: a permanent on the battlefield answers with its live controller.
+    if let Some(obj) = obj_opt.filter(|obj| obj.zone == Zone::Battlefield) {
+        return Some(obj.controller);
+    }
+    // CR 109.4 + CR 601.2a + CR 608.2h: an object that is live on the stack is
+    // in the zone it was expected to be in, so it uses its current controller
+    // (the spell's caster, or a stack ability's controller) — never a stale
+    // battlefield snapshot left in the LKI cache by an earlier incarnation.
+    // Matched by the stack object's OWN id (`entry.id`): a spell's entry id is
+    // its object id, and a targeted ability is recorded by its entry id. An
+    // entry whose `source_id` names this object is a different object — an
+    // ability exists independently of its source (CR 113.7a) — so a pending
+    // ability never makes its departed source look live on the stack.
+    if let Some(entry) = state.stack.iter().find(|entry| entry.id == id) {
+        return Some(stack_object_controller(state, entry));
+    }
+    // CR 608.2h: off the battlefield and off the stack — last known
+    // information from the battlefield, else the live (post-reset) row.
+    state
+        .lki_cache
+        .get(&id)
+        .map(|lki| lki.controller)
+        .or_else(|| obj_opt.map(|obj| obj.controller))
+}
+
+/// CR 400.7 + CR 608.2h: the controller of one specific incarnation of `id`:
+/// the live permanent's controller while that incarnation is still on the
+/// battlefield, else the incarnation-keyed last known information captured as
+/// it left. `None` when neither exists (the caller falls back to the bare-id
+/// authority, `last_known_permanent_controller`).
+pub(crate) fn incarnation_controller(
+    state: &GameState,
+    id: ObjectId,
+    incarnation: u64,
+) -> Option<PlayerId> {
+    if let Some(obj) = state
+        .objects
+        .get(&id)
+        .filter(|obj| obj.zone == Zone::Battlefield && obj.incarnation == incarnation)
+    {
+        return Some(obj.controller);
+    }
+    state
+        .lki_by_incarnation
+        .get(&id)
+        .and_then(|history| history.get(&incarnation))
+        .map(|lki| lki.controller)
+}
+
 /// CR 109.4 + CR 608.2c: Resolve the controller of an ability's first parent target.
 ///
 /// This is the canonical lookup for `ControllerRef::ParentTargetController` and
@@ -820,40 +886,9 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
         // battlefield — e.g. a token Recoil bounced to hand, which then ceases
         // to exist per CR 704.5d before the chained "that player discards"
         // resolves — fall back to last-known information so the player anaphor
-        // still resolves.
-        // CR 109.4: "Only objects on the stack or on the battlefield have a
-        // controller." The rung matches by `entry.id == id || entry.source_id
-        // == id` — a spell's `source_id == entry.id` (measured), so
-        // `stack_object_controller` is correct on both arms: it reads the
-        // spell's live controller when the object is on the stack, and falls
-        // back to `entry.controller` (CR 113.8) for an ability entry, which has
-        // no `state.objects` row.
-        TargetRef::Object(id) => state
-            .stack
-            .iter()
-            .find(|entry| entry.id == *id || entry.source_id == *id)
-            .map(|entry| stack_object_controller(state, entry))
-            .or_else(|| {
-                let obj_opt = state.objects.get(id);
-                // CR 608.2h: reset_for_battlefield_exit() reverts `controller`
-                // to the owner when a permanent leaves the battlefield. For any
-                // object that is no longer on the battlefield, the LKI snapshot
-                // (captured just before the zone change) holds the correct
-                // pre-exit controller. Prefer it over the live — post-reset —
-                // value so that "its controller" anchors on who controlled the
-                // permanent at departure, not the owner who now appears to
-                // control the exiled/graved object.
-                let off_battlefield = obj_opt.is_none_or(|obj| obj.zone != Zone::Battlefield);
-                if off_battlefield {
-                    state
-                        .lki_cache
-                        .get(id)
-                        .map(|lki| lki.controller)
-                        .or_else(|| obj_opt.map(|obj| obj.controller))
-                } else {
-                    obj_opt.map(|obj| obj.controller)
-                }
-            }),
+        // still resolves. The stack rung and the LKI rung both live in
+        // `last_known_permanent_controller`.
+        TargetRef::Object(id) => last_known_permanent_controller(state, *id),
         TargetRef::Player(pid) => Some(*pid),
     }) {
         return Some(player);
@@ -22168,9 +22203,56 @@ mod tests {
             parent_target_controller(&by_entry_id, &state),
             Some(PlayerId(1))
         );
+        // CR 113.7a: the ability exists independently of its source; its
+        // source's id is not the ability. A source with no object row and no
+        // LKI has no controller to report.
+        assert_eq!(parent_target_controller(&by_source_id, &state), None);
+    }
+
+    /// CR 113.7a + CR 608.2h: a departed source whose ability is still on the
+    /// stack answers with its battlefield LKI controller (P0, who controlled
+    /// it), not the pending ability's controller (P1).
+    #[test]
+    fn parent_target_controller_of_a_departed_source_ignores_its_pending_ability() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Departed Source".to_string(),
+            Zone::Battlefield,
+        );
+        // P0 controlled it on the battlefield; then it left (to hand).
+        state.objects.get_mut(&source_id).unwrap().controller = PlayerId(0);
+        let lki = state.objects[&source_id].snapshot_public_characteristics();
+        assert_eq!(lki.controller, PlayerId(0), "fixture: LKI controller is P0");
+        state.lki_cache.insert(source_id, lki);
+        state.battlefield.retain(|id| *id != source_id);
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.zone = Zone::Hand;
+            obj.controller = PlayerId(1);
+        }
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(77),
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Departed Source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let by_source_id = make_simple_ability(vec![TargetRef::Object(source_id)], ObjectId(0));
         assert_eq!(
             parent_target_controller(&by_source_id, &state),
-            Some(PlayerId(1))
+            Some(PlayerId(0))
         );
     }
 

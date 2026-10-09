@@ -1008,12 +1008,19 @@ fn count_matching_trigger_event_subjects(
         // Object target events yield the affected object as subject. Player
         // target events carry no object subject; player scoping lives on
         // `valid_target`.
-        GameEvent::DamageDealt { target, .. } | GameEvent::BecomesTarget { target, .. } => {
-            match target {
-                TargetRef::Object(id) => count_one(*id),
-                TargetRef::Player(_) => 0,
-            }
-        }
+        GameEvent::BecomesTarget { target, .. } => match target {
+            TargetRef::Object(id) => count_one(*id),
+            TargetRef::Player(_) => 0,
+        },
+        // CR 120.4b + CR 608.2c: like `CounterAdded` below, a damage event's
+        // batch amount is the DAMAGE dealt to matching recipients, not a
+        // recipient headcount — "one or more creatures you control are dealt
+        // damage, you gain that much life" reads the damage. A headcount here
+        // would shadow the event's own magnitude in `EventContextAmount`.
+        GameEvent::DamageDealt { target, amount, .. } => match target {
+            TargetRef::Object(id) if matches(*id) => *amount,
+            TargetRef::Object(_) | TargetRef::Player(_) => 0,
+        },
         // CR 603.2c + CR 608.2: For a batched "one or more counters are put on
         // <FILTER>" trigger whose effect reads "that much"/`EventContextAmount`
         // (All Will Be One), the batch amount is the NUMBER OF COUNTERS placed by
@@ -2529,6 +2536,7 @@ pub(super) fn match_taps(
     if let GameEvent::PermanentTapped {
         object_id,
         caused_by,
+        ..
     } = event
     {
         // If valid_card is set, check the tapped object matches (e.g. "opponent's creature")
@@ -2893,6 +2901,7 @@ pub(super) fn match_becomes_target(
     let GameEvent::BecomesTarget {
         target,
         source_id: targeting_spell_id,
+        targeter,
         ..
     } = event
     else {
@@ -2902,18 +2911,38 @@ pub(super) fn match_becomes_target(
     // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
     // constrains the targeting source to matching stack spell characteristics.
     if let Some(source_filter) = &trigger.valid_source {
+        // CR 601.2c + CR 113.8: the event records what targeted, as it was
+        // announced. A spell targeter is the spell entry carrying that
+        // announcement; an ability targeter is never a spell, even when its
+        // source is a spell on the stack (Elder Deep-Fiend's cast trigger). A
+        // legacy event without a targeter falls back to the id lookup.
+        let is_targeter = |entry: &&crate::types::game_state::StackEntry| {
+            let id_matches =
+                entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id;
+            let is_spell = matches!(
+                entry.kind,
+                crate::types::game_state::StackEntryKind::Spell { .. }
+            );
+            match targeter {
+                None => id_matches,
+                Some(crate::types::events::Targeter::Ability(_)) => id_matches && !is_spell,
+                Some(crate::types::events::Targeter::Spell(announcement)) => {
+                    is_spell
+                        && entry.id == *targeting_spell_id
+                        && state
+                            .objects
+                            .get(&entry.id)
+                            .is_some_and(|obj| obj.spell_announcement == Some(*announcement))
+                }
+            }
+        };
         // First, try to find the entry on the stack (normal case)
-        let targeting_entry = state.stack.iter().find(|entry| {
-            entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
-        });
+        let targeting_entry = state.stack.iter().find(is_targeter);
         // CR 608.2: A resolving spell or ability follows its resolution steps even
         // after the local stack entry has been popped and saved in `resolving_stack_entry`.
         // Triggered abilities can emit BecomesTarget events during that effect execution.
-        let targeting_entry = targeting_entry.or_else(|| {
-            state.resolving_stack_entry.as_ref().filter(|entry| {
-                entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
-            })
-        });
+        let targeting_entry =
+            targeting_entry.or_else(|| state.resolving_stack_entry.as_ref().filter(is_targeter));
         let Some(targeting_entry) = targeting_entry else {
             return false;
         };
@@ -13241,6 +13270,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // No valid_card, so fallback: event.object_id == source_id param
         assert!(match_becomes_target(
@@ -13269,6 +13299,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13290,6 +13321,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13351,6 +13383,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13376,6 +13409,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13397,6 +13431,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13424,6 +13459,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13451,6 +13487,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13477,6 +13514,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13504,6 +13542,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13530,6 +13569,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13556,6 +13596,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13583,6 +13624,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         assert!(match_becomes_target(
@@ -13611,6 +13653,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         assert!(!match_becomes_target(
@@ -13639,6 +13682,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         assert!(!match_becomes_target(
@@ -13704,6 +13748,7 @@ mod tests {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             match_becomes_target(
@@ -13721,6 +13766,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             match_becomes_target(
@@ -13762,6 +13808,7 @@ mod tests {
             target: TargetRef::Object(permanent),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(
@@ -13803,6 +13850,7 @@ mod tests {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(
@@ -13847,6 +13895,7 @@ mod tests {
             target: TargetRef::Object(graveyard_card),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(
@@ -13894,6 +13943,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             !match_becomes_target(&event, &trigger, &test_trigger_source_context(&state, rotpriest), &state),
@@ -13912,6 +13962,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13932,6 +13983,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13952,6 +14004,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -13972,6 +14025,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -13992,6 +14046,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -14012,6 +14067,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -14032,6 +14088,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -14077,6 +14134,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(!match_becomes_target(
             &event,
@@ -14119,6 +14177,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(match_becomes_target(
             &event,
@@ -14180,6 +14239,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // Should NOT fire because the ability (entry.id = ability_id) is controlled by PlayerId(1)
         // The other entry with different controller should not be considered
@@ -14246,6 +14306,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: pw_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // Should NOT fire because the ability (entry.source_id = pw_id) is controlled by PlayerId(0)
         // The trigger requires opponent control
@@ -14318,6 +14379,7 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: innkeepers_talent_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         // Should NOT fire because the triggered ability is controlled by PlayerId(0)
         // The trigger requires opponent control
@@ -15312,6 +15374,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: opp_creature,
             caused_by: Some(your_source),
+            incarnation: None,
         };
         assert!(match_taps(
             &event,
@@ -15351,6 +15414,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: opp_creature,
             caused_by: None,
+            incarnation: None,
         };
         assert!(!match_taps(
             &event,
@@ -15390,6 +15454,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: own_creature,
             caused_by: Some(trigger_src),
+            incarnation: None,
         };
         assert!(!match_taps(
             &event,
@@ -15430,6 +15495,7 @@ mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: any_creature,
             caused_by: None,
+            incarnation: None,
         };
         assert!(match_taps(
             &event,
@@ -15449,6 +15515,7 @@ mod tests {
         let event2 = GameEvent::PermanentTapped {
             object_id: any_creature,
             caused_by: Some(opp_source),
+            incarnation: None,
         };
         assert!(match_taps(
             &event2,

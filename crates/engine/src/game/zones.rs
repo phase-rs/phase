@@ -206,6 +206,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         if from == Zone::Stack && to != Zone::Stack {
             obj.cast_occurrence = None;
             obj.prepared_copy_source = None;
+            // CR 400.7: the spell's identity ends with the spell.
+            obj.spell_announcement = None;
         }
     }
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
@@ -1201,6 +1203,7 @@ pub fn apply_resolved_zone_change(
     if command.from == Zone::Stack && command.to != Zone::Stack {
         object.cast_occurrence = None;
         object.prepared_copy_source = None;
+        object.spell_announcement = None;
     }
     // CR 400.7: the same object-bound grant lifetime as the live cleanup
     // (issue #8795), through the shared authority.

@@ -167,7 +167,7 @@ use self::imperative::{
 };
 use self::search::parse_search_filter;
 use self::search::{
-    parse_multi_search_zones, parse_search_destination, parse_search_library_details,
+    classify_search_zone_list, parse_search_destination, parse_search_library_details,
     parse_seek_details, parse_total_mana_value_comparator,
 };
 use self::sequence::{
@@ -2007,7 +2007,104 @@ fn whenever_event_expiry_from_duration(duration: &Duration) -> Option<WheneverEv
     }
 }
 
+/// Where an inline "whenever" clause without a "this turn"/"this combat" window
+/// came from, which decides whether it can be a delayed trigger at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnwindowedWhenever {
+    /// Inside an effect chain, after the outer dispatch consumed a leading
+    /// stated duration ("Until end of turn, whenever …" — The Sea Devils III).
+    /// The bare remainder is a delayed trigger.
+    Delayed,
+    /// A whole spell line that opens with "Whenever". With no window, it is a
+    /// printed triggered ability that functions from the zone its own text names,
+    /// such as a graveyard (CR 113.6 + CR 113.6m), not a delayed one.
+    PrintedLine,
+}
+
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
+    try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::Delayed)
+}
+
+/// CR 603.4 + CR 608.2c: does this delayed body's intervening-if test the
+/// triggering object itself (a targetless `TargetMatchesFilter`, "if it's a
+/// Wizard"), through any `Not`/`And`/`Or`? Such a gate has no fire-time bridge
+/// (`delayed_intervening_if` declines it), so the shape fails closed.
+fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::TargetMatchesFilter {
+            subject_slot: None, ..
+        } => true,
+        AbilityCondition::Not { condition } => condition_reads_the_event_subject(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_reads_the_event_subject(inner),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_reads_the_event_subject)
+        }
+        // Exhaustive on purpose: a new condition leaf must decide here whether
+        // it reads the triggering event's subject.
+        AbilityCondition::TargetMatchesFilter {
+            subject_slot: Some(_),
+            ..
+        }
+        | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+    }
+}
+
+fn try_parse_whenever_this_turn_from(
+    tp: TextPair,
+    unwindowed: UnwindowedWhenever,
+) -> Option<ParsedEffectClause> {
     // CR 603.7b: capture a leading stated duration as the delayed trigger's
     // EXPIRY (its own lifetime), not the enclosing clause's duration. This runs
     // at the head so it precedes the outer `strip_leading_duration` dispatch site,
@@ -2051,33 +2148,57 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // in a later same-turn extra combat (CR 500.8) after the prepared copy was cast
     // and the creature unprepared (CR 722.3c) — rare, and not separately gated
     // because the engine has no per-combat delayed-trigger purge primitive.
-    let window_split =
-        DELAYED_TRIGGER_WINDOWS
-            .iter()
-            .fold(None::<(TextPair, TextPair)>, |best, window| {
-                match (best, tp.rsplit_around(window)) {
-                    (Some((b, _)), Some((nb, na))) if nb.lower.len() > b.lower.len() => {
-                        Some((nb, na))
-                    }
-                    (None, Some((nb, na))) => Some((nb, na)),
-                    (best, _) => best,
+    // CR 603.7b: the window terminates the trigger CONDITION, which lies in the
+    // first sentence. The clause can carry later sentences of the same delayed
+    // body (`split_clause_sequence` keeps them with the head), and one of those
+    // may itself say "this turn, ", so the search is confined to the first
+    // sentence and the effect is everything after the window.
+    let first_sentence_len = take_until::<_, _, OracleError<'_>>(". ")
+        .parse(tp.lower)
+        .map_or(tp.lower.len(), |(_, first)| first.len());
+    let (first_sentence, _) = tp.split_at(first_sentence_len);
+    let window_split = DELAYED_TRIGGER_WINDOWS
+        .iter()
+        .fold(None::<(usize, usize)>, |best, window| {
+            match (best, first_sentence.rsplit_around(window)) {
+                (Some((b, _)), Some((nb, _))) if nb.lower.len() > b => {
+                    Some((nb.lower.len(), window.len()))
                 }
-            });
+                (None, Some((nb, _))) => Some((nb.lower.len(), window.len())),
+                (best, _) => best,
+            }
+        })
+        .map(|(before_len, window_len)| {
+            let (before, _) = tp.split_at(before_len);
+            let (_, after) = tp.split_at(before_len + window_len);
+            (before, after)
+        });
 
     // CR 603.7b: When no "this turn" / "this combat" infix window is
     // present, the duration was supplied as a consumed PREFIX ("Until end of
     // turn, whenever <trigger>, <effect>" — The Sea Devils III). The clause then
     // reaches here as a bare "whenever <trigger>, <effect>" with the duration
-    // already applied to the surrounding clause. Split the trigger condition from
-    // the effect on the FIRST top-level comma — the comma that terminates the
-    // trigger clause.
+    // already applied to the surrounding clause. CR 603.1: split the trigger
+    // condition from the effect at the comma that terminates the trigger
+    // clause — the same `find_effect_boundary` authority printed triggers use,
+    // so a comma inside the condition ("whenever a Kraken, Leviathan, Merfolk,
+    // Octopus, or Serpent attacks" — Summon: Leviathan) is not the boundary.
     let (before, after) = match window_split {
         Some(split) => split,
         // CR 603.7b: The phase form is a delayed trigger ONLY when scoped by an
         // explicit "this turn"/"this combat" window. Without it, "at the beginning
         // of [phase]" is a printed trigger and must not be intercepted here.
         None if is_phase_form => return None,
-        None => tp.split_around(", ")?,
+        // CR 113.6m + CR 603.7b: a standalone spell line with no window and no
+        // consumed duration is a printed trigger (Killian's Confidence,
+        // Thunderblade Charge: graveyard abilities), not a delayed one.
+        None if unwindowed == UnwindowedWhenever::PrintedLine && leading.is_none() => return None,
+        None => {
+            let boundary = crate::parser::oracle_trigger::find_effect_boundary(tp.lower)?;
+            let (before, _) = tp.split_at(boundary);
+            let (_, after) = tp.split_at(boundary + ", ".len());
+            (before, after)
+        }
     };
 
     // Condition spans the keyword through the split boundary. The "whenever "
@@ -2121,26 +2242,54 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // is already lowercase (`before.lower`).
     inner_ctx.relative_player_scope =
         crate::parser::oracle_trigger::relative_player_scope_for_condition(condition_text);
-    // CR 608.2k + CR 120.1: In a delayed combat/noncombat-damage trigger whose
-    // subject is a set/other object (not the source permanent), an untargeted
-    // object anaphor ("it"/"them") in the effect body names the per-firing damage
-    // dealer — the `TriggeringSource` — e.g. Love on the Battlefield's "put a +1/+1
-    // counter on it" (the creature that dealt combat damage, not the enchantment).
-    // Seed the trigger subject so `resolve_it_pronoun` binds "it" → TriggeringSource
-    // (via the non-self-subject arm) instead of defaulting to `SelfRef`. Mirrors the
-    // printed-trigger effect context (`parse_trigger_line`), which likewise seeds
-    // `subject`. Scoped to `DamageDone`; a `SelfRef`/`Any` subject ("he", Human
-    // Torch) is left unset so its body keeps the source binding.
-    if matches!(trigger_def.mode, TriggerMode::DamageDone) {
-        if let Some(subject) = trigger_def
-            .valid_source
-            .clone()
-            .filter(|f| !matches!(f, TargetFilter::SelfRef | TargetFilter::Any))
-        {
-            inner_ctx.subject = Some(subject);
-        }
-    }
+    // CR 608.2k: an untargeted object anaphor in the delayed effect body names
+    // the object the trigger condition referred to — the per-firing attacker or
+    // blocker ("it gets +0/+1" — Battle Cry), the damage recipient ("is dealt
+    // damage, destroy it" — Shriveling Rot), the cast spell ("copy it"). Bound by
+    // the same authority the printed trigger body uses (`parse_trigger_line`), so
+    // a delayed trigger binds exactly what the same printed condition would. A
+    // self subject ("he" in the `Delayed` scope — Human Torch) or a subjectless
+    // condition yields `SelfRef`/`Any`, which keeps "it" bound to the source.
+    let anaphors =
+        crate::parser::oracle_trigger::trigger_condition_anaphors(condition_text, &mut inner_ctx);
+    inner_ctx.subject = Some(anaphors.subject);
+    inner_ctx.object_pronoun_ref = anaphors.object_pronoun_ref;
+    inner_ctx.condition_object_antecedent = anaphors.condition_object_antecedent;
+    inner_ctx.demonstrative_object_ref = anaphors.demonstrative_object_ref;
     let inner = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    // CR 603.4: a delayed body that opens with an intervening "if" clause must
+    // carry that condition on its root ability. When the shared conditional
+    // splitter finds a leading "if …," but the parsed root carries no
+    // condition, the gate was lost and the ability would fire unconditionally
+    // (17-Year Cicadas' printed suspend trigger, read here as a delayed one).
+    // Fail it closed rather than claim an ungated trigger.
+    let inner = if inner.condition.is_none()
+        && crate::parser::oracle_effect::conditions::split_leading_conditional(effect_text)
+            .is_some()
+    {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("delayed_intervening_if_dropped", effect_text),
+        )
+    } else if inner
+        .condition
+        .as_ref()
+        .is_some_and(condition_reads_the_event_subject)
+    {
+        // CR 603.4: "The ability triggers only if it is; otherwise it does
+        // nothing." A delayed body gated on the triggering object ("…, if it's
+        // a Wizard, draw a card") is checked against each narrowed firing's
+        // subject only at resolution today: `delayed_intervening_if` declines
+        // the targetless `TargetMatchesFilter` bridge, so a false gate would
+        // still put a respondable ability on the stack. Fail the shape closed
+        // until that bridge exists. No printed card produces it.
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("delayed_event_subject_intervening_if", effect_text),
+        )
+    } else {
+        inner
+    };
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
@@ -2884,7 +3033,7 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
 ) -> Option<AbilityIr> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    let clause = try_parse_whenever_this_turn(tp)
+    let clause = try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine)
         .or_else(|| try_parse_when_next_event(tp))
         .or_else(|| try_parse_copy_next_spell_when_cast(tp))
         .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind))?;
@@ -10316,6 +10465,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
     if counter_unless_payment_is_unsupported(text) {
         return parsed_unless_payment_unsupported_clause(text);
+    }
+    // CR 705.1 + CR 608.2c: a set chosen by each object's own coin flip ("Destroy
+    // each creature whose coin comes up tails" — Rakdos, the Showstopper; "each
+    // player whose coin comes up tails" — Goblin Assassin, Mana Clash) needs a
+    // per-object flip outcome the engine doesn't model. The type phrase would
+    // otherwise stop before the relative clause and drop it silently, applying
+    // the effect to EVERY object, so the clause fails closed.
+    if nom_primitives::scan_contains(&text.to_ascii_lowercase(), "whose coin comes up") {
+        return parsed_clause(Effect::unimplemented("per_object_coin_flip_outcome", text));
     }
     // CR 102.2 + CR 102.3 + CR 608.2c: "For each opponent, choose [up to one]
     // <type> that player controls" — the controller chooses one permanent per
@@ -26695,6 +26853,14 @@ fn lower_subject_predicate_ast(
                     };
                 }
             }
+            // CR 509.3c + CR 120.1: under a bare "becomes blocked" condition
+            // "it" names the blocked attacker (`ParentTarget`, pinned by
+            // `trigger_object_pronoun_ref_for_condition`). `DamageSource` has no
+            // value naming that attacker, so "it deals N damage" would be dealt
+            // by the ability's source. Fail it closed instead.
+            if subject_is_unbindable_damage_source(&subject, &clause.effect, ctx) {
+                return unbindable_damage_source_clause(original_clause);
+            }
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
             if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
@@ -27564,6 +27730,32 @@ fn rebind_each_target_damage_amount(effect: &mut Effect, power_scope: ObjectScop
         }
         _ => {}
     }
+}
+
+/// CR 509.3c + CR 120.1: true when the damage clause's subject is the bare
+/// "becomes blocked" condition's attacker ("it"), which no `DamageSource` value
+/// can name. Typed: the trigger condition's antecedent is the blocked attacker
+/// and the subject resolved to the matching `ParentTarget` pin.
+fn subject_is_unbindable_damage_source(
+    subject: &SubjectPhraseAst,
+    effect: &Effect,
+    ctx: &ParseContext,
+) -> bool {
+    matches!(effect, Effect::DealDamage { .. } | Effect::DamageAll { .. })
+        && ctx.condition_object_antecedent
+            == Some(crate::parser::oracle_ir::context::ConditionObjectAntecedent::BlockedAttacker)
+        && matches!(ctx.object_pronoun_ref, Some(TargetFilter::ParentTarget))
+        && matches!(
+            subject.target.as_ref().or(subject.affected.as_ref()),
+            Some(TargetFilter::ParentTarget)
+        )
+}
+
+fn unbindable_damage_source_clause(original_clause: &str) -> ParsedEffectClause {
+    parsed_clause(Effect::unimplemented(
+        "blocked_attacker_damage_source",
+        original_clause,
+    ))
 }
 
 fn bind_damage_clause_source(
@@ -42372,6 +42564,12 @@ fn parse_effect_chain_ir_body(
                         .then(|| ctx.object_pronoun_ref.clone())
                         .flatten()
                 }),
+            // CR 509.3c + CR 608.2k: the antecedent travels only with the
+            // trigger-level pin it describes — not with a chain-local typed
+            // referent, and not when the pin was withheld.
+            condition_object_antecedent: (!prior_typed_referent && !binds_source_counter_pronoun)
+                .then_some(ctx.condition_object_antecedent)
+                .flatten(),
             card_name: ctx.card_name.clone(),
             // The DEMONSTRATIVE-scoped antecedent is a property of the whole
             // trigger body (the Kashi-Tribe "tap that creature and it doesn't
@@ -43052,6 +43250,30 @@ fn parse_effect_chain_ir_body(
             }
         };
         let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
+
+        // CR 608.2c: a clause that STATED its subject ("target opponent loses
+        // life equal to the difference" — Ancient Cellarspawn) has it peeled
+        // into `leading_subject_application`, and its quantity gap records only
+        // the bare predicate. The trigger-side "difference" rewrite binds that
+        // bare predicate to `ParentTarget`, which is right only for the
+        // anaphoric "they" (Lolth's emblem, whose peeled subject IS
+        // `ParentTarget`); for a stated subject it made the controller lose the
+        // life. Record the whole clause instead, so the rewrite can't claim it
+        // and the gap stays honest until the stated subject is threaded through.
+        let clause = match leading_subject_application.as_ref() {
+            Some(application)
+                if application.affected != TargetFilter::ParentTarget
+                    && clause.effect.unimplemented_description().is_some_and(
+                        crate::parser::oracle_trigger::is_difference_lose_life_gap,
+                    ) =>
+            {
+                parsed_clause(Effect::unimplemented(
+                    "difference_drops_stated_subject",
+                    text.trim(),
+                ))
+            }
+            _ => clause,
+        };
 
         // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
         // advance the chain's chosen-player counter exactly once. The index is

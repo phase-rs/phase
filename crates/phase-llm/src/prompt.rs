@@ -14,6 +14,35 @@ use crate::error::{LlmError, LlmResult};
 pub struct LlmPrompt {
     pub system: String,
     pub user: String,
+    /// The same decision in structured form, for providers that answer typed
+    /// questions rather than chat (Jev). Built from the very strings `system`
+    /// and `user` are, so every provider is shown the same position and the same
+    /// option domain.
+    pub frame: DecisionFrame,
+}
+
+/// One decision, split into the parts a typed question needs: who the model is
+/// playing as, what it can see, what it is asked, and the options it may name.
+///
+/// Chat providers read `system` + `user` and ignore this. A System One provider
+/// has no free-text channel for a reply format or an option list, so it takes
+/// the position as its `state` and the options as the Choice's criteria, and
+/// the reply contract and data fence (which exist to steer a text reply) have
+/// no counterpart here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionFrame {
+    /// Engine-authored standing brief: the seat's role, difficulty, and format
+    /// guidance. Instructions, never data.
+    pub brief: String,
+    /// The rendered position. DATA: card names, Oracle text, log lines and
+    /// player names all reach it, so it is only ever placed in the question's
+    /// `state`, never in its instructions.
+    pub position: String,
+    /// The engine-authored question put about the position.
+    pub instruction: String,
+    /// Sanitized option lines ([`option_value`]); the index is the option number.
+    pub options: Vec<String>,
 }
 
 /// What the model was asked to do, decoded back out of its reply.

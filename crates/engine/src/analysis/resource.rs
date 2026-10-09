@@ -4391,6 +4391,11 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 /// non-object field (delayed-trigger stores, journals, monarch, …) compares the
 /// growth-invariant remainder. A hidden per-cycle accumulator here fails the compare.
 fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>) -> bool {
+    // CR 104.4b: the restricted normalization contract — a state holding an
+    // unsettled delivery carrier is never loop-comparable.
+    if !pa.is_loop_comparable() || !pb.is_loop_comparable() {
+        return false;
+    }
     let mut a = pa.clone();
     let mut b = pb.clone();
     // CR 400.1: each grown id must also leave the per-player zone COLLECTION its own `zone`

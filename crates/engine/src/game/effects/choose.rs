@@ -245,6 +245,12 @@ pub(crate) fn bind_named_choice(
                 _ => None,
             });
     }
+    // CR 105.4 + CR 608.2c: "that color" later in this resolution names this
+    // answer, whether or not the chooser persists it and whatever other kind
+    // of choice comes between (`named_color_this_resolution`).
+    if let Some(ChoiceValue::Color(color)) = ChoiceValue::from_choice(choice_type, choice) {
+        state.named_color_this_resolution = Some(color);
+    }
     let updated_context = source.as_deref_mut().and_then(|source| {
         let context = source.context.as_mut()?;
         if !choice_type.is_resolution_scoped_card_predicate_choice() {

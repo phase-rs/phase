@@ -5017,6 +5017,8 @@ export interface LlmDecisionRequestResult {
   optionCount?: number;
   request?: LlmHttpRequestSpec;
   error?: string;
+  /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */
+  errorKind?: { kind: string };
 }
 
 /** Result of submitting an opaque AI proposal to its issuing authority. */

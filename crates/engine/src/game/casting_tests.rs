@@ -24757,6 +24757,7 @@ fn target_declaration_classifies_opponent_object_as_a_provisional_crime() {
         &[TargetRef::Object(target)],
         ObjectId(99),
         PlayerId(0),
+        None,
         &mut events,
     );
     assert!(events.iter().any(|e| matches!(
@@ -24796,6 +24797,7 @@ fn emit_targeting_events_own_object_no_crime() {
         &[TargetRef::Object(target)],
         ObjectId(99),
         PlayerId(0),
+        None,
         &mut events,
     );
     assert!(events
@@ -24815,6 +24817,7 @@ fn target_declaration_classifies_opponent_player_as_a_provisional_crime() {
         &[TargetRef::Player(PlayerId(1))],
         ObjectId(99),
         PlayerId(0),
+        None,
         &mut events,
     );
     assert!(events.iter().any(|e| matches!(
@@ -24914,6 +24917,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         &crate::game::ability_utils::flatten_targets_in_chain(&ability),
         object_id,
         PlayerId(0),
+        None,
         &mut events,
     );
 

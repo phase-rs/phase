@@ -2632,19 +2632,19 @@ fn c1_row7c_the_may_journal_does_not_cross_save_load() {
 }
 
 /// **Row 7b″, structural half.** EVERY production `loop_detect_ring.clear()` is paired with
-/// a `loop_answer_journal = None` on the same receiver, at all eight sites.
+/// a `loop_answer_journal = None` on the same receiver, at all nine sites.
 ///
 /// The driven row above reaches sites 5, 6 and 7 on the F4 board; sites 1–4 and 8 need
 /// materialize / until-lethal / pipeline / unobserved-life-move boards that this fixture does
 /// not produce. A source-level census covers the whole set at the only tier that can, and
-/// fails loudly if a NINTH clear site is added without the journal, which is the actual
+/// fails loudly if a TENTH clear site is added without the journal, which is the actual
 /// regression this guards.
 ///
 /// THE WALK IS THE WHOLE CRATE, not a named pair of files. A hard-coded
-/// `["game/engine.rs", "types/game_state.rs"]` cannot see a ninth site in any THIRD file: such
-/// a site is neither paired nor reported, so `paired == 8` still passes while the regression is
-/// live. MEASURED on this tree: the recursive walk finds exactly the 8 sites the named pair did
-/// (5 in `game/engine.rs`, 3 in `types/game_state.rs`), so THE COUNT ASSERTION IS BLIND TO THE
+/// `["game/engine.rs", "types/game_state.rs"]` cannot see a tenth site in any THIRD file: such
+/// a site is neither paired nor reported, so `paired == 9` still passes while the regression is
+/// live. MEASURED on this tree: the recursive walk finds exactly the 9 sites the named pair did
+/// (5 in `game/engine.rs`, 4 in `types/game_state.rs`), so THE COUNT ASSERTION IS BLIND TO THE
 /// WIDENING — the planted-third-file probe below is the only thing that measures it.
 ///
 /// Discrimination, BOTH DIRECTIONS, RUN:
@@ -2702,9 +2702,10 @@ fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
          {unpaired:?}"
     );
     assert_eq!(
-        paired, 8,
-        "the ring has EIGHT production clear sites across the whole of `crates/engine/src` \
-         (5 in game/engine.rs, 3 in types/game_state.rs; MEASURED by this recursive walk). A \
+        paired, 9,
+        "the ring has NINE production clear sites across the whole of `crates/engine/src` \
+         (5 in game/engine.rs, 4 in types/game_state.rs, the fourth being the CR 104.4b \
+         not-loop-comparable sampler gate; MEASURED by this recursive walk). A \
          different count means a site was added or removed and this census must be re-derived, \
          not re-numbered"
     );

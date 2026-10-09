@@ -879,10 +879,7 @@ pub(crate) fn tap_permanent_for_cost(
     )
     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
     {
-        events.push(GameEvent::PermanentTapped {
-            object_id: id,
-            caused_by: None,
-        });
+        events.push(GameEvent::permanent_tapped(state, id, None));
     }
     Ok(())
 }

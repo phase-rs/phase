@@ -210,10 +210,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 119 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
- *      player a later clause names after a declared target player. A v118 peer
+ * 121 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v120 peer
  *      cannot deserialize it; the exact-match handshake refuses the pairing. P2P
- *      moves in lockstep (wire 101); lobby messages are unchanged.
+ *      moves in lockstep (wire 103); lobby messages are unchanged.
+ * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
+ *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
+ *      gains the targeter that announced the target. A v119 peer cannot
+ *      deserialize the new state. P2P moves in lockstep to wire 102. (119 is
+ *      reserved for the Legends of Jidoor PR.)
  * 118 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
  *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
  *      and trigger definitions of GameState. A v117 peer cannot deserialize the tagged
@@ -750,7 +755,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 119;
+export const PROTOCOL_VERSION = 121;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

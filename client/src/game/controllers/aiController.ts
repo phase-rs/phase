@@ -4,7 +4,7 @@ import { profileForSeat, useLlmStore } from "../../stores/llmStore";
 import { executeLlmRequest } from "../../services/llm/llmClient";
 import { loadProviderCatalog } from "../../services/llm/catalog";
 import { reportLlmFailure } from "../../services/llm/diagnostics";
-import { endpointOf } from "../../services/llm/types";
+import { resolvedEndpointOf } from "../../services/llm/endpoint";
 import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
@@ -144,15 +144,20 @@ async function llmActionProposal(
     return null;
   }
 
-  onAttempt();
   const history = (logHistory ?? []).slice(-LLM_HISTORY_TRANSFER_LIMIT);
   const built = await adapter.buildLlmDecisionRequest(
     difficulty,
     playerId,
-    JSON.stringify(endpointOf(profile)),
+    JSON.stringify(resolvedEndpointOf(profile)),
     JSON.stringify(history),
   );
   if (signal.aborted || !isCurrent()) return null;
+  // A decision this provider cannot be asked at all (a forced move has no
+  // question to pose) is not the provider failing: the heuristic plays it, and
+  // it does not count toward giving the seat's provider up.
+  if (built?.errorKind?.kind === "unsupportedDecision") return null;
+  // From here the provider is in play, so an outcome without a proposal counts.
+  onAttempt();
   if (!built?.request || !built.fingerprint) {
     // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
     // the game log is prompt-renderable. Only the Phase-authored summary is

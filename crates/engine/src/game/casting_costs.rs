@@ -1951,6 +1951,7 @@ pub(crate) fn begin_deferred_target_selection(
             &declared_targets_in_chain(&pending.ability),
             pending.object_id,
             pending.ability.controller,
+            super::casting::pending_cast_targeter(state, &pending),
             events,
         );
         if pending.activation_ability_index.is_some() {
@@ -1985,6 +1986,7 @@ pub(crate) fn begin_deferred_target_selection(
             &declared_targets_in_chain(&pending.ability),
             pending.object_id,
             pending.ability.controller,
+            super::casting::pending_cast_targeter(state, &pending),
             events,
         );
         if pending.activation_ability_index.is_some() {
@@ -6756,7 +6758,16 @@ pub(super) fn push_activated_ability_to_stack(
                 pending.crime_candidate =
                     super::casting::targets_commit_crime(state, &assigned_targets, player);
                 pending.begin_activation_trigger_collection();
-                emit_targeting_events(state, &assigned_targets, source_id, player, events);
+                emit_targeting_events(
+                    state,
+                    &assigned_targets,
+                    source_id,
+                    player,
+                    Some(crate::types::events::Targeter::Ability(
+                        crate::types::ability::StackAbilityKind::Activated,
+                    )),
+                    events,
+                );
                 return finish_target_selected_activated_ability_at_payment_boundary(
                     state, player, pending, events,
                 );
@@ -6780,6 +6791,9 @@ pub(super) fn push_activated_ability_to_stack(
                     &declared_targets_in_chain(&pending.ability),
                     source_id,
                     player,
+                    Some(crate::types::events::Targeter::Ability(
+                        crate::types::ability::StackAbilityKind::Activated,
+                    )),
                     events,
                 );
                 return finish_target_selected_activated_ability_at_payment_boundary(
@@ -6803,6 +6817,9 @@ pub(super) fn push_activated_ability_to_stack(
                     &declared_targets_in_chain(&pending.ability),
                     source_id,
                     player,
+                    Some(crate::types::events::Targeter::Ability(
+                        crate::types::ability::StackAbilityKind::Activated,
+                    )),
                     events,
                 );
                 return finish_target_selected_activated_ability_at_payment_boundary(
@@ -14405,10 +14422,7 @@ fn auto_tap_mana_sources_inner(
                 )
                 .expect("auto-tap source must remain a live exact object")
                 {
-                    events.push(GameEvent::PermanentTapped {
-                        object_id: option.object_id,
-                        caused_by: None,
-                    });
+                    events.push(GameEvent::permanent_tapped(state, option.object_id, None));
                 }
                 // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
                 // intrinsic mana ability. It never moves the land, so it carries no
