@@ -376,7 +376,7 @@ fn prepare_readings(state: &GameState, record: &SpellCastRecord) -> [bool; 4] {
         .map(|filter| spell_record_matches_filter(record, &filter, P0, &state.all_creature_types))
 }
 
-/// CR 117.1: P0's "spells you've cast this turn" count, optionally filtered,
+/// P0's "spells you've cast this turn" count, optionally filtered,
 /// resolved through the production quantity resolver.
 fn spells_cast_this_turn(state: &GameState, source: ObjectId, filter: Option<TargetFilter>) -> i32 {
     engine::game::quantity::resolve_quantity(

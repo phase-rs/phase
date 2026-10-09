@@ -1303,7 +1303,9 @@ pub struct SpellCastRecord {
     /// the real designation rather than an unknown. `None` for every other spell,
     /// including Paradigm and cast-a-copy-of-a-card casts (CR 707.12), and for
     /// legacy payloads. A copy of a prepare spell is a prepare spell (CR 722.3d)
-    /// but is not cast (CR 707.10), so copies never reach this ledger. A live
+    /// but is not cast (CR 707.10), so a copy made by a spell never reaches this
+    /// ledger; a copy that is itself cast (the `CopySpell` + `CastFromZone` route)
+    /// keeps the marker, which is correct per CR 722.3d. A live
     /// candidate projection of the linked copy still waiting in exile also carries
     /// the marker: that object can only be cast as a prepare spell (CR 722.3c), so
     /// pre-cast probes and the recorded cast agree.
