@@ -19159,21 +19159,22 @@ mod mode_gate_tests {
             ClientMessage::GetTournament {
                 code: "TOUR01".into(),
             },
-            // Deliberately CORRELATED, and the only fixture here that is.
+            // Deliberately CORRELATED.
             // `skip_serializing_if = "Option::is_none"` means a `None`
             // correlator emits no key at all, so under an all-`None` table a
             // projection that FORWARDED the field and one that DISCARDED it
             // serialize to byte-identical strings — and
             // `tournament_variants_survive_the_canonical_lobby_roundtrip`, whose
             // whole job is to catch a dropped field, would pass either way.
-            // A real `Some(..)` is what makes that instrument fire.
+            // A real `Some(..)` makes this comparison detect a dropped id.
             ClientMessage::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "org-tok".into(),
                 request_id: Some(TournamentRequestId(7)),
             },
-            // The remaining three stay uncorrelated, so the same pass also
-            // proves a pre-correlation frame still round-trips unchanged.
+            // The existing report, drop, and end frames retain `None` as the
+            // omitted-field control. Submission below has its own correlated
+            // fixture so this comparison detects a dropped id for that arm.
             ClientMessage::ReportMatchResult {
                 code: "TOUR01".into(),
                 pairing_id: 7,
@@ -19193,7 +19194,7 @@ mod mode_gate_tests {
                     main_deck: vec!["Island".into(), "Forest".into()],
                     ..Default::default()
                 },
-                request_id: None,
+                request_id: Some(TournamentRequestId(8)),
             },
             ClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
