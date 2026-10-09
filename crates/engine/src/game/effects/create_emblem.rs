@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
@@ -79,10 +79,7 @@ fn emblem_link_binding(
     ability: &ResolvedAbility,
 ) -> Option<LinkedAbilitySource> {
     let source = state.objects.get(&ability.source_id)?;
-    let creator = ObjectIncarnationRef::of(
-        source.id,
-        ability.source_incarnation.unwrap_or(source.incarnation),
-    );
+    let creator = ability.source_ref(state)?;
     let characteristic_set = match ability.source_ability_provenance() {
         Some(AbilityProvenance::Characteristic(set)) => set,
         Some(AbilityProvenance::Granted) => return None,
@@ -157,7 +154,7 @@ mod tests {
         BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
         StaticDefinition, TargetFilter, TypedFilter,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
 
@@ -188,6 +185,7 @@ mod tests {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         }
     }
 
@@ -653,20 +651,22 @@ mod tests {
             Zone::Battlefield,
         );
         let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
-        let copy_id = state.add_transient_continuous_effect(
-            source_id,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: source_id },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let copy_id = state
+            .add_transient_continuous_effect(
+                source_id,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: source_id },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         crate::game::layers::mark_layers_full(&mut state);
         crate::game::layers::flush_layers(&mut state);
         assert_eq!(

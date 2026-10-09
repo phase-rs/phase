@@ -163,9 +163,8 @@ pub fn apply_debug_action(
 
         DebugAction::Mill { player_id, count } => {
             validate_player(state, player_id)?;
-            let player = state.players.iter().find(|p| p.id == player_id).unwrap();
-            let top_ids: Vec<ObjectId> = player
-                .library
+            let top_ids: Vec<ObjectId> = state
+                .library_of(player_id)
                 .iter()
                 .take(count as usize)
                 .copied()

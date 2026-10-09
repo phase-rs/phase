@@ -38,6 +38,7 @@ use crate::types::game_state::{
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
@@ -613,6 +614,16 @@ pub struct DungeonRoomView {
 /// live once, beside the static tables, rather than once per surface.
 pub use crate::game::dungeon::{DungeonCardView, DungeonRoomNodeView};
 
+/// CR 400.1 as modified by the format's shared-zone axis: which seat's
+/// container stores each shared pile. A zone absent here is per-player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedPilesView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<PlayerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard: Option<PlayerId>,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -623,6 +634,10 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// The authorized viewer's Scry identity, retained when the bounded
+    /// interaction projection omits its opportunities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scry_prompt_id: Option<InteractionId>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -633,6 +648,10 @@ pub struct DerivedViews {
     /// intentionally narrow so a debug browser can select a card by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debug_library_cards: Vec<DebugLibraryCardView>,
+    /// Present only for a format that shares a library or graveyard; names the
+    /// seat whose `Player` container stores each shared pile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_piles: Option<SharedPilesView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -1535,8 +1554,11 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        scry_prompt_id: viewer
+            .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
+        shared_piles: shared_piles(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
@@ -2169,6 +2191,9 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.scry_prompt_id = viewer.and_then(|viewer| {
+        crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
+    });
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
@@ -2243,6 +2268,14 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
         .collect()
 }
 
+fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
+    let view = SharedPilesView {
+        library: state.shared_zone_holder(Zone::Library),
+        graveyard: state.shared_zone_holder(Zone::Graveyard),
+    };
+    (view.library.is_some() || view.graveyard.is_some()).then_some(view)
+}
+
 fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<DebugLibraryCardView> {
     let Some(viewer) = viewer else {
         return Vec::new();
@@ -2255,7 +2288,7 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
         .iter()
         .find(|player| player.id == viewer)
         .into_iter()
-        .flat_map(|player| player.library.iter())
+        .flat_map(|player| state.library_of(player.id).iter())
         .filter_map(|object_id| {
             state
                 .objects
@@ -4204,36 +4237,39 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&target).unwrap(),
         );
-        let tce_id = state.add_transient_continuous_effect_with_bindings(
-            source,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::IsTapped {
-                    scope: ObjectScope::Target,
+        let tce_id = state
+            .add_transient_continuous_effect_with_bindings(
+                source,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Target,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: source },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            crate::types::game_state::TransientContinuousEffectBindings {
-                affected_recipient: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&source],
+                TargetFilter::SpecificObject { id: source },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                crate::types::game_state::TransientContinuousEffectBindings {
+                    affected_recipient: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&source],
+                        ),
                     ),
-                ),
-                duration_subject: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&target],
+                    duration_subject: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&target],
+                        ),
                     ),
-                ),
-            },
-        );
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
 
         assert_eq!(
             derive_views(&state, None).copied_permanents,
@@ -4306,20 +4342,22 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&host).unwrap(),
         );
-        let independent_copy_effect_id = state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: host },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let independent_copy_effect_id = state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         assert_ne!(
             Some(independent_copy_effect_id),
             merge_effect_id,
@@ -6623,6 +6661,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }]
             .into();
         }
@@ -9096,6 +9135,110 @@ mod tests {
             }),
             "the declared set holds a Land and would classify Permanent; the narrowed offer the \
              client actually renders holds only the creature"
+        );
+    }
+
+    fn shared_piles_wire(state: &GameState, viewer: Option<PlayerId>) -> serde_json::Value {
+        let filtered = match viewer {
+            Some(viewer) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+            None => state.clone(),
+        };
+        let wire =
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(state, &filtered, viewer))
+                .expect("serialize client state");
+        wire["derived"].clone()
+    }
+
+    #[test]
+    fn shared_piles_names_the_holder_for_a_shared_zone_format() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let both = Some(SharedPilesView {
+            library: Some(PlayerId(0)),
+            graveyard: Some(PlayerId(0)),
+        });
+        assert_eq!(derive_views(&state, None).shared_piles, both);
+        let json = serde_json::to_value(derive_views(&state, None)).unwrap();
+        assert_eq!(
+            json["shared_piles"],
+            serde_json::json!({"library": 0, "graveyard": 0})
+        );
+
+        // The descriptor and the storage accessor agree on the holder.
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Seat One Card".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(1)).push_back(card);
+        assert!(state.players[0].library.contains(&card));
+        assert!(state.players[1].library.is_empty());
+    }
+
+    #[test]
+    fn shared_piles_is_absent_for_per_player_formats() {
+        let standard = GameState::new(FormatConfig::standard(), 2, 42);
+        assert_eq!(derive_views(&standard, None).shared_piles, None);
+        let json = serde_json::to_value(derive_views(&standard, None)).unwrap();
+        assert!(json.get("shared_piles").is_none());
+        let commander = GameState::new(FormatConfig::commander(), 2, 42);
+        assert_eq!(derive_views(&commander, None).shared_piles, None);
+        // Reach-guard: the same function answers `Some` for the shared format.
+        assert!(
+            derive_views(&GameState::new(FormatConfig::dandan(), 2, 42), None)
+                .shared_piles
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn shared_piles_survives_every_viewer_projection() {
+        let state = GameState::new(FormatConfig::dandan(), 2, 42);
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            assert_eq!(
+                shared_piles_wire(&state, viewer)["shared_piles"],
+                serde_json::json!({"library": 0, "graveyard": 0}),
+                "viewer {viewer:?}"
+            );
+        }
+        let local = serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(1))))
+            .expect("serialize local client state");
+        assert_eq!(
+            local["derived"]["shared_piles"],
+            serde_json::json!({"library": 0, "graveyard": 0})
+        );
+    }
+
+    #[test]
+    fn shared_piles_holder_is_the_lowest_seat_not_the_first_in_turn_order() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        state.seat_order = vec![PlayerId(1), PlayerId(0)];
+        assert_eq!(
+            derive_views(&state, None).shared_piles.unwrap().library,
+            Some(PlayerId(0))
+        );
+    }
+
+    #[test]
+    fn debug_library_projection_reads_the_shared_pile_for_the_non_holder_seat() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(1));
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shared Pile Card".to_string(),
+            Zone::Library,
+        );
+        let views = derive_views(&state, Some(PlayerId(1)));
+        assert_eq!(
+            views.debug_library_cards,
+            vec![DebugLibraryCardView {
+                object_id: card,
+                name: "Shared Pile Card".to_string(),
+            }]
         );
     }
 }

@@ -3,8 +3,8 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{GameState, TransientContinuousEffectBindings};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 
@@ -31,20 +31,39 @@ pub fn resolve(
     let new_controller = gain_control_controller(ability, target);
     let object_ids = gain_control_object_targets(state, ability, target);
 
+    // Settle first so the captured prior controllers are post-layer values.
+    if duration.is_for_as_long_as() {
+        crate::game::layers::flush_layers(state);
+    }
+
     for obj_id in object_ids {
-        let Some(old_controller) = state.objects.get(&obj_id).map(|obj| obj.controller) else {
+        let Some(object) = state.objects.get(&obj_id) else {
             return Err(EffectError::ObjectNotFound(obj_id));
         };
-
-        // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
-        state.add_transient_continuous_effect(
+        let old_controller = object.controller;
+        let recipient = ObjectIncarnationRef::from_object(object);
+        // CR 611.2c + CR 400.7: state durations track this exact recipient.
+        // CR 400.7a: other control effects retain spell-to-permanent continuity.
+        // CR 611.2b: a duration that never starts installs nothing, so no
+        // control or echo side effect follows.
+        let installed = state.add_transient_continuous_effect_with_bindings(
             ability.source_id,
             new_controller,
             duration.clone(),
             TargetFilter::SpecificObject { id: obj_id },
             vec![ContinuousModification::ChangeController],
             None,
+            TransientContinuousEffectBindings {
+                affected_recipient: matches!(duration, Duration::ForAsLongAs { .. })
+                    .then_some(recipient),
+                duration_subject: matches!(duration, Duration::ForAsLongAs { .. })
+                    .then_some(recipient),
+                granting_object: None,
+            },
         );
+        if installed.is_none() {
+            continue;
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
         // CR 613.1b: emit the control-change event so "when you lose control"
@@ -118,6 +137,12 @@ pub fn resolve_all(
     // "you gain control" — the ability's controller takes control.
     let new_controller = ability.controller;
 
+    // Settle first so matching and the captured prior controllers read
+    // post-layer values.
+    if duration.is_for_as_long_as() {
+        crate::game::layers::flush_layers(state);
+    }
+
     // Ability-context filter evaluation, identical to `destroy::resolve_all`:
     // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
     // TargetPlayer`) from the ability before matching.
@@ -135,7 +160,9 @@ pub fn resolve_all(
     for obj_id in matching {
         let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
         // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
-        state.add_transient_continuous_effect(
+        // CR 611.2b: one whose duration never starts (The Wretched after its
+        // controller lost it) installs nothing and emits no side effect.
+        let installed = state.add_transient_continuous_effect(
             ability.source_id,
             new_controller,
             duration.clone(),
@@ -143,6 +170,9 @@ pub fn resolve_all(
             vec![ContinuousModification::ChangeController],
             None,
         );
+        if installed.is_none() {
+            continue;
+        }
         mark_echo_due_for_new_controller(state, obj_id);
         if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
             events.push(GameEvent::ControllerChanged {
@@ -285,8 +315,9 @@ pub fn resolve_give(
         let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
 
         // CR 613.3: Create a transient continuous effect at Layer 2 (Control)
-        // with the recipient as the new controller.
-        state.add_transient_continuous_effect(
+        // with the recipient as the new controller. CR 611.2b: one whose
+        // duration never starts installs nothing and emits no side effect.
+        let installed = state.add_transient_continuous_effect(
             ability.source_id,
             recipient_id,
             duration.clone(),
@@ -294,6 +325,9 @@ pub fn resolve_give(
             vec![ContinuousModification::ChangeController],
             None,
         );
+        if installed.is_none() {
+            continue;
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
         // CR 110.2: Record the handoff for downstream "if they do" riders and
@@ -417,7 +451,11 @@ fn unique_recipient_from_filter(
     // event.
     if matches!(
         filter,
-        TargetFilter::TriggeringPlayer | TargetFilter::TriggeringSourceController
+        TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSourceController
+            // CR 113.8: "that spell or ability's controller" on a targeting
+            // trigger (Fractured Loyalty) — the targeter's controller.
+            | TargetFilter::TriggeringSpellController
     ) {
         return crate::game::targeting::resolve_event_context_target(
             state,

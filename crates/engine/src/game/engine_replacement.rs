@@ -596,10 +596,7 @@ fn handle_replacement_choice_inner(
                     )
                     .is_ok()
                     {
-                        events.push(GameEvent::PermanentTapped {
-                            object_id,
-                            caused_by: None,
-                        });
+                        events.push(GameEvent::permanent_tapped(state, object_id, None));
                     }
                 }
                 // CR 701.26b: Untap accepted after replacement choice.

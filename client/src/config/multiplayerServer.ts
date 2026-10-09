@@ -51,6 +51,21 @@ export function parseWebSocketUrl(value: string): URL | null {
 }
 
 /**
+ * The HTTP origin served beside a phase-server's WebSocket API (`wss:` →
+ * `https:`, `ws:` → `http:`), or `undefined` when there is no server or the
+ * address is not a valid ws/wss URL. Path, query and fragment are dropped.
+ *
+ * Takes the address rather than reading a store: this module is imported by
+ * the store that holds it, so the read belongs to each caller.
+ */
+export function serverHttpOrigin(webSocketUrl: string | null): string | undefined {
+  const server = webSocketUrl === null ? null : parseWebSocketUrl(webSocketUrl);
+  if (!server) return undefined;
+  server.protocol = server.protocol === "wss:" ? "https:" : "http:";
+  return server.origin;
+}
+
+/**
  * Where this build connects by default.
  *
  * Runtime configuration wins over the build-time define so one generic image

@@ -16,7 +16,7 @@ fn graveyard_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     state
         .players
         .get(player.0 as usize)
-        .map(|p| p.graveyard.iter().copied().collect())
+        .map(|p| state.graveyard_of(p.id).iter().copied().collect())
         .unwrap_or_default()
 }
 
@@ -173,7 +173,7 @@ pub(crate) fn handle_choice(
     let still_legal: Vec<ObjectId> = state
         .players
         .get(player.0 as usize)
-        .map(|p| p.graveyard.iter().copied().collect())
+        .map(|p| state.graveyard_of(p.id).iter().copied().collect())
         .unwrap_or_default();
     for id in chosen {
         if !still_legal.contains(id) {

@@ -11,8 +11,8 @@ import {
 export type FlightDestination = Extract<Zone, "Stack" | "Battlefield" | "Graveyard" | "Hand" | "Library" | "Exile">;
 
 /** Where a card flight goes: from the card's surface in one zone to its own
- *  surface in another. `ownerId` locates per-player surfaces (hand, library,
- *  graveyard), which belong to the card's owner whoever controls it. */
+ *  surface in another. `ownerId` locates per-player surfaces (hand, exile; library and
+ *  graveyard unless the format shares them), which belong to the card's owner whoever controls it. */
 export interface CardFlightRoute {
   from: Zone;
   to: FlightDestination;

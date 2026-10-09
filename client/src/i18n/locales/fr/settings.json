@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nouvelles",
       "classic": "Classiques"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Survolez pour prévisualiser",
+    "cardAnimationPreviewHintTap": "Touchez pour prévisualiser"
   },
   "flexLayout": {
     "title": "Disposition flexible",
@@ -503,6 +505,8 @@
     "modelPlaceholder": "Identifiant du modèle (par ex. gpt-5, claude-sonnet-5)",
     "endpoint": "Point de terminaison",
     "endpointPlaceholder": "https://votre-serveur/v1",
+    "jevEndpointPlaceholder": "Par défaut, votre serveur multijoueur",
+    "jevEndpointHint": "Jev est joignable via un serveur multijoueur phase, qui relaie chaque requête à TypeSafe. Votre clé ne circule que dans cette requête et n'est jamais stockée sur le serveur.",
     "apiKey": "Clé d'API",
     "apiKeyPlaceholder": "Collez votre clé d'API",
     "apiKeyOptional": "Facultative pour un serveur local",

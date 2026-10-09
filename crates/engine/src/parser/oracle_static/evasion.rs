@@ -2258,6 +2258,76 @@ fn parse_nominative_pronoun(input: &str) -> OracleResult<'_, &str> {
     alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)
 }
 
+/// CR 510.1c + CR 609.4: Shared tail of every "assign its combat damage as though
+/// it weren't blocked" grammar: " assign <its> combat damage as though <it>
+/// weren't blocked". Returns the remainder so each caller decides how strictly to
+/// consume what follows.
+fn parse_assign_damage_unblocked_tail(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag(" assign ").parse(input)?;
+    let (rest, _) = parse_possessive_pronoun(rest)?;
+    let (rest, _) = tag(" combat damage as though ").parse(rest)?;
+    let (rest, _) = parse_nominative_pronoun(rest)?;
+    let (rest, _) = tag(" weren't blocked").parse(rest)?;
+    Ok((rest, ()))
+}
+
+/// CR 510.1c + CR 609.4 + CR 508.1k + CR 611.3a: Parse the per-creature class grant
+/// "[As long as <condition>, ]for each <creature class> you control, you may have
+/// that creature assign its combat damage as though it weren't blocked." (Siege
+/// Behemoth; Zilortha, Apex of Ikoria; Ruxa, Patient Professor).
+///
+/// Fails closed: an unparsable gate, a subject that is not a controller-scoped
+/// typed filter with a type anchor, or any unconsumed tail yields `None`, so a
+/// gated line can never degrade to an ungated static.
+pub(crate) fn parse_for_each_assign_damage_as_though_unblocked(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = tp.lower.trim_end_matches('.');
+    let (rest, gate_text) = opt(terminated(
+        preceded(
+            tag::<_, _, VE<'_>>("as long as "),
+            take_until(", for each "),
+        ),
+        tag(", "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let condition = match gate_text {
+        Some(gate_text) => Some(parse_static_condition(gate_text)?),
+        None => None,
+    };
+    let (rest, _) = tag::<_, _, VE<'_>>("for each ").parse(rest).ok()?;
+
+    // `parse_type_phrase_folding` is infallible: unrecognized input yields an empty
+    // filter, so decline anything that is not a controller-scoped, type-anchored
+    // typed filter.
+    let (subject, rest) = parse_type_phrase_folding(rest);
+    let TargetFilter::Typed(typed) = &subject else {
+        return None;
+    };
+    if typed.controller != Some(ControllerRef::You) || typed.type_filters.is_empty() {
+        return None;
+    }
+
+    let (rest, _) = tag::<_, _, VE<'_>>(", you may have that creature")
+        .parse(rest)
+        .ok()?;
+    let (rest, ()) = parse_assign_damage_unblocked_tail(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = StaticDefinition::continuous()
+        .affected(subject)
+        .modifications(vec![ContinuousModification::AssignDamageAsThoughUnblocked])
+        .description(text.to_string());
+    def.condition = condition;
+    Some(def)
+}
+
 /// CR 510.1c: Parse "you may have this creature assign its combat damage as though it
 /// weren't blocked" self-referential static. Accepts gendered pronouns
 /// (his/her/he/she/they) so named characters parse the same as neuter creatures.
@@ -2275,13 +2345,7 @@ pub(crate) fn parse_assign_damage_as_though_unblocked(
     .parse(clean)
     .ok()?;
     let (rest, _) = result;
-    let (rest, _) = tag::<_, _, VE<'_>>(" assign ").parse(rest).ok()?;
-    let (rest, _) = parse_possessive_pronoun(rest).ok()?;
-    let (rest, _) = tag::<_, _, VE<'_>>(" combat damage as though ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = parse_nominative_pronoun(rest).ok()?;
-    let (rest, _) = tag::<_, _, VE<'_>>(" weren't blocked").parse(rest).ok()?;
+    let (rest, ()) = parse_assign_damage_unblocked_tail(rest).ok()?;
     if !rest.is_empty() {
         return None;
     }
@@ -2324,13 +2388,7 @@ pub(crate) fn parse_attached_creature_assign_damage_as_though_unblocked(
         .parse(rest.lower)
         .ok()?;
     let (after, _) = parse_nominative_pronoun(after).ok()?;
-    let (after, _) = tag::<_, _, VE<'_>>(" assign ").parse(after).ok()?;
-    let (after, _) = parse_possessive_pronoun(after).ok()?;
-    let (after, _) = tag::<_, _, VE<'_>>(" combat damage as though ")
-        .parse(after)
-        .ok()?;
-    let (after, _) = parse_nominative_pronoun(after).ok()?;
-    let (_, _) = tag::<_, _, VE<'_>>(" weren't blocked").parse(after).ok()?;
+    let (_, ()) = parse_assign_damage_unblocked_tail(after).ok()?;
 
     Some(
         StaticDefinition::continuous()

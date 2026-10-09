@@ -1914,7 +1914,13 @@ pub fn resolve_all(
     // CR 120.3: Collect matching player IDs when the effect also targets players.
     // The player set is part of the same damage event as the object set.
     let matching_players: Vec<PlayerId> = match player_filter {
-        Some(pf) => collect_matching_players(state, pf, ability.controller, ability.source_id),
+        Some(pf) => collect_matching_players(
+            state,
+            pf,
+            ability.controller,
+            ability.source_id,
+            ability.context.granting_object,
+        ),
         None => Vec::new(),
     };
 
@@ -2010,6 +2016,7 @@ fn collect_matching_players(
     player_filter: PlayerFilter,
     source_controller: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
+    granting_object: Option<crate::types::identifiers::ObjectIncarnationRef>,
 ) -> Vec<PlayerId> {
     state
         .players
@@ -2156,12 +2163,13 @@ fn collect_matching_players(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
-                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
-                    // the resolution-scoped chosen-player anchor have no meaning
-                    // for a damage-each-player effect (no parent object target /
-                    // chosen player is in scope here); never matches.
+                    // CR 109.4 + CR 108.3 + CR 601.2a: the parent-object-target anchors,
+                    // the resolution-scoped chosen-player anchor and the unlatched
+                    // granter caster have no meaning for a damage-each-player effect
+                    // (none is in scope here); never matches.
                     PlayerFilter::ParentObjectTargetController
                     | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
@@ -2208,14 +2216,10 @@ fn collect_matching_players(
                             value,
                             source_controller,
                             crate::game::quantity::QuantityContext {
-                                entering: None,
-                                source: source_id,
-                                trigger_source: None,
-                                recipient: None,
                                 scoped_player: Some(p.id),
-                                damage_source: None,
-                                spell: None,
-                                event_amount: None,
+                                // CR 201.5a: a granted body's threshold names its granter.
+                                granting_object,
+                                ..crate::game::quantity::QuantityContext::new(source_id)
                             },
                         );
                         crate::game::players::matches_relation(
@@ -2432,12 +2436,13 @@ pub fn resolve_each_player(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
-                    // the resolution-scoped chosen-player anchor have no meaning
-                    // for a damage-each-player effect (no parent object target /
-                    // chosen player is in scope here); never matches.
+                    // CR 109.4 + CR 108.3 + CR 601.2a: the parent-object-target anchors,
+                    // the resolution-scoped chosen-player anchor and the unlatched
+                    // granter caster have no meaning for a damage-each-player effect
+                    // (none is in scope here); never matches.
                     PlayerFilter::ParentObjectTargetController
                     | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
@@ -2484,14 +2489,9 @@ pub fn resolve_each_player(
                             value,
                             ability.controller,
                             crate::game::quantity::QuantityContext {
-                                entering: None,
-                                source: ability.source_id,
-                                trigger_source: None,
-                                recipient: None,
                                 scoped_player: Some(p.id),
-                                damage_source: None,
-                                spell: None,
-                                event_amount: None,
+                                granting_object: ability.context.granting_object,
+                                ..crate::game::quantity::QuantityContext::new(ability.source_id)
                             },
                         );
                         crate::game::players::matches_relation(
@@ -7503,54 +7503,31 @@ mod tests {
     // battles (Screaming Nemesis precedent). These tests drive the real parsed
     // output through the activation/resolution pipeline.
 
-    /// Extract the activated ability definition that a parsed "gains
-    /// \"{T}: …\" until end of turn" trigger grants.
+    /// Iron Fist's granted body parsed as a printed ability, since the card's own grant line
+    /// lowers to the CR 201.5a granter residual.
     #[cfg(test)]
-    fn extract_granted_ability(
-        oracle: &str,
-        card_name: &str,
-    ) -> crate::types::ability::AbilityDefinition {
-        use crate::types::ability::{ContinuousModification, Effect};
-        let parsed = crate::parser::oracle::parse_oracle_text(
-            oracle,
-            card_name,
+    fn iron_fist_granted_body() -> crate::types::ability::AbilityDefinition {
+        crate::parser::oracle::parse_oracle_text(
+            "{T}: Iron Fist deals damage equal to his power to any other target",
+            "Iron Fist, Living Weapon",
             &[],
             &["Creature".into()],
             &[],
-        );
-        let trigger = parsed
-            .triggers
-            .into_iter()
-            .next()
-            .expect("cast trigger present");
-        let execute = trigger.execute.expect("trigger has an execute ability");
-        let Effect::GenericEffect {
-            static_abilities, ..
-        } = &*execute.effect
-        else {
-            panic!(
-                "expected GenericEffect granting an ability, got {:?}",
-                execute.effect
-            );
-        };
-        let modification = static_abilities
-            .iter()
-            .flat_map(|s| s.modifications.iter())
-            .find_map(|m| match m {
-                ContinuousModification::GrantAbility { definition } => Some((**definition).clone()),
-                _ => None,
-            });
-        modification.expect("a GrantAbility modification")
+        )
+        .abilities
+        .into_iter()
+        .next()
+        .expect("the activated ability")
     }
 
     /// CR 120.1 + CR 115.4 + CR 208.3 — DISCRIMINATING runtime gate for Iron
-    /// Fist, Living Weapon. Its cast-trigger grants "{T}: ~ deals damage equal
-    /// to his power to any other target". Parsing the full card, attaching the
-    /// granted ability to a 4-power Iron Fist, and activating it at an opponent
-    /// creature must deal exactly 4 damage. Reverting the gendered-pronoun
-    /// quantity fix makes "his power" fall to `Effect::Unimplemented`, so the
-    /// granted ability deals no damage and `ActivateAbility` never reaches a
-    /// damage resolution — this assertion flips.
+    /// Fist, Living Weapon's granted "{T}: ~ deals damage equal to his power to
+    /// any other target". Attaching that ability to a 4-power Iron Fist and
+    /// activating it at an opponent creature must deal exactly 4 damage.
+    /// Reverting the gendered-pronoun quantity fix makes "his power" fall to
+    /// `Effect::Unimplemented`, so the granted ability deals no damage and
+    /// `ActivateAbility` never reaches a damage resolution — this assertion
+    /// flips.
     #[test]
     fn iron_fist_granted_ability_deals_damage_equal_to_power() {
         use crate::game::scenario::GameScenario;
@@ -7559,11 +7536,7 @@ mod tests {
         const P0: PlayerId = PlayerId(0);
         const P1: PlayerId = PlayerId(1);
 
-        let granted = extract_granted_ability(
-            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
-             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
-            "Iron Fist, Living Weapon",
-        );
+        let granted = iron_fist_granted_body();
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -7603,11 +7576,7 @@ mod tests {
         const P0: PlayerId = PlayerId(0);
         const P1: PlayerId = PlayerId(1);
 
-        let granted = extract_granted_ability(
-            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
-             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
-            "Iron Fist, Living Weapon",
-        );
+        let granted = iron_fist_granted_body();
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);

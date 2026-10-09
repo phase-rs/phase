@@ -32,6 +32,8 @@ import {
   recordLlmDraftSubmission,
   reportLlmDraftOutcomes,
   resetLlmDraftBreaker,
+  startLlmDraftRound,
+  type LlmDrafterStatus,
 } from "../draftLlm";
 import type { LlmProfile } from "../types";
 
@@ -60,6 +62,7 @@ function pickRequest(seat: number, fingerprint: string) {
     fingerprint,
     optionCount: 15,
     requiredPickCount: 1,
+    promptChars: 1000 + seat,
     request: REQUEST,
   };
 }
@@ -449,5 +452,74 @@ describe("LLM drafters", () => {
     }
 
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  describe("a pick round started when the pack opens", () => {
+    it("reports every seat picking, then each seat's own outcome as it settles", async () => {
+      leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
+      let releaseSeatTwo!: () => void;
+      const seatTwo = new Promise<void>((resolve) => {
+        releaseSeatTwo = resolve;
+      });
+      llmMocks.executeLlmRequest.mockImplementation(async (spec) => {
+        if (spec === REQUEST && llmMocks.executeLlmRequest.mock.calls.length === 1) {
+          throw new Error("provider down");
+        }
+        await seatTwo;
+        return { status: 200, body: '{"choice":0}' };
+      });
+      const published: (readonly LlmDrafterStatus[])[] = [];
+
+      const round = startLlmDraftRound(PROFILE, () => true, (statuses) => published.push(statuses));
+      expect(round.settled).toBe(false);
+      await vi.waitFor(() => expect(published.length).toBeGreaterThanOrEqual(2));
+
+      expect(published[0]).toEqual([
+        { seat: 1, state: "picking" },
+        { seat: 2, state: "picking" },
+      ]);
+      // Seat 1's call failed; seat 2 is still thinking.
+      expect(published[published.length - 1]).toEqual([
+        { seat: 1, state: "fallback" },
+        { seat: 2, state: "picking" },
+      ]);
+      expect(round.settled).toBe(false);
+
+      releaseSeatTwo();
+      await expect(round.responses).resolves.toEqual([
+        { seat: 2, fingerprint: "fp-2", provider: "Anthropic", status: 200, body: '{"choice":0}' },
+      ]);
+      expect(round.settled).toBe(true);
+      expect(published[published.length - 1]).toEqual([
+        { seat: 1, state: "fallback" },
+        { seat: 2, state: "ready" },
+      ]);
+      expect(round.promptChars.get(2)).toBe(1002);
+    });
+
+    it("publishes nothing once its pick step is no longer current", async () => {
+      leaseReturning([pickRequest(1, "fp-1")]);
+      llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+      const onStatus = vi.fn();
+
+      const round = startLlmDraftRound(PROFILE, () => false, onStatus);
+
+      await expect(round.responses).resolves.toEqual([]);
+      expect(onStatus).not.toHaveBeenCalled();
+    });
+
+    /// The last card of a pack is never put to a provider: the engine builds no
+    /// request for a forced pick, so the round asks nothing and shows nothing.
+    it("asks nothing and shows nothing when every pick is forced", async () => {
+      leaseReturning([]);
+      const onStatus = vi.fn();
+
+      const round = startLlmDraftRound(PROFILE, () => true, onStatus);
+
+      await expect(round.responses).resolves.toEqual([]);
+      expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+      expect(onStatus).not.toHaveBeenCalled();
+      expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    });
   });
 });

@@ -2738,6 +2738,7 @@ fn a_ward_counter_never_reports_the_targeting_abilitys_source_as_acted_on() {
                 target: TargetRef::Object(warded),
                 source_id: aimer,
                 source_controller: PlayerId(0),
+                targeter: None,
             }),
         );
         let acted_on = reach(&state, ward)[0].2.clone();

@@ -584,6 +584,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ("PostReplacementDrain", None, "applied", "HashSet", HASH_SET),
         ("PendingDrawDelivery", None, "applied", "HashSet", HASH_SET),
         ("DrawSequenceFrame", None, "applied", "HashSet", HASH_SET),
+        ("DrawDealerSeat", None, "applied", "HashSet", HASH_SET),
     ] {
         add_spec(
             &mut specs,

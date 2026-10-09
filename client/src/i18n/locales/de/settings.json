@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Neu",
       "classic": "Klassisch"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Zum Ansehen darüberfahren",
+    "cardAnimationPreviewHintTap": "Zum Ansehen tippen"
   },
   "flexLayout": {
     "title": "Flexibles Layout",
@@ -503,6 +505,8 @@
     "modelPlaceholder": "Modell-ID (z. B. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpunkt",
     "endpointPlaceholder": "https://dein-server/v1",
+    "jevEndpointPlaceholder": "Standardmäßig dein Multiplayer-Server",
+    "jevEndpointHint": "Jev wird über einen phase-Multiplayer-Server erreicht, der jede Anfrage an TypeSafe weiterleitet. Dein Schlüssel wird nur in dieser Anfrage übertragen und nie auf dem Server gespeichert.",
     "apiKey": "API-Schlüssel",
     "apiKeyPlaceholder": "API-Schlüssel einfügen",
     "apiKeyOptional": "Bei lokalen Servern optional",

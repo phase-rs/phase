@@ -203,16 +203,28 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     )))
     .parse(base);
 
-    let (base_part, qual_props) = if let Ok((_, (before, suffix))) = that_split {
+    let (base_part, qual_props, qual_type) = if let Ok((_, (before, suffix))) = that_split {
         let suffix = suffix.trim_start();
-        let (props, consumed) =
-            crate::parser::oracle_target::parse_that_clause_suffix(suffix, None)?;
-        if !suffix[consumed..].trim().is_empty() {
-            return None;
+        // CR 205.3 + CR 601.2f: "Each spell you cast that's a Demon, Horror, or
+        // Nightmare" (Ancient Cellarspawn) — a subtype, "X or Y", or an
+        // Oxford-comma list read whole by the shared relative-subtype parser.
+        // Without this the subtype clause matched nothing below and the
+        // modifier fell back to reducing EVERY spell.
+        if let Some((subtype_filter, _)) =
+            crate::parser::oracle_target::parse_that_is_subtype_suffix(suffix)
+                .filter(|(_, consumed)| suffix[*consumed..].trim().is_empty())
+        {
+            (before.trim(), Vec::new(), Some(subtype_filter))
+        } else {
+            let (props, consumed) =
+                crate::parser::oracle_target::parse_that_clause_suffix(suffix, None)?;
+            if !suffix[consumed..].trim().is_empty() {
+                return None;
+            }
+            (before.trim(), props, None)
         }
-        (before.trim(), props)
     } else {
-        (base, Vec::new())
+        (base, Vec::new(), None)
     };
 
     let base_part = strip_cost_mod_cast_scope_suffix(base_part);
@@ -244,6 +256,25 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             }
             _ => None,
         }
+    };
+
+    // CR 205.3: a relative subtype clause narrows the subject's type, AND-merged
+    // with whatever the subject phrase itself named.
+    let typed_filter = match (typed_filter, qual_type) {
+        (filter, None) => filter,
+        (Some(TargetFilter::Typed(mut tf)), Some(subtype_filter)) => {
+            tf.type_filters.push(subtype_filter);
+            Some(TargetFilter::Typed(tf))
+        }
+        (Some(other), Some(subtype_filter)) => Some(TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::card().with_type(subtype_filter)),
+            ],
+        }),
+        (None, Some(subtype_filter)) => Some(TargetFilter::Typed(
+            TypedFilter::card().with_type(subtype_filter),
+        )),
     };
 
     let filter = match (typed_filter, qual_props.is_empty()) {

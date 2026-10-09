@@ -106,6 +106,24 @@
     "grant": "Genehmigen",
     "decline": "Priorität behalten"
   },
+  "sandboxLifeCorrection": {
+    "open": "Leben korrigieren",
+    "title": "Sandbox-Lebenskorrektur",
+    "description": "Nutze die normalen Hand- und Stapelsteuerungen, um eine Kreatur zu wirken und zu verrechnen. Dieses Feld sendet die Sandbox-Aktion SetLife über den vorhandenen Spieladapter.",
+    "scopeNote": "Die Lebenspunkte werden über den Spielerbearbeitungspfad der Engine korrigiert; dies ist weder Schaden noch ein Karteneffekt. Aufdecken einer verborgenen Hand, regelgerechtes Abwerfen und ein vorab vereinbartes Undo vor dem Wirken sind nicht Teil dieses Umfangs.",
+    "target": "Spieler",
+    "player": "{{name}} (Spieler {{seat}})",
+    "you": "Du",
+    "opponent": "Gegner",
+    "currentLife": "Aktuelle Lebenspunkte",
+    "newLife": "Neue Lebenspunkte",
+    "submit": "Korrektur anwenden",
+    "submitting": "Korrektur gesendet; das Schließen dieses Felds bricht sie nicht ab.",
+    "applied": "Bestätigter aktueller Lebensstand für {{player}}: {{life}}.",
+    "notApplied": "Die Engine hat diese Korrektur nicht bestätigt. Prüfe den aktuellen Snapshot, bevor du es erneut versuchst.",
+    "failed": "Die Korrektur konnte nicht gesendet werden.",
+    "stale": "Das Spiel hat sich während der Bearbeitung geändert. Schließe dieses Feld und öffne es erneut, um mit dem aktuellen Snapshot zu beginnen."
+  },
   "debugCreate": {
     "copies": "Kopien",
     "asToken": "Als Spielstein erstellen",
@@ -843,6 +861,7 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseCreatureToEquip": "Wähle eine Kreatur zum Ausrüsten",
     "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
@@ -1134,6 +1153,8 @@
       "usePowder": "{{name}} verwenden",
       "powderDescription": "Schicke jede Karte auf der Hand ins Exil, ziehe die gleiche Anzahl — kein Mulligan",
       "powderTooltip": "Schicke jede Karte auf deiner Hand ins Exil und ziehe die gleiche Anzahl. Kein Mulligan — Anzahl und unter die Bibliothek zu legende Karten bleiben unberührt.",
+      "freeReveal": "Aufdecken und neu ziehen (gratis)",
+      "freeRevealDescription": "Decke deine Hand auf, mische sie zurück und ziehe 7 — gratis, keine Karten unter die Bibliothek, kein Mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Starthand · London-Mulligan",
       "reviewTitle": "Überprüfe deine Starthand",
@@ -1698,6 +1719,10 @@
     "empowerJace": {
       "title": "Jace stärken",
       "subtitle": "Wähle einen Jace-Spielstein, den du kontrollierst, für +{{count}} Loyalität"
+    },
+    "spellCopyOrder": {
+      "title": "Kopien ordnen",
+      "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
     },
     "collectEvidence": {
       "title": "Beweise sammeln",

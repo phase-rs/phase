@@ -7,25 +7,30 @@
 //! here means the no-cheating property is enforced by the engine's existing
 //! visibility authority, not by this module remembering to omit a field.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
+use engine::game::mana_sources;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::log::{GameLogEntry, LogCategory, LogSegment, LogVisibility};
+use engine::types::log::GameLogEntry;
+use engine::types::mana::ManaType;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+use super::action::describe_tagged;
+use super::history::{push_history, HistoryBudget, TurnCycle};
 use super::text::{clamp_text, mana_cost_text, one_line, type_line_text};
 
 /// How much of the position to render. Driven by difficulty so a low-difficulty
 /// seat genuinely reasons from less information (see
-/// [`crate::prompt::history_window`]).
+/// [`crate::prompt::history_budget`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameRenderOptions {
-    /// Trailing game-log entries to include. `0` omits the history section.
-    pub history_lines: usize,
+    /// How much game history to include, summarized per turn cycle (see
+    /// [`super::history`]).
+    pub history: HistoryBudget,
     /// Include Oracle text for cards in the viewer's hand and on the
     /// battlefield. Off for the lowest difficulties, which are meant to play
     /// off the board rather than off exact card text.
@@ -37,15 +42,22 @@ pub struct GameRenderOptions {
 impl Default for GameRenderOptions {
     fn default() -> Self {
         GameRenderOptions {
-            history_lines: 40,
+            history: HistoryBudget {
+                summarized_cycles: 2,
+                current_cycle_entries: 40,
+            },
             include_oracle_text: true,
             oracle_text_budget: 320,
         }
     }
 }
 
-/// Render the whole position: turn, players, stack, battlefield, the viewer's
-/// hand, graveyards, visible exile, and recent history.
+/// Render the whole position: turn, players, stack, pending delayed triggers,
+/// battlefield, the viewer's hand and available mana, what the viewer knows of
+/// other hands, graveyards, visible exile, and the turn-cycle history.
+///
+/// Every section is a function of live state except the history, so the size
+/// of a prompt tracks the size of the position, not the length of the game.
 pub fn render_board(
     state: &GameState,
     viewer: PlayerId,
@@ -57,12 +69,15 @@ pub fn render_board(
     push_header(&mut out, state, viewer);
     push_players(&mut out, state, viewer);
     push_stack(&mut out, state, viewer);
+    push_delayed_triggers(&mut out, state, viewer);
     push_combat(&mut out, state, viewer);
     push_battlefield(&mut out, state, viewer, db, options);
     push_hand(&mut out, state, viewer, db, options);
+    push_available_mana(&mut out, state, viewer);
+    push_known_other_hands(&mut out, state, viewer);
     push_graveyards(&mut out, state, viewer);
     push_exile(&mut out, state, viewer);
-    push_history(&mut out, history, options.history_lines);
+    push_history(&mut out, history, TurnCycle::of(state), options.history);
     out
 }
 
@@ -93,14 +108,23 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
         let mut facts = vec![
             format!("{} life", player.life),
             format!("{} cards in hand", player.hand.len()),
-            format!("{} cards in library", player.library.len()),
-            format!("{} cards in graveyard", player.graveyard.len()),
+            format!("{} cards in library", state.library_of(player.id).len()),
+            format!("{} cards in graveyard", state.graveyard_of(player.id).len()),
         ];
         if player.poison_counters > 0 {
             facts.push(format!("{} poison", player.poison_counters));
         }
         if player.energy > 0 {
             facts.push(format!("{} energy", player.energy));
+        }
+        // CR 106.4: unspent mana stays in a player's pool until the step or
+        // phase ends, so it is mana that player can still spend right now.
+        if !player.mana_pool.mana.is_empty() {
+            facts.push(format!(
+                "{} unspent mana in pool ({})",
+                player.mana_pool.mana.len(),
+                mana_symbols(player.mana_pool.mana.iter().map(|unit| unit.color))
+            ));
         }
         facts.push(format!(
             "{} lands played this turn",
@@ -131,6 +155,27 @@ fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
             index + 1,
             name,
             seat_label(entry.controller, viewer)
+        ));
+    }
+}
+
+/// Effects already set to happen later: CR 603.7a delayed triggered abilities
+/// created by resolved spells and abilities ("at the beginning of the next end
+/// step, sacrifice it"). They are not on the stack yet and not on any card on
+/// the battlefield, so without this section a seat cannot see them coming.
+fn push_delayed_triggers(out: &mut String, state: &GameState, viewer: PlayerId) {
+    if state.delayed_triggers.is_empty() {
+        return;
+    }
+    out.push_str("\n--- PENDING DELAYED TRIGGERS ---\n");
+    for trigger in &state.delayed_triggers {
+        let source = object_name(state, trigger.source_id).unwrap_or_else(|| "unknown".to_string());
+        let when = serde_json::to_value(&trigger.condition)
+            .map(|value| describe_tagged(state, &value))
+            .unwrap_or_else(|_| "later".to_string());
+        out.push_str(&format!(
+            "- from {source} (controlled by {}): {when}\n",
+            seat_label(trigger.controller, viewer)
         ));
     }
 }
@@ -199,10 +244,38 @@ fn push_battlefield(
     }
     for (controller, ids) in by_controller {
         out.push_str(&format!("{}:\n", seat_label(PlayerId(controller), viewer)));
-        for id in ids {
-            out.push_str(&format!("  - {}\n", permanent_line(state, id, db, options)));
+        let lines = ids
+            .into_iter()
+            .map(|id| permanent_line(state, id, db, options));
+        for line in grouped_lines(lines) {
+            out.push_str(&format!("  - {line}\n"));
         }
     }
+}
+
+/// Collapse identical lines into one `line ×N`, in first-seen order.
+///
+/// Lossless: two permanents render to the same line only when every fact the
+/// prompt states about them — name, type, P/T, tapped, counters, damage,
+/// attachments, keywords, rules text — is the same. Five untapped Forests are
+/// one line, not five copies of the same text.
+fn grouped_lines(lines: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for line in lines {
+        let count = counts.entry(line.clone()).or_insert(0);
+        if *count == 0 {
+            order.push(line);
+        }
+        *count += 1;
+    }
+    order
+        .into_iter()
+        .map(|line| match counts.get(&line) {
+            Some(count) if *count > 1 => format!("{line} ×{count}"),
+            _ => line,
+        })
+        .collect()
 }
 
 fn push_hand(
@@ -220,19 +293,150 @@ fn push_hand(
         out.push_str("(empty)\n");
         return;
     }
-    for id in player.hand.iter() {
-        out.push_str(&format!("  - {}\n", card_line(state, *id, db, options)));
+    let lines = player
+        .hand
+        .iter()
+        .map(|id| card_line(state, *id, db, options));
+    for line in grouped_lines(lines) {
+        out.push_str(&format!("  - {line}\n"));
+    }
+}
+
+/// The viewer's mana: what is floating now and every untapped source that can
+/// still produce more — lands, but equally mana artifacts, mana creatures and
+/// Treasures.
+///
+/// CR 605.1a: a mana ability is any non-loyalty activated ability that could
+/// add mana without targeting. The engine's own enumeration
+/// (`mana_sources::activatable_mana_options`) decides which permanents qualify
+/// and whether each can be activated right now (untapped, not summoning sick
+/// for a `{T}` cost), so a Sol Ring is listed beside the lands exactly when the
+/// engine would tap it to pay for a spell.
+fn push_available_mana(out: &mut String, state: &GameState, viewer: PlayerId) {
+    let Some(player) = state.players.iter().find(|player| player.id == viewer) else {
+        return;
+    };
+    let pool: Vec<ManaType> = player
+        .mana_pool
+        .mana
+        .iter()
+        .map(|unit| unit.color)
+        .collect();
+
+    let mut total = 0u32;
+    let mut sources: Vec<String> = Vec::new();
+    for id in state.battlefield.iter() {
+        let options = mana_sources::activatable_mana_options(state, *id, viewer);
+        if options.is_empty() {
+            continue;
+        }
+        let Some(object) = state.objects.get(id) else {
+            continue;
+        };
+        let produced: BTreeSet<ManaType> = options.iter().map(|option| option.mana_type).collect();
+        // The engine's net figure: a source whose activation costs as much
+        // mana as it makes adds nothing, and is not counted as if it did.
+        let amount = mana_sources::max_mana_yield(state, *id, viewer);
+        total = total.saturating_add(amount);
+        // Core types only: "Artifact" is the fact that matters here, and the
+        // full type line is already on the battlefield entry above.
+        let kind = object
+            .card_types
+            .core_types
+            .iter()
+            .map(|core| format!("{core:?}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        sources.push(format!(
+            "{} ({kind}): {amount} mana, {}",
+            one_line(&object.name),
+            mana_symbols(produced.into_iter())
+        ));
+    }
+
+    if pool.is_empty() && sources.is_empty() {
+        return;
+    }
+    out.push_str("\n--- YOUR AVAILABLE MANA ---\n");
+    if !pool.is_empty() {
+        out.push_str(&format!(
+            "Unspent mana in your pool: {}\n",
+            mana_symbols(pool.into_iter())
+        ));
+    }
+    if sources.is_empty() {
+        out.push_str("No untapped mana sources.\n");
+        return;
+    }
+    out.push_str(&format!(
+        "Untapped mana sources (up to {total} more mana available now):\n"
+    ));
+    for line in grouped_lines(sources) {
+        out.push_str(&format!("  - {line}\n"));
+    }
+}
+
+/// `{W}{U}{C}` for a run of mana types, in the order given.
+fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
+    types
+        .map(|mana| match mana {
+            ManaType::White => "{W}",
+            ManaType::Blue => "{U}",
+            ManaType::Black => "{B}",
+            ManaType::Red => "{R}",
+            ManaType::Green => "{G}",
+            ManaType::Colorless => "{C}",
+        })
+        .collect()
+}
+
+/// Cards in another player's hand that this seat has legitimately seen —
+/// revealed by an effect, or otherwise known.
+///
+/// CR 400.2 + CR 402.3: a hand is a hidden zone; another player's cards are
+/// normally visible only as a count. The viewer-filtered state the board is
+/// rendered from has already redacted every card this seat may not identify
+/// (`hide_card` turns it face down and strips its name), so any card in another
+/// player's hand still face up here is one the engine says this seat knows — a
+/// revealed card, or a teammate's hand where the format shares it.
+fn push_known_other_hands(out: &mut String, state: &GameState, viewer: PlayerId) {
+    let mut lines: Vec<String> = Vec::new();
+    for player in state.players.iter().filter(|player| player.id != viewer) {
+        let known: Vec<String> = player
+            .hand
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| !object.face_down)
+            .map(|object| one_line(&object.name))
+            .collect();
+        if !known.is_empty() {
+            lines.push(format!(
+                "{}: {} (of {} in hand)",
+                seat_label(player.id, viewer),
+                known.join(", "),
+                player.hand.len()
+            ));
+        }
+    }
+    if lines.is_empty() {
+        return;
+    }
+    out.push_str("\n--- CARDS YOU KNOW IN OTHER HANDS ---\n");
+    for line in lines {
+        out.push_str(&line);
+        out.push('\n');
     }
 }
 
 fn push_graveyards(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- GRAVEYARDS ---\n");
     for player in &state.players {
-        let names: Vec<String> = player
-            .graveyard
-            .iter()
-            .filter_map(|id| object_name(state, *id))
-            .collect();
+        let names = grouped_lines(
+            state
+                .graveyard_of(player.id)
+                .iter()
+                .filter_map(|id| object_name(state, *id)),
+        );
         out.push_str(&format!(
             "{}: {}\n",
             seat_label(player.id, viewer),
@@ -267,84 +471,6 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- EXILE ---\n");
     out.push_str(&names.join(", "));
     out.push('\n');
-}
-
-fn push_history(out: &mut String, history: &[GameLogEntry], limit: usize) {
-    if limit == 0 || history.is_empty() {
-        return;
-    }
-    // Filter BEFORE windowing so dropped entries do not consume the budget —
-    // otherwise a burst of draws would silently shorten the visible history.
-    let visible: Vec<&GameLogEntry> = history
-        .iter()
-        .filter(|entry| is_prompt_safe(entry))
-        .collect();
-    if visible.is_empty() {
-        return;
-    }
-    out.push_str("\n--- RECENT GAME HISTORY (oldest first) ---\n");
-    let start = visible.len().saturating_sub(limit);
-    for entry in &visible[start..] {
-        out.push_str(&format!(
-            "T{} {:?}: {}\n",
-            entry.turn,
-            entry.phase,
-            render_log_entry(entry)
-        ));
-    }
-}
-
-/// Whether a log entry may appear in a prompt.
-///
-/// Two independent exclusions, for two different reasons.
-///
-/// `LogVisibility::HiddenInformation` is not a display hint: it marks entries
-/// the normal game log must not disclose — card draws name the exact card via
-/// `LogSegment::CardName` (`engine::game::log::visibility`). A prompt leaves the
-/// machine for a third-party provider, a strictly weaker boundary than the
-/// on-screen log that classification was written for, so the same bar applies.
-///
-/// `LogCategory::Debug` is excluded because it is not a record of the GAME at
-/// all — it is a diagnostic channel the client writes into, and its text can
-/// originate outside this process. A provider's error detail travels as
-/// `LlmError::Provider { detail }`, and a provider, a proxy, or a hostile custom
-/// endpoint controls that string. Were a diagnostic entry renderable, such a
-/// string could be written into the log and then read back to the model as
-/// ordinary history on the next decision — prose that looks like history but is
-/// authored by the very party the response validation exists to distrust.
-/// Response validation does not help here: the text never has to pass as a
-/// decision, only as narrative.
-///
-/// This filter decides what is rendered at all. It is not what decides how the
-/// rendered text is READ: everything this module emits — including public log
-/// lines, whose `LogSegment::PlayerName` text is chosen by other people — is
-/// quoted inside [`crate::prompt::untrusted_block`], under the declaration in
-/// [`crate::prompt::UNTRUSTED_DATA_DECLARATION`]. The two are independent and
-/// both are required. Excluding a channel keeps text out of the prompt; the
-/// fence governs the text that legitimately belongs there.
-fn is_prompt_safe(entry: &GameLogEntry) -> bool {
-    matches!(entry.presentation.visibility, LogVisibility::Public)
-        && !matches!(entry.category, LogCategory::Debug)
-}
-
-/// Flatten an engine-authored log entry's segments into one sentence. The
-/// engine already decided what this entry says and who may see it; this only
-/// drops the presentation markup.
-pub fn render_log_entry(entry: &GameLogEntry) -> String {
-    let text = entry
-        .segments
-        .iter()
-        .map(|segment| match segment {
-            LogSegment::Text(text) => text.clone(),
-            LogSegment::CardName { name, .. } => name.clone(),
-            LogSegment::PlayerName { name, .. } => name.clone(),
-            LogSegment::Number(value) => value.to_string(),
-            LogSegment::Mana(symbols) => symbols.clone(),
-            LogSegment::Zone(zone) => format!("{zone:?}"),
-            LogSegment::Keyword(keyword) => keyword.clone(),
-        })
-        .collect::<String>();
-    one_line(&text)
 }
 
 /// A battlefield permanent: identity plus the state that changes how it plays.
@@ -499,117 +625,238 @@ pub fn zone_names(state: &GameState, zone: Zone) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::log::{GameLogEntry, LogCategory, LogPresentation};
-    use engine::types::phase::Phase;
+    use engine::game::create_object;
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::format::FormatConfig;
+    use engine::types::identifiers::CardId;
 
-    fn log_entry(segments: Vec<LogSegment>) -> GameLogEntry {
-        GameLogEntry {
-            seq: 0,
-            turn: 3,
-            phase: Phase::PreCombatMain,
-            category: LogCategory::Stack,
-            segments,
-            presentation: LogPresentation::default(),
+    fn rendered(state: &GameState, viewer: PlayerId) -> String {
+        let visible = filter_state_for_viewer(state, viewer);
+        render_board(&visible, viewer, None, &[], &GameRenderOptions::default())
+    }
+
+    #[test]
+    fn identical_lines_collapse_with_a_count_in_first_seen_order() {
+        let lines = ["Forest", "Bear", "Forest", "Forest", "Elf"].map(str::to_string);
+        assert_eq!(grouped_lines(lines), vec!["Forest ×3", "Bear", "Elf"]);
+    }
+
+    #[test]
+    fn identical_permanents_render_once_with_a_count() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        for index in 0..4 {
+            create_object(
+                &mut state,
+                CardId(index),
+                PlayerId(1),
+                "Mountain".to_string(),
+                Zone::Battlefield,
+            );
         }
+        let board = rendered(&state, PlayerId(1));
+        assert_eq!(board.matches("Mountain").count(), 1, "{board}");
+        assert!(board.contains("Mountain | untapped ×4"), "{board}");
     }
 
     #[test]
-    fn a_log_entry_flattens_to_one_sentence() {
-        let entry = log_entry(vec![
-            LogSegment::PlayerName {
-                name: "Player 1".to_string(),
-                player_id: PlayerId(1),
-            },
-            LogSegment::Text(" casts ".to_string()),
-            LogSegment::CardName {
-                name: "Lightning Bolt".to_string(),
-                object_id: ObjectId(4),
-            },
-        ]);
-        assert_eq!(render_log_entry(&entry), "Player 1 casts Lightning Bolt");
+    fn floating_mana_is_public_and_listed_for_its_owner() {
+        use engine::types::mana::ManaUnit;
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains("Player 0: ") && board.contains("1 unspent mana in pool ({R})"),
+            "{board}"
+        );
+        let own = rendered(&state, PlayerId(0));
+        assert!(own.contains("Unspent mana in your pool: {R}"), "{own}");
     }
 
+    /// A seat that has seen a card in another hand (a reveal) is told so; a
+    /// card it has not seen stays a count.
     #[test]
-    fn the_history_section_keeps_only_the_trailing_window() {
-        let history: Vec<GameLogEntry> = (0..10)
-            .map(|index| log_entry(vec![LogSegment::Text(format!("event {index}"))]))
-            .collect();
-        let mut out = String::new();
-        push_history(&mut out, &history, 3);
-        assert!(out.contains("event 7"));
-        assert!(out.contains("event 9"));
-        assert!(!out.contains("event 6"));
+    fn only_known_cards_in_another_hand_are_named() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let seen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Brainstorm".to_string(),
+            Zone::Hand,
+        );
+        let unseen = rendered(&state, PlayerId(1));
+        assert!(!unseen.contains("Counterspell"), "{unseen}");
+        assert!(!unseen.contains("CARDS YOU KNOW"), "{unseen}");
+
+        state.revealed_cards.insert(seen);
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains("Player 0: Counterspell (of 2 in hand)"),
+            "{board}"
+        );
+        assert!(!board.contains("Brainstorm"), "hidden card leaked: {board}");
     }
 
-    fn hidden_entry(text: &str) -> GameLogEntry {
-        let mut entry = log_entry(vec![LogSegment::Text(text.to_string())]);
-        entry.presentation.visibility = LogVisibility::HiddenInformation;
-        entry
-    }
-
-    /// The engine marks card draws `HiddenInformation` because the entry names
-    /// the exact card. A prompt leaves the machine entirely, so it must clear
-    /// the same bar the on-screen log does.
+    /// A mana artifact is a mana source exactly like a land: the engine taps
+    /// it to pay for spells, so the seat is shown it as available mana.
     #[test]
-    fn hidden_information_entries_never_reach_the_prompt() {
-        let history = vec![
-            log_entry(vec![LogSegment::Text("Player 1 plays a land".to_string())]),
-            hidden_entry("Player 0 draws Black Lotus"),
-            log_entry(vec![LogSegment::Text("Player 1 passes".to_string())]),
-        ];
+    fn mana_artifacts_count_as_available_mana_beside_lands() {
+        use crate::test_support::mana_rock_ability;
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::ManaColor;
+        use engine::types::phase::Phase;
 
-        let mut out = String::new();
-        push_history(&mut out, &history, 40);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+        scenario
+            .add_creature(PlayerId(0), "Sol Ring", 0, 0)
+            .as_artifact()
+            .with_ability_definition(mana_rock_ability(2));
+        let runner = scenario.build();
 
-        assert!(out.contains("plays a land"), "{out}");
-        assert!(out.contains("passes"), "{out}");
-        assert!(!out.contains("Black Lotus"), "hidden entry leaked: {out}");
-        assert!(!out.contains("draws"), "hidden entry leaked: {out}");
+        let board = rendered(runner.state(), PlayerId(0));
+        assert!(board.contains("--- YOUR AVAILABLE MANA ---"), "{board}");
+        assert!(
+            board.contains("Sol Ring (Artifact): 2 mana, {C}"),
+            "{board}"
+        );
+        assert!(board.contains("Forest (Land): 1 mana, {G} ×2"), "{board}");
+        assert!(board.contains("up to 4 more mana available now"), "{board}");
+
+        // Another seat is never shown this seat's sources as its own.
+        let other = rendered(runner.state(), PlayerId(1));
+        assert!(!other.contains("YOUR AVAILABLE MANA"), "{other}");
     }
 
-    /// A hidden entry must not consume the history budget either: filtering
-    /// before windowing keeps the visible window the size it claims to be.
+    /// CR 603.7a: a delayed trigger waiting to fire is a pending effect the
+    /// seat must plan around, though nothing on the stack or board shows it.
     #[test]
-    fn hidden_entries_do_not_consume_the_history_window() {
-        let mut history: Vec<GameLogEntry> = Vec::new();
-        for index in 0..10 {
-            history.push(hidden_entry(&format!("secret {index}")));
-            history.push(log_entry(vec![LogSegment::Text(format!("public {index}"))]));
-        }
+    fn pending_delayed_triggers_are_rendered_with_their_source_and_timing() {
+        use engine::types::ability::{
+            DelayedTriggerCondition, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        };
+        use engine::types::game_state::DelayedTrigger;
+        use engine::types::phase::Phase;
 
-        let mut out = String::new();
-        push_history(&mut out, &history, 3);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sneak Attack".to_string(),
+            Zone::Battlefield,
+        );
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
+        ));
 
-        for index in 7..10 {
-            assert!(out.contains(&format!("public {index}")), "{out}");
-        }
-        assert!(!out.contains("secret"), "hidden entry leaked: {out}");
-        assert!(!out.contains("public 6"), "window overran: {out}");
-    }
-
-    /// A history made up entirely of hidden entries yields no section at all,
-    /// rather than an empty heading that implies nothing happened.
-    #[test]
-    fn an_all_hidden_history_renders_no_section() {
-        let history = vec![hidden_entry("secret a"), hidden_entry("secret b")];
-
-        let mut out = String::new();
-        push_history(&mut out, &history, 40);
-
-        assert!(out.is_empty(), "{out}");
-    }
-
-    #[test]
-    fn a_zero_history_window_omits_the_section_entirely() {
-        let history = vec![log_entry(vec![LogSegment::Text("event".to_string())])];
-        let mut out = String::new();
-        push_history(&mut out, &history, 0);
-        assert!(out.is_empty());
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains("--- PENDING DELAYED TRIGGERS ---"),
+            "{board}"
+        );
+        assert!(
+            board.contains(
+                "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End)"
+            ),
+            "{board}"
+        );
+        assert!(
+            !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(1))
+                .contains("PENDING DELAYED TRIGGERS")
+        );
     }
 
     #[test]
     fn the_viewers_seat_reads_as_you_and_others_by_number() {
         assert_eq!(seat_label(PlayerId(1), PlayerId(1)), "You");
         assert_eq!(seat_label(PlayerId(0), PlayerId(1)), "Player 0");
+    }
+
+    #[test]
+    fn the_shared_pile_renders_for_every_seat_through_the_viewer_filter() {
+        use engine::game::create_object;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::format::FormatConfig;
+        use engine::types::identifiers::CardId;
+
+        for (format, viewer, other, shared) in [
+            (FormatConfig::dandan(), PlayerId(1), PlayerId(0), true),
+            (FormatConfig::dandan(), PlayerId(0), PlayerId(1), true),
+            (FormatConfig::standard(), PlayerId(1), PlayerId(0), false),
+        ] {
+            let mut state = GameState::new(format, 2, 3);
+            // Standard: the staged cards belong to the viewer's own zones.
+            let holder = if shared { PlayerId(0) } else { viewer };
+            for (id, name) in ["Island", "Brainstorm", "Mental Note"]
+                .into_iter()
+                .enumerate()
+            {
+                create_object(
+                    &mut state,
+                    CardId(id as u64),
+                    holder,
+                    name.to_string(),
+                    Zone::Library,
+                );
+            }
+            create_object(
+                &mut state,
+                CardId(9),
+                holder,
+                "Memory Lapse".to_string(),
+                Zone::Graveyard,
+            );
+            let visible = filter_state_for_viewer(&state, viewer);
+            let board = render_board(&visible, viewer, None, &[], &GameRenderOptions::default());
+
+            let line = |label: &str| {
+                board
+                    .lines()
+                    .find(|l| l.starts_with(&format!("{label}: ")) && l.contains("life"))
+                    .unwrap_or_else(|| panic!("no players line for {label} in\n{board}"))
+                    .to_string()
+            };
+            assert!(
+                line("You").contains("3 cards in library"),
+                "{viewer:?} shared={shared}: {board}"
+            );
+            let other_line = line(&format!("Player {}", other.0));
+            assert_eq!(
+                other_line.contains("3 cards in library"),
+                shared,
+                "{viewer:?}: the other seat reads the same pile only when shared"
+            );
+            assert!(
+                board.contains("You: Memory Lapse"),
+                "{viewer:?} shared={shared}: the viewer's graveyard line"
+            );
+        }
     }
 }

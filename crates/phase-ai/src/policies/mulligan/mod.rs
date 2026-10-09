@@ -639,6 +639,7 @@ mod cedh_registration_tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         (state, hand)
     }
@@ -652,6 +653,7 @@ mod cedh_registration_tests {
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         (state, hand)
     }
@@ -718,6 +720,7 @@ mod cedh_registration_tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         let hand = vec![add_zero_cost_action(&mut state, 99)];
 
@@ -828,6 +831,7 @@ mod cedh_registration_tests {
         mdfc_state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let mdfc_forecast = OpeningHandActionForecast::for_hand(&[mdfc], &mdfc_state);
@@ -868,6 +872,7 @@ mod cedh_registration_tests {
         fast_mana_state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         let fast_mana_forecast =
             OpeningHandActionForecast::for_hand(&[fast_mana], &fast_mana_state);
@@ -897,6 +902,7 @@ mod cedh_registration_tests {
         activation_state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         assert!(
             OpeningHandActionForecast::for_hand(&[activation], &activation_state)
@@ -909,6 +915,7 @@ mod cedh_registration_tests {
         targeted_spell_state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         assert!(
             OpeningHandActionForecast::for_hand(&[targeted_spell], &targeted_spell_state)
@@ -934,6 +941,7 @@ mod cedh_registration_tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         assert!(
@@ -1056,6 +1064,7 @@ mod cedh_registration_tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         let hand = vec![add_zero_cost_action(&mut state, 99)];
 

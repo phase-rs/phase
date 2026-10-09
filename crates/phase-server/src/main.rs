@@ -1,6 +1,7 @@
 mod admin;
 mod data_bootstrap;
 mod draft_pools;
+mod jev_relay;
 mod logging;
 mod metrics;
 mod persistence;
@@ -27,6 +28,7 @@ use engine::ai_support::{
     end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
+    with_viewer_actions as engine_with_viewer_actions,
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
@@ -514,6 +516,20 @@ fn derive_transport_views(
     derive_filtered_views(authoritative_state, filtered_state, viewer)
 }
 
+/// The `legal_actions` payload for one seat: empty unless the seat is acting,
+/// otherwise the all-seat enumeration plus the actions only that seat is offered.
+fn legal_actions_for_seat(
+    state: &GameState,
+    player: PlayerId,
+    legal_actions: &[GameAction],
+) -> Vec<GameAction> {
+    if server_core::is_acting(state, player) {
+        engine_with_viewer_actions(state, player, legal_actions.to_vec())
+    } else {
+        Vec::new()
+    }
+}
+
 /// Build the `GameStarted` message for a single seat.
 ///
 /// `events` carries the engine's start-of-game events (the d20 first-player
@@ -572,7 +588,7 @@ fn build_game_started_message(
         your_player: player,
         opponent_name,
         player_names: session.display_names.clone(),
-        legal_actions: if is_actor { legal_actions } else { Vec::new() },
+        legal_actions: legal_actions_for_seat(&session.state, player, &legal_actions),
         auto_pass_recommended: auto_pass,
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
@@ -686,11 +702,7 @@ fn build_state_update_message(
         state_revision,
         state: filtered,
         events: server_core::filter_events_for_player(events, raw_state, player),
-        legal_actions: if is_actor {
-            legal_actions.clone()
-        } else {
-            Vec::new()
-        },
+        legal_actions: legal_actions_for_seat(raw_state, player, legal_actions),
         auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
@@ -830,7 +842,8 @@ impl Default for Limits {
 /// Ambient per-process context every admission decision needs: what the limits
 /// are, and where a refusal gets counted. Threaded through the socket handlers
 /// rather than held in a global so tests can drive a handler at a small cap
-/// without perturbing the rest of the suite.
+/// without perturbing the rest of the suite. It also carries the Jev relay,
+/// whose in-flight cap is an admission limit of the same kind.
 #[derive(Clone, Default)]
 struct ServerContext {
     limits: Limits,
@@ -840,6 +853,8 @@ struct ServerContext {
     /// has no way to turn a label back into a number.
     replica_ordinal: Option<u32>,
     metrics: Arc<metrics::ServerMetrics>,
+    /// The outbound `/jev/systemone` relay: its upstream, client and in-flight cap.
+    jev_relay: jev_relay::JevRelay,
 }
 
 // The lobby-only broker capacity cap (`MAX_LOBBY_ENTRIES`) now lives in
@@ -2535,6 +2550,11 @@ async fn serve() {
         ServerMode::Full
     };
     info!(?mode, "server mode selected");
+    let jev_relay_config = jev_relay::JevRelayConfig::from_env()
+        .unwrap_or_else(|error| panic!("invalid Jev relay configuration: {error}"));
+    let jev_relay = jev_relay::JevRelay::new(jev_relay_config)
+        .unwrap_or_else(|error| panic!("could not build the Jev relay HTTP client: {error}"));
+    info!(upstream = %jev_relay.upstream_origin(), "jev relay upstream resolved");
     let server_context = ServerContext {
         limits: Limits {
             max_connections: cli.max_connections,
@@ -2542,6 +2562,7 @@ async fn serve() {
         },
         replica_ordinal: cli.replica_ordinal,
         metrics: Arc::new(metrics::ServerMetrics::default()),
+        jev_relay,
     };
     info!(
         max_connections = server_context.limits.max_connections,
@@ -4020,7 +4041,7 @@ fn admin_token_from_env() -> Option<String> {
 /// keeping the layer off that route entirely removes any dependence on that
 /// implementation detail continuing to hold across axum/tower-http upgrades.
 /// Every other route (health check, the `lobby_broker::directory::INFO_PATH`
-/// identity document, the P2P draft backup API, and — when `admin_token` is
+/// identity document, the P2P draft backup API, the Jev relay, and — when `admin_token` is
 /// set — the bearer-guarded `/admin/*` routes) is served through gzip
 /// `CompressionLayer` so JSON/text responses shrink whenever the client
 /// advertises `Accept-Encoding: gzip`.
@@ -4036,7 +4057,8 @@ fn build_router(app_state: AppState, cors: CorsLayer, admin_token: Option<&str>)
         .route(
             "/p2p-draft-backup/{code}",
             get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        );
+        )
+        .route("/jev/systemone", jev_relay::method_router());
     if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
         http_router = mount_admin_routes(http_router, token);
     }
@@ -7189,8 +7211,8 @@ async fn broadcast_ai_results(
             for (pid, pstate) in &ai_filtered {
                 if let Some(s) = players.get(pid) {
                     let is_actor = server_core::is_acting(ai_raw_state, *pid);
-                    let player_legals = if is_last && is_actor {
-                        ai_legal.clone()
+                    let player_legals = if is_last {
+                        legal_actions_for_seat(ai_raw_state, *pid, ai_legal)
                     } else {
                         vec![]
                     };
@@ -7328,11 +7350,7 @@ async fn broadcast_takeback_approved(
         for (pid, pstate) in &filtered_states {
             if let Some(s) = players.get(pid) {
                 let is_actor = server_core::is_acting(&raw_state, *pid);
-                let player_legals = if is_actor {
-                    legal_actions.clone()
-                } else {
-                    vec![]
-                };
+                let player_legals = legal_actions_for_seat(&raw_state, *pid, &legal_actions);
                 let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
                 let p_end_continuous_effect_offers =
                     engine_end_continuous_effect_offers(&player_legals);
@@ -7895,8 +7913,8 @@ async fn handle_full_game_submission(
                     for (pid, pstate) in &filtered_states {
                         if let Some(s) = players.get(pid) {
                             let is_actor = server_core::is_acting(&raw_state, *pid);
-                            let player_legals = if ai_results.is_empty() && is_actor {
-                                legal_actions.clone()
+                            let player_legals = if ai_results.is_empty() {
+                                legal_actions_for_seat(&raw_state, *pid, &legal_actions)
                             } else {
                                 // AI will act next — don't send legal actions yet
                                 vec![]
@@ -12364,6 +12382,98 @@ mod state_transport_derived_tests {
             } => (legal_actions.len(), auto_pass_recommended),
             other => panic!("expected StateUpdate, got {other:?}"),
         }
+    }
+
+    /// Dandan mulligan prompt: P0 holds seven nonland cards (qualifies for the
+    /// free reveal), P1 three lands and four nonland cards (does not).
+    fn dandan_mulligan_result() -> ActionResult {
+        use engine::game::create_object;
+        use engine::types::card_type::CoreType;
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::{MulliganDecisionEntry, MulliganDecisionPhase};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        for (seat, lands) in [(PlayerId(0), 0), (PlayerId(1), 3)] {
+            for i in 0..7u64 {
+                let id = create_object(
+                    &mut state,
+                    CardId(u64::from(seat.0) * 100 + i),
+                    seat,
+                    format!("Card {i}"),
+                    Zone::Hand,
+                );
+                if i < lands {
+                    state
+                        .objects
+                        .get_mut(&id)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Land);
+                }
+            }
+        }
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: [PlayerId(0), PlayerId(1)]
+                .map(|player| MulliganDecisionEntry {
+                    player,
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                })
+                .to_vec(),
+            free_first_mulligan: false,
+            declared: Vec::new(),
+        };
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&state);
+        (
+            state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            false,
+            spell_costs,
+            by_object,
+        )
+    }
+
+    fn state_update_legal_actions(result: &ActionResult, viewer: PlayerId) -> Vec<GameAction> {
+        let full_key = server_core::FullSessionKey {
+            game_code: "ABC123".to_string(),
+            generation: 1,
+        };
+        match build_state_update_message(result, 1, &full_key, viewer, Vec::new())
+            .expect("fixture state update")
+        {
+            ServerMessage::StateUpdate { legal_actions, .. } => legal_actions,
+            other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn free_reveal_reaches_only_the_seat_whose_hand_qualifies() {
+        use engine::types::actions::MulliganChoice;
+
+        let result = dandan_mulligan_result();
+        let free_reveal = GameAction::MulliganDecision {
+            choice: MulliganChoice::FreeReveal,
+        };
+        let keep = GameAction::MulliganDecision {
+            choice: MulliganChoice::Keep,
+        };
+        assert!(
+            result.2.contains(&keep) && !result.2.contains(&free_reveal),
+            "the all-seat enumeration holds Keep and never FreeReveal"
+        );
+        for seat in [PlayerId(0), PlayerId(1)] {
+            assert!(state_update_legal_actions(&result, seat).contains(&keep));
+            assert!(legal_actions_for_seat(&result.0, seat, &result.2).contains(&keep));
+        }
+        assert!(state_update_legal_actions(&result, PlayerId(0)).contains(&free_reveal));
+        assert!(!state_update_legal_actions(&result, PlayerId(1)).contains(&free_reveal));
+        assert!(legal_actions_for_seat(&result.0, PlayerId(0), &result.2).contains(&free_reveal));
+        assert!(!legal_actions_for_seat(&result.0, PlayerId(1), &result.2).contains(&free_reveal));
     }
 
     #[cfg(any())]
@@ -22292,6 +22402,182 @@ mod compression_tests {
         assert!(recorded_player_counts(&log).iter().all(|count| *count == 3));
         handle.abort();
         recorder.abort();
+    }
+
+    /// The Jev relay through the production router: route mount, outer CORS
+    /// layer and compression, in the lobby-only mode production runs.
+    mod jev_relay_routes {
+        use http::HeaderValue;
+
+        use super::*;
+        use crate::jev_relay::test_support::{
+            client, envelope, hits, relay_config, spawn_recording_upstream, MockReply, TEST_KEY,
+        };
+        use crate::jev_relay::JevRelay;
+
+        const ORIGIN: &str = "https://phase-rs.dev";
+
+        /// `build_router` over a lobby-only state whose relay points at
+        /// `upstream`, served on an ephemeral port.
+        async fn spawn_router(
+            temp_dir: &tempfile::TempDir,
+            cors: CorsLayer,
+            upstream: Url,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let mut state = test_app_state(temp_dir, ServerMode::LobbyOnly);
+            state.context.jev_relay = JevRelay::new(relay_config(upstream)).expect("relay client");
+            let app = build_router(state, cors, None);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("test server");
+            });
+            (format!("http://{addr}"), server)
+        }
+
+        /// The browser's simple request: `text/plain`, an `Origin`, and no
+        /// `Authorization` header.
+        async fn post_simple(base: &str, body: String) -> reqwest::Response {
+            client()
+                .post(format!("{base}/jev/systemone"))
+                .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
+                .header(reqwest::header::ORIGIN, ORIGIN)
+                .body(body)
+                .send()
+                .await
+                .expect("relay request")
+        }
+
+        fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+        }
+
+        /// The two CORS layers are expression-identical to the two arms of
+        /// `let cors = match cli.cors_origin.as_deref()` in `serve()` at
+        /// `73d05fe632b4fd6c352b8daef0a8da0c590f193e`:
+        /// `Some("*") | None => CorsLayer::permissive()` and
+        /// `Some(origin) => CorsLayer::new().allow_origin(origin.parse::<HeaderValue>().expect("invalid CORS origin"))`.
+        #[tokio::test]
+        async fn simple_request_is_relayed_with_allow_origin_in_both_cors_modes() {
+            /// (CORS layer constructor, expected `Access-Control-Allow-Origin`)
+            type CorsMode = (fn() -> CorsLayer, &'static str);
+            let modes: [CorsMode; 2] = [
+                (CorsLayer::permissive, "*"),
+                (
+                    || {
+                        CorsLayer::new().allow_origin(
+                            "https://phase-rs.dev"
+                                .parse::<HeaderValue>()
+                                .expect("invalid CORS origin"),
+                        )
+                    },
+                    ORIGIN,
+                ),
+            ];
+            let replies = [
+                (StatusCode::OK, r#"{"pick":2}"#),
+                (StatusCode::UNPROCESSABLE_ENTITY, r#"{"title":"bad pack"}"#),
+            ];
+            for (cors, want_origin) in modes {
+                for (want_status, want_body) in replies {
+                    let temp = tempfile::tempdir().expect("temp dir");
+                    let (upstream, log, mock) = spawn_recording_upstream(MockReply::Respond {
+                        status: want_status,
+                        content_type: Some("application/json"),
+                        body: want_body,
+                    })
+                    .await;
+                    let (base, server) = spawn_router(&temp, cors(), upstream).await;
+
+                    let response =
+                        post_simple(&base, envelope(serde_json::json!({ "model": "jev" }))).await;
+                    let case = format!("{want_origin} / {want_status}");
+                    assert_eq!(response.status(), want_status, "{case}");
+                    assert_eq!(
+                        header(&response, "access-control-allow-origin"),
+                        Some(want_origin),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        header(&response, "access-control-allow-credentials"),
+                        None,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        header(&response, "content-type"),
+                        Some("application/json"),
+                        "{case}"
+                    );
+                    let body = response.text().await.expect("body");
+                    assert_eq!(body, want_body, "{case}");
+                    assert!(!body.contains(TEST_KEY), "{case}");
+                    assert_eq!(hits(&log), 1, "{case}");
+
+                    server.abort();
+                    mock.abort();
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn oversize_is_413_with_allow_origin() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let (upstream, log, mock) = spawn_recording_upstream(MockReply::Respond {
+                status: StatusCode::OK,
+                content_type: Some("application/json"),
+                body: "{}",
+            })
+            .await;
+            let (base, server) = spawn_router(&temp, CorsLayer::permissive(), upstream).await;
+
+            let oversize = envelope(serde_json::json!({ "pad": "a".repeat(600 * 1024) }));
+            let response = post_simple(&base, oversize).await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(header(&response, "access-control-allow-origin"), Some("*"));
+            assert_eq!(hits(&log), 0);
+
+            // Reach guard: a valid envelope through the same router reaches it.
+            let response =
+                post_simple(&base, envelope(serde_json::json!({ "model": "jev" }))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(hits(&log), 1);
+
+            server.abort();
+            mock.abort();
+        }
+
+        #[tokio::test]
+        async fn health_keeps_allow_origin_with_relay_mounted() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let (upstream, _log, mock) = spawn_recording_upstream(MockReply::Hang).await;
+            let cors = CorsLayer::new().allow_origin(
+                "https://phase-rs.dev"
+                    .parse::<HeaderValue>()
+                    .expect("invalid CORS origin"),
+            );
+            let (base, server) = spawn_router(&temp, cors, upstream).await;
+
+            let response = client()
+                .get(format!("{base}/health"))
+                .header(reqwest::header::ORIGIN, ORIGIN)
+                .send()
+                .await
+                .expect("health request");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                header(&response, "access-control-allow-origin"),
+                Some(ORIGIN)
+            );
+            assert_eq!(response.text().await.expect("body"), "ok");
+
+            server.abort();
+            mock.abort();
+        }
     }
 }
 

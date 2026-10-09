@@ -735,5 +735,13 @@
     "slotTraditional": "Draft Tradicional",
     "slotCommanderDraft": "Draft Commander",
     "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Drafters de IA",
+    "picking": "Escolhendo",
+    "ready": "Escolhido",
+    "fallback": "Escolha do motor",
+    "waiting": "Aguardando todos os jogadores escolherem…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

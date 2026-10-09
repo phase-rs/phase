@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 217,
+      "date": "2026-10-07",
+      "title": "Invasion of Alara finds its cards",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Invasion of Alara exiles until it finds two qualifying cards, offers one free cast, puts one into your hand, and bottoms the other exiled cards as printed\n• Thranduil, the Elvenking gains the activated abilities of Elf cards in your graveyard, including cards whose types have changed\n• Siege Behemoth lets your creatures assign combat damage as though they weren't blocked while it attacks\n\n🛠️ Cards That Now Work Right\n• Gilded Drake lets you decline its exchange and is sacrificed when the exchange fails, even if its chosen target becomes illegal\n• Duskana, the Rage Mother and Bess, Soul Nourisher check base power and toughness correctly, ignoring counters and bonuses\n• Mazemind Tome exiles itself and gains you life at four or more page counters; its trigger isn't canceled by a later counter change\n• Arena of Glory and Generator Servant grant haste to the creature their mana paid for; Pitfall Trap offers its {W} cost when exactly one creature attacks\n• Divine Presence and Forethought Amulet reduce only damage that meets their printed thresholds\n• Damage redirection respects its chosen recipient restrictions and the player who activated it\n• Terraformer and Elsewhere Flask apply the chosen basic land type; Mistform Wakecaster keeps creature-type choices separate\n• Lagrella, the Magpie adds counters only to exiled cards that return under your control\n• Counter lists stay on their intended creature, and following damage instructions are preserved (Aang, Longstalk Brawl, Duel for Dominance)\n• Hellish Rebuke triggers only for damage to its caster; granted abilities that name their granting card keep the correct source and costs\n• Breath of Fury's follow-up depends on a successful attachment, and Princess Yue retains her granted mana ability after returning\n• Exile-and-cast effects put the correct remaining cards back into the library (Jodah, the Unifier; Possibility Storm; Ryan Sinclair; Collected Conjuring)\n\n⚔️ Combat & Gameplay\n• Goad keeps the correct goading player and duration through overlapping effects and control changes\n• Temporary control ends when its printed condition ends, including when Master Thief changes hands; expired effects stay expired\n• Granted static abilities follow current types and controllers, including creatures that become eligible after copying or type changes\n• Cards with unhandled granting-card references or counter restrictions are marked unsupported rather than silently losing those clauses\n\n🖥️ Interface\n• Preview New and Classic card animations side by side in Settings, with hover, keyboard, and touch controls that respect reduced motion\n• Each scry prompt starts with a fresh selection, and overlapping action submissions no longer race one another\n\n🤖 AI\n• LLM opponents receive the actual game format's rules and strategy guidance; draft guidance follows the draft variant",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1557566289248124969"
+    },
+    {
       "id": 216,
       "date": "2026-10-05",
       "title": "Goblin Charbelcher fires correctly",

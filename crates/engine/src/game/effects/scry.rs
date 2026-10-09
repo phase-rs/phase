@@ -179,7 +179,7 @@ fn apply_scry_after_replacement_without_draw(
         });
     };
 
-    let count = (instructed as usize).min(player.library.len());
+    let count = (instructed as usize).min(state.library_of(player.id).len());
     if count == 0 {
         // CR 701.22b: an instruction to scry 0 is no scry event. CR 701.22d: an
         // instruction of 1 or more with an empty library still completes a
@@ -200,8 +200,8 @@ fn apply_scry_after_replacement_without_draw(
         });
     }
 
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()

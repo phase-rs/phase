@@ -360,7 +360,7 @@ pub(crate) fn install_merge_layer_effect(
         None,
     );
     if let Some(obj) = state.objects.get_mut(&target_id) {
-        obj.merge_layer_effect_id = Some(effect_id);
+        obj.merge_layer_effect_id = effect_id;
     }
     crate::game::layers::flush_layers(state);
 }

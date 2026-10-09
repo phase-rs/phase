@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nowe",
       "classic": "Klasyczne"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Najedź, aby zobaczyć podgląd",
+    "cardAnimationPreviewHintTap": "Dotknij, aby zobaczyć podgląd"
   },
   "flexLayout": {
     "title": "Elastyczny układ",
@@ -503,6 +505,8 @@
     "modelPlaceholder": "Identyfikator modelu (np. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://twoj-serwer/v1",
+    "jevEndpointPlaceholder": "Domyślnie Twój serwer wieloosobowy",
+    "jevEndpointHint": "Jev jest dostępny przez serwer wieloosobowy phase, który przekazuje każde żądanie do TypeSafe. Twój klucz jest przesyłany tylko w tym żądaniu i nigdy nie jest zapisywany na serwerze.",
     "apiKey": "Klucz API",
     "apiKeyPlaceholder": "Wklej swój klucz API",
     "apiKeyOptional": "Opcjonalny dla serwerów lokalnych",

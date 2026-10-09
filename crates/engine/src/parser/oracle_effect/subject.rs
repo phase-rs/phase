@@ -1448,15 +1448,15 @@ fn try_parse_subject_base_pt_set_clause_ast(
             .map(|keyword| ContinuousModification::AddKeyword { keyword }),
     );
 
+    // CR 611.2a: no stated duration means this base-P/T set lasts indefinitely.
+    // Permanent remains the unset sentinel for an enclosing clause duration.
+    let duration = leading_duration.or(Some(Duration::Permanent));
     let effect = Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
             .affected(affected)
             .modifications(modifications)
             .description(body.trim_end_matches('.').to_string())],
-        // CR 611.2a: a leading duration stripped above is threaded onto the
-        // GenericEffect; otherwise the sequence layer's wrapping duration (for
-        // the trigger-body path, where it is already stripped upstream) applies.
-        duration: leading_duration.clone(),
+        duration: duration.clone(),
         target: application.target.clone(),
         end_cost: None,
     };
@@ -1471,7 +1471,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect,
-            duration: leading_duration,
+            duration,
             sub_ability: None,
         }),
     })
@@ -5590,18 +5590,28 @@ fn build_become_clause(
     )))
     .parse(become_lower.as_str())
     {
-        // CR 722.3a: Resolve the prepare/unprepare target from the subject.
-        // A targeted subject ("target creature becomes prepared", Biblioplex)
-        // binds to the chosen object via `ParentTarget` at resolution; a
-        // self-referential or anaphoric subject ("this creature becomes
-        // prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`) uses
-        // the subject's own `affected` filter. Mirrors
-        // `static_affected_for_application`'s targeted-vs-subject split so the
-        // self-reference is preserved instead of collapsing to `ParentTarget`.
-        let target = if application.target.is_some() || application.inherits_parent {
-            crate::types::ability::TargetFilter::ParentTarget
-        } else {
-            application.affected.clone()
+        // CR 722.3a + CR 722.3b: Resolve the prepare/unprepare target from the
+        // subject. Like `BecomeSaddled` below, the effect's `target` IS the
+        // selection slot:
+        // - CR 115.1c/115.1d + CR 601.2c/602.2b: a DECLARED target ("target
+        //   creature becomes prepared" — Skycoach Waypoint, Biblioplex
+        //   Tomekeeper; "target creature that attacked this turn" — Hexhaven
+        //   Dueling Arena) keeps its typed filter, so `build_target_slots`
+        //   surfaces a slot chosen at announcement and the filter's
+        //   restrictions are enforced.
+        // - A context-ref `target` (anaphor markers `ParentTarget` /
+        //   `TriggeringSource`) or an `inherits_parent` subject ("it becomes
+        //   unprepared") keeps the established `ParentTarget` binding.
+        // - A self-referential or untargeted subject ("this creature becomes
+        //   prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`)
+        //   uses the subject's own `affected` filter.
+        let target = match application.target.as_ref() {
+            Some(declared) if !declared.is_context_ref() => declared.clone(),
+            Some(_) => crate::types::ability::TargetFilter::ParentTarget,
+            None if application.inherits_parent => {
+                crate::types::ability::TargetFilter::ParentTarget
+            }
+            None => application.affected.clone(),
         };
         let effect = match kind {
             PreparedKind::Prepared => Effect::BecomePrepared { target },
@@ -6605,7 +6615,7 @@ fn build_restriction_clause(
             | TargetFilter::SourceController
             | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::Opponent
-            | TargetFilter::GrantingObject
+            | TargetFilter::GrantingObject { .. }
             | TargetFilter::SourceOrPaired
             | TargetFilter::Not { .. }
             | TargetFilter::Or { .. }
@@ -11305,8 +11315,8 @@ mod tests {
         assert!(mods.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Trample
         }));
-        // No leading duration in the trigger-body form.
-        assert_eq!(duration, None);
+        // CR 611.2a: an enclosing duration may still override this unset sentinel.
+        assert_eq!(duration, Some(Duration::Permanent));
     }
 
     #[test]

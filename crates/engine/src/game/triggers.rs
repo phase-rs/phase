@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use rand_chacha::ChaCha20Rng;
@@ -1163,6 +1164,7 @@ pub fn resolve_and_apply_trigger_collection(
 /// `matching_counter_added_events_by_recipient` (per-recipient grouping) so the
 /// two apply an identical filter chain; they differ only in how survivors are
 /// grouped and whether `contextual_batched_trigger_event` is layered on top.
+#[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
 fn candidate_passes_batched_filters(
     state: &GameState,
     candidate: &GameEvent,
@@ -1171,6 +1173,7 @@ fn candidate_passes_batched_filters(
     controller: PlayerId,
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    conditions: FiringConditions<'_>,
 ) -> bool {
     if event_is_suppressed_by_static_triggers_cached(
         state,
@@ -1183,17 +1186,52 @@ fn candidate_passes_batched_filters(
     if !matcher(candidate, trig_def, source_context, state) {
         return false;
     }
-    trig_def.condition.as_ref().is_none_or(|condition| {
-        check_trigger_condition_with_source(
-            state,
-            condition,
-            controller,
-            Some(source_context),
-            Some(candidate),
-        )
-    })
+    conditions.hold(state, controller, source_context, candidate)
 }
 
+/// CR 603.4: a trigger's two fire-time condition inputs, kept apart and never
+/// merged.
+#[derive(Clone, Copy, Default)]
+struct FiringConditions<'a> {
+    /// The definition's own condition: a printed intervening-if, or a head
+    /// qualifier such as "attacks alone" (CR 506.5, lowered to
+    /// `Not { MinCoAttackers { 1 } }`). It decides admission only; whether it is
+    /// rechecked on resolution is the definition's own business
+    /// (`stack_condition_for_trigger`).
+    head: Option<&'a TriggerCondition>,
+    /// A delayed body's hoisted intervening-if (`delayed_intervening_if`). Its
+    /// resolution recheck is carried on the pending trigger separately.
+    body_if: Option<&'a TriggerCondition>,
+}
+
+impl<'a> FiringConditions<'a> {
+    fn printed(trig_def: &'a TriggerDefinition) -> Self {
+        Self {
+            head: trig_def.condition.as_ref(),
+            body_if: None,
+        }
+    }
+
+    fn hold(
+        &self,
+        state: &GameState,
+        controller: PlayerId,
+        source_context: &TriggerSourceContext,
+        event: &GameEvent,
+    ) -> bool {
+        self.head.into_iter().chain(self.body_if).all(|condition| {
+            check_trigger_condition_with_source(
+                state,
+                condition,
+                controller,
+                Some(source_context),
+                Some(event),
+            )
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
 fn matching_batched_trigger_events(
     state: &GameState,
     event_batch: &[GameEvent],
@@ -1202,10 +1240,12 @@ fn matching_batched_trigger_events(
     controller: PlayerId,
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
-) -> Vec<GameEvent> {
+    conditions: FiringConditions<'_>,
+) -> Vec<(usize, GameEvent)> {
     event_batch
         .iter()
-        .filter(|candidate| {
+        .enumerate()
+        .filter(|(_, candidate)| {
             candidate_passes_batched_filters(
                 state,
                 candidate,
@@ -1214,10 +1254,12 @@ fn matching_batched_trigger_events(
                 controller,
                 matcher,
                 active_suppress_triggers,
+                conditions,
             )
         })
-        .filter_map(|candidate| {
+        .filter_map(|(index, candidate)| {
             contextual_batched_trigger_event(state, candidate, trig_def, source_context)
+                .map(|narrowed| (index, narrowed))
         })
         .collect()
 }
@@ -1238,6 +1280,7 @@ fn matching_batched_trigger_events(
 /// two genuine deltas on top — grouping survivors by `object_id` and the
 /// deliberate omission of `contextual_batched_trigger_event` (a no-op passthrough
 /// for `CounterAdded` events anyway, since it only narrows attack-family events).
+#[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
 fn matching_counter_added_events_by_recipient(
     state: &GameState,
     event_batch: &[GameEvent],
@@ -1246,9 +1289,10 @@ fn matching_counter_added_events_by_recipient(
     controller: PlayerId,
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
-) -> Vec<Vec<GameEvent>> {
-    let mut groups: Vec<(ObjectId, Vec<GameEvent>)> = Vec::new();
-    for candidate in event_batch {
+    conditions: FiringConditions<'_>,
+) -> Vec<Vec<(usize, GameEvent)>> {
+    let mut groups: Vec<(ObjectId, Vec<(usize, GameEvent)>)> = Vec::new();
+    for (index, candidate) in event_batch.iter().enumerate() {
         let GameEvent::CounterAdded { object_id, .. } = candidate else {
             continue;
         };
@@ -1260,12 +1304,13 @@ fn matching_counter_added_events_by_recipient(
             controller,
             matcher,
             active_suppress_triggers,
+            conditions,
         ) {
             continue;
         }
         match groups.iter_mut().find(|(id, _)| id == object_id) {
-            Some((_, events)) => events.push(candidate.clone()),
-            None => groups.push((*object_id, vec![candidate.clone()])),
+            Some((_, events)) => events.push((index, candidate.clone())),
+            None => groups.push((*object_id, vec![(index, candidate.clone())])),
         }
     }
     groups.into_iter().map(|(_, events)| events).collect()
@@ -1295,12 +1340,22 @@ fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched && matches!(trig_def.mode, TriggerMode::CounterAdded)
 }
 
-/// CR 603.2c: this exact player-recipient phrasing fires once for each player
-/// recipient in a simultaneous damage event. Other recipient scopes retain
-/// their existing aggregate batching semantics.
-fn damage_done_once_by_controller_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
+/// CR 603.2c: a "one or more … deal damage to a player" trigger fires once for
+/// each player recipient in a simultaneous damage event. Both trigger modes that
+/// carry this wording qualify: the printed "Whenever one or more creatures you
+/// control deal combat damage to a player" lowers to
+/// `DamageDoneOnceByController`, and the same words in a delayed body ("…
+/// to a player this turn" — Jace, Cunning Castaway's +1) lower to `DamageDone`.
+/// Per the 2017-09-29 Jace ruling, damage to two players fires twice. Other
+/// recipient scopes keep their aggregate batching. The normalizer
+/// (`matching_damage_done_once_by_controller_event`) reads only the trigger's
+/// recipient, source, kind and amount fields, so it serves both modes.
+fn damage_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched
-        && matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController)
+        && matches!(
+            trig_def.mode,
+            TriggerMode::DamageDoneOnceByController | TriggerMode::DamageDone
+        )
         && trig_def.valid_target == Some(TargetFilter::Player)
 }
 
@@ -1308,6 +1363,7 @@ fn damage_done_once_by_controller_fires_per_player_recipient(trig_def: &TriggerD
 /// then player-recipient damage triggers fire once for each recipient. Preserve
 /// first-seen recipient order and normalize each candidate before retaining it,
 /// so resolution sees only the source amounts that satisfied the trigger.
+#[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
 fn matching_damage_done_once_by_controller_events_by_player_recipient(
     state: &GameState,
     event_batch: &[GameEvent],
@@ -1316,9 +1372,10 @@ fn matching_damage_done_once_by_controller_events_by_player_recipient(
     controller: PlayerId,
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
-) -> Vec<Vec<GameEvent>> {
-    let mut groups: Vec<(PlayerId, Vec<GameEvent>)> = Vec::new();
-    for candidate in event_batch {
+    conditions: FiringConditions<'_>,
+) -> Vec<Vec<(usize, GameEvent)>> {
+    let mut groups: Vec<(PlayerId, Vec<(usize, GameEvent)>)> = Vec::new();
+    for (index, candidate) in event_batch.iter().enumerate() {
         let player_id = match candidate {
             GameEvent::CombatDamageDealtToPlayer { player_id, .. }
             | GameEvent::DamageDealt {
@@ -1335,6 +1392,7 @@ fn matching_damage_done_once_by_controller_events_by_player_recipient(
             controller,
             matcher,
             active_suppress_triggers,
+            conditions,
         ) {
             continue;
         }
@@ -1352,8 +1410,8 @@ fn matching_damage_done_once_by_controller_events_by_player_recipient(
             .iter_mut()
             .find(|(recipient, _)| *recipient == player_id)
         {
-            Some((_, events)) => events.push(normalized),
-            None => groups.push((player_id, vec![normalized])),
+            Some((_, events)) => events.push((index, normalized)),
+            None => groups.push((player_id, vec![(index, normalized)])),
         }
     }
     groups.into_iter().map(|(_, events)| events).collect()
@@ -1426,12 +1484,13 @@ fn matching_damage_received_whole_event_events(
     source_context: &TriggerSourceContext,
     controller: PlayerId,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
-) -> Vec<Vec<GameEvent>> {
+    conditions: FiringConditions<'_>,
+) -> Vec<Vec<(usize, GameEvent)>> {
     let Some(threshold) = trig_def.damage_amount else {
         return Vec::new();
     };
-    let mut groups: Vec<(TargetRef, Vec<GameEvent>)> = Vec::new();
-    for candidate in event_batch {
+    let mut groups: Vec<(TargetRef, Vec<(usize, GameEvent)>)> = Vec::new();
+    for (index, candidate) in event_batch.iter().enumerate() {
         let GameEvent::DamageDealt { target, .. } = candidate else {
             continue;
         };
@@ -1443,12 +1502,13 @@ fn matching_damage_received_whole_event_events(
             controller,
             super::trigger_matchers::damage_received_filters_match,
             active_suppress_triggers,
+            conditions,
         ) {
             continue;
         }
         match groups.iter_mut().find(|(recipient, _)| recipient == target) {
-            Some((_, events)) => events.push(candidate.clone()),
-            None => groups.push((target.clone(), vec![candidate.clone()])),
+            Some((_, events)) => events.push((index, candidate.clone())),
+            None => groups.push((target.clone(), vec![(index, candidate.clone())])),
         }
     }
     groups
@@ -1456,7 +1516,7 @@ fn matching_damage_received_whole_event_events(
         .filter(|(_, events)| {
             let sum = events
                 .iter()
-                .map(|event| match event {
+                .map(|(_, event)| match event {
                     GameEvent::DamageDealt { amount, .. } => *amount,
                     _ => 0,
                 })
@@ -1525,6 +1585,274 @@ fn declaration_records_for_attackers(
         .iter()
         .filter(|record| attackers.contains(&record.object_id))
         .cloned()
+        .collect()
+}
+
+/// CR 603.2c + CR 508.3a + CR 509.3a/c/d + CR 510.2: the per-occurrence event
+/// fan-out for trigger modes whose single event can contain several
+/// occurrences — one attack declaration naming several attackers, one block
+/// declaration naming several blockers, one combat-damage step with several
+/// sources. Each returned event is one firing's narrowed context (the attacker,
+/// the blocker, the (attacker, blocker) pair, the damage source), so an event
+/// anaphor ("it", "that creature") binds that occurrence.
+///
+/// `None` means the mode does not fan out and the caller fires once on the
+/// event. The single authority shared by printed triggers
+/// (`collect_triggers_for_event`) and multi-fire delayed triggers
+/// (`collect_matching_delayed_triggers`), so a trigger fires the same number of
+/// times whether it is printed or created by an effect. Batched ("one or more")
+/// triggers are decided before this is consulted, by both callers.
+fn occurrence_trigger_events(
+    event: &GameEvent,
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<GameEvent>> {
+    use super::trigger_matchers as m;
+    match trig_def.mode {
+        TriggerMode::Attacks => Some(m::matching_attack_events(
+            event,
+            trig_def,
+            source_context,
+            state,
+        )),
+        TriggerMode::YouAttack if ability.has_event_source_force_block_recursive() => {
+            let matching = m::matching_you_attack_pairs(event, trig_def, source_context, state);
+            Some(match event {
+                GameEvent::AttackersDeclared {
+                    defending_player,
+                    declaration_records,
+                    ..
+                } => singleton_attack_events(
+                    *defending_player,
+                    matching,
+                    declaration_records.clone(),
+                ),
+                _ => Vec::new(),
+            })
+        }
+        // CR 508.3e: "Whenever you attack a player" triggers once for EACH
+        // attacked player, each firing bound to its own attacked player. Ordered
+        // after the event-source force-block arm, whose attacker demonstrative
+        // needs one event per ATTACKER, which this per-player grouping strands.
+        TriggerMode::YouAttack if m::you_attack_binds_attacked_player(trig_def) => {
+            Some(m::matching_you_attack_events_by_attacked_player(
+                event,
+                trig_def,
+                source_context,
+                state,
+            ))
+        }
+        TriggerMode::Blocks => Some(m::matching_block_events(
+            event,
+            trig_def,
+            source_context,
+            state,
+        )),
+        TriggerMode::BecomesBlocked => Some(m::matching_becomes_blocked_events(
+            event,
+            trig_def,
+            source_context,
+            state,
+        )),
+        // CR 509.1h + CR 509.3d: narrow each firing to its own single
+        // (attacker, blocker) event so "the other creature"/"that creature"
+        // resolves per-firing, matching the atomic `Blocks`/`BecomesBlocked`.
+        TriggerMode::BlocksOrBecomesBlocked => Some(m::matching_blocks_or_becomes_blocked_events(
+            event,
+            trig_def,
+            source_context,
+            state,
+        )),
+        // CR 603.2c: One aggregate combat-damage event may satisfy this trigger
+        // once, while CR 608.2c makes the filtered source set available to
+        // later "those creatures" instructions.
+        TriggerMode::DamageDoneOnceByController => Some(
+            m::matching_damage_done_once_by_controller_event(
+                event,
+                trig_def,
+                source_context,
+                state,
+            )
+            .into_iter()
+            .collect(),
+        ),
+        _ if m::listens_on_aggregate_combat_damage_done(trig_def)
+            && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }) =>
+        {
+            Some(m::matching_damage_done_events(
+                event,
+                trig_def,
+                source_context,
+                state,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// CR 603.2c: one firing of a trigger. `events` is the firing's narrowed
+/// context; `raw` holds the raw batch indices its members came from, kept apart
+/// from the narrowing so consumed-occurrence bookkeeping reads the raw events.
+struct FiringGroup {
+    raw: Vec<usize>,
+    events: Vec<GameEvent>,
+}
+
+impl FiringGroup {
+    fn from_indexed(members: Vec<(usize, GameEvent)>) -> Self {
+        let (raw, events) = members.into_iter().unzip();
+        Self { raw, events }
+    }
+
+    fn single(admitted: Option<usize>, event: GameEvent) -> Self {
+        Self {
+            raw: admitted.into_iter().collect(),
+            events: vec![event],
+        }
+    }
+}
+
+/// CR 603.2c + CR 603.4: the firings one admitted event produces for one
+/// trigger. The single authority shared by printed triggers
+/// (`collect_matching_triggers_inner`) and multi-fire delayed triggers
+/// (`collect_matching_delayed_triggers`), so the same trigger fires the same
+/// number of times, with the same narrowed contexts, whichever way it exists.
+///
+/// The shapes, in precedence order: per-recipient counters, the whole-event
+/// received-damage fold, per-player-recipient damage, batched ("one or more")
+/// subjects, the per-occurrence fan-out, the event-source force-block singleton
+/// fallback, and the single event. The first four read the whole batch, so a
+/// caller asks for them once per batch (`fires_once_per_batch`).
+///
+/// Conditions are checked where the printed path always checked them: on the
+/// raw event before expansion (except for `Attacks`, whose condition reads the
+/// defending player of each narrowed attack), per candidate inside the batch
+/// shapes, and on each narrowed firing for every non-batched shape.
+/// `admitted` is the raw index of `event` in `event_batch` when the caller
+/// knows it.
+#[allow(clippy::too_many_arguments)] // Each input is an independent collection fact.
+fn trigger_firing_groups(
+    state: &GameState,
+    event: &GameEvent,
+    admitted: Option<usize>,
+    event_batch: &[GameEvent],
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    controller: PlayerId,
+    matcher: TriggerMatcher,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    conditions: FiringConditions<'_>,
+    ability: &ResolvedAbility,
+) -> Vec<FiringGroup> {
+    // CR 508.5 + CR 603.4: Attacks triggers with intervening-if clauses read
+    // the defending player from each expanded attack event; the batch-level
+    // event is the wrong context, so their check waits for the narrowed firing.
+    if !trig_def.batched
+        && !matches!(trig_def.mode, TriggerMode::Attacks)
+        && !conditions.hold(state, controller, source_context, event)
+    {
+        return Vec::new();
+    }
+    let indexed_groups = |groups: Vec<Vec<(usize, GameEvent)>>| -> Vec<FiringGroup> {
+        groups.into_iter().map(FiringGroup::from_indexed).collect()
+    };
+    let groups = if counter_added_fires_per_recipient(trig_def) {
+        // CR 603.2c: the "one or more counters on a <singular recipient>"
+        // class fires once per recipient object, folding that recipient's
+        // whole kind-multiset into one firing. A class-level property of the
+        // trigger phrasing (see `counter_added_fires_per_recipient`), not of
+        // the effect leaf.
+        indexed_groups(matching_counter_added_events_by_recipient(
+            state,
+            event_batch,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+            conditions,
+        ))
+    } else if damage_received_aggregates_whole_event(trig_def) {
+        // CR 120.4b: an unscoped received-damage threshold reads the whole
+        // simultaneous damage event, grouped by recipient and summed before
+        // the threshold applies. `batched` is never set for this class, so
+        // `subject_match_count` stays `None` and "that much" can't read a
+        // source headcount.
+        indexed_groups(matching_damage_received_whole_event_events(
+            state,
+            event_batch,
+            trig_def,
+            source_context,
+            controller,
+            active_suppress_triggers,
+            conditions,
+        ))
+    } else if damage_fires_per_player_recipient(trig_def) {
+        indexed_groups(
+            matching_damage_done_once_by_controller_events_by_player_recipient(
+                state,
+                event_batch,
+                trig_def,
+                source_context,
+                controller,
+                matcher,
+                active_suppress_triggers,
+                conditions,
+            ),
+        )
+    } else if trig_def.batched {
+        let members = matching_batched_trigger_events(
+            state,
+            event_batch,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+            conditions,
+        );
+        if members.is_empty() {
+            Vec::new()
+        } else {
+            vec![FiringGroup::from_indexed(members)]
+        }
+    } else if let Some(occurrences) =
+        occurrence_trigger_events(event, trig_def, source_context, state, ability)
+    {
+        occurrences
+            .into_iter()
+            .map(|occurrence| FiringGroup::single(admitted, occurrence))
+            .collect()
+    } else if ability.has_event_source_force_block_recursive() {
+        // CR 603.2 + CR 608.2c: every event-source force-block branch owns
+        // one unambiguous attacker. The ordinary attack modes above narrow by
+        // their own matcher; this fallback preserves singleton identity for
+        // any additional attack trigger mode.
+        split_attack_event_into_singletons(event)
+            .unwrap_or_else(|| vec![event.clone()])
+            .into_iter()
+            .map(|occurrence| FiringGroup::single(admitted, occurrence))
+            .collect()
+    } else {
+        vec![FiringGroup::single(admitted, event.clone())]
+    };
+    // Batched triggers already checked their conditions per candidate against
+    // the full event, before it was reduced to the resolution context.
+    // Rechecking here would make event-count qualifiers read the narrowed
+    // context instead of the declaration that caused the trigger.
+    if trig_def.batched {
+        return groups;
+    }
+    groups
+        .into_iter()
+        .filter(|group| {
+            group
+                .events
+                .first()
+                .is_some_and(|first| conditions.hold(state, controller, source_context, first))
+        })
         .collect()
 }
 
@@ -2570,6 +2898,7 @@ fn collect_matching_triggers_inner(
             .map(|(i, (kind, def))| (printed_trigger_count + i, None, def, Some(*kind))),
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
+        let source_context = source_context_for_definition(&source_context, trig_def);
         // Synthesized granted-keyword companion triggers carry a keyword-keyed
         // `MayTriggerOrigin` — the synthetic `trig_idx` points past
         // `trigger_definitions` and must not be used as a `Printed` index.
@@ -2721,25 +3050,6 @@ fn collect_matching_triggers_inner(
             ) {
                 continue;
             }
-            if !trig_def.batched {
-                if let Some(ref condition) = trig_def.condition {
-                    // CR 508.5 + CR 603.4: Attacks triggers with intervening-if
-                    // clauses read the defending player from each expanded attack
-                    // event — the batch-level event is the wrong context.
-                    let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks);
-                    if !skip_early_condition
-                        && !check_trigger_condition_with_source(
-                            state,
-                            condition,
-                            controller,
-                            Some(&source_context),
-                            Some(event),
-                        )
-                    {
-                        continue;
-                    }
-                }
-            }
             let mut ability = build_triggered_ability_from_context(
                 state,
                 trig_def,
@@ -2794,208 +3104,26 @@ fn collect_matching_triggers_inner(
                 .as_ref()
                 .map(|exec| (exec.modal.clone(), exec.mode_abilities.clone()))
                 .unwrap_or_default();
-            let trigger_event_batches = if counter_added_fires_per_recipient(trig_def) {
-                // CR 603.2c: the "one or more counters on a <singular recipient>"
-                // class fires once per recipient object, folding that recipient's
-                // whole kind-multiset into one firing. This is a class-level
-                // property of the trigger phrasing (see
-                // `counter_added_fires_per_recipient`), NOT of the effect leaf, so
-                // every batched `CounterAdded` trigger — reproduction, draw, or
-                // damage — routes here and binds its per-recipient "it" correctly.
-                let batches = matching_counter_added_events_by_recipient(
-                    state,
-                    event_batch,
-                    trig_def,
-                    &source_context,
-                    controller,
-                    matcher,
-                    active_suppress_triggers,
-                );
-                if batches.is_empty() {
-                    continue;
-                }
-                batches
-            } else if damage_received_aggregates_whole_event(trig_def) {
-                // CR 120.4b: an unscoped received-damage threshold reads the
-                // whole simultaneous damage event, so the batch is grouped by
-                // recipient and each group's amounts are summed before the
-                // threshold is applied. Placed BEFORE the `trig_def.batched`
-                // arm; `batched` is deliberately never set for this class, so
-                // `subject_match_count` stays `None` and "that much" cannot
-                // resolve to a source headcount.
-                let batches = matching_damage_received_whole_event_events(
-                    state,
-                    event_batch,
-                    trig_def,
-                    &source_context,
-                    controller,
-                    active_suppress_triggers,
-                );
-                if batches.is_empty() {
-                    continue;
-                }
-                batches
-            } else if damage_done_once_by_controller_fires_per_player_recipient(trig_def) {
-                let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
-                    state,
-                    event_batch,
-                    trig_def,
-                    &source_context,
-                    controller,
-                    matcher,
-                    active_suppress_triggers,
-                );
-                if batches.is_empty() {
-                    continue;
-                }
-                batches
-            } else if trig_def.batched {
-                let trigger_events = matching_batched_trigger_events(
-                    state,
-                    event_batch,
-                    trig_def,
-                    &source_context,
-                    controller,
-                    matcher,
-                    active_suppress_triggers,
-                );
-                if trigger_events.is_empty() {
-                    continue;
-                }
-                vec![trigger_events]
-            } else if matches!(trig_def.mode, TriggerMode::Attacks) {
-                super::trigger_matchers::matching_attack_events(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if matches!(trig_def.mode, TriggerMode::YouAttack)
-                && ability.has_event_source_force_block_recursive()
+            // CR 603.2c + CR 603.4: the firing shape and its condition checks
+            // come from the authority the delayed collector shares.
+            let firing_groups = trigger_firing_groups(
+                state,
+                event,
+                None,
+                event_batch,
+                trig_def,
+                &source_context,
+                controller,
+                matcher,
+                active_suppress_triggers,
+                FiringConditions::printed(trig_def),
+                &ability,
+            );
+            for FiringGroup {
+                events: trigger_events,
+                ..
+            } in firing_groups
             {
-                let matching = super::trigger_matchers::matching_you_attack_pairs(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                );
-                match event {
-                    GameEvent::AttackersDeclared {
-                        defending_player,
-                        declaration_records,
-                        ..
-                    } => singleton_attack_events(
-                        *defending_player,
-                        matching,
-                        declaration_records.clone(),
-                    ),
-                    _ => Vec::new(),
-                }
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if matches!(trig_def.mode, TriggerMode::YouAttack)
-                && super::trigger_matchers::you_attack_binds_attacked_player(trig_def)
-            {
-                // CR 508.3e: "Whenever you attack a player" triggers once for
-                // EACH attacked player, each firing bound to its own attacked
-                // player. Horizon Explorer has no "that player" anaphor at all,
-                // which is what proves the cardinality belongs to the trigger
-                // CONDITION rather than to the ability's body.
-                //
-                // Ordered against the two arms above it, both MORE specific and
-                // both of which must keep winning: `trig_def.batched`, whose
-                // events must keep flowing through
-                // `matching_batched_trigger_events` (where static suppression and
-                // the per-candidate intervening-if are applied); and the
-                // event-source force-block arm, whose attacker demonstrative
-                // ("that creature") has no referent in a plural event and so needs
-                // one event per ATTACKER — which this per-player grouping strands.
-                super::trigger_matchers::matching_you_attack_events_by_attacked_player(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if matches!(trig_def.mode, TriggerMode::Blocks) {
-                super::trigger_matchers::matching_block_events(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if matches!(trig_def.mode, TriggerMode::BecomesBlocked) {
-                super::trigger_matchers::matching_becomes_blocked_events(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if matches!(trig_def.mode, TriggerMode::BlocksOrBecomesBlocked) {
-                // CR 509.1h + CR 509.3d: narrow each firing to its own single
-                // (attacker, blocker) event so "the other creature"/"that
-                // creature" resolves per-firing, matching the atomic
-                // `Blocks`/`BecomesBlocked` arms above.
-                super::trigger_matchers::matching_blocks_or_becomes_blocked_events(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
-                // CR 603.2c: One aggregate combat-damage event may satisfy this
-                // trigger once, while CR 608.2c makes the filtered source set
-                // available to later "those creatures" instructions.
-                super::trigger_matchers::matching_damage_done_once_by_controller_event(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if super::trigger_matchers::listens_on_aggregate_combat_damage_done(trig_def)
-                && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. })
-            {
-                super::trigger_matchers::matching_damage_done_events(
-                    event,
-                    trig_def,
-                    &source_context,
-                    state,
-                )
-                .into_iter()
-                .map(|trigger_event| vec![trigger_event])
-                .collect()
-            } else if ability.has_event_source_force_block_recursive() {
-                // CR 603.2 + CR 608.2c: every event-source force-block branch
-                // owns one unambiguous attacker. The ordinary attack modes
-                // above narrow by their own matcher; this fallback preserves
-                // singleton identity for any additional attack trigger mode.
-                split_attack_event_into_singletons(event)
-                    .unwrap_or_else(|| vec![event.clone()])
-                    .into_iter()
-                    .map(|trigger_event| vec![trigger_event])
-                    .collect()
-            } else {
-                vec![vec![event.clone()]]
-            };
-            for trigger_events in trigger_event_batches {
                 if batched_zone_change_replay_guard_applies(trig_def, &trigger_events)
                     && batched_zone_change_already_collected(
                         state,
@@ -3009,24 +3137,6 @@ fn collect_matching_triggers_inner(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
-                // Batched triggers already check their fire-time condition in
-                // `matching_batched_trigger_events` against the full candidate
-                // event before it is reduced to the resolution context. Rechecking
-                // here would make event-count qualifiers read the narrowed context
-                // instead of the declaration that caused the trigger.
-                if !trig_def.batched {
-                    if let Some(ref condition) = trig_def.condition {
-                        if !check_trigger_condition_with_source(
-                            state,
-                            condition,
-                            controller,
-                            Some(&source_context),
-                            Some(&trigger_event),
-                        ) {
-                            continue;
-                        }
-                    }
-                }
                 // CR 603.2c: For batched triggers, stash the filtered subject
                 // count so the resolved ability's `EventContextAmount` reads
                 // "that many" as the number of matching subjects (Dragons that
@@ -3682,6 +3792,7 @@ fn inline_tap_mana_trigger_abilities(
         for active in super::functioning_abilities::active_trigger_definitions(state, object) {
             let definition_ref = active.definition_ref.clone();
             let trigger_definition = active.definition;
+            let source_context = source_context_for_definition(&source_context, trigger_definition);
             if !matches!(
                 trigger_definition.mode,
                 TriggerMode::TapsForMana | TriggerMode::ManaAbilityProduced
@@ -4298,6 +4409,7 @@ fn collect_latched_batched_zone_triggers(
             let Some(source_context) = latched.source_context_at(observation_time) else {
                 continue;
             };
+            let stamped = source_context_for_definition(source_context, &latched.definition);
             let (_, suppressors) = match observation_time {
                 TriggerObservationTime::ImmediatelyBefore => group
                     .immediately_before_latches()
@@ -4310,15 +4422,15 @@ fn collect_latched_batched_zone_triggers(
             if event_is_suppressed_by_static_triggers_cached(
                 state,
                 event,
-                Some(source_context),
+                Some(&*stamped),
                 &suppressors,
-            ) || !matcher(event, &latched.definition, source_context, state)
+            ) || !matcher(event, &latched.definition, &stamped, state)
                 || !check_trigger_constraint_with_ref(
                     state,
                     &latched.definition,
                     Some(&latched.definition_ref),
-                    Some(source_context),
-                    source_context.lki.controller,
+                    Some(&*stamped),
+                    stamped.lki.controller,
                     Some(event),
                 )
                 || !latched
@@ -4329,8 +4441,8 @@ fn collect_latched_batched_zone_triggers(
                         check_trigger_condition_with_source(
                             state,
                             condition,
-                            source_context.lki.controller,
-                            Some(source_context),
+                            stamped.lki.controller,
+                            Some(&*stamped),
                             Some(event),
                         )
                     })
@@ -4338,9 +4450,10 @@ fn collect_latched_batched_zone_triggers(
                 continue;
             }
             if let Some(contextual_event) =
-                contextual_batched_trigger_event(state, event, &latched.definition, source_context)
+                contextual_batched_trigger_event(state, event, &latched.definition, &stamped)
             {
-                admitted.push((source_context, contextual_event));
+                // CR 201.5a: the count reads the subjects through the context admission read.
+                admitted.push((stamped, contextual_event));
             }
         }
 
@@ -4504,10 +4617,9 @@ impl BulkMemberTriggerCollection {
 fn active_state_trigger_definitions<'a>(
     state: &'a GameState,
     obj: &'a GameObject,
-) -> impl Iterator<Item = &'a TriggerDefinition> + 'a {
+) -> impl Iterator<Item = super::functioning_abilities::ActiveTriggerDefinition<'a>> + 'a {
     super::functioning_abilities::active_trigger_definitions(state, obj)
-        .map(|active| active.definition)
-        .filter(|definition| definition.mode == TriggerMode::StateCondition)
+        .filter(|active| active.definition.mode == TriggerMode::StateCondition)
 }
 
 /// CR 603.8: whether any battlefield permanent has a functioning state trigger,
@@ -7048,12 +7160,18 @@ enum TriggerOrderingDisposition {
 enum DelayedTriggerEventScope {
     Any,
     PhaseChangedOnly,
+    /// CR 603.3b: an attack or block declaration's settlement. Every delayed
+    /// trigger matching the declaration batch joins the printed triggers in one
+    /// ordering choice (Summon: Leviathan II/III beside Righteous Cause). Like
+    /// `PhaseChangedOnly`, it closes no unrelated reflexive: a declaration is not
+    /// the creating batch of any reflexive delayed trigger.
+    DeclarationSettlement,
 }
 
 impl DelayedTriggerEventScope {
     fn accepts(self, event: &GameEvent) -> bool {
         match self {
-            Self::Any => true,
+            Self::Any | Self::DeclarationSettlement => true,
             Self::PhaseChangedOnly => matches!(event, GameEvent::PhaseChanged { .. }),
         }
     }
@@ -9066,7 +9184,7 @@ pub(crate) enum TriggerDispatchDisposition {
     /// fallback below.
     DroppedNoLegalRequiredTarget,
     /// A target/resolution slot could not be auto-resolved (`build_target_slots`,
-    /// `auto_select_targets_for_ability`, or `assign_targets_in_chain` returned
+    /// `auto_select_targets_for_ability`, or `assign_selected_slots_in_chain` returned
     /// `Err`). For a genuine CR 115.1d target with no legal option this matches
     /// CR 603.3d removal; but `build_target_slots` also surfaces resolution-time
     /// filter slots that are *not* CR 115.1d targets (e.g. Good King Mog's "a
@@ -9177,7 +9295,7 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
 
     match auto_targets {
         Ok(Some(targets)) => {
-            if super::ability_utils::assign_targets_in_chain(
+            if super::ability_utils::assign_selected_slots_in_chain(
                 &prepared_state,
                 &mut prepared_trigger.ability,
                 &targets,
@@ -9192,6 +9310,9 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
                 &super::ability_utils::declared_targets_in_chain(&prepared_trigger.ability),
                 prepared_trigger.source_id,
                 prepared_trigger.controller,
+                Some(crate::types::events::Targeter::Ability(
+                    crate::types::ability::StackAbilityKind::Triggered,
+                )),
                 &mut events,
             );
             PreparedTriggerTargets::AutoAssigned {
@@ -11239,7 +11360,11 @@ pub fn check_state_triggers(state: &mut GameState) {
         // phased-out / command-zone gate. We clone the yielded triggers to a
         // local Vec so the mutable-state pass below (push_pending_trigger_to_stack)
         // doesn't collide with the shared borrow on `state.objects`.
-        let (controller, timestamp, trigger_defs): (PlayerId, u32, Vec<TriggerDefinition>) = {
+        let (controller, timestamp, trigger_defs): (
+            PlayerId,
+            u32,
+            Vec<(TriggerDefinitionRef, TriggerDefinition)>,
+        ) = {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
             };
@@ -11250,16 +11375,26 @@ pub fn check_state_triggers(state: &mut GameState) {
                 obj.controller,
                 obj.entered_battlefield_turn.unwrap_or(0),
                 active_state_trigger_definitions(state, obj)
-                    .cloned()
+                    .map(|active| (active.definition_ref, active.definition.clone()))
                     .collect(),
             )
         };
 
-        for trigger in &trigger_defs {
-            // CR 603.8: Don't re-trigger if this state trigger is already on the stack.
+        for (definition_ref, trigger) in &trigger_defs {
+            // CR 603.8: "A state-triggered ability doesn't trigger again until
+            // the ability has resolved, has been countered, or has otherwise
+            // left the stack." Only an instance of THIS ability suppresses it:
+            // another triggered ability of the same source on the stack does
+            // not. (A copy of the ability carries the same definition ref and
+            // holds it back too, as before.) The ref's source pins the source
+            // incarnation, so a pending trigger of an object that left the
+            // battlefield never suppresses the new object it became (CR 400.7).
             let already_on_stack = state.stack.iter().any(|entry| {
-                entry.source_id == obj_id
-                    && matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if ability.trigger_definition_ref.as_ref() == Some(definition_ref)
+                )
             });
             if already_on_stack {
                 continue;
@@ -11269,6 +11404,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                 continue;
             };
             let source_context = trigger_source_context_for_latch(state, source);
+            let source_context = source_context_for_definition(&source_context, trigger);
 
             // Evaluate the condition and build the pending ability from this
             // same observation; a state-trigger source must not later rebind.
@@ -11294,12 +11430,25 @@ pub fn check_state_triggers(state: &mut GameState) {
                 });
 
                 let target_constraints = execute.target_constraints.clone();
-                let ability =
-                    build_triggered_ability_from_context(state, trigger, &source_context, None);
+                // The exact occurrence rides on the stacked ability; it is the
+                // identity the CR 603.8 self-suppression check above reads.
+                let ability = build_triggered_ability_from_context(
+                    state,
+                    trigger,
+                    &source_context,
+                    Some(definition_ref),
+                );
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
-                    condition: trigger.condition.clone(),
+                    // CR 603.8 + CR 603.4: the state condition was read above as
+                    // the trigger event (an `EventTime` wrapper, stripped here) and
+                    // is not rechecked on resolution; only an intervening "if"
+                    // beside it reaches the stacked condition.
+                    condition: trigger
+                        .condition
+                        .as_ref()
+                        .and_then(|condition| stack_condition_for_trigger(trigger, condition)),
                     ability: Box::new(ability),
                     timestamp,
                     target_constraints,
@@ -11650,64 +11799,6 @@ pub(crate) fn filter_already_collected_trigger_events_from(
     .collect()
 }
 
-/// CR 603.2c + CR 510.2: Expand a multi-fire `WheneverEvent` `DamageDone`
-/// trigger's aggregate `CombatDamageDealtToPlayer` matches into one synthetic
-/// per-source `DamageDealt` event per matching (source, defending player)
-/// occurrence, so each firing binds `TriggeringSource`/`EventContextAmount` to a
-/// single creature. CR 510.2 deals all combat damage in a step simultaneously, so
-/// one combat-damage step can emit SEVERAL aggregate events at once — one per
-/// defending player (multiplayer / batched attacks split across opponents, e.g.
-/// Love on the Battlefield). Every such aggregate in the batch is expanded, not
-/// just the first `.find()` match, so a rider that hits two defenders fires for
-/// each (source, player) occurrence. Each returned pair carries the originating
-/// aggregate's event index for consumed-occurrence tracking. Returns the matched
-/// event unchanged (paired with `matched_index`) for every other case
-/// (non-`WheneverEvent`, or no aggregate match — e.g. a `SelfRef` source already
-/// matching the per-source `DamageDealt` event directly, or a non-damage trigger).
-fn expand_multi_fire_damage_occurrences(
-    condition: &crate::types::ability::DelayedTriggerCondition,
-    events: &[GameEvent],
-    matched_index: usize,
-    matched_event: &GameEvent,
-    state: &GameState,
-    source_context: Option<&TriggerSourceContext>,
-) -> Vec<(usize, GameEvent)> {
-    use crate::types::ability::DelayedTriggerCondition;
-    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
-        return vec![(matched_index, matched_event.clone())];
-    };
-    let Some(source_context) = source_context else {
-        return vec![(matched_index, matched_event.clone())];
-    };
-    // CR 603.2c: a single trigger event (the combat-damage step) can contain
-    // multiple occurrences. Expand EVERY matching aggregate
-    // `CombatDamageDealtToPlayer` in the batch — one per defending player — into
-    // its per-source synthetic `DamageDealt` events, tagging each with the source
-    // aggregate's index. `matching_damage_done_events` is empty for non-aggregate
-    // listeners (SelfRef) and non-`DamageDone` triggers, so this scan is inert for
-    // every case handled by the unchanged-fallback below.
-    let expanded: Vec<(usize, GameEvent)> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
-        .flat_map(|(idx, event)| {
-            super::trigger_matchers::matching_damage_done_events(
-                event,
-                trigger,
-                source_context,
-                state,
-            )
-            .into_iter()
-            .map(move |synth| (idx, synth))
-        })
-        .collect();
-    if expanded.is_empty() {
-        vec![(matched_index, matched_event.clone())]
-    } else {
-        expanded
-    }
-}
-
 /// CR 603.4 + CR 608.2c: does this delayed body still carry work that the
 /// resolution-time reading performs when the gate is FALSE — work the fire-time
 /// hoist would silently DELETE?
@@ -11951,7 +12042,13 @@ fn quantity_expr_binding_diverges(expr: &QuantityExpr) -> bool {
 /// deletes a real ability.
 fn object_scope_unbound_at_fire_time(scope: ObjectScope) -> bool {
     match scope {
-        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::EventTarget => false,
+        ObjectScope::Source
+        | ObjectScope::EventSource
+        | ObjectScope::EventTarget
+        // CR 201.5a: a bound incarnation is context-free, and the unbound symbol reads as
+        // `Source` in counters (0 on both legs elsewhere).
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => false,
         ObjectScope::Target
         | ObjectScope::Recipient
         | ObjectScope::CostPaidObject
@@ -12388,14 +12485,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // CR 113.7a + CR 608.2h: source-relative reads, all served by the
         // `TriggerSourceContext` the fire-time leg carries — the same authority
         // `ObjectScope::Source` is adjudicated non-divergent under.
-        // `OriginalSource` and `GrantingObject` are concretized to
-        // `SpecificObject` before runtime and degrade to the source if not;
         // CR 400.3 `Owner` and `SourceController` project a player off it;
         // CR 301.5 / CR 303.4 `AttachedTo` and CR 702.95b `SourceOrPaired` read
         // the source's attachment / pairing.
         | TargetFilter::SelfRef
         | TargetFilter::OriginalSource
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceController
         | TargetFilter::Owner
         | TargetFilter::AttachedTo
@@ -12760,10 +12855,11 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
-        // CR 109.4 + CR 115.1: the anchor lives on the resolving ability
-        // (`targets` / `chosen_players`).
+        // CR 109.4 + CR 115.1 + CR 601.2a: the anchor lives on the resolving ability
+        // (`targets` / `chosen_players` / `cast_occurrence`).
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. }
         // CR 608.2c: ledgers a RESOLUTION publishes — the zone-change and action
         // "this way" lists, the CR 701.38 vote ballots, the tracked sets, and
@@ -13093,15 +13189,36 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
 fn delayed_trigger_to_context(
     state: &GameState,
     trigger: DelayedTrigger,
-    trigger_event: GameEvent,
+    trigger_events: Vec<GameEvent>,
 ) -> PendingTriggerContext {
+    let trigger_event = trigger_events
+        .first()
+        .cloned()
+        .expect("a delayed firing always has an event");
     // CR 603.4 (second half): carry the hoisted intervening-`if` onto the stack
     // entry so `stack.rs`'s resolution recheck applies to a delayed triggered
     // ability exactly as it does to a printed one. `delayed_intervening_if` is
     // the SAME authority the collection gate below used, so the two halves of
     // the CR 603.4 pair cannot read different predicates.
     let condition = delayed_intervening_if(&trigger.ability);
-    PendingTriggerContext::delayed(
+    // CR 603.2c: a batched ("one or more") delayed trigger reads "that many" as
+    // the number of matching subjects in its whole firing group, through the
+    // same counting authority printed batched triggers use.
+    let subject_match_count = match &trigger.condition {
+        crate::types::ability::DelayedTriggerCondition::WheneverEvent {
+            trigger: definition,
+            ..
+        } if definition.batched => trigger.ability.trigger_source.as_ref().and_then(|source| {
+            super::trigger_matchers::count_trigger_subjects_in_batch(
+                state,
+                definition.valid_card.as_ref(),
+                source,
+                &trigger_events,
+            )
+        }),
+        _ => None,
+    };
+    let mut context = PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
             controller: trigger.controller,
@@ -13115,12 +13232,124 @@ fn delayed_trigger_to_context(
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
-            subject_match_count: None,
+            subject_match_count,
             die_result: None,
             provenance: None,
         },
         trigger.provenance,
-    )
+    );
+    // CR 603.2c + CR 608.2c: the firing's whole narrowed group, on the Delayed
+    // dispatch identity (not `PendingTriggerContext::batched`).
+    context.trigger_events = trigger_events;
+    context
+}
+
+/// One firing of a multi-fire delayed `WheneverEvent` generator.
+struct DelayedWheneverFiring {
+    /// Raw batch indices this firing consumes. A raw index shared by several
+    /// firings of one generator (two sources in one aggregate combat-damage
+    /// event) is recorded once.
+    consume: Vec<usize>,
+    events: Vec<GameEvent>,
+}
+
+/// CR 603.7b + CR 603.2c: the firings a duration-bearing ("this turn")
+/// `WheneverEvent` generator makes on one batch, through the same firing-group
+/// authority printed triggers use. Every admitted event is considered, not just
+/// the first match, so a two-creature Pyroclasm fires "whenever a creature
+/// dies" twice and a batched "one or more" generator sees the whole matching
+/// batch. Returns `None` for every other delayed shape, which keeps its
+/// first-match reading (CR 603.7b: a one-shot triggers only once).
+fn delayed_whenever_event_firings(
+    state: &GameState,
+    delayed: &DelayedTrigger,
+    events: &[GameEvent],
+    scope: DelayedTriggerEventScope,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> Option<Vec<DelayedWheneverFiring>> {
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, .. } =
+        &delayed.condition
+    else {
+        return None;
+    };
+    if delayed.one_shot {
+        return None;
+    }
+    let (Some(source_context), Some(matcher)) = (
+        delayed.ability.trigger_source.as_ref(),
+        super::trigger_matchers::trigger_matcher(trigger.mode.clone()),
+    ) else {
+        return Some(Vec::new());
+    };
+    // CR 603.4: the definition's own condition (a head qualifier such as
+    // "attacks alone") and the body's hoisted intervening-if are separate
+    // inputs; only the body-if is rechecked on resolution.
+    let body_if = delayed_intervening_if(&delayed.ability);
+    let conditions = FiringConditions {
+        head: trigger.condition.as_ref(),
+        body_if: body_if.as_ref(),
+    };
+    let once_per_batch = fires_once_per_batch(trigger);
+    let mut consumed = HashSet::new();
+    let mut firings = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        // CR 120.4b: a whole-event threshold is decided on the summed batch,
+        // so admission uses the threshold-free filters, as printed does.
+        let admitted = if damage_received_aggregates_whole_event(trigger) {
+            super::trigger_matchers::damage_received_filters_match(
+                event,
+                trigger,
+                source_context,
+                state,
+            )
+        } else {
+            matcher(event, trigger, source_context, state)
+        };
+        // CR 603.2g: a statically suppressed event triggers nothing.
+        if !admitted
+            || !scope.accepts(event)
+            || event_is_suppressed_by_static_triggers_cached(
+                state,
+                event,
+                Some(source_context),
+                active_suppress_triggers,
+            )
+        {
+            continue;
+        }
+        let groups = trigger_firing_groups(
+            state,
+            event,
+            Some(index),
+            events,
+            trigger,
+            source_context,
+            delayed.controller,
+            matcher,
+            active_suppress_triggers,
+            conditions,
+            &delayed.ability,
+        );
+        let fired = !groups.is_empty();
+        for group in groups {
+            let consume = group
+                .raw
+                .iter()
+                .copied()
+                .filter(|raw| consumed.insert(*raw))
+                .collect();
+            firings.push(DelayedWheneverFiring {
+                consume,
+                events: group.events,
+            });
+        }
+        // CR 603.2c: a "one or more" shape reads the whole batch, so it is
+        // asked once, at the first admitted event that fires it.
+        if once_per_batch && fired {
+            break;
+        }
+    }
+    Some(firings)
 }
 
 /// CR 603.7 + CR 603.7b: Match-only delayed-trigger collection. It fires
@@ -13147,11 +13376,30 @@ fn collect_matching_delayed_triggers(
 
     // Separate "abilities to fire" from "indices to remove".
     // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
-    let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent, bool)> = Vec::new();
+    // Each firing carries the raw batch indices it consumes and its event group.
+    let mut to_fire: Vec<(DelayedTrigger, Vec<usize>, Vec<GameEvent>, bool)> = Vec::new();
     let mut to_remove: Vec<(usize, usize, GameEvent)> = Vec::new();
     let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
+    let active_suppress_triggers = if state.delayed_triggers.iter().any(|delayed| {
+        matches!(
+            delayed.condition,
+            crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
+        )
+    }) {
+        active_suppress_trigger_statics(state)
+    } else {
+        Vec::new()
+    };
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
+        if let Some(firings) =
+            delayed_whenever_event_firings(state, delayed, events, scope, &active_suppress_triggers)
+        {
+            for DelayedWheneverFiring { consume, events } in firings {
+                to_fire.push((delayed.clone(), consume, events, false));
+            }
+            continue;
+        }
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
             &delayed.condition,
             events,
@@ -13204,30 +13452,14 @@ fn collect_matching_delayed_triggers(
             if delayed.one_shot {
                 to_remove.push((idx, event_index, trigger_event));
             } else {
-                // CR 603.2c + CR 510.2: A MULTI-FIRE WheneverEvent DamageDone
-                // trigger that matched the AGGREGATE `CombatDamageDealtToPlayer`
-                // event fires ONCE PER matching (source, defending player)
-                // occurrence — each creature dealing combat damage is a separate
-                // occurrence (CR 603.2c), and one simultaneous combat-damage step
-                // (CR 510.2) can deal to several defenders at once (multiplayer /
-                // batched attacks). Expand EVERY matching aggregate in the batch —
-                // not just the first `.find()` match — into per-source synthetic
-                // `DamageDealt` events so `TriggeringSource` / `EventContextAmount`
-                // bind to each specific source (Love on the Battlefield's
-                // per-creature "+1/+1 counter on it"), for every defender hit.
-                // Non-aggregate matches and non-DamageDone conditions fire once on
-                // the matched event unchanged. Each occurrence carries its own
-                // originating aggregate index for consumed-occurrence tracking.
-                for (occ_index, occurrence) in expand_multi_fire_damage_occurrences(
-                    &delayed.condition,
-                    events,
-                    event_index,
-                    &trigger_event,
-                    state,
-                    delayed.ability.trigger_source.as_ref(),
-                ) {
-                    to_fire.push((delayed.clone(), occ_index, occurrence, false));
-                }
+                // Duration-bearing `WheneverEvent` generators are handled above;
+                // any other multi-fire shape fires once on its matched event.
+                to_fire.push((
+                    delayed.clone(),
+                    vec![event_index],
+                    vec![trigger_event],
+                    false,
+                ));
             }
         }
     }
@@ -13247,7 +13479,7 @@ fn collect_matching_delayed_triggers(
             synth.ability.trigger_source.as_ref(),
         ) {
             if scope.accepts(&trigger_event) {
-                to_fire.push((synth, event_index, trigger_event, false));
+                to_fire.push((synth, vec![event_index], vec![trigger_event], false));
             }
         }
     }
@@ -13276,7 +13508,7 @@ fn collect_matching_delayed_triggers(
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
         if let Some((event_index, trigger_event)) = fired_events.remove(&idx) {
-            to_fire.push((trigger, event_index, trigger_event, true));
+            to_fire.push((trigger, vec![event_index], vec![trigger_event], true));
         } else if let Some(disposition) = unfired_dispositions.remove(&idx) {
             super::lifecycle::record_delayed_terminal(trigger.provenance.firing(), disposition);
         }
@@ -13285,30 +13517,31 @@ fn collect_matching_delayed_triggers(
     let mut consumed_events = Vec::new();
     let mut pending: Vec<PendingTriggerContext> = to_fire
         .into_iter()
-        .map(|(trigger, event_index, trigger_event, removed_one_shot)| {
+        .map(|(trigger, consume, trigger_events, removed_one_shot)| {
             // CR 603.2c + CR 510.2: The consumed IDENTITY is the raw originating
-            // buffer event at `event_index`. For an expanded multi-fire combat
-            // trigger that is the aggregate `CombatDamageDealtToPlayer` — NOT the
-            // synthetic per-source `DamageDealt` in `trigger_event`, which exists
-            // only as per-firing context. `trigger_event_occurrence` counts
-            // occurrences of `events[event_index]`, so the recorded event MUST key
-            // off the same raw event; otherwise `filter_consumed_trigger_events_from`
-            // (which compares both event equality and occurrence) never matches the
-            // aggregate, leaving it in the buffer for a later priority scan to
-            // re-expand and fire the delayed trigger a second time. For every
-            // non-expanded case `trigger_event == events[event_index]`, so this is a
-            // no-op there.
-            consumed_events.push(ConsumedTriggerEventOccurrence {
-                occurrence: trigger_event_occurrence(events, event_index),
-                event: events[event_index].clone(),
-                scope: ConsumedTriggerEventScope::AllCollectors,
-            });
+            // buffer event. For an expanded multi-fire combat trigger that is the
+            // aggregate `CombatDamageDealtToPlayer` — NOT the synthetic
+            // per-source `DamageDealt` in the firing's events, which exists only
+            // as per-firing context. `trigger_event_occurrence` counts
+            // occurrences of the raw event, so the recorded event MUST key off
+            // the same raw event; otherwise `filter_consumed_trigger_events_from`
+            // (which compares both event equality and occurrence) never matches
+            // the aggregate, leaving it in the buffer for a later priority scan
+            // to re-expand and fire the delayed trigger a second time. A batched
+            // firing consumes every raw member.
+            for event_index in consume {
+                consumed_events.push(ConsumedTriggerEventOccurrence {
+                    occurrence: trigger_event_occurrence(events, event_index),
+                    event: events[event_index].clone(),
+                    scope: ConsumedTriggerEventScope::AllCollectors,
+                });
+            }
             let origin = trigger.provenance.origin();
             let binding = super::lifecycle::ImmutableBinding {
                 source_id: trigger.source_id,
                 controller: trigger.controller,
             };
-            let context = delayed_trigger_to_context(state, trigger, trigger_event);
+            let context = delayed_trigger_to_context(state, trigger, trigger_events);
             if removed_one_shot {
                 if let Some(origin) = origin {
                     super::lifecycle::record_delayed_due(origin, binding);
@@ -13390,7 +13623,8 @@ fn terminalize_unmatched_reflexives_for_closed_batch(
         }
         let expires = match scope {
             DelayedTriggerEventScope::Any => is_reflexive_lifetime(&delayed.condition),
-            DelayedTriggerEventScope::PhaseChangedOnly => {
+            DelayedTriggerEventScope::PhaseChangedOnly
+            | DelayedTriggerEventScope::DeclarationSettlement => {
                 reflexive_coin_flip_resolved_without_match(
                     &delayed.condition,
                     events,
@@ -13638,6 +13872,27 @@ pub(crate) fn process_triggers_with_delayed_phase_events(
         state,
         normal_pending,
         delayed_events,
+        events_out,
+    )
+}
+
+/// CR 603.3b + CR 508.3a + CR 509.3a: settle an attack or block declaration.
+/// The printed triggers and every delayed trigger the declaration batch fires
+/// (Summon: Leviathan's chapter II/III beside Righteous Cause) are collected
+/// into ONE batch, so each controller orders them together. The delayed
+/// collector's consumed raw occurrences are recorded as for any other combined
+/// batch, so the later priority pass does not fire them a second time.
+pub(crate) fn process_triggers_with_delayed_declaration_events(
+    state: &mut GameState,
+    events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerBatchOutcome {
+    let normal_pending = collect_triggers_for_batch(state, events);
+    process_collected_triggers_with_delayed_events_scoped(
+        state,
+        normal_pending,
+        events,
+        DelayedTriggerEventScope::DeclarationSettlement,
         events_out,
     )
 }
@@ -15203,10 +15458,12 @@ fn evaluate_trigger_condition_with_source(
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
-            // CR 108.3 + CR 608.2c: parent-target-owner and resolution-scoped
-            // chosen-player anchors are effect-resolution references, not
-            // turn-binding predicates — no "whose turn" semantic. Fail-closed.
+            // CR 108.3 + CR 601.2a + CR 608.2c: parent-target-owner, granter-caster
+            // and resolution-scoped chosen-player anchors are effect-resolution
+            // references, not turn-binding predicates — no "whose turn" semantic.
+            // Fail-closed.
             | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::GrantingObjectCaster
             | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
@@ -15461,7 +15718,11 @@ fn evaluate_trigger_condition_with_source(
         // Reads the per-color tally recorded in casting::pay_mana_cost.
         TriggerCondition::ManaColorSpent { color, minimum } => {
             source_context.is_some_and(|source| {
-                source.source_read(state).colors_spent_to_cast().get(*color) >= *minimum
+                source
+                    .source_read(state)
+                    .colors_spent_to_cast()
+                    .get(color.color())
+                    >= *minimum
             })
         }
         // CR 601.2h: "if no mana was spent to cast it/them" — check the cast or
@@ -15604,9 +15865,10 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_event,
         ),
-        // CR 508.1m + CR 603.4: an event-time gate evaluates its wrapped
-        // condition when the trigger event occurs; it never reaches the
-        // resolution recheck (`stack_condition_for_trigger` drops it).
+        // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
+        // a state trigger's own condition) evaluates its wrapped condition when
+        // the ability triggers; it never reaches the resolution recheck
+        // (`stack_condition_for_trigger` drops it).
         TriggerCondition::EventTime { condition } => evaluate_trigger_condition_with_source(
             state,
             condition,
@@ -16061,8 +16323,9 @@ fn stack_condition_for_trigger(
     }
 
     match condition {
-        // CR 508.1m + CR 603.4: a "while" gate was read at the trigger event and
-        // is not an intervening `if`, so it never becomes a resolution recheck.
+        // CR 508.1m + CR 603.4 / CR 603.8: a "while" gate, or a state trigger's
+        // own condition, was read when the ability triggered and is not an
+        // intervening `if`, so it never becomes a resolution recheck.
         TriggerCondition::EventTime { .. } => None,
         TriggerCondition::And { conditions } => {
             let mut remaining: Vec<TriggerCondition> = conditions
@@ -16591,6 +16854,20 @@ fn ability_condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool
     }
 }
 
+/// CR 201.5a + CR 603.2 + CR 603.4: the source context a trigger definition is
+/// matched, checked and instantiated with carries exactly that definition's granter stamp.
+pub(super) fn source_context_for_definition<'a>(
+    source_context: &'a TriggerSourceContext,
+    trig_def: &TriggerDefinition,
+) -> Cow<'a, TriggerSourceContext> {
+    if source_context.granting_object == trig_def.granting_object {
+        return Cow::Borrowed(source_context);
+    }
+    let mut stamped = source_context.clone();
+    stamped.granting_object = trig_def.granting_object;
+    Cow::Owned(stamped)
+}
+
 /// Builds a triggered ability exclusively from the source observation that
 /// matched it. The only live reads below are documented game-global event
 /// channels (`announced_source_x` and `active_player`), never a rebind of the
@@ -16601,6 +16878,8 @@ pub(super) fn build_triggered_ability_from_context(
     source_context: &TriggerSourceContext,
     definition_ref: Option<&TriggerDefinitionRef>,
 ) -> ResolvedAbility {
+    let source_context = source_context_for_definition(source_context, trig_def);
+    let source_context: &TriggerSourceContext = &source_context;
     let source_id = source_context.identity.reference.object_id;
     let controller = source_context.lki.controller;
     if let Some(definition_ref) = definition_ref {
@@ -16980,9 +17259,9 @@ pub mod tests {
         FilterProp, GuessSubject, KickerVariant, ModalChoice, MultiTargetSpec, PlayerFilter,
         PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -18106,19 +18385,13 @@ pub mod tests {
         let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
         trigger.batched = true;
         trigger.valid_target = Some(TargetFilter::Player);
-        assert!(damage_done_once_by_controller_fires_per_player_recipient(
-            &trigger
-        ));
+        assert!(damage_fires_per_player_recipient(&trigger));
 
         trigger.valid_target = Some(TargetFilter::Opponent);
-        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
-            &trigger
-        ));
+        assert!(!damage_fires_per_player_recipient(&trigger));
 
         trigger.valid_target = Some(TargetFilter::Controller);
-        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
-            &trigger
-        ));
+        assert!(!damage_fires_per_player_recipient(&trigger));
 
         trigger.valid_target = Some(TargetFilter::Or {
             filters: vec![
@@ -18129,21 +18402,22 @@ pub mod tests {
                 }),
             ],
         });
-        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
-            &trigger
-        ));
+        assert!(!damage_fires_per_player_recipient(&trigger));
 
         trigger.valid_target = Some(TargetFilter::Player);
         trigger.batched = false;
-        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
-            &trigger
-        ));
+        assert!(!damage_fires_per_player_recipient(&trigger));
 
         trigger.batched = true;
         trigger.mode = TriggerMode::DamageDoneOnce;
-        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
-            &trigger
-        ));
+        assert!(!damage_fires_per_player_recipient(&trigger));
+
+        // The delayed body's wording (Jace, Cunning Castaway +1) lowers to
+        // DamageDone with the same recipient; it fires per player too.
+        trigger.mode = TriggerMode::DamageDone;
+        assert!(damage_fires_per_player_recipient(&trigger));
+        trigger.valid_target = Some(TargetFilter::Opponent);
+        assert!(!damage_fires_per_player_recipient(&trigger));
     }
 
     #[test]
@@ -18216,7 +18490,16 @@ pub mod tests {
             PlayerId(0),
             super::super::trigger_matchers::match_damage_done_once_by_controller,
             &[],
-        );
+            FiringConditions::printed(&trigger),
+        )
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
 
         assert_eq!(batches.len(), 2, "each damaged player must keep one firing");
         assert_eq!(
@@ -18335,7 +18618,16 @@ pub mod tests {
             PlayerId(0),
             super::super::trigger_matchers::match_damage_done_once_by_controller,
             &[],
-        );
+            FiringConditions::printed(&trigger),
+        )
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
 
         assert_eq!(batches.len(), 2, "only player recipients may form groups");
         assert_eq!(batches[0], vec![player_one_hit.clone(), player_one_hit]);
@@ -18531,6 +18823,7 @@ pub mod tests {
             Some(&GameEvent::PermanentTapped {
                 object_id: milled,
                 caused_by: None,
+                incarnation: None,
             }),
             EventContextSeedTiming::StackPush,
         );
@@ -19387,6 +19680,61 @@ pub mod tests {
                 "{mode:?}: the intervening-if beside it must stay on the stack"
             );
         }
+    }
+
+    /// CR 603.8 + CR 603.4: a parsed state trigger stacks exactly its intervening
+    /// "if" — the state condition itself is the trigger event (lowered as
+    /// `EventTime`) and is never rechecked on resolution. A state trigger with no
+    /// intervening "if" stacks no condition at all. Verbatim Oracle text (MTGJSON).
+    #[test]
+    fn parsed_state_trigger_stacks_only_its_intervening_if() {
+        let state_trigger = |oracle: &str, name: &str, core_type: &str| {
+            crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &[core_type.to_string()],
+                &[],
+            )
+            .triggers
+            .into_iter()
+            .find(|t| t.mode == TriggerMode::StateCondition)
+            .unwrap_or_else(|| panic!("{name} must parse a StateCondition trigger"))
+        };
+
+        let hidden_predators = state_trigger(
+            "When an opponent controls a creature with power 4 or greater, if this permanent is an enchantment, it becomes a 4/4 Beast creature.",
+            "Hidden Predators",
+            "Enchantment",
+        );
+        let condition = hidden_predators
+            .condition
+            .as_ref()
+            .expect("Hidden Predators' state trigger must carry a condition");
+        assert!(
+            matches!(
+                stack_condition_for_trigger(&hidden_predators, condition),
+                Some(TriggerCondition::SourceMatchesFilter { .. })
+            ),
+            "only the intervening \"if this permanent is an enchantment\" may be \
+             rechecked on resolution; stacked {:?} from {condition:?}",
+            stack_condition_for_trigger(&hidden_predators, condition),
+        );
+
+        let emperor_crocodile = state_trigger(
+            "When you control no other creatures, sacrifice this creature.",
+            "Emperor Crocodile",
+            "Creature",
+        );
+        let condition = emperor_crocodile
+            .condition
+            .as_ref()
+            .expect("Emperor Crocodile's state trigger must carry a condition");
+        assert_eq!(
+            stack_condition_for_trigger(&emperor_crocodile, condition),
+            None,
+            "a state trigger without an intervening \"if\" stacks no recheck"
+        );
     }
 
     #[test]
@@ -25182,6 +25530,23 @@ pub mod tests {
         );
     }
 
+    /// CR 201.5 + CR 603.4: unbound, `GrantingObject` counters read exactly `Source`'s, so
+    /// they must hoist to fire time the same way.
+    #[test]
+    fn granting_object_counters_bind_at_fire_time_like_source() {
+        let counters = |scope| QuantityRef::CountersOn {
+            scope,
+            counter_type: None,
+        };
+        assert_eq!(
+            quantity_ref_binding_diverges(&counters(ObjectScope::GrantingObject)),
+            quantity_ref_binding_diverges(&counters(ObjectScope::Source)),
+        );
+        assert!(!quantity_ref_binding_diverges(&counters(
+            ObjectScope::GrantingObject
+        )));
+    }
+
     #[test]
     fn starting_life_fire_time_binding_tracks_player_scope() {
         let state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 0);
@@ -26615,7 +26980,7 @@ pub mod tests {
         );
         // The expansion path requires the delayed ability to carry its
         // creation-time trigger source; without it, collection returns the event
-        // unexpanded (see `expand_multi_fire_damage_occurrences`).
+        // unexpanded (see `delayed_whenever_event_firings`).
         let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&rider_source]);
         ability.set_trigger_source_recursive(rider_ctx);
 
@@ -26671,6 +27036,82 @@ pub mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::CombatDamageDealtToPlayer { .. })),
             "the aggregate must be consumed so a re-scan cannot fire the trigger twice"
+        );
+    }
+
+    /// CR 603.2c: a batched ("one or more") delayed generator fires ONCE for the
+    /// whole matching batch, carries every member as its trigger events, and
+    /// consumes EVERY raw member, so a later scan of the buffer cannot fire it
+    /// again on a member the first firing already read. The non-matching
+    /// member (an opponent's creature) is neither read nor consumed.
+    #[test]
+    fn batched_delayed_generator_consumes_every_raw_member_once() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let watcher = create_object(
+            &mut state,
+            CardId(0x9656_0001),
+            controller,
+            "Batch Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let own_a = make_creature(&mut state, controller, "Own Wall A", 0, 4);
+        let own_b = make_creature(&mut state, controller, "Own Wall B", 0, 4);
+        let theirs = make_creature(&mut state, PlayerId(1), "Their Wall", 0, 4);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageReceived);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.batched = true;
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            watcher,
+            controller,
+        );
+        let watcher_ctx = trigger_source_context_for_latch(&state, &state.objects[&watcher]);
+        ability.set_trigger_source_recursive(watcher_ctx);
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: watcher,
+            one_shot: false,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        });
+
+        let hit = |target: ObjectId| GameEvent::DamageDealt {
+            source_id: watcher,
+            target: TargetRef::Object(target),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        };
+        let events = vec![hit(own_a), hit(theirs), hit(own_b)];
+        let DelayedTriggerMatch {
+            contexts, consumed, ..
+        } = collect_matching_delayed_triggers(&mut state, &events, DelayedTriggerEventScope::Any);
+
+        assert_eq!(contexts.len(), 1, "one firing for the whole batch");
+        assert_eq!(
+            contexts[0].trigger_events,
+            vec![hit(own_a), hit(own_b)],
+            "the firing reads every matching member, and only those"
+        );
+        assert_eq!(consumed.len(), 2, "both raw members are consumed");
+        let remaining =
+            filter_consumed_trigger_events(&events, TriggerCollectionRequester::Delayed, &consumed);
+        assert_eq!(
+            remaining,
+            vec![hit(theirs)],
+            "a re-scan finds only the non-matching member"
         );
     }
 
@@ -29657,6 +30098,7 @@ pub mod tests {
             target: TargetRef::Object(creature),
             source_id: spell,
             source_controller: PlayerId(0),
+            targeter: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -29728,6 +30170,7 @@ pub mod tests {
             target: TargetRef::Object(creature),
             source_id: spell,
             source_controller: PlayerId(0),
+            targeter: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -29776,6 +30219,7 @@ pub mod tests {
             target: TargetRef::Object(ward_target),
             source_id: prepared_source,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(
             collect_pending_triggers(&mut without_overlay, std::slice::from_ref(&event)).is_empty(),
@@ -29787,6 +30231,7 @@ pub mod tests {
             target: TargetRef::Object(ward_target),
             source_id: prepared_source,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         let pending = collect_pending_triggers_with_overlay(
             &mut with_overlay,
@@ -29875,6 +30320,7 @@ pub mod tests {
             target: TargetRef::Object(observer),
             source_id: source,
             source_controller: PlayerId(0),
+            targeter: None,
         };
         assert!(crate::game::trigger_matchers::match_becomes_target(
             &event,
@@ -29917,6 +30363,7 @@ pub mod tests {
                 target: TargetRef::Object(ward_target),
                 source_id: source,
                 source_controller: PlayerId(0),
+                targeter: None,
             }],
         );
         let serialized = serde_json::to_string(&pending)
@@ -29928,6 +30375,7 @@ pub mod tests {
             &[GameEvent::PermanentTapped {
                 object_id: tapped,
                 caused_by: None,
+                incarnation: None,
             }],
         );
         pending.collect(
@@ -29935,6 +30383,7 @@ pub mod tests {
             &[GameEvent::PermanentTapped {
                 object_id: tapped,
                 caused_by: None,
+                incarnation: None,
             }],
         );
 
@@ -29966,6 +30415,7 @@ pub mod tests {
             &[GameEvent::PermanentTapped {
                 object_id: cancelled_tap,
                 caused_by: None,
+                incarnation: None,
             }],
         );
         drop(cancelled);
@@ -30019,6 +30469,7 @@ pub mod tests {
             target: TargetRef::Object(creature),
             source_id: spell,
             source_controller: PlayerId(0),
+            targeter: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -30125,6 +30576,7 @@ pub mod tests {
                 target: TargetRef::Object(p1_ward),
                 source_id: spell0,
                 source_controller: PlayerId(0),
+                targeter: None,
             }],
         );
         assert!(
@@ -30142,6 +30594,7 @@ pub mod tests {
                 target: TargetRef::Object(p0_ward),
                 source_id: spell1,
                 source_controller: PlayerId(0),
+                targeter: None,
             }],
         );
         assert!(
@@ -30196,6 +30649,7 @@ pub mod tests {
             target: TargetRef::Object(creature),
             source_id: spell,
             source_controller: PlayerId(0),
+            targeter: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -30544,6 +30998,7 @@ pub mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: tapped,
             caused_by: None,
+            incarnation: None,
         };
 
         // No taps recorded yet → false.
@@ -30580,6 +31035,7 @@ pub mod tests {
         let other_event = GameEvent::PermanentTapped {
             object_id: ObjectId(99),
             caused_by: None,
+            incarnation: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -30624,14 +31080,17 @@ pub mod tests {
             GameEvent::PermanentTapped {
                 object_id: a,
                 caused_by: None,
+                incarnation: None,
             },
             GameEvent::PermanentTapped {
                 object_id: b,
                 caused_by: None,
+                incarnation: None,
             },
             GameEvent::PermanentTapped {
                 object_id: a,
                 caused_by: None,
+                incarnation: None,
             },
         ];
         observe_object_taps(&mut state, &events);
@@ -30652,10 +31111,12 @@ pub mod tests {
             GameEvent::PermanentTapped {
                 object_id: tapped,
                 caused_by: None,
+                incarnation: None,
             },
             GameEvent::PermanentTapped {
                 object_id: tapped,
                 caused_by: None,
+                incarnation: None,
             },
             GameEvent::CounterAdded {
                 object_id: countered,
@@ -31961,7 +32422,9 @@ pub mod tests {
     fn test_adamant_true_when_enough_color_spent() {
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         assert!(check_trigger_condition(
@@ -31977,7 +32440,9 @@ pub mod tests {
     fn test_adamant_false_when_not_enough() {
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 4,
         };
         assert!(!check_trigger_condition(
@@ -31993,7 +32458,9 @@ pub mod tests {
     fn test_adamant_false_when_wrong_color() {
         let (state, src) = setup_with_colored_cast(ManaColor::Green, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         assert!(!check_trigger_condition(
@@ -32010,7 +32477,9 @@ pub mod tests {
         // minimum: 1 with one red spent → true
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 1);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 1,
         };
         assert!(check_trigger_condition(
@@ -32024,7 +32493,9 @@ pub mod tests {
         // minimum: 1 with zero red spent → false
         let (state, src) = setup_with_colored_cast(ManaColor::Green, 5);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 1,
         };
         assert!(!check_trigger_condition(
@@ -32182,6 +32653,7 @@ pub mod tests {
         let event = GameEvent::PermanentTapped {
             object_id: subject,
             caused_by: None,
+            incarnation: None,
         };
 
         assert!(check_trigger_condition_with_source(
@@ -37499,7 +37971,9 @@ pub mod tests {
         clear_post_collection_transients(&mut state);
 
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::White,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::White,
+            },
             minimum: 2,
         };
         assert!(
@@ -40899,6 +41373,7 @@ pub mod tests {
         let events = vec![GameEvent::PermanentTapped {
             object_id: victim,
             caused_by: Some(tapper),
+            incarnation: None,
         }];
 
         state.waiting_for = if settled {
@@ -42231,6 +42706,7 @@ pub mod tests {
             condition: None,
             duration_subject: None,
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: "Jhoira".to_string(),
         };
@@ -42326,6 +42802,7 @@ pub mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                granting_object: None,
                 duration_event_source: None,
                 source_name: "Grant source".to_string(),
             });
@@ -42472,6 +42949,7 @@ pub mod tests {
                     condition: None,
                     duration_subject: None,
                     end_permission: None,
+                    granting_object: None,
                     duration_event_source: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
                 },

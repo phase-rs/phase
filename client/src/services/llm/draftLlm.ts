@@ -16,15 +16,20 @@ import { ensureSetCatalog } from "../setCatalog";
 import { debugLog } from "../../game/debugLog";
 import { reportLlmFailure } from "./diagnostics";
 import { executeLlmRequest } from "./llmClient";
-import { endpointOf, type LlmDraftOutcome, type LlmDraftPickRequest, type LlmProfile } from "./types";
+import { resolvedEndpointOf } from "./endpoint";
+import { recordLlmUsage } from "./usage";
+import { type LlmDraftOutcome, type LlmDraftPickRequest, type LlmProfile } from "./types";
 
 /**
  * Per-seat ceiling for a draft pick.
  *
- * Tighter than the in-game budget because the player is waiting on a click they
- * just made. The call runs with no engine lease held, so a seat that misses the
- * window is simply drafted by the heuristic bot, with no consequence beyond
- * that one card.
+ * The clock starts when the pack opens, not when the player clicks: a round is
+ * started the moment a pack is in front of the pod (`startLlmDraftRound`), so
+ * most of this budget is spent while the player is still reading the pack.
+ * Tighter than the in-game budget because a slow seat can still hold the pod
+ * at the end of a quick pick. The call runs with no engine lease held, so a
+ * seat that misses the window is simply drafted by the heuristic bot, with no
+ * consequence beyond that one card.
  */
 export const LLM_DRAFT_TIMEOUT_MS = 20_000;
 
@@ -104,6 +109,92 @@ async function setNameMap(): Promise<Record<string, string>> {
   );
 }
 
+/** Where one LLM drafter is in the current pick round. */
+export type LlmDrafterState =
+  /** Its provider call is in flight. */
+  | "picking"
+  /** A reply came back; the engine will read it when the pick is submitted. */
+  | "ready"
+  /** The call failed or timed out; the engine bot drafts this seat's pick. */
+  | "fallback";
+
+export interface LlmDrafterStatus {
+  readonly seat: number;
+  readonly state: LlmDrafterState;
+}
+
+/** Progress callbacks for one round of provider calls. */
+export interface LlmDraftRoundObserver {
+  /** The engine built these requests; their calls are about to start. */
+  onRequests?(requests: readonly LlmDraftPickRequest[]): void;
+  /** One seat's call settled: `true` when bytes came back. */
+  onSeatSettled?(seat: number, replied: boolean): void;
+}
+
+/**
+ * One pick step's worth of LLM drafting, started as soon as the pack is open.
+ *
+ * The seats pick simultaneously (CR 905.1a), and none of them needs the
+ * player's pick to make its own — a seat's pack is already in front of it. So
+ * the provider calls start when the pack opens and run while the player
+ * decides; the player's pick only has to wait for whatever is still in flight
+ * when it is made, and a pick made after every seat has answered waits for
+ * nothing.
+ */
+export interface LlmDraftRound {
+  readonly profileId: string;
+  /** True once every seat's call has settled (replied, failed or timed out). */
+  readonly settled: boolean;
+  /**
+   * Every seat's reply, for `submitPickWithLlmBotPicks`. Never rejects; empty
+   * when nothing usable came back or the round was superseded.
+   */
+  readonly responses: Promise<LlmDraftResponsePayload[]>;
+  /** Prompt size of each seat's request, for usage reporting. */
+  readonly promptChars: ReadonlyMap<number, number>;
+}
+
+/**
+ * Start the round of LLM picks for the pack in front of the pod.
+ *
+ * Returns immediately; the calls run in the background. `onStatus` receives
+ * every seat's progress as it changes, so the UI can show which drafters have
+ * picked. Starting a round supersedes any earlier one, exactly as
+ * `collectLlmDraftResponses` does.
+ */
+export function startLlmDraftRound(
+  profile: LlmProfile,
+  stillCurrent: () => boolean,
+  onStatus: (statuses: readonly LlmDrafterStatus[]) => void,
+): LlmDraftRound {
+  const promptChars = new Map<number, number>();
+  let statuses: LlmDrafterStatus[] = [];
+  const publish = (next: LlmDrafterStatus[]): void => {
+    statuses = next;
+    if (stillCurrent()) onStatus(statuses);
+  };
+  const round: { -readonly [K in keyof LlmDraftRound]: LlmDraftRound[K] } = {
+    profileId: profile.id,
+    settled: false,
+    promptChars,
+    responses: Promise.resolve([]),
+  };
+  round.responses = collectLlmDraftResponses(profile, stillCurrent, {
+    onRequests(requests) {
+      for (const request of requests) promptChars.set(request.seat, request.promptChars);
+      publish(requests.map((request) => ({ seat: request.seat, state: "picking" })));
+    },
+    onSeatSettled(seat, replied) {
+      publish(statuses.map((status) => (
+        status.seat === seat ? { seat, state: replied ? "ready" : "fallback" } : status
+      )));
+    },
+  }).finally(() => {
+    round.settled = true;
+  });
+  return round;
+}
+
 /**
  * Gather every LLM bot seat's reply for the pick about to be submitted.
  *
@@ -128,6 +219,7 @@ async function setNameMap(): Promise<Record<string, string>> {
 export async function collectLlmDraftResponses(
   profile: LlmProfile,
   stillCurrent: () => boolean,
+  observer: LlmDraftRoundObserver = {},
 ): Promise<LlmDraftResponsePayload[]> {
   // A profile the session has given up on skips the round entirely, so a dead
   // provider costs no further latency.
@@ -149,7 +241,7 @@ export async function collectLlmDraftResponses(
     // client-side classification of the same thing -- free to drift, and
     // drifting toward disclosing a human seat's private pool.
     requests = await withDraftEngineOperation((lease) =>
-      lease.buildLlmDraftPickRequests(JSON.stringify(endpointOf(profile)), setNames),
+      lease.buildLlmDraftPickRequests(JSON.stringify(resolvedEndpointOf(profile)), setNames),
     );
   } catch (error) {
     // A run the draft lifecycle cancelled (abandon, new draft, resume) will
@@ -161,14 +253,17 @@ export async function collectLlmDraftResponses(
     return [];
   }
   if (requests.length === 0) {
-    // Nothing to ask is not a provider failure; it is a pod with no eligible
-    // seat. It must not count toward giving up on the profile.
+    // Nothing to ask is not a provider failure: a pod with no eligible seat,
+    // or a step where every seat's pick is forced (the last card of a pack),
+    // which the engine never puts to a provider. It must not count toward
+    // giving up on the profile.
     return [];
   }
   if (!stillCurrent() || run.signal.aborted) {
     cancelRun(run);
     return [];
   }
+  observer.onRequests?.(requests);
 
   // Phase 2 -- no lease held. One call per seat, in parallel: the seats pick
   // simultaneously in the rules (CR 905.1a), and serializing them would
@@ -180,6 +275,7 @@ export async function collectLlmDraftResponses(
           timeoutMs: LLM_DRAFT_TIMEOUT_MS,
           signal: run.signal,
         });
+        observer.onSeatSettled?.(request.seat, true);
         return {
           seat: request.seat,
           fingerprint: request.fingerprint,
@@ -188,7 +284,12 @@ export async function collectLlmDraftResponses(
           body,
         };
       } catch (error) {
-        reportLlmFailure(`LLM drafter (seat ${request.seat}) failed`, error);
+        observer.onSeatSettled?.(request.seat, false);
+        // A round the draft cut loose (a new pack, an abandoned draft) is not
+        // the provider failing, and is not worth a line in the game log.
+        if (!run.signal.aborted) {
+          reportLlmFailure(`LLM drafter (seat ${request.seat}) failed`, error);
+        }
         return null;
       }
     }),
@@ -238,6 +339,21 @@ export function recordLlmDraftSubmission(profileId: string, outcomes: LlmDraftOu
 /** Clear `activeRun` only if it still refers to this round. */
 function cancelRun(run: AbortController): void {
   if (activeRun === run) activeRun = null;
+}
+
+/**
+ * Log what each seat's call cost: the prompt size the engine built and the
+ * token usage the provider reported. Console only (see `usage.ts`).
+ */
+export function recordLlmDraftUsage(round: LlmDraftRound, outcomes: LlmDraftOutcome[]): void {
+  for (const outcome of outcomes) {
+    recordLlmUsage(
+      "draft",
+      `seat ${outcome.seat}`,
+      round.promptChars.get(outcome.seat),
+      outcome.usage,
+    );
+  }
 }
 
 /**

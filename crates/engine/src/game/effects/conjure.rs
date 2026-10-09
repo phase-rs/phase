@@ -328,14 +328,14 @@ fn place_conjured_in_library(
     if conjured.is_empty() {
         return;
     }
-    let Some(pidx) = state.players.iter().position(|p| p.id == owner) else {
+    if !state.players.iter().any(|p| p.id == owner) {
         return;
-    };
+    }
     // The recipient's existing library, with the just-conjured copies (currently at
     // the bottom in creation order) removed, so index math and the random window
     // treat the copies as being *inserted* among the existing cards.
-    let mut rest: Vec<ObjectId> = state.players[pidx]
-        .library
+    let mut rest: Vec<ObjectId> = state
+        .library_of(owner)
         .iter()
         .copied()
         .filter(|id| !conjured.contains(id))
@@ -387,7 +387,7 @@ fn place_conjured_in_library(
     };
 
     // allow-raw-zone: in-library reorder of just-conjured cards, not a zone event.
-    state.players[pidx].library = final_library.into_iter().collect();
+    *state.library_of_mut(owner) = final_library.into_iter().collect();
 }
 
 #[cfg(test)]

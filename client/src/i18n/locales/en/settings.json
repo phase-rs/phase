@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "New",
       "classic": "Classic"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Hover to preview",
+    "cardAnimationPreviewHintTap": "Tap to preview"
   },
   "flexLayout": {
     "title": "Flex Layout",
@@ -503,6 +505,8 @@
     "modelPlaceholder": "Model id (e.g. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://your-server/v1",
+    "jevEndpointPlaceholder": "Defaults to your multiplayer server",
+    "jevEndpointHint": "Jev is reached through a phase multiplayer server, which relays each request to TypeSafe. Your key travels only inside that request. It is never stored on the server.",
     "apiKey": "API key",
     "apiKeyPlaceholder": "Paste your API key",
     "apiKeyOptional": "Optional for local servers",

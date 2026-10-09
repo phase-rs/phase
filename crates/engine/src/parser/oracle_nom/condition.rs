@@ -2103,6 +2103,22 @@ fn parse_bare_predicate_disjunction(input: &str) -> OracleResult<'_, Vec<TargetF
     nom::multi::separated_list1(tag(" or "), parse_bare_predicate_tail).parse(input)
 }
 
+/// CR 303.4b: being "enchanted" means having an Aura attached, regardless of
+/// which object supplies the condition or who controls the Aura.
+fn parse_enchanted_status_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::HasAttachment {
+                kind: crate::types::ability::AttachmentKind::Aura,
+                controller: None,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
+            }]),
+        ),
+        tag("enchanted"),
+    )
+    .parse(input)
+}
+
 /// CR 401.1 + CR 401.5: "the top card of your library is [predicate]" — a
 /// continuous-static gate reading the top card of the controller's library
 /// (Vampire Nocturnus "is black", Mul Daya Channelers "is a creature card",
@@ -2143,17 +2159,45 @@ fn parse_top_of_library_condition(input: &str) -> OracleResult<'_, StaticConditi
 }
 
 /// CR 611.3a: "it's a Zombie" / "it isn't white" / "it's a Zombie or a Skeleton" —
-/// the anaphoric "it" binds to the recipient (effective subject) of the continuous
+/// the anaphoric "it" or "that <object>" binds to the recipient of the continuous
 /// effect. Emits `RecipientMatchesFilter` (affirmative), `Not(RecipientMatchesFilter)`
 /// (negated), or `Or([RecipientMatchesFilter, …])` (disjunction). The pronoun subject
 /// is scoped to this combinator only (it is NOT added to the shared source-subject
 /// dispatcher, mirroring `parse_counter_condition_subject`). A terminal-boundary guard
 /// rejects non-clause-ending predicates (e.g. "attacking alone") so the alt backtracks
 /// to the combat combinator.
+///
+/// Only the explicit "that <object>" anaphor also takes the "enchanted" status
+/// predicate (Rootwater Matriarch: "for as long as that creature is enchanted").
+/// Bare "it" stays limited to characteristic predicates: on a SelfRef static,
+/// "it's enchanted" names the source and is bound by the caller
+/// (`rewrite_self_pronoun_subject` → `SourceIsEnchanted`, Metathran Elite), which
+/// relies on this context-free grammar declining it.
 fn parse_recipient_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("it").parse(input)?;
-    let (rest, negated) = parse_it_copula(rest)?;
-    let (rest, filters) = parse_bare_predicate_disjunction(rest)?;
+    let (rest, (negated, filters)) = alt((
+        preceded(
+            tag("it"),
+            (parse_it_copula, parse_bare_predicate_disjunction),
+        ),
+        preceded(
+            (
+                tag("that "),
+                alt((
+                    value((), super::primitives::parse_core_type),
+                    value((), tag("permanent")),
+                    value((), tag("card")),
+                )),
+            ),
+            (
+                parse_it_copula,
+                alt((
+                    map(parse_enchanted_status_filter, |filter| vec![filter]),
+                    parse_bare_predicate_disjunction,
+                )),
+            ),
+        ),
+    ))
+    .parse(input)?;
 
     // Pronoun-form boundary guard: the predicate must end at a clause boundary
     // (end of input or one of ",", ".", ";"). Otherwise leftover words (e.g.
@@ -2656,22 +2700,63 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
 /// self-referential subject such as Mazemind Tome's "this artifact" arrives as
 /// `~` here (do not write an un-normalized unit test against this combinator).
 pub(crate) fn parse_source_counters_exist(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Source-referential subject only: `~` (normalized self-ref) or bound `it`.
+    // A non-source subject ("that creature") is not a source state trigger and
+    // correctly falls through (recoverable Err → the enclosing `alt()` moves on).
+    parse_there_are_counters_on(input, alt((tag("~"), tag("it"))))
+}
+
+/// CR 122.1: "there are <quantity> [<type>] counter[s] on <subject>", shared by the
+/// state-trigger and condition forms; each caller passes its own source subjects.
+fn parse_there_are_counters_on<'a>(
+    input: &'a str,
+    source_subject: impl Parser<&'a str, Output = &'a str, Error = OracleError<'a>>,
+) -> OracleResult<'a, StaticCondition> {
     let (rest, _) = tag("there are ").parse(input)?;
     let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
     let (rest, counters) = parse_counter_noun_match(rest)?;
     let (rest, _) = tag(" on ").parse(rest)?;
-    // Source-referential subject only: `~` (normalized self-ref) or bound `it`.
-    // A non-source subject ("that creature") is not a source state trigger and
-    // correctly falls through (recoverable Err → the enclosing `alt()` moves on).
-    let (rest, _) = alt((tag("~"), tag("it"))).parse(rest)?;
-    Ok((
-        rest,
-        StaticCondition::HasCounters {
-            counters,
+    let granter_counters = counters.clone();
+    alt((
+        // CR 201.5a: counters on a granted ability's granter are read from the granter.
+        map(nom_target::parse_granting_object_ref, move |_| {
+            granter_counters_condition(&granter_counters, minimum, maximum)
+        }),
+        map(source_subject, move |_| StaticCondition::HasCounters {
+            counters: counters.clone(),
             minimum,
             maximum,
-        },
+        }),
     ))
+    .parse(rest)
+}
+
+/// The `HasCounters` bounds as a comparison on the granter's counter count.
+fn granter_counters_condition(
+    counters: &CounterMatch,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> StaticCondition {
+    let qty = QuantityRef::CountersOn {
+        scope: ObjectScope::GrantingObject,
+        counter_type: match counters {
+            CounterMatch::OfType(counter_type) => Some(counter_type.clone()),
+            CounterMatch::Any => None,
+        },
+    };
+    match maximum {
+        None => make_quantity_ge(qty, minimum),
+        Some(maximum) if maximum == minimum => {
+            make_quantity_comparison(qty, Comparator::EQ, maximum)
+        }
+        Some(maximum) if minimum == 0 => make_quantity_comparison(qty, Comparator::LE, maximum),
+        Some(maximum) => StaticCondition::And {
+            conditions: vec![
+                make_quantity_ge(qty.clone(), minimum),
+                make_quantity_comparison(qty, Comparator::LE, maximum),
+            ],
+        },
+    }
 }
 
 /// Recipient-bound counterpart to [`parse_source_has_counters`] for
@@ -10073,23 +10158,7 @@ fn parse_zone_count_ref(input: &str) -> OracleResult<'_, ZoneRef> {
 /// - Source subject: any pronoun / `~` form accepted by
 ///   `parse_counter_on_source_subject`.
 fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("there are ").parse(input)?;
-    let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
-    let (rest, counters) = alt((
-        parse_typed_counter_noun,
-        value(CounterMatch::Any, alt((tag("counters"), tag("counter")))),
-    ))
-    .parse(rest)?;
-    let (rest, _) = tag(" on ").parse(rest)?;
-    let (rest, _) = parse_counter_on_source_subject(rest)?;
-    Ok((
-        rest,
-        StaticCondition::HasCounters {
-            counters,
-            minimum,
-            maximum,
-        },
-    ))
+    parse_there_are_counters_on(input, parse_counter_on_source_subject)
 }
 
 /// Trailing source subject for `parse_there_are_counters_on_source`. Mirrors the
@@ -17385,6 +17454,49 @@ mod tests {
     }
 
     // -- Anaphoric "it" recipient conditions (CR 611.3a) --
+
+    #[test]
+    fn recipient_enchanted_predicate_preserves_subject_and_attachment_kind() {
+        // CR 303.4b: any attached Aura, not the granting source's Aura.
+        let enchanted = StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: crate::types::ability::AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                },
+            ])),
+        };
+        for text in [
+            "that creature is enchanted",
+            "that permanent is enchanted",
+            "that land is enchanted",
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(condition, enchanted, "{text}");
+        }
+        let (rest, negated) = parse_inner_condition("that creature isn't enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            negated,
+            StaticCondition::Not {
+                condition: Box::new(enchanted),
+            }
+        );
+        // Bare "it" is caller-bound for status predicates: a SelfRef static
+        // rewrites it to the source (Metathran Elite → `SourceIsEnchanted`).
+        for text in ["it is enchanted", "it's enchanted"] {
+            assert!(parse_recipient_is_filter_condition(text).is_err(), "{text}");
+        }
+        let (rest, source) = parse_inner_condition("~ is enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(source, StaticCondition::SourceIsEnchanted);
+        assert!(parse_recipient_is_filter_condition(
+            "that creature is enchanted by an Aura you control"
+        )
+        .is_err());
+    }
 
     fn recipient_filter(condition: &StaticCondition) -> &TargetFilter {
         match condition {

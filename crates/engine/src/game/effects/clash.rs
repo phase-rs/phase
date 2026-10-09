@@ -179,13 +179,9 @@ pub fn perform_clash(
 
 /// Get the top card ObjectId of a player's library, if any.
 fn top_card_of_library(state: &GameState, player: PlayerId) -> Option<ObjectId> {
-    state
-        .players
-        .iter()
-        .find(|p| p.id == player)?
-        .library
-        .last()
-        .copied()
+    let seat = state.players.iter().find(|p| p.id == player)?.id;
+    // CR 701.30a: a clashing player reveals the top card, index 0.
+    state.library_of(seat).front().copied()
 }
 
 /// Get the mana value of a card by its object ID.

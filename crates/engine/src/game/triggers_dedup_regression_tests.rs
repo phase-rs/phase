@@ -3439,6 +3439,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             trigger_event: Some(GameEvent::PermanentTapped {
                 object_id: event_object,
                 caused_by: None,
+                incarnation: None,
             }),
             modal: None,
             mode_abilities: Vec::new(),

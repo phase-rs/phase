@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nuevas",
       "classic": "Clásicas"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Pasa el cursor para ver",
+    "cardAnimationPreviewHintTap": "Toca para ver"
   },
   "flexLayout": {
     "title": "Diseño flexible",
@@ -503,6 +505,8 @@
     "modelPlaceholder": "ID del modelo (p. ej. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://tu-servidor/v1",
+    "jevEndpointPlaceholder": "Por defecto, tu servidor multijugador",
+    "jevEndpointHint": "Jev se alcanza a través de un servidor multijugador de phase, que reenvía cada solicitud a TypeSafe. Tu clave viaja solo dentro de esa solicitud y nunca se guarda en el servidor.",
     "apiKey": "Clave de API",
     "apiKeyPlaceholder": "Pega tu clave de API",
     "apiKeyOptional": "Opcional para servidores locales",

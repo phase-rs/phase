@@ -55,7 +55,7 @@ use super::{
     each_target_filter_mut, has_typed_target, is_broadcast_population_filter, parse_effect_clause,
     parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
     refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
-    scan_contains_phrase, target_filter_controller_ref,
+    scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
 use crate::game::effects::effect::generic_effect_population_filter;
 
@@ -1971,6 +1971,22 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    target_choice_timing_for_parsed(
+        &clause_ir.parsed,
+        clause_ir.source.fragment().unwrap_or_default(),
+        clause_ir.declared_target_choice_timing,
+        clause_ir.multi_target.is_some(),
+    )
+}
+
+/// The clause's target-choice timing from its parsed effect and printed fragment; the
+/// compound splitter's continuation has no `ClauseIr` of its own.
+pub(super) fn target_choice_timing_for_parsed(
+    parsed: &ParsedEffectClause,
+    fragment: &str,
+    declared: Option<TargetChoiceTiming>,
+    clause_multi_target: bool,
+) -> TargetChoiceTiming {
     // CR 115.10a + CR 701.41a: a producer that expanded a keyword-action
     // SHORTHAND into a targeted effect already knows the answer the ladder below
     // is trying to infer, so its declaration wins outright. The ladder decides by
@@ -1982,17 +1998,13 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     // arm below can return early, so a later check would be unreachable for
     // exactly the shapes that need it — and ahead of the shared `lower` binding,
     // which this path never reads.
-    if let Some(timing) = clause_ir.declared_target_choice_timing {
+    if let Some(timing) = declared {
         return timing;
     }
     // CR 115.1d: the "is this a target?" decisions below read the clause's
     // printed text, so its lowercased fragment is computed once and shared.
-    let lower = clause_ir
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let has_untargeted_resolution_choice = match &clause_ir.parsed.effect {
+    let lower = fragment.to_ascii_lowercase();
+    let has_untargeted_resolution_choice = match &parsed.effect {
         // CR 115.1d + CR 608.2d: an Attach instruction whose ATTACHMENT operand
         // is itself an untargeted choice ("attach an Equipment", "cast that
         // card") resolves that choice while the effect resolves; its explicit
@@ -2051,7 +2063,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             return TargetChoiceTiming::Resolution;
         }
     }
-    if let Effect::ChooseCounterKind { target, .. } = &clause_ir.parsed.effect {
+    if let Effect::ChooseCounterKind { target, .. } = &parsed.effect {
         // CR 115.1 + CR 608.2d: "choose a counter on a permanent you
         // control" is an untargeted choice made while the ability resolves.
         // Context references are already bound and need no selection slot.
@@ -2059,7 +2071,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             return TargetChoiceTiming::Resolution;
         }
     }
-    if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
+    if let Effect::PutCounter { target, .. } = &parsed.effect {
         // CR 115.10a: an object is a target only if the text uses the literal
         // word "target"; CR 608.2d: an untargeted choice is made "while
         // applying the effect" (at resolution), not at announcement. Was
@@ -2132,13 +2144,13 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     if let Effect::Double {
         target_kind: crate::types::ability::DoubleTarget::Counters { .. },
         target,
-    } = &clause_ir.parsed.effect
+    } = &parsed.effect
     {
         if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
             return TargetChoiceTiming::Resolution;
         }
     }
-    if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. })
+    if matches!(parsed.effect, Effect::MultiplyCounter { .. })
         && !nom_primitives::scan_contains(&lower, "target ")
     {
         return TargetChoiceTiming::Resolution;
@@ -2146,12 +2158,12 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     // CR 701.26a/b: only single-target tap/untap (legacy `Tap`/`Untap`) takes
     // the resolution-timing branch; the mass scope never declares multi-target.
     if matches!(
-        clause_ir.parsed.effect,
+        parsed.effect,
         Effect::SetTapState {
             scope: EffectScope::Single,
             ..
         }
-    ) && clause_ir.multi_target.is_some()
+    ) && clause_multi_target
         && !nom_primitives::scan_contains(&lower, "target ")
     {
         return TargetChoiceTiming::Resolution;
@@ -2197,7 +2209,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     // advocate) is produced by the retarget-then-lift path, so none of their
     // branches is ever stamped `Resolution` — `.all()` fails for all of them
     // and they keep `Stack` unchanged.
-    if let Effect::ChooseOneOf { branches, .. } = &clause_ir.parsed.effect {
+    if let Effect::ChooseOneOf { branches, .. } = &parsed.effect {
         let all_branches_choose_recipient_at_resolution = !branches.is_empty()
             && branches.iter().all(|branch| {
                 branch.target_choice_timing == TargetChoiceTiming::Resolution
@@ -2212,11 +2224,10 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     // may still stamp Resolution on ChangeZoneAll resolution-picks via the
     // shared helper; clause-IR timing must not silently reclassify every
     // off-BF mass move (Bomat Courier / Jace −12 snapshot regressions).
-    let Effect::ChangeZone { origin, target, .. } = &clause_ir.parsed.effect else {
+    let Effect::ChangeZone { origin, target, .. } = &parsed.effect else {
         return TargetChoiceTiming::Stack;
     };
-    let has_multi_target =
-        clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some();
+    let has_multi_target = clause_multi_target || parsed.multi_target.is_some();
     change_zone_target_choice_timing(*origin, target, has_multi_target, &lower)
 }
 
@@ -3778,7 +3789,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::Opponent
             | TargetFilter::SelfRef
-            | TargetFilter::GrantingObject
+            | TargetFilter::GrantingObject { .. }
             | TargetFilter::SourceOrPaired
             | TargetFilter::Typed(..)
             | TargetFilter::StackAbility { .. }
@@ -3874,7 +3885,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(..)
         | TargetFilter::StackAbility { .. }
@@ -5091,26 +5102,53 @@ mod difference_binding_tests {
     }
 }
 
-/// CR 705.2: Strip the redundant `"for each flip you won, "` (Mirror March)
-/// quantifier from a coin-flip win clause. Unlike `strip_for_each_prefix`, this
-/// carries NO iteration count: `FlipCoinUntilLose`/`FlipCoins` already run their
-/// `win_effect` once per win (`finish_until_lose`), so lifting the count into a
-/// `repeat_for` loop would double-apply it. Dropping the quantifier lets the
-/// bare imperative ("create a token that's a copy of that creature") reach the
-/// `CopyTokenOf` combinator. The `"flip(s) you won"` noun is not a countable
-/// `parse_for_each_clause` clause, so `strip_for_each_prefix` cannot handle it.
-/// Anchored nom strip — never a substring dispatch.
+/// CR 705.2: Strip the redundant coin-flip win quantifier from a win clause,
+/// whether it leads (`"for each flip you won, create …"` — Mirror March) or
+/// trails (`"put a +1/+1 counter on ~ for each flip you won"` — Crazed
+/// Firecat). Unlike `strip_for_each_prefix`, this carries NO iteration count:
+/// `FlipCoinUntilLose`/`FlipCoins` already run their `win_effect` once per win
+/// (`finish_until_lose`), so lifting the count into a `repeat_for` loop (or a
+/// counter-count multiplier) would double-apply it. Dropping the quantifier
+/// lets the bare imperative reach its own combinator. The `"flip(s) you won"`
+/// noun is not a countable `parse_for_each_clause` clause, so neither
+/// `strip_for_each_prefix` nor a verb's for-each suffix can consume it.
+/// Anchored nom strips at word boundaries — never a substring dispatch.
 pub(crate) fn strip_redundant_flip_win_quantifier(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let ((), rest) = nom_on_lower(text, &lower, |i| {
-        let (i, _) = tag::<_, _, OracleError<'_>>("for each ").parse(i)?;
-        let (i, _) = alt((tag("flips"), tag("flip"))).parse(i)?;
-        let (i, _) = tag(" you ").parse(i)?;
-        let (i, _) = alt((tag("won"), tag("win"))).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
-        Ok((i, ()))
-    })?;
-    Some(rest.to_string())
+    // ASCII folding keeps `lower` byte-aligned with `text`, so the trailing
+    // form's `cut` offset is a valid boundary in the original casing.
+    let lower = text.to_ascii_lowercase();
+    if let Some(((), rest)) = nom_on_lower(text, &lower, |i| {
+        value((), terminated(parse_flip_win_quantifier, tag(", "))).parse(i)
+    }) {
+        return Some(rest.to_string());
+    }
+    // Trailing form: try the quantifier at each " for each " boundary and
+    // accept it only when nothing but terminal punctuation follows.
+    let mut search = lower.as_str();
+    while let Ok((at, _)) = take_until::<_, _, OracleError<'_>>(" for each ").parse(search) {
+        if let Ok((_, (_, (), period, _))) = (
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_flip_win_quantifier,
+            opt(tag(".")),
+            eof,
+        )
+            .parse(at)
+        {
+            let cut = lower.len() - at.len();
+            return Some(format!("{}{}", &text[..cut], period.unwrap_or_default()));
+        }
+        search = &at[1..];
+    }
+    None
+}
+
+/// CR 705.2: `"for each flip(s) you won|win"` — the per-win quantifier noun.
+fn parse_flip_win_quantifier(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("for each ").parse(input)?;
+    let (input, _) = alt((tag("flips"), tag("flip"))).parse(input)?;
+    let (input, _) = tag(" you ").parse(input)?;
+    let (input, _) = alt((tag("won"), tag("win"))).parse(input)?;
+    Ok((input, ()))
 }
 
 /// CR 107.1: Parse an anchored `for each <clause>` multiplier for an effect's
@@ -6549,6 +6587,7 @@ fn strip_performed_action_this_way_clause(
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TrackedSetPossessor { .. } => return None,
     };
     let (remainder, action) =
@@ -11396,6 +11435,16 @@ pub(super) fn apply_where_x_effect_expression(
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
             bind_where_x_quantity(life_payment, where_x_expression, &mut unbound_where_x);
         }
+        // CR 608.2c: the "until you exile X … cards" match count and the
+        // cumulative threshold are the loop's quantity slots.
+        Effect::ExileFromTopUntil { until, .. } => match until {
+            crate::types::ability::UntilCondition::NextMatches { count, .. } => {
+                bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            }
+            crate::types::ability::UntilCondition::CumulativeThreshold { threshold, .. } => {
+                bind_where_x_quantity(threshold, where_x_expression, &mut unbound_where_x);
+            }
+        },
         Effect::CreateTokenCopyFromPool {
             mv_bound, count, ..
         } => {
@@ -11909,6 +11958,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -12012,6 +12062,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -13048,6 +13099,44 @@ mod tests {
                 Some("draw a card.".to_string()),
                 "must strip {prefix:?}"
             );
+        }
+    }
+
+    #[test]
+    fn strip_redundant_flip_win_quantifier_accepts_trailing_form() {
+        // CR 705.2: the per-win quantifier may trail the win clause (Crazed
+        // Firecat); the loop already repeats the clause, so it is dropped.
+        for suffix in [
+            " for each flip you won",
+            " for each flips you won",
+            " for each flip you win",
+        ] {
+            for period in ["", "."] {
+                assert_eq!(
+                    strip_redundant_flip_win_quantifier(&format!(
+                        "Put a +1/+1 counter on ~{suffix}{period}"
+                    )),
+                    Some(format!("Put a +1/+1 counter on ~{period}")),
+                    "must strip {suffix:?}{period:?}"
+                );
+            }
+        }
+        // The cut is computed on the folded text, so a character whose
+        // full-Unicode lowercase changes byte length must not shift it.
+        assert_eq!(
+            strip_redundant_flip_win_quantifier(
+                "Put a +1/+1 counter on İstanbul Ward for each flip you won."
+            ),
+            Some("Put a +1/+1 counter on İstanbul Ward.".to_string())
+        );
+        // Only a quantifier that ends the clause is redundant; a countable
+        // for-each or a quantifier with following text is left alone.
+        for text in [
+            "Put a +1/+1 counter on ~ for each creature you control",
+            "Put a +1/+1 counter on ~ for each flip you won this turn",
+            "Put a +1/+1 counter on ~ for each flip you lost",
+        ] {
+            assert_eq!(strip_redundant_flip_win_quantifier(text), None, "{text}");
         }
     }
 

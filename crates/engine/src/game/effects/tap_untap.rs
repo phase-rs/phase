@@ -196,10 +196,11 @@ pub(crate) fn process_one_tap(
                 )
                 .map_err(|_| EffectError::ObjectNotFound(object_id))?
                 {
-                    events.push(GameEvent::PermanentTapped {
+                    events.push(GameEvent::permanent_tapped(
+                        state,
                         object_id,
-                        caused_by: Some(source_id),
-                    });
+                        Some(source_id),
+                    ));
                 }
             }
             Ok(TapUntapOutcome::Complete)
@@ -456,20 +457,22 @@ mod tests {
         use crate::types::ability::{ContinuousModification, Duration, StaticCondition};
         use crate::types::counter::CounterMatch;
         let controller = state.objects[&object_id].controller;
-        state.add_transient_continuous_effect(
-            object_id,
-            controller,
-            Duration::ForAsLongAs {
-                condition: StaticCondition::RecipientHasCounters {
-                    counters: CounterMatch::OfType(CounterType::Stun),
-                    minimum: 1,
-                    maximum: None,
+        state
+            .add_transient_continuous_effect(
+                object_id,
+                controller,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters: CounterMatch::OfType(CounterType::Stun),
+                        minimum: 1,
+                        maximum: None,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: object_id },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        )
+                TargetFilter::SpecificObject { id: object_id },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     #[test]

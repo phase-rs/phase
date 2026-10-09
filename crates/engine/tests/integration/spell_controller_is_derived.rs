@@ -2257,25 +2257,28 @@ fn parent_target_controller_of_a_stolen_spell_is_the_thief() {
     assert_eq!(parent_target_controller(&ability, &state), Some(thief));
 }
 
-/// HOSTILE (V10): the rung matches by `entry.source_id == id` too — an
-/// ability entry matched by `source_id`, where the accessor must fall back to
-/// `entry.controller` per CR 113.8 (no object row for the ability id itself).
+/// HOSTILE (V10): a target naming an ability's SOURCE answers with that source's
+/// controller: live on the battlefield, else as it last existed there. The stack
+/// rung matches only a stack object's own id, so the pending ability, whose
+/// controller differs, never answers for its source (CR 113.7a + CR 608.2h).
 #[test]
-fn parent_target_controller_matches_by_source_id_for_an_ability_entry() {
+fn parent_target_controller_ignores_an_ability_entry_sharing_the_source_id() {
     let mut state = new_state();
     let source = creature_on_battlefield(&mut state, P1, "Ability Source", 1);
     let ability_stack_id = ObjectId(9996);
     state.stack.push_back(StackEntry {
         id: ability_stack_id,
         source_id: source,
-        controller: P1,
+        // Distinct from the source's controller: a source-id match on the stack
+        // rung would answer P0.
+        controller: P0,
         kind: StackEntryKind::ActivatedAbility {
             source_id: source,
             ability: Box::new(ResolvedAbility::new(
                 Effect::unimplemented("test", "V10 ability rung"),
                 vec![],
                 source,
-                P1,
+                P0,
             )),
         },
     });
@@ -2285,6 +2288,13 @@ fn parent_target_controller_matches_by_source_id_for_an_ability_entry() {
         source,
         P1,
     );
+    assert_eq!(parent_target_controller(&ability, &state), Some(P1));
+
+    // The source leaves the battlefield: the battlefield rung no longer answers,
+    // so only its last known information (P1) or a wrong source-id stack match
+    // (P0) can.
+    engine::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+    assert_eq!(state.objects[&source].zone, Zone::Graveyard, "reach guard");
     assert_eq!(parent_target_controller(&ability, &state), Some(P1));
 }
 

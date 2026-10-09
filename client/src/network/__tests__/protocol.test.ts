@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
 
+import {
+  LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_DANDAN,
+  MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
+  lobbyProtocolRequiredForFormat,
+} from "../../adapter/ws-adapter";
 import type { EndContinuousEffectOffer } from "../../adapter/types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
@@ -70,9 +76,22 @@ const PREVIEW_ANSWER = {
   summaries: ["confirmAvailable", "progress"],
 } as never;
 
+describe("lobby capability floor for the Dandan format", () => {
+  it("requires the frozen Dandan floor for a lobby frame naming the format", () => {
+    expect(lobbyProtocolRequiredForFormat("Dandan")).toBe(16);
+    expect(MIN_LOBBY_PROTOCOL_FOR_DANDAN).toBe(16);
+    expect(MIN_LOBBY_PROTOCOL_FOR_DANDAN).toBeLessThanOrEqual(LOBBY_PROTOCOL_VERSION);
+  });
+
+  it("reads the floor per format, not as a constant", () => {
+    expect(lobbyProtocolRequiredForFormat("Freeform")).toBe(MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS);
+    expect(lobbyProtocolRequiredForFormat("Standard")).toBeNull();
+  });
+});
+
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v88", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(88);
+  it("pins the P2P wire protocol to v102", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(102);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {

@@ -1,6 +1,7 @@
 use super::*;
+use crate::game::ability_utils::ability_definition_supported;
 use crate::game::scenario::{GameScenario, P0, P1};
-use crate::parser::oracle::parse_oracle_text;
+use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
 use crate::parser::oracle_classifier::has_trigger_prefix;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -20,6 +21,9 @@ use crate::types::ability::{
     PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality,
     SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+};
+use crate::types::ability::{
+    EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, SpentColor,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -15766,23 +15770,23 @@ fn widened_boundary_window_is_monotone_over_effect_verbs() {
 /// (`that `/`which `/`with `) rather than reading into it. Without this bound,
 /// **Immolation Shaman**'s "an ability of an artifact, creature, or land THAT
 /// ISN'T a mana ability" would let the widened window reach "isn't", which
-/// `is_negated_auxiliary_predicate_token` classifies as an effect predicate,
-/// moving the boundary from the card's second comma to its first and
-/// narrowing `valid_card` from `AnyOf[Artifact, Creature]` to `Artifact`.
-/// Revert-failing against the round-2 variant (sentence bound only), under
-/// which row 1 moves to the first comma and row 3 returns
-/// `"creature, or land that isn't a mana ability"`.
+/// `is_negated_auxiliary_predicate_token` classifies as an effect predicate.
+/// The window bound itself is pinned by the `type_list_clause_window` row
+/// below. The Immolation Shaman boundary row is now decided earlier, by
+/// `continues_type_list_final_leg` (an effect cannot open with "or"), so the
+/// boundary is the CR 603.1 one after the whole list — #7451 pinned it at the
+/// closing leg, which kept "land" out of `valid_card`.
 #[test]
 fn widened_window_stops_at_a_restrictive_postmodifier() {
     let immolation_shaman = "whenever an opponent activates an ability of an artifact, creature, or land that isn't a mana ability, this creature deals 1 damage to that player.";
     let lower = immolation_shaman.to_lowercase();
     let boundary = find_effect_boundary(&lower).expect("effect boundary");
     let suffix = &lower[boundary..];
-    let expected = ", or land that isn't";
+    let expected = ", this creature deals";
     assert_eq!(
         &suffix[..expected.len()],
         expected,
-        "boundary must stay at the card's second comma, got {suffix:?}"
+        "boundary must follow the whole type list, got {suffix:?}"
     );
 
     let harsh_mentor = "whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, this creature deals 2 damage to that player.";
@@ -15925,30 +15929,30 @@ fn comma_terminated_bare_event_verb_is_an_event_head_not_a_predicate() {
 }
 
 /// Issue #7451: a condition-side Oxford type list — the trigger's SUBJECT, not
-/// its effect — must stay exactly where it is today. These cards remain
-/// `TriggerMode::Unknown`; turning them green is out of scope for #7451.
-/// Revert-failing against `naive-B` (the two-pass design with the widened
-/// window but WITHOUT the event-head exclusion): under `naive-B` the boundary
-/// jumps to the FIRST comma. **Not** revert-failing against `naive-A` — under
-/// `naive-A` the widened window still contains the event head ("attacks" /
-/// "becomes"), so `naive-A`'s whole-window veto also leaves the boundary at
-/// comma 2.
+/// its effect — stays whole in the condition. #7451 pinned the boundary at the
+/// list's closing "or" leg and left these cards `TriggerMode::Unknown`; that
+/// split was wrong under CR 603.1 (an effect clause cannot open with the list
+/// conjunction "or"), and `continues_type_list_final_leg` now keeps the whole
+/// list. Still revert-failing against `naive-B` (the two-pass design without
+/// the event-head exclusion), which jumps to the FIRST comma.
 #[test]
-fn condition_side_type_list_boundary_is_unchanged() {
-    let bird_frog_otter = "whenever a bird, frog, or otter you control attacks, draw a card";
-    let lower = bird_frog_otter.to_lowercase();
-    let boundary = find_effect_boundary(&lower).expect("effect boundary");
-    let suffix = &lower[boundary..];
-    let expected = ", or otter";
-    assert_eq!(&suffix[..expected.len()], expected, "got {suffix:?}");
-
-    let forest_island_swamp =
-        "whenever a forest, island, or swamp you control becomes tapped, draw a card";
-    let lower = forest_island_swamp.to_lowercase();
-    let boundary = find_effect_boundary(&lower).expect("effect boundary");
-    let suffix = &lower[boundary..];
-    let expected = ", or swamp";
-    assert_eq!(&suffix[..expected.len()], expected, "got {suffix:?}");
+fn condition_side_type_list_stays_whole() {
+    for (text, first_leg) in [
+        (
+            "whenever a bird, frog, or otter you control attacks, draw a card",
+            ", frog",
+        ),
+        (
+            "whenever a forest, island, or swamp you control becomes tapped, draw a card",
+            ", island",
+        ),
+    ] {
+        let lower = text.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        assert!(suffix.starts_with(", draw a card"), "got {suffix:?}");
+        assert!(!suffix.starts_with(first_leg), "got {suffix:?}");
+    }
 }
 
 /// `type_list_clause_window` bounds: extended across every list comma when
@@ -20107,7 +20111,10 @@ fn resolution_optional_payment_sacrifice_allowlist_fails_closed() {
     );
     for forbidden in [
         AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
-        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::GrantingObject, 1)),
+        AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::GrantingObject { bound: None },
+            1,
+        )),
         AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
         AbilityCost::Sacrifice(SacrificeCost::count(typed.clone(), 0)),
         AbilityCost::Sacrifice(SacrificeCost::count(typed.clone(), u32::MAX)),
@@ -26835,11 +26842,17 @@ fn managorger_phoenix_perpetual_clause_fails_closed_instead_of_pumping() {
     );
 
     let execute = def.execute.as_ref().expect("trigger must execute");
-    // Reach guard: the counter clause still parses, so the gap below is the
-    // conditional sibling and not a wholesale parse failure.
+    // Reach guard: the counter clause is recognized, and its unsupported
+    // "for each {R} in that spell's mana cost" count is an explicit counter-tail
+    // gap rather than a silent one-counter placement (CR 608.2c), so the gap
+    // below is the conditional sibling and not a wholesale parse failure.
     assert!(
-        matches!(&*execute.effect, Effect::PutCounter { .. }),
-        "the flame-counter clause must still lower, got {:?}",
+        matches!(
+            &*execute.effect,
+            Effect::Unimplemented { name, description: Some(fragment) }
+                if name == "put_counter_tail" && fragment.contains("for each {R}")
+        ),
+        "the flame-counter clause must surface its count tail, got {:?}",
         execute.effect
     );
     let perpetual_branch = execute
@@ -27281,7 +27294,9 @@ fn extract_adamant_three_red() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 3,
         }
     );
@@ -27301,7 +27316,9 @@ fn extract_symbolic_mana_spent_two_green() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Green,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Green,
+            },
             minimum: 2,
         }
     );
@@ -27315,7 +27332,9 @@ fn extract_symbolic_mana_spent_two_blue_with_trailing_effect() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Blue,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Blue,
+            },
             minimum: 2,
         }
     );
@@ -27328,7 +27347,9 @@ fn extract_symbolic_mana_spent_single_red_this_spell() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 1,
         }
     );
@@ -27342,7 +27363,9 @@ fn extract_symbolic_unless_mana_spent_single_blue() {
         cond.unwrap(),
         TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Blue,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Blue,
+                },
                 minimum: 1,
             }),
         }
@@ -27357,7 +27380,9 @@ fn extract_symbolic_unless_mana_spent_two_black() {
         cond.unwrap(),
         TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Black,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Black,
+                },
                 minimum: 2,
             }),
         }
@@ -27537,7 +27562,9 @@ fn extract_symbolic_mana_spent_mid_sentence() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 3,
         }
     );
@@ -27558,7 +27585,9 @@ fn extract_symbolic_mana_spent_lowercase_input() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Green,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Green,
+            },
             minimum: 2,
         }
     );
@@ -27577,11 +27606,15 @@ fn extract_symbolic_mana_spent_mixed_colors() {
         conditions,
         vec![
             TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Green,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Green,
+                },
                 minimum: 1,
             },
             TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Blue,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Blue,
+                },
                 minimum: 1,
             },
         ]
@@ -28075,6 +28108,17 @@ fn cast_trigger_lowers_to_control_next_turn_effect() {
     }
 }
 
+/// CR 603.8 + CR 603.4: a state trigger's own condition is its trigger event, so
+/// the parser lowers it inside `TriggerCondition::EventTime` (read when the game
+/// state matches, never rechecked on resolution). Returns the wrapped head and
+/// fails the test if the wrapper is missing.
+fn state_trigger_head(def: &TriggerDefinition) -> &TriggerCondition {
+    match &def.condition {
+        Some(TriggerCondition::EventTime { condition }) => condition,
+        other => panic!("expected an EventTime-wrapped state-trigger condition, got {other:?}"),
+    }
+}
+
 #[test]
 fn state_trigger_control_no_islands() {
     let def = parse_trigger_line(
@@ -28082,7 +28126,7 @@ fn state_trigger_control_no_islands() {
         "Dandân",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsNone { filter }) = &def.condition {
+    if let TriggerCondition::ControlsNone { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(
                 tf.type_filters
@@ -28113,7 +28157,7 @@ fn state_trigger_control_no_other_creatures() {
         "Emperor Crocodile",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsNone { filter }) = &def.condition {
+    if let TriggerCondition::ControlsNone { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(tf.properties.contains(&FilterProp::Another));
             assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -28133,7 +28177,7 @@ fn state_trigger_control_no_artifacts() {
         "Covetous Dragon",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsNone { filter }) = &def.condition {
+    if let TriggerCondition::ControlsNone { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         } else {
@@ -28156,7 +28200,7 @@ fn state_trigger_control_a_creature_with_toughness() {
         "Endangered Armodon",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::ControlsType { filter }) = &def.condition {
+    if let TriggerCondition::ControlsType { filter } = state_trigger_head(&def) {
         if let TargetFilter::Typed(tf) = filter {
             assert!(
                 tf.type_filters.contains(&TypeFilter::Creature),
@@ -28308,11 +28352,11 @@ fn state_trigger_has_no_ice_counters() {
         "Dark Depths",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(
             *counters,
@@ -28339,11 +28383,11 @@ fn state_trigger_has_no_plus1_counters() {
         "Afiya Grove",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(*counters, CounterMatch::OfType(CounterType::Plus1Plus1));
         assert_eq!(*minimum, 0);
@@ -28361,11 +28405,11 @@ fn state_trigger_has_no_counters_bare() {
         "TestCard",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(*counters, CounterMatch::Any);
         assert_eq!(*minimum, 0);
@@ -28384,11 +28428,11 @@ fn state_trigger_has_twenty_or_more_charge_counters() {
         "Darksteel Reactor",
     );
     assert_eq!(def.mode, TriggerMode::StateCondition);
-    if let Some(TriggerCondition::HasCounters {
+    if let TriggerCondition::HasCounters {
         counters,
         minimum,
         maximum,
-    }) = &def.condition
+    } = state_trigger_head(&def)
     {
         assert_eq!(
             *counters,
@@ -28520,6 +28564,118 @@ fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
         ),
         "game must end with player 0 as winner after Darksteel Reactor fires; got {:?}",
         state.waiting_for,
+    );
+}
+
+/// CR 603.8 + CR 122.1: the source-counter state-condition authority accepts
+/// both surface grammars (possessive / existential) in the depletion and
+/// threshold forms, and is all-consuming — trailing text after the counter
+/// phrase is not a source-counter state condition.
+#[test]
+fn source_counter_state_condition_accepts_whole_condition_only() {
+    for accepted in [
+        "there are four or more page counters on ~",
+        "~ has no ice counters on it",
+        "~ has twenty or more charge counters on it",
+    ] {
+        assert!(
+            parse_source_counter_state_condition(accepted).is_some(),
+            "{accepted:?} must be recognized as a source-counter state condition"
+        );
+    }
+    for rejected in [
+        "there are four or more page counters on ~ and you control an artifact",
+        "~ has no ice counters on it during your turn",
+        "you control no islands",
+    ] {
+        assert!(
+            parse_source_counter_state_condition(rejected).is_none(),
+            "{rejected:?} must not be recognized as a source-counter state condition"
+        );
+    }
+}
+
+/// CR 608.2k + CR 603.8 + CR 400.7: in a source-counter state trigger, the body's
+/// bare "it" ("exile it") names the ability's own source, so it lowers to
+/// `SelfRef` (whose resolver applies the new-object guard) rather than the
+/// untargeted `ParentTarget` fallback. Verbatim Oracle text (MTGJSON).
+#[test]
+fn source_counter_state_trigger_bare_it_binds_source() {
+    const MAZEMIND_TOME: &str = "{T}, Put a page counter on this artifact: Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\n{2}, {T}, Put a page counter on this artifact: Draw a card.\nWhen there are four or more page counters on this artifact, exile it. If you do, you gain 4 life.";
+    const NINE_LIVES: &str = "Hexproof\nIf a source would deal damage to you, prevent that damage and put an incarnation counter on this enchantment.\nWhen there are nine or more incarnation counters on this enchantment, exile it.\nWhen this enchantment leaves the battlefield, you lose the game.";
+    for (oracle, name, core_type, keywords) in [
+        (MAZEMIND_TOME, "Mazemind Tome", "Artifact", vec![]),
+        (
+            NINE_LIVES,
+            "Nine Lives",
+            "Enchantment",
+            vec!["Hexproof".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &keywords, &[core_type.to_string()], &[]);
+        let state_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::StateCondition)
+            .unwrap_or_else(|| panic!("{name} must parse a StateCondition trigger"));
+        let execute = state_trigger
+            .execute
+            .as_deref()
+            .expect("state trigger must have an execute ability");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "{name}: \"exile it\" must exile the source (SelfRef), got {:?}",
+            execute.effect
+        );
+    }
+}
+
+/// CR 608.2k: the source pin is the OUTERMOST antecedent — a typed referent
+/// introduced earlier in the same chain still owns a later bare "it". Synthetic
+/// source-counter state trigger whose body targets a creature and then refers
+/// back to it.
+#[test]
+fn source_counter_state_trigger_chain_typed_referent_keeps_parent_target() {
+    let parsed = parse_oracle_text(
+        "When there are three or more charge counters on this artifact, tap target creature. Put a stun counter on it.",
+        "Corvane Stunlatch",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let state_trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::StateCondition)
+        .expect("the synthetic line must parse a StateCondition trigger");
+    let effects = trigger_chain_effects(state_trigger);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        )),
+        "reach guard: the chain must open with the typed tap target, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )),
+        "\"put a stun counter on it\" must stay bound to the tapped creature \
+         (ParentTarget), not the source, got {effects:?}"
     );
 }
 
@@ -32766,23 +32922,13 @@ fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
 
 // --- issue #640: reanimator-Aura GRANT-shape ETB whole-body recognizer (Necromancy) ---
 
-/// Verbatim Necromancy Oracle text (Scryfall, 2026-07). Unlike Animate Dead,
-/// Necromancy is a plain (non-Aura) Enchantment whose ETB ability BOTH becomes
-/// an Aura AND targets the graveyard creature to reanimate ("Put target creature
-/// card from a graveyard onto the battlefield ...").
+/// Verbatim Necromancy Oracle text.
 const NECROMANCY_ORACLE: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with Necromancy.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
 
-/// SHAPE test — assert Necromancy's ETB trigger lowers to the 4-node
-/// reanimator-Aura chain with the GRANT shape: the root `ChangeZone` targets a
-/// genuinely-parsed creature-card-in-a-graveyard `Typed` filter (NOT
-/// `AttachedTo`, unlike the swap shape — this is the #640 fix), and the
-/// `GenericEffect` grants the Aura subtype and the Enchant keyword for the first
-/// time (`AddSubtype` + `AddKeyword`, with NO `RemoveKeyword`). Runtime behavior
-/// is exercised separately in `casting_tests.rs`.
+/// CR 201.5a: the granted enchant restriction names Necromancy where the masker refuses the
+/// name, so the ETB line lowers to the granter residual rather than the reanimator chain.
 #[test]
-fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
-    use crate::types::zones::Zone;
-
+fn necromancy_etb_lowers_to_the_granter_residual() {
     let parsed = parse_oracle_text(
         NECROMANCY_ORACLE,
         "Necromancy",
@@ -32790,9 +32936,39 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
         &["Enchantment".to_string()],
         &[],
     );
-    // Necromancy has TWO enters-battlefield triggers: its first ability (the
-    // cleanup-step sacrifice for flash-casts) and this reanimator ETB. Select
-    // the reanimator one by its root `Effect::ChangeZone` body.
+    assert!(
+        !parsed.triggers.iter().any(|t| matches!(
+            t.execute.as_deref().map(|d| d.effect.as_ref()),
+            Some(Effect::ChangeZone { .. })
+        )),
+        "{parsed:#?}"
+    );
+    assert!(
+        parsed.abilities.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
+        )),
+        "{parsed:#?}"
+    );
+}
+
+/// Necromancy's printed text with a granted enchant restriction that does not name the card.
+const REANIMATOR_AURA_GRANT_ORACLE: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with this enchantment.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
+
+/// SHAPE test — the GRANT-shape ETB lowers to the 4-node reanimator-Aura chain: the root
+/// `ChangeZone` targets the graveyard creature card itself (not `AttachedTo`), and the
+/// `GenericEffect` grants the Aura subtype and Enchant keyword with no `RemoveKeyword`.
+#[test]
+fn reanimator_aura_grant_etb_lowers_to_grant_chain() {
+    let parsed = parse_oracle_text(
+        REANIMATOR_AURA_GRANT_ORACLE,
+        "Necro Probe",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // The first ability's cleanup-step sacrifice is also an enters trigger; select the
+    // reanimator one by its root `Effect::ChangeZone` body.
     let root = parsed
         .triggers
         .iter()
@@ -32801,7 +32977,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
         .find(|def| matches!(def.effect.as_ref(), Effect::ChangeZone { .. }))
         .unwrap_or_else(|| {
             panic!(
-                "Necromancy: expected a reanimator ETB trigger with a root ChangeZone, got {:?}",
+                "expected a reanimator ETB trigger with a root ChangeZone, got {:?}",
                 parsed.triggers
             )
         });
@@ -32810,7 +32986,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     // graveyard-creature-card filter (NOT AttachedTo).
     assert!(
         root.forward_result,
-        "Necromancy: root ChangeZone must set forward_result"
+        "root ChangeZone must set forward_result"
     );
     let Effect::ChangeZone {
         origin,
@@ -32821,36 +32997,26 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
         ..
     } = root.effect.as_ref()
     else {
-        panic!(
-            "Necromancy: expected root Effect::ChangeZone, got {:?}",
-            root.effect
-        );
+        panic!("expected root Effect::ChangeZone, got {:?}", root.effect);
     };
-    assert_eq!(*origin, Some(Zone::Graveyard), "Necromancy: origin");
-    assert_eq!(*destination, Zone::Battlefield, "Necromancy: destination");
-    assert_eq!(
-        *enters_under,
-        Some(ControllerRef::You),
-        "Necromancy: enters_under"
-    );
-    // Untapped: "onto the battlefield" with no trailing " tapped".
+    assert_eq!(*origin, Some(Zone::Graveyard), "origin");
+    assert_eq!(*destination, Zone::Battlefield, "destination");
+    assert_eq!(*enters_under, Some(ControllerRef::You), "enters_under");
     assert!(
         !enter_tapped.is_tapped(),
-        "Necromancy: creature enters untapped ({enter_tapped:?})"
+        "creature enters untapped ({enter_tapped:?})"
     );
-    // The #640 fix: the target is a genuinely-parsed creature-card-in-a-graveyard
-    // filter (owner-agnostic — "a graveyard"), NOT `TargetFilter::AttachedTo`.
     assert_ne!(
         *target,
         TargetFilter::AttachedTo,
-        "Necromancy: ETB must target the graveyard creature itself, not AttachedTo"
+        "ETB must target the graveyard creature itself, not AttachedTo"
     );
     assert_eq!(
         *target,
         TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
             zone: Zone::Graveyard
         }])),
-        "Necromancy: ETB ChangeZone target"
+        "ETB ChangeZone target"
     );
 
     // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
@@ -32858,29 +33024,26 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     let generic = root
         .sub_ability
         .as_deref()
-        .expect("Necromancy: ChangeZone has no GenericEffect sub");
+        .expect("ChangeZone has no GenericEffect sub");
     let Effect::GenericEffect {
         static_abilities,
         duration,
         ..
     } = generic.effect.as_ref()
     else {
-        panic!(
-            "Necromancy: expected GenericEffect, got {:?}",
-            generic.effect
-        );
+        panic!("expected GenericEffect, got {:?}", generic.effect);
     };
     assert_eq!(
         *duration,
         Some(Duration::Permanent),
-        "Necromancy: grant is stamped to Duration::Permanent (CR 611.2a)"
+        "grant is stamped to Duration::Permanent (CR 611.2a)"
     );
-    assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
+    assert_eq!(static_abilities.len(), 1, "one grant static");
     let sd = &static_abilities[0];
     assert_eq!(
         sd.affected,
         Some(TargetFilter::OriginalSource),
-        "Necromancy: grant must target OriginalSource (the enchantment), not SelfRef"
+        "grant must target OriginalSource (the enchantment), not SelfRef"
     );
     assert_eq!(
         sd.modifications,
@@ -32892,63 +33055,52 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
                 keyword: Keyword::Enchant(TargetFilter::ParentTarget),
             },
         ],
-        "Necromancy: grant modifications (AddSubtype + AddKeyword, no RemoveKeyword)"
+        "grant modifications (AddSubtype + AddKeyword, no RemoveKeyword)"
     );
 
     // Node 3: Attach — SelfRef (the enchantment) onto ParentTarget (the creature).
     let attach = generic
         .sub_ability
         .as_deref()
-        .expect("Necromancy: GenericEffect has no Attach sub");
+        .expect("GenericEffect has no Attach sub");
     let Effect::Attach {
         attachment, target, ..
     } = attach.effect.as_ref()
     else {
-        panic!("Necromancy: expected Attach, got {:?}", attach.effect);
+        panic!("expected Attach, got {:?}", attach.effect);
     };
-    assert_eq!(
-        *attachment,
-        TargetFilter::SelfRef,
-        "Necromancy: attach attachment"
-    );
-    assert_eq!(
-        *target,
-        TargetFilter::ParentTarget,
-        "Necromancy: attach host"
-    );
+    assert_eq!(*attachment, TargetFilter::SelfRef, "attach attachment");
+    assert_eq!(*target, TargetFilter::ParentTarget, "attach host");
 
     // Node 4: CreateDelayedTrigger — WhenLeavesPlayFiltered{SelfRef} -> Sacrifice{ParentTarget}.
     let delayed = attach
         .sub_ability
         .as_deref()
-        .expect("Necromancy: Attach has no CreateDelayedTrigger sub");
+        .expect("Attach has no CreateDelayedTrigger sub");
     let Effect::CreateDelayedTrigger {
         condition, effect, ..
     } = delayed.effect.as_ref()
     else {
-        panic!(
-            "Necromancy: expected CreateDelayedTrigger, got {:?}",
-            delayed.effect
-        );
+        panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
     };
     assert_eq!(
         *condition,
         DelayedTriggerCondition::WhenLeavesPlayFiltered {
             filter: TargetFilter::SelfRef,
         },
-        "Necromancy: delayed leaves-battlefield condition on the enchantment (SelfRef)"
+        "delayed leaves-battlefield condition on the enchantment (SelfRef)"
     );
     let Effect::Sacrifice { target, .. } = effect.effect.as_ref() else {
-        panic!("Necromancy: expected Sacrifice, got {:?}", effect.effect);
+        panic!("expected Sacrifice, got {:?}", effect.effect);
     };
     assert_eq!(
         *target,
         TargetFilter::ParentTarget,
-        "Necromancy: sacrifice targets the reanimated creature"
+        "sacrifice targets the reanimated creature"
     );
     assert!(
         delayed.sub_ability.is_none(),
-        "Necromancy: chain ends at the delayed trigger"
+        "chain ends at the delayed trigger"
     );
 }
 
@@ -37352,5 +37504,448 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         );
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+}
+
+/// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+const GILDED_DRAKE_TEXT: &str = "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+/// Gilded Drake's trigger body as printed (the text after "When this creature enters, ").
+const GILDED_DRAKE_BODY: &str = "exchange control of this creature and up to one target creature \
+    an opponent controls. If you don't or can't make an exchange, sacrifice this creature. This \
+    ability still resolves if its target becomes illegal.";
+
+/// Parse `text` through the whole-card pipeline as a Drake creature and return
+/// its single trigger's execute.
+fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        text,
+        "Gilded Drake",
+        &[],
+        &["Creature".to_string()],
+        &["Drake".to_string()],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+    };
+    trigger
+        .execute
+        .as_deref()
+        .cloned()
+        .expect("the trigger has an execute")
+}
+
+/// Every node reachable through `sub_ability` / `else_ability`, root first.
+fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut nodes = vec![root];
+    let mut index = 0;
+    while let Some(node) = nodes.get(index).copied() {
+        nodes.extend(node.sub_ability.as_deref());
+        nodes.extend(node.else_ability.as_deref());
+        index += 1;
+    }
+    nodes
+}
+
+fn has_unbound_subject_node(root: &AbilityDefinition) -> bool {
+    chain_nodes(root).iter().any(|node| {
+        matches!(&*node.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject")
+    })
+}
+
+/// PU3 (CR 101.1 + CR 608.2b): Gilded Drake's verbatim text parses fully. The
+/// trailing override sentence becomes the execute root's disposition instead of
+/// a strict-failure node; the exchange and its rider are unchanged.
+///
+/// Fails on revert: the sentence stays an `unbound_subject` node and the root
+/// keeps the default disposition.
+#[test]
+fn gilded_drake_trailing_still_resolves_sentence_stamps_the_execute_root() {
+    let execute = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
+
+    let opponent_creature =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+    assert_eq!(
+        *execute.effect,
+        Effect::ExchangeControl {
+            target_a: TargetFilter::SelfRef,
+            target_b: opponent_creature,
+        },
+        "REACH GUARD: the execute is the paired exchange"
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "phase 1's up-to-one slot is preserved"
+    );
+    assert!(
+        !has_unimplemented(&execute),
+        "no strict-failure node remains anywhere in the chain: {execute:?}"
+    );
+    assert!(ability_definition_supported(&execute));
+    assert_eq!(
+        execute.illegal_targets_disposition,
+        IllegalTargetsDisposition::StillResolves
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the sacrifice rider follows the exchange");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected the rider to sacrifice the Drake, got {:?}",
+        rider.effect
+    );
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            }),
+        }),
+        "CR 608.2c: \"If you don't or can't make an exchange\" gates the rider"
+    );
+    assert_eq!(
+        rider.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve,
+        "the disposition is stamped on the root only"
+    );
+    assert!(rider.sub_ability.is_none(), "nothing follows the rider");
+}
+
+/// PU4: the same text without the override sentence parses to the same chain
+/// with the CR 608.2b default disposition. Paired positive: PU3.
+#[test]
+fn gilded_drake_text_without_the_override_keeps_the_default_disposition() {
+    let execute = drake_shaped_trigger_execute(
+        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
+         target creature an opponent controls. If you don't or can't make an exchange, sacrifice \
+         this creature.",
+    );
+    assert_eq!(
+        execute.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve
+    );
+
+    let mut with_override = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
+    with_override.illegal_targets_disposition = IllegalTargetsDisposition::DoesNotResolve;
+    assert_eq!(
+        execute, with_override,
+        "the override sentence changes nothing but the root's disposition"
+    );
+}
+
+/// PU5 (CR 101.1 + CR 608.2b): the override is detached only when it is the
+/// last sentence of the body and an effect precedes it. Any other placement
+/// returns the text unchanged with the default, so the sentence stays a strict
+/// failure. Paired positives: the verbatim-body leg below and PU3.
+#[test]
+fn still_resolves_sentence_is_detached_only_as_the_last_sentence() {
+    let (kept, disposition) = extract_illegal_targets_disposition(GILDED_DRAKE_BODY);
+    assert_eq!(disposition, IllegalTargetsDisposition::StillResolves);
+    assert_eq!(
+        kept,
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         If you don't or can't make an exchange, sacrifice this creature.",
+        "the previous sentence keeps its period"
+    );
+
+    for unchanged in [
+        // Not the last sentence.
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         This ability still resolves if its target becomes illegal. Draw a card.",
+        // Inside a longer sentence, not a sentence of its own.
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         If you don't or can't make an exchange, sacrifice this creature; this ability still \
+         resolves if its target becomes illegal.",
+        // The whole body: no effect for the override to govern.
+        "This ability still resolves if its target becomes illegal.",
+    ] {
+        let (kept, disposition) = extract_illegal_targets_disposition(unchanged);
+        assert_eq!(kept, unchanged);
+        assert_eq!(disposition, IllegalTargetsDisposition::DoesNotResolve);
+    }
+
+    // Full pipeline: the sentence placed before the rider is not detached.
+    let not_trailing = drake_shaped_trigger_execute(
+        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
+         target creature an opponent controls. This ability still resolves if its target becomes \
+         illegal. If you don't or can't make an exchange, sacrifice this creature.",
+    );
+    assert!(
+        matches!(&*not_trailing.effect, Effect::ExchangeControl { .. }),
+        "REACH GUARD: the body parsed past the exchange, got {:?}",
+        not_trailing.effect
+    );
+    assert!(has_unbound_subject_node(&not_trailing));
+    assert!(chain_nodes(&not_trailing)
+        .iter()
+        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
+
+    // Full pipeline: a body that is only the sentence stays a strict failure.
+    let only_override = drake_shaped_trigger_execute(
+        "When this creature enters, this ability still resolves if its target becomes illegal.",
+    );
+    assert!(has_unbound_subject_node(&only_override));
+    assert!(!ability_definition_supported(&only_override));
+    assert_eq!(
+        only_override.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve
+    );
+}
+
+/// PU6 (CR 603.12 + CR 608.2b): a shape fixture, not a printed card. When the
+/// targeted exchange sits on a reflexive "When you do" node, that node is a
+/// separate triggered ability with its own targets, so a stamp on the chain's
+/// root could not govern "its target". The override fails closed: the sentence
+/// stays a strict failure and no node carries the override.
+///
+/// Fails on revert of the fail-close: the root is stamped and the card reports
+/// supported while the reflexive ability would still fizzle. Paired positive: PU3.
+#[test]
+fn still_resolves_sentence_fails_closed_beside_a_reflexive_when_you_do_node() {
+    let execute = drake_shaped_trigger_execute(
+        "When this creature enters, you may pay {1}. When you do, exchange control of this \
+         creature and up to one target creature an opponent controls. This ability still \
+         resolves if its target becomes illegal.",
+    );
+    let nodes = chain_nodes(&execute);
+    assert!(
+        nodes.iter().any(|node| node
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)),
+        "REACH GUARD: the chain carries the reflexive marker the fail-close reads: {execute:?}"
+    );
+    assert!(nodes
+        .iter()
+        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
+    assert!(has_unimplemented(&execute));
+    assert!(!ability_definition_supported(&execute));
+}
+
+/// PU7 (CR 603.12): the reflexive-node predicate descends effect-carried
+/// definitions, not only `sub_ability` / `else_ability`. Each positive is paired
+/// with the same shape minus the "When you do" marker.
+#[test]
+fn chain_creates_reflexive_ability_descends_nested_definitions() {
+    let draw = || Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    let plain_sub = AbilityDefinition::new(AbilityKind::Spell, draw());
+    let reflexive_sub = plain_sub.clone().condition(AbilityCondition::WhenYouDo);
+    let branch_with_reflexive =
+        AbilityDefinition::new(AbilityKind::Spell, draw()).sub_ability(reflexive_sub);
+    let branch_without_reflexive =
+        AbilityDefinition::new(AbilityKind::Spell, draw()).sub_ability(plain_sub);
+
+    let flip_coin = |win: AbilityDefinition| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+    };
+    assert!(chain_creates_reflexive_ability(&flip_coin(
+        branch_with_reflexive.clone()
+    )));
+    assert!(!chain_creates_reflexive_ability(&flip_coin(
+        branch_without_reflexive.clone()
+    )));
+
+    let choose_one_of = |branch: AbilityDefinition| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(AbilityKind::Spell, draw()), branch],
+            },
+        )
+    };
+    assert!(chain_creates_reflexive_ability(&choose_one_of(
+        branch_with_reflexive
+    )));
+    assert!(!chain_creates_reflexive_ability(&choose_one_of(
+        branch_without_reflexive
+    )));
+}
+
+/// Maintainer round 4, finding 2. CR 608.2c: in a becomes-target body an
+/// explicit object-controller antecedent ("that creature's controller") names
+/// the targeted object's controller, which the lowered `ParentTargetController`
+/// can't keep apart from the targeter, so the body fails closed. A spell or
+/// ability controller ("that spell's controller", "that spell or ability's
+/// controller") keeps the targeter rewrite. The first line is the maintainer's
+/// synthetic grammar control; Forsaken Wastes is verbatim (Scryfall).
+#[test]
+fn becomes_target_object_controller_antecedent_fails_closed() {
+    // The maintainer's synthetic line, then compound noun phrases: the guard
+    // reads `that|the` + any noun phrase + `'s controller`, exempting only a
+    // spell or ability head noun.
+    for (name, text) in [
+        (
+            "Synthetic Watcher",
+            "Whenever a creature becomes the target of a spell or ability, that creature's controller draws a card.",
+        ),
+        (
+            "Synthetic Token Watcher",
+            "Whenever a creature becomes the target of a spell or ability, that creature token's controller draws a card.",
+        ),
+        (
+            "Synthetic Artifact Watcher",
+            "Whenever an artifact creature becomes the target of a spell, that artifact creature's controller draws a card.",
+        ),
+        (
+            "Synthetic Bare Token Watcher",
+            "Whenever a token becomes the target of a spell, that token's controller draws a card.",
+        ),
+        (
+            "Synthetic Non-Human Watcher",
+            "Whenever a creature becomes the target of a spell, that non-Human creature's controller draws a card.",
+        ),
+        (
+            "Synthetic Assembly-Worker Watcher",
+            "Whenever an Assembly-Worker becomes the target of a spell, that Assembly-Worker's controller draws a card.",
+        ),
+        (
+            "Synthetic Stat Token Watcher",
+            "Whenever a creature token becomes the target of a spell, that 1/1 creature token's controller draws a card.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::BecomesTarget, "{name}: reach guard");
+        let json = serde_json::to_string(&def).expect("trigger serializes");
+        assert!(
+            json.contains("becomes_target_object_controller_antecedent"),
+            "{name}: the explicit object-controller body fails closed: {json}"
+        );
+        assert!(
+            !json.contains("TriggeringSpellController"),
+            "{name}: no targeter rewrite for the object's controller: {json}"
+        );
+    }
+
+    // After a fresh object-target choice the rebind stops, so "that creature"
+    // names the chosen creature and the guard doesn't fire: the body stays
+    // supported and the chosen creature's controller is not rewritten.
+    let fresh = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, tap target creature. That creature's controller draws a card.",
+        "Synthetic Fresh Choice",
+    );
+    assert_eq!(fresh.mode, TriggerMode::BecomesTarget, "reach guard");
+    let json = serde_json::to_string(&fresh).expect("trigger serializes");
+    assert!(
+        !json.contains("becomes_target_object_controller_antecedent"),
+        "past the fresh-choice boundary the guard doesn't fire: {json}"
+    );
+    assert!(
+        json.contains("ParentTargetController") && !json.contains("TriggeringSpellController"),
+        "the chosen creature's controller keeps its parent-target reading: {json}"
+    );
+
+    // An "Otherwise" body is visited before the conditional link's fresh-choice
+    // stop, as the rebind visits `else_ability` first: it fails closed.
+    let otherwise = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, tap target artifact if you control an Island. Otherwise, that creature's controller draws a card.",
+        "Synthetic Otherwise Watcher",
+    );
+    assert_eq!(otherwise.mode, TriggerMode::BecomesTarget, "reach guard");
+    let json = serde_json::to_string(&otherwise).expect("trigger serializes");
+    assert!(
+        json.contains("becomes_target_object_controller_antecedent"),
+        "the else body's object controller fails closed: {json}"
+    );
+    // An "Otherwise" binds to the most recent conditional even across an
+    // intervening clause, so a chain holding one is read whole: fails closed.
+    let distant = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, tap target artifact if you control an Island. You gain 1 life. Otherwise, that creature's controller draws a card.",
+        "Synthetic Distant Otherwise Watcher",
+    );
+    assert_eq!(distant.mode, TriggerMode::BecomesTarget, "reach guard");
+    let json = serde_json::to_string(&distant).expect("trigger serializes");
+    assert!(
+        json.contains("becomes_target_object_controller_antecedent"),
+        "a distant Otherwise's object controller fails closed: {json}"
+    );
+    // Complementary reveal conditions attach an `else_ability` with no
+    // "Otherwise" clause; the assembled else reads the body whole: fails closed.
+    let complementary = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, reveal the top card of your library. If it's a land card, tap target artifact. If it isn't a land card, that creature's controller draws a card.",
+        "Synthetic Complementary Watcher",
+    );
+    assert_eq!(
+        complementary.mode,
+        TriggerMode::BecomesTarget,
+        "reach guard"
+    );
+    let json = serde_json::to_string(&complementary).expect("trigger serializes");
+    assert!(
+        json.contains("\"else_ability\"") && json.contains("RevealedHasCardType"),
+        "reach guard: the complementary conditions assemble an else branch: {json}"
+    );
+    assert!(
+        json.contains("becomes_target_object_controller_antecedent"),
+        "a complementary-condition else body's object controller fails closed: {json}"
+    );
+
+    // A modal body is scoped by the same traversal, mode by mode: the fresh
+    // target in the first mode stops the rewrite there, so the mode stays
+    // supported with its Tap and Draw.
+    let modal = parse_oracle_text(
+        "Whenever this enchantment becomes the target of a spell or ability, choose one \u{2014}\n\u{2022} Tap target creature. That creature's controller draws a card.\n\u{2022} You gain 1 life.",
+        "Synthetic Modal Watcher",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = modal
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::BecomesTarget)
+        .expect("reach guard: the becomes-target trigger parses");
+    let json = serde_json::to_string(trigger).expect("trigger serializes");
+    assert!(
+        json.contains("\"Tap\"") && json.contains("\"Draw\""),
+        "the modal mode keeps its Tap and Draw: {json}"
+    );
+    assert!(
+        !json.contains("Unimplemented"),
+        "the modal body stays supported: {json}"
+    );
+
+    for (name, text) in [
+        (
+            "Synthetic Targeter Watcher",
+            "Whenever a creature becomes the target of a spell or ability, that spell or ability's controller draws a card.",
+        ),
+        (
+            "Forsaken Wastes",
+            "Whenever this enchantment becomes the target of a spell, that spell's controller loses 5 life.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::BecomesTarget, "{name}: reach guard");
+        let json = serde_json::to_string(&def).expect("trigger serializes");
+        assert!(
+            json.contains("TriggeringSpellController"),
+            "{name}: the targeter controller keeps the rewrite: {json}"
+        );
+        assert!(
+            !json.contains("Unimplemented"),
+            "{name}: stays supported: {json}"
+        );
     }
 }

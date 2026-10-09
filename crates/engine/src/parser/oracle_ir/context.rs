@@ -164,6 +164,14 @@ impl TriggerZoneChangeProvenance {
     }
 }
 
+/// CR 608.2k: the object a trigger condition introduces for its body's bare
+/// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionObjectAntecedent {
+    /// CR 509.3c: the attacker of a bare "<creature> becomes blocked" condition.
+    BlockedAttacker,
+}
+
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
@@ -264,6 +272,12 @@ pub(crate) struct ParseContext {
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
     /// moves the spell on the stack, not the trigger source or a parent target.
     pub object_pronoun_ref: Option<TargetFilter>,
+    /// CR 509.3c + CR 608.2k: what `object_pronoun_ref` names, when the pinned
+    /// `TargetFilter` alone doesn't say it. `ParentTarget` is also the ordinary
+    /// "it" of a spell's earlier target; under a bare "becomes blocked" trigger
+    /// condition it is the blocked attacker, which some slots (a damage source)
+    /// cannot express. Set only together with the matching pin.
+    pub condition_object_antecedent: Option<ConditionObjectAntecedent>,
     /// CR 608.2c (rules of English — number agreement) + CR 608.2k + CR 406.6:
     /// Antecedent for bare PLURAL object pronouns ("them"/"themselves") in the
     /// current trigger body, introduced by a plural noun phrase in the trigger's
@@ -633,6 +647,19 @@ pub(crate) struct ParseContext {
     /// lingering path. Mirrors `chain_has_prior_exile_producer`.
     // CR 608.2g + CR 701.20e
     pub chain_prior_self_library_peek: bool,
+    /// CR 608.2c: the stop filter of the most recent earlier same-chain
+    /// `ExileFromTopUntil { NextMatches }` loop. The loop ends on its last
+    /// match, so the cards it exiled that match this filter are exactly the
+    /// ones it found, and "the other cards exiled this way" are the rest
+    /// (Invasion of Alara). `None` when the chain has no such loop.
+    pub chain_prior_exile_until_match: Option<TargetFilter>,
+    /// CR 608.2c: the candidate source for cards the `NextMatches` loop found.
+    /// `Some(ParentTargets)` only when every
+    /// clause after the loop is the one-cast window over its batch (Invasion
+    /// of Alara's "You may cast one of those two cards …"), which hands those
+    /// targets on unchanged. Any other clause in between may target or choose
+    /// its own objects, so "put one of them into your hand" stays unbound.
+    pub chain_exile_until_hits_source: Option<ZoneChoiceCandidateSource>,
     /// CR 400.7j + CR 608.2c + CR 608.2d: the NEAREST earlier single-card exile
     /// partition in this same effect chain, carrying that pile's
     /// [`ZoneChoiceCandidateSource`] — `None` when the chain has none.

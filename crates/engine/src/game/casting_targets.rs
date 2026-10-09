@@ -218,12 +218,13 @@ pub(crate) fn handle_select_modes(
                 &pending.target_constraints,
             )?;
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
                 &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
+                super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
             return finish_pending_cast_cost_or_pay(
@@ -238,12 +239,13 @@ pub(crate) fn handle_select_modes(
             &pending.target_constraints,
         )? {
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
                 &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
+                super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
             return finish_pending_cast_cost_or_pay(
@@ -400,6 +402,7 @@ pub(crate) fn handle_select_targets(
         &announced_targets,
         pending.object_id,
         pending.ability.controller,
+        super::casting::pending_cast_targeter(state, &pending),
         events,
     );
 
@@ -505,6 +508,7 @@ pub(crate) fn handle_choose_target(
                 &announced_targets,
                 pending.object_id,
                 controller,
+                super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
 
