@@ -176,7 +176,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'engine_panic') / sumIf(_sample_interval, blob1 = 'game_start'), 2), 0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('engine_panic', 'game_start')",
+                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'engine_panic') / sumIf(_sample_interval, blob1 = 'game_start'), 2), 0.0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('engine_panic', 'game_start')",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -267,7 +267,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'session_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'js_error') / sumIf(_sample_interval, blob1 = 'session_start'), 2), 0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('js_error', 'session_start')",
+                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'session_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'js_error') / sumIf(_sample_interval, blob1 = 'session_start'), 2), 0.0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('js_error', 'session_start')",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -358,7 +358,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'stuck_decision') / sumIf(_sample_interval, blob1 = 'game_start'), 2), 0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('stuck_decision', 'game_start')",
+                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'stuck_decision') / sumIf(_sample_interval, blob1 = 'game_start'), 2), 0.0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('stuck_decision', 'game_start')",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -449,7 +449,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'game_end') / sumIf(_sample_interval, blob1 = 'game_start'), 1), 0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('game_end', 'game_start')",
+                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'game_end') / sumIf(_sample_interval, blob1 = 'game_start'), 1), 0.0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('game_end', 'game_start')",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -541,7 +541,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'session_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'chunk_reload') / sumIf(_sample_interval, blob1 = 'session_start'), 2), 0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('chunk_reload', 'session_start')",
+                        "query": "SELECT if(sumIf(_sample_interval, blob1 = 'session_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'chunk_reload') / sumIf(_sample_interval, blob1 = 'session_start'), 2), 0.0) AS n FROM ${dataset} WHERE $timeFilter AND blob1 IN ('chunk_reload', 'session_start')",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -1125,7 +1125,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT if(blob1 = 'game_start', blob5, blob7) AS mode, sumIf(_sample_interval, blob1 = 'game_start') AS starts, sumIf(_sample_interval, blob1 = 'game_end') AS ends, if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'game_end') / sumIf(_sample_interval, blob1 = 'game_start'), 1), 0) AS completion_pct FROM ${dataset} WHERE $timeFilter AND blob1 IN ('game_start', 'game_end') GROUP BY mode ORDER BY starts DESC",
+                        "query": "SELECT if(blob1 = 'game_start', blob5, blob7) AS mode, sumIf(_sample_interval, blob1 = 'game_start') AS starts, sumIf(_sample_interval, blob1 = 'game_end') AS ends, if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'game_end') / sumIf(_sample_interval, blob1 = 'game_start'), 1), 0.0) AS completion_pct FROM ${dataset} WHERE $timeFilter AND blob1 IN ('game_start', 'game_end') GROUP BY mode ORDER BY starts DESC",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -1748,7 +1748,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT blob2 AS version, sumIf(_sample_interval, blob1 = 'session_start') AS sessions, sumIf(_sample_interval, blob1 = 'game_start') AS games, sumIf(_sample_interval, blob1 = 'engine_panic') AS panics, sumIf(_sample_interval, blob1 = 'js_error') AS js_errors, sumIf(_sample_interval, blob1 = 'stuck_decision') AS stuck, if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'engine_panic') / sumIf(_sample_interval, blob1 = 'game_start'), 2), 0) AS panics_per_100_games, if(sumIf(_sample_interval, blob1 = 'session_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'js_error') / sumIf(_sample_interval, blob1 = 'session_start'), 2), 0) AS js_errors_per_100_sessions, min(timestamp) AS first_seen FROM ${dataset} WHERE $timeFilter AND blob1 IN ('session_start', 'game_start', 'engine_panic', 'js_error', 'stuck_decision') GROUP BY version ORDER BY first_seen DESC LIMIT 15",
+                        "query": "SELECT blob2 AS version, sumIf(_sample_interval, blob1 = 'session_start') AS sessions, sumIf(_sample_interval, blob1 = 'game_start') AS games, sumIf(_sample_interval, blob1 = 'engine_panic') AS panics, sumIf(_sample_interval, blob1 = 'js_error') AS js_errors, sumIf(_sample_interval, blob1 = 'stuck_decision') AS stuck, if(sumIf(_sample_interval, blob1 = 'game_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'engine_panic') / sumIf(_sample_interval, blob1 = 'game_start'), 2), 0.0) AS panics_per_100_games, if(sumIf(_sample_interval, blob1 = 'session_start') > 0, round(100 * sumIf(_sample_interval, blob1 = 'js_error') / sumIf(_sample_interval, blob1 = 'session_start'), 2), 0.0) AS js_errors_per_100_sessions, min(timestamp) AS first_seen FROM ${dataset} WHERE $timeFilter AND blob1 IN ('session_start', 'game_start', 'engine_panic', 'js_error', 'stuck_decision') GROUP BY version ORDER BY first_seen DESC LIMIT 15",
                         "rawQuery": true
                       },
                       "version": "v0"
@@ -2403,7 +2403,7 @@
                         "dateTimeType": "DATETIME",
                         "extrapolate": false,
                         "format": "table",
-                        "query": "SELECT blob7 AS game_mode, sum(_sample_interval) AS games, sumIf(_sample_interval, blob8 != '') AS with_unimplemented, if(sum(_sample_interval) > 0, round(100 * sumIf(_sample_interval, blob8 != '') / sum(_sample_interval), 1), 0) AS pct FROM ${dataset} WHERE $timeFilter AND blob1 = 'game_end' GROUP BY game_mode ORDER BY games DESC",
+                        "query": "SELECT blob7 AS game_mode, sum(_sample_interval) AS games, sumIf(_sample_interval, blob8 != '') AS with_unimplemented, if(sum(_sample_interval) > 0, round(100 * sumIf(_sample_interval, blob8 != '') / sum(_sample_interval), 1), 0.0) AS pct FROM ${dataset} WHERE $timeFilter AND blob1 = 'game_end' GROUP BY game_mode ORDER BY games DESC",
                         "rawQuery": true
                       },
                       "version": "v0"
