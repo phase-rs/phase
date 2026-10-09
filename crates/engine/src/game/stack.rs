@@ -4889,12 +4889,14 @@ fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool 
 }
 
 /// CR 111.2 + CR 109.4: The run-identity axis along the source dimension. A
-/// base token's characteristics and controller are fixed at creation and do not
-/// read the creating source, so triggers from DISTINCT sources are
-/// resolution-identical and collapse under `SourceIndependent`. Any
-/// source-relative effect (a copy that reads its own `SelfRef` source, an
-/// attacking/attached token, a source-relative count) keeps a per-source
-/// boundary via `Source(id)` so two sources never collapse incorrectly.
+/// base token whose top-level effect passes
+/// `token::token_effect_is_source_independent` (controller-owned, `Fixed`
+/// count, not attacking, not attached) groups triggers from DISTINCT sources
+/// under `SourceIndependent`; any other effect keeps a per-source boundary via
+/// `Source(id)`. Grouping is not interchangeability: a member's spec or
+/// `ConditionInstead` sub-ability can still read its own source, so every
+/// member resolves through `resolve_top` and the bulk admission
+/// (`token::admits_bulk_run`) compares members before eliding checkpoints.
 #[derive(PartialEq)]
 enum BatchSourceAxis {
     SourceIndependent,
@@ -4919,9 +4921,10 @@ struct BatchRunKey<'a> {
 /// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
 /// else abilities embed their own), so a derived `PartialEq` would treat two
 /// otherwise-identical abilities from distinct sources as unequal — defeating
-/// the `SourceIndependent` collapse. When both keys are `SourceIndependent` the
-/// effect provably reads nothing from the source, so abilities are compared
-/// with `source_id` canonicalized away (recursively, on the chain). When either
+/// the `SourceIndependent` collapse. When both keys are `SourceIndependent`,
+/// abilities are compared with `source_id` canonicalized away (recursively, on
+/// the chain); what each member still reads from its own source is compared by
+/// the bulk admission (`token::admits_bulk_run`). When either
 /// key is `Source(id)`, the per-source boundary already differs, so the regular
 /// deep equality (including `source_id`) applies.
 impl PartialEq for BatchRunKey<'_> {
@@ -4946,9 +4949,10 @@ impl PartialEq for BatchRunKey<'_> {
 
 /// Compare two resolved abilities for batch-run identity while ignoring the
 /// source-object id at every level of the sub/else chain. Cheap clone+normalize
-/// only runs on the batch-eligible path. The classifier guarantees the effect
-/// reads nothing else from the source, so source-id is the only field allowed
-/// to differ across a `SourceIndependent` run.
+/// only runs on the batch-eligible path. Source-id is the only field allowed to
+/// differ across a `SourceIndependent` run; equal abilities can still read
+/// different values from their sources, which the bulk admission compares per
+/// member (`token::admits_bulk_run`).
 fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> bool {
     normalize_ability_source(a) == normalize_ability_source(b)
 }

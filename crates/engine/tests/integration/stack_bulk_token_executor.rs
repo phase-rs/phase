@@ -12,7 +12,10 @@ use engine::game::engine::{apply, apply_verified_ai_priority_pass};
 use engine::game::perf_counters;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{Effect, ObjectScope, PtValue, QuantityExpr, QuantityRef};
+use engine::types::ability::{
+    AbilityCondition, Comparator, ControllerRef, Effect, FilterProp, ObjectScope, PtValue,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
@@ -282,12 +285,16 @@ fn assert_parsed(state: &GameState, name: &str) {
     );
 }
 
-fn edit_stacked_token_specs(state: &mut GameState, edit: impl Fn(&mut Effect)) {
+fn edit_stacked_abilities(state: &mut GameState, edit: impl Fn(&mut ResolvedAbility)) {
     for entry in state.stack.iter_mut() {
         if let StackEntryKind::TriggeredAbility { ability, .. } = &mut entry.kind {
-            edit(&mut ability.effect);
+            edit(ability);
         }
     }
+}
+
+fn edit_stacked_token_specs(state: &mut GameState, edit: impl Fn(&mut Effect)) {
+    edit_stacked_abilities(state, |ability| edit(&mut ability.effect));
 }
 
 /// A1: N Insect-branch Scute triggers (one land < 6, CR 608.2c) resolve as
@@ -511,6 +518,152 @@ fn distinct_source_token_specs_refuse_the_run() {
         tokens_named(&reference.state, "Saproling"),
         2,
         "reach guard: member 2's 0/0 Saproling dies"
+    );
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// Three distinct Sporemound sources; the first to resolve is an artifact
+/// creature and the board's only artifact, so "another artifact you control"
+/// counts 0 for member 1 and 1 for members 2 and 3.
+fn artifact_led_sporemound_board() -> GameState {
+    let s0 = landfall_board(0, |s| {
+        // Under the identity order setup index 2 resolves first.
+        for artifact in [false, false, true] {
+            let mut sporemound = s.add_creature_from_oracle(P0, "Sporemound", 3, 3, SPOREMOUND);
+            sporemound.with_subtypes(vec!["Fungus"]);
+            if artifact {
+                sporemound.as_artifact_creature();
+            }
+        }
+    });
+    assert_eq!(s0.stack.len(), 3, "reach guard: three Sporemound triggers");
+    s0
+}
+
+/// The number of other artifacts the member's controller controls: the count
+/// excludes the member's own source (`FilterProp::Another`).
+fn other_artifacts_you_control() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact)
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
+            ),
+        },
+    }
+}
+
+/// "If you control another artifact".
+fn you_control_another_artifact() -> AbilityCondition {
+    AbilityCondition::QuantityCheck {
+        lhs: other_artifacts_you_control(),
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    }
+}
+
+/// Edit a token effect to a 0/0 Germ.
+fn germ(effect: &mut Effect) {
+    if let Effect::Token {
+        name,
+        power,
+        toughness,
+        ..
+    } = effect
+    {
+        *name = "Germ".to_string();
+        *power = PtValue::Fixed(0);
+        *toughness = PtValue::Fixed(0);
+    }
+}
+
+fn germs_created(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::TokenCreated { name, .. } if name == "Germ"))
+        .count()
+}
+
+/// A8-CI (labelled class fixture: each stacked trigger gets the sub "if you
+/// control another artifact, create a 0/0 Germ instead"): member 1's artifact
+/// source makes its swap unmet while members 2 and 3 meet it (CR 608.2c). Their
+/// Germs die at their own checkpoints (CR 704.5f), which member 1's checkpoint
+/// cannot show, so the run is not bulk-admitted.
+#[test]
+fn distinct_source_instead_verdicts_refuse_the_run() {
+    let mut s0 = artifact_led_sporemound_board();
+    edit_stacked_abilities(&mut s0, |ability| {
+        let mut swapped = ability.effect.clone();
+        germ(&mut swapped);
+        ability.sub_ability = Some(Box::new(
+            ResolvedAbility::new(swapped, vec![], ability.source_id, ability.controller).condition(
+                AbilityCondition::ConditionInstead {
+                    inner: Box::new(you_control_another_artifact()),
+                },
+            ),
+        ));
+    });
+    let (bulk, reference) = parity("A8-CI", s0);
+    assert_eq!(tokens_named(&reference.state, "Saproling"), 1);
+    assert_eq!(
+        (
+            germs_created(&reference.events),
+            tokens_named(&reference.state, "Germ")
+        ),
+        (2, 0),
+        "reach guard: members 2 and 3 create 0/0 Germs that die"
+    );
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-RC (labelled class fixture: each stacked trigger's root effect becomes a
+/// 0/0 Germ gated on "if you control another artifact"): member 1 creates
+/// nothing while members 2 and 3 create Germs that die at their own
+/// checkpoints (CR 608.2c, CR 704.5f), so the run is not bulk-admitted.
+#[test]
+fn root_condition_refuses_the_run() {
+    let mut s0 = artifact_led_sporemound_board();
+    edit_stacked_abilities(&mut s0, |ability| {
+        germ(&mut ability.effect);
+        ability.condition = Some(you_control_another_artifact());
+    });
+    let (bulk, reference) = parity("A8-RC", s0);
+    assert_eq!(
+        (
+            germs_created(&reference.events),
+            tokens_named(&reference.state, "Germ")
+        ),
+        (2, 0),
+        "reach guard: members 2 and 3 create 0/0 Germs that die"
+    );
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-RR (labelled class fixture: each stacked trigger's root effect becomes a
+/// 0/0 Germ repeated once for each other artifact you control): member 1
+/// repeats zero times while members 2 and 3 each create a Germ that dies at
+/// its own checkpoint (CR 608.2c, CR 704.5f), so the run is not bulk-admitted.
+#[test]
+fn root_repeat_for_refuses_the_run() {
+    let mut s0 = artifact_led_sporemound_board();
+    edit_stacked_abilities(&mut s0, |ability| {
+        germ(&mut ability.effect);
+        ability.repeat_for = Some(other_artifacts_you_control());
+    });
+    let (bulk, reference) = parity("A8-RR", s0);
+    assert_eq!(
+        (
+            germs_created(&reference.events),
+            tokens_named(&reference.state, "Germ")
+        ),
+        (2, 0),
+        "reach guard: members 2 and 3 create 0/0 Germs that die"
     );
     assert_eq!(bulk.counters.bulk_entries, 0);
 }

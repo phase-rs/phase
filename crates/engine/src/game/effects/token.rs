@@ -2625,6 +2625,11 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
 /// CR 608.2c: The run-invariant shape both bulk arms share: a bare
 /// `Effect::Token` with a literal `Fixed` count whose per-resolution spec
 /// resolves read-only, mirroring `resolve`. `None` for any other shape.
+///
+/// A root `condition` or `repeat_for` decides at each member's resolution
+/// whether, and how many times, its token is created, and either can read the
+/// member's own source (a counted filter excluding it). Member 1's checkpoint
+/// then vets a token the other members need not create, so both refuse.
 fn bulk_token_shape(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -2637,7 +2642,10 @@ fn bulk_token_shape(
     let Effect::Token { count, .. } = &ability.effect else {
         return None;
     };
-    if !matches!(count, QuantityExpr::Fixed { .. }) {
+    if !matches!(count, QuantityExpr::Fixed { .. })
+        || ability.condition.is_some()
+        || ability.repeat_for.is_some()
+    {
         return None;
     }
     resolve_token_spec(state, ability)
@@ -2678,7 +2686,18 @@ pub(crate) fn admits_bulk_run(
         else {
             return false;
         };
-        if super::evaluate_condition(inner, state, ability) {
+        // CR 608.2c: each member evaluates the swap against its own source (a
+        // counted filter can exclude or relate to that source), so the run is
+        // admitted only when every member takes member 1's branch.
+        let met = super::evaluate_condition(inner, state, ability);
+        if run_members
+            .iter()
+            .skip(1)
+            .any(|member| super::evaluate_condition(inner, state, member) != met)
+        {
+            return false;
+        }
+        if met {
             return try_resolve_copy_batch(state, ability, sub, inner, run_members);
         }
         if !condition_invariant_for_token(inner, &spec.characteristics.core_types) {
