@@ -28567,11 +28567,9 @@ pub struct SpellContext {
     /// event-delayed trigger, which reads the event that fires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
-    /// CR 603.7a + CR 608.2c: the players the creating chain's declared groups named when a
-    /// delayed ability was created, for the groups still legal then. The payload fires as a fresh
-    /// root with no declaring clause of those groups; `targeting::resolve_live_declared_player`
-    /// reads this map only for a group no node of the resolving root declares. Stamped on the
-    /// payload root by `delayed_trigger::resolve`; empty everywhere else.
+    /// CR 603.7a + CR 608.2c: the player each declared group of the creating chain named, still
+    /// legal at creation, read through `targeting::carried_declared_player`; stamped only by
+    /// `delayed_trigger::resolve`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outer_declared_players: Vec<(ChosenGroupId, PlayerId)>,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered

@@ -1299,8 +1299,9 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     })
 }
 
-/// CR 608.2c + CR 608.2b: the instruction-time read of the player announced by the chain
-/// clause tagged `declares_chosen_group == Some(group)`. `None` when no player was announced,
+/// CR 608.2c + CR 608.2b: the instruction-time read of the player announced by the clause
+/// tagged `declares_chosen_group == Some(group)`, else the player the creating chain carried
+/// (`carried_declared_player`). `None` when no player was announced,
 /// when that target was illegal as the chain began to resolve (`illegal_target_slots`), or when
 /// the player has left the game (CR 800.4a): an illegal target is not affected and "any part of
 /// the effect that requires that information won't happen". An independently announced object

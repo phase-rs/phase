@@ -12986,9 +12986,9 @@ fn delayed_intervening_if(
     if delayed_body_outlives_a_false_gate(ability) {
         return None;
     }
-    // CR 603.7a + CR 608.2c: both CR 603.4 legs evaluate a `TriggerCondition` with no ability, so
-    // a carried declared player is bound into the condition first. A group the payload declares
-    // itself, or whose carried player left, stays unbound and declines the hoist.
+    // CR 603.7a + CR 608.2c: both CR 603.4 legs evaluate the condition with no ability, so a
+    // carried declared player is bound into it first; a group the payload declares itself stays
+    // unbound and declines the hoist.
     let mut condition = ability.condition.clone()?;
     crate::game::filter::rebind_declared_groups_in_condition(&mut condition, &mut |group| {
         if super::ability_utils::declared_group_player_slot(ability, group).is_some() {

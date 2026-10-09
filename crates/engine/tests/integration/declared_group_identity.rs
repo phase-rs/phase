@@ -1340,7 +1340,7 @@ fn f1_force_attack_population_lowers_the_declared_player() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Carried declarations: effect fields no install-time rewrite reaches
+// Carried declarations: effect fields read through the resolving root's lookup
 // ---------------------------------------------------------------------------------------------
 
 fn spirit(owner: TargetFilter, count: QuantityExpr) -> Effect {

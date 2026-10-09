@@ -7849,9 +7849,8 @@ fn legal_targets_for_selected_slot(
         // CR 608.2c + CR 115.1a: a reader of a declared group names the player THAT
         // group's clause announced, not the latest player selected.
         let mut players = announced_group_players(prior_specs, selected_slots);
-        // CR 603.7a: a group the chain does not declare is the delayed payload's carried player;
-        // one it does not carry stays unbound and offers nothing. A declaration that announced no
-        // player still shadows the carried one, as in `resolve_live_declared_player`.
+        // CR 603.7a: a group no node of this chain declares is the payload's carried player; a
+        // declaration that announced no player still shadows it.
         for group in super::filter::declared_groups(&bound_filter) {
             if declared_group_player_slot(ability, group).is_none() {
                 players.extend(
