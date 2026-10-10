@@ -23,6 +23,8 @@ import { LobbyView } from "../components/lobby/LobbyView";
 import { PlayerIdentityBanner } from "../components/lobby/PlayerIdentityBanner";
 import { ServerOfflinePrompt } from "../components/lobby/ServerOfflinePrompt";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast";
+import { TextPromptDialog } from "../components/ui/TextPromptDialog";
+import { useTextPrompt } from "../hooks/useTextPrompt";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
@@ -220,6 +222,12 @@ function MultiplayerPageContent({
       primaryAction?: { label: string; onClick: () => void };
     } | null
   >(null);
+  const {
+    open: passwordPromptOpen,
+    request: requestRoomPassword,
+    confirm: confirmRoomPassword,
+    cancel: cancelRoomPassword,
+  } = useTextPrompt();
   // The Discord-link version gate's dialog: "updating" while the tab waits to
   // reload onto the deployed build, "manual" when it did not.
   const [buildUpdate, setBuildUpdateState] = useState<BuildUpdateDialog | null>(null);
@@ -487,7 +495,7 @@ function MultiplayerPageContent({
           return stripPeerIdPrefix(result.peerInfo.host_peer_id);
         }
         if (result.reason === "password_required") {
-          const entered = window.prompt(t("page.passwordPrompt"));
+          const entered = await requestRoomPassword();
           if (!entered) return null;
           password = entered;
           continue;
@@ -517,7 +525,13 @@ function MultiplayerPageContent({
         return null;
       }
     },
-    [refreshToLatestBuild, resolveGuestFromStore, showToast, t],
+    [
+      refreshToLatestBuild,
+      requestRoomPassword,
+      resolveGuestFromStore,
+      showToast,
+      t,
+    ],
   );
 
   // Declared above `executeAction` so the deck-select → re-dispatch
@@ -920,7 +934,7 @@ function MultiplayerPageContent({
       if (first.ok) {
         info = first.info;
       } else if (first.reason === "password_required") {
-        const entered = window.prompt(t("page.passwordPrompt"));
+        const entered = await requestRoomPassword();
         if (!entered) return;
         resolvedPassword = entered;
         const retry = await lookupJoinTargetFromStore(code, origin, resolvedPassword);
@@ -952,7 +966,7 @@ function MultiplayerPageContent({
       setPendingAction(action);
       setView("deck-select");
     },
-    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
+    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, requestRoomPassword],
   );
 
   // Guest join from a Discord link. A room the host has not opened yet (or has
@@ -1354,6 +1368,14 @@ function MultiplayerPageContent({
           onDismiss={() => setJoinErrorDialog(null)}
         />
       )}
+      <TextPromptDialog
+        open={passwordPromptOpen}
+        title={t("page.passwordPromptTitle")}
+        label={t("page.passwordPrompt")}
+        confirmLabel={t("page.passwordPromptConfirm")}
+        onConfirm={confirmRoomPassword}
+        onCancel={cancelRoomPassword}
+      />
       {buildUpdate?.status === "updating" && (
         <JoinErrorDialog title={t("page.updatingTitle")} message={t("page.updatingMessage")} />
       )}

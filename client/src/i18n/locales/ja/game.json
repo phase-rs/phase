@@ -1360,6 +1360,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "この部屋にはパスワードが必要です：",
+    "passwordPromptTitle": "ルームのパスワード",
+    "passwordPromptConfirm": "参加",
     "toasts": {
       "connectionFailed": "接続に失敗しました。再試行するか、設定でサーバーを変更してください。",
       "eliminatedSpectating": "あなたは敗北しました。観戦に移行します。"

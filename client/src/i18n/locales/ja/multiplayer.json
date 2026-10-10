@@ -296,6 +296,8 @@
     "deckCheckFailedGeneric": "デッキ確認に失敗しました。",
     "failedToJoinDraft": "ドラフトポッドへの参加に失敗しました。",
     "passwordPrompt": "このルームにはパスワードが必要です:",
+    "passwordPromptTitle": "ルームのパスワード",
+    "passwordPromptConfirm": "参加",
     "joinErrorOutOfDateTitle": "クライアントが古いです",
     "joinErrorRefresh": "更新",
     "joinErrorCantJoinTitle": "このルームに参加できません",

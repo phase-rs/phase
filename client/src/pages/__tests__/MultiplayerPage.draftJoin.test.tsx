@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useEffect } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -268,10 +269,6 @@ describe("MultiplayerPage draft join routing", () => {
           filled_seats: 1,
         },
       });
-    // happy-dom does not implement `window.prompt`, so `vi.spyOn` has nothing
-    // to wrap — `vi.stubGlobal` is the idiom this codebase uses elsewhere
-    // (`MyDecks.test.tsx`).
-    vi.stubGlobal("prompt", vi.fn(() => "pw2"));
     harness.lobbyAction = (props) => {
       (
         props.onJoinGame as (
@@ -285,6 +282,9 @@ describe("MultiplayerPage draft join routing", () => {
     };
 
     renderPage();
+    const passwordInput = await screen.findByLabelText("This room requires a password:");
+    await userEvent.type(passwordInput, "pw2");
+    await userEvent.click(screen.getByRole("button", { name: "Join" }));
 
     await waitFor(() => {
       expect(connectionMocks.joinRoom).toHaveBeenCalled();
@@ -527,12 +527,14 @@ describe("MultiplayerPage draft join routing", () => {
           draft_metadata: { setCode: "MKM", draftKind: "Premier" },
         },
       });
-    vi.stubGlobal("prompt", vi.fn(() => "pw2"));
     harness.lobbyAction = (props) => {
       (props.onJoinGame as (code: string, origin: LobbySource) => void)("ABC123", ORIGIN);
     };
 
     renderPage();
+    const passwordInput = await screen.findByLabelText("This room requires a password:");
+    await userEvent.type(passwordInput, "pw2");
+    await userEvent.click(screen.getByRole("button", { name: "Join" }));
 
     await waitFor(() => {
       expect(connectionMocks.joinRoom).toHaveBeenCalled();
