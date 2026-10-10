@@ -115,8 +115,10 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +49: the v120 CR 601.2a spell announcement (GameObject.spell_announcement,
 // GameState.next_spell_announcement) and the BecomesTarget targeter.
 // +50: v121 records the actual receiving player with successful trigger mana.
-// +51: v122 adds the TargetFilter::DeclaredPlayer reference.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 51;
+// +51: v122 adds the `TriggeringSourceController` permission grantee and the
+//      damage-source incarnations on damage events.
+// +52: v123 adds the TargetFilter::DeclaredPlayer reference.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 52;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -192,8 +194,9 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // (+47, wire 101, is reserved for the Legends of Jidoor PR.)
 // +48: wire 102 moves with full-game v120 for the spell announcement and targeter.
 // +49: wire 103 moves with full-game v121 for player-relative trigger mana.
-// +50: wire 104 moves with full-game v122 for TargetFilter::DeclaredPlayer.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 50;
+// +50: wire 104 moves with full-game v122 for the `TriggeringSourceController` grantee.
+// +51: wire 105 moves with full-game v123 for TargetFilter::DeclaredPlayer.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 51;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

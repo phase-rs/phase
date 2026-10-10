@@ -13540,6 +13540,7 @@ fn with_triggering_player_controller(filter: TargetFilter) -> TargetFilter {
 /// - "to another player"            → opponent-controlled TypedFilter
 /// - "to one of your opponents"     → opponent-controlled TypedFilter
 /// - "to you"                       → `Controller`
+/// - "to enchanted player"         → `AttachedTo`
 /// - "to a player or planeswalker"  → `Or { Player, Planeswalker }`
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     parse_damage_to_qualifier_with_rest(after_verb)
@@ -13664,6 +13665,9 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
         parse_opponent_or_battle_recipient,
         parse_opponent_player_recipient,
         value(TargetFilter::Controller, tag("you")),
+        // CR 303.4m + CR 120.1: "enchanted player" — the player the source Aura
+        // is attached to (Curse of Hospitality, Curse of Stalked Prey).
+        value(TargetFilter::AttachedTo, tag("enchanted player")),
     ))
     .parse(rest)
 }

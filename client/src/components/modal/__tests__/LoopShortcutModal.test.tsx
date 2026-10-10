@@ -345,7 +345,7 @@ describe("LoopShortcutModal", () => {
     dispatchMock.mockReset();
     dispatchMock.mockResolvedValue(undefined);
     vi.mocked(dispatchInteraction).mockReset();
-    vi.mocked(dispatchInteraction).mockResolvedValue(undefined);
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
   });
 
   afterEach(() => {
@@ -2443,7 +2443,7 @@ describe("DeclareShortcutModal — authored-split preview", () => {
     dispatchMock.mockReset();
     dispatchMock.mockResolvedValue(undefined);
     vi.mocked(dispatchInteraction).mockReset();
-    vi.mocked(dispatchInteraction).mockResolvedValue(undefined);
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
     useAppNotificationStore.setState({ notification: null });
   });
 

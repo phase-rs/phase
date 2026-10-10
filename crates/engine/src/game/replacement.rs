@@ -15896,6 +15896,7 @@ mod tests {
                 amount: ambient as u32,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             });
             let event = ProposedEvent::Damage {
                 source_id: ObjectId(11),

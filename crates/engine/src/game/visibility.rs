@@ -6988,6 +6988,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::TriggerTargetSelection {

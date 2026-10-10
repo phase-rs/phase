@@ -108,6 +108,7 @@ them. Until the end of your next turn, you may play that card.";
         amount: 3,
         is_combat: false,
         excess: 0,
+        source_incarnation: None,
     });
 
     let def = parse_effect_chain(FELDON_BODY, AbilityKind::Spell);

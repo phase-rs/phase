@@ -59,10 +59,18 @@ mkdir -p "$(dirname "$OUTPUT")"
 #                        single-element when the card has no `card_faces`.
 #                        Used by the frontend to resolve `faceIndex` from the
 #                        engine-reported `printed_ref.face_name`.
-#   - faces            — array of {normal, art_crop} per face (image URLs)
-#   - layout           — Scryfall layout string; the frontend uses this for
-#                        presentation-only orientation such as sideways split
-#                        cards, including Room cards.
+#   - faces            — array of {normal, art_crop, orientation} per face.
+#                        `normal`/`art_crop` are image URLs; `orientation` is
+#                        "landscape" when that face is printed sideways and
+#                        the frontend must turn the image to read it, else
+#                        "portrait". Scryfall `split` layouts (split cards,
+#                        Rooms) are rotated as a whole image, and a battle face
+#                        (type line includes Battle) is printed landscape while
+#                        its back face (e.g. Awaken the Maelstrom on Invasion
+#                        of Alara, a `transform` card) is portrait.
+#   - layout           — Scryfall layout string (e.g. "flip", which the
+#                        frontend uses for the 180-degree preview spin).
+#                        Older faces without orientation fall back to split.
 #   - name, mana_cost, cmc, type_line, colors, color_identity, keywords
 #
 # Token entries are included separately with a "token:" prefix key to avoid
@@ -72,6 +80,15 @@ mkdir -p "$(dirname "$OUTPUT")"
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
+  # Printed orientation of one face (a card_faces element, or the card itself
+  # when it has none); see the `faces` entry above.
+  def face_orientation($layout; $type_line):
+    if $layout == "split"
+      or (((($type_line // "") | split(" — ") | .[0] // "") | split(" ") | index("Battle")) != null)
+    then "landscape"
+    else "portrait"
+    end;
+
   # Playable cards
   ([.[] |
     select(.layout as $l | $exclude | index($l) | not) |
@@ -88,10 +105,15 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       faces: (if $card.card_faces then
         [$card.card_faces[] | {
           normal: (.image_uris.normal // $card.image_uris.normal),
-          art_crop: (.image_uris.art_crop // $card.image_uris.art_crop)
+          art_crop: (.image_uris.art_crop // $card.image_uris.art_crop),
+          orientation: face_orientation($card.layout; .type_line)
         }]
       else
-        [{normal: $card.image_uris.normal, art_crop: $card.image_uris.art_crop}]
+        [{
+          normal: $card.image_uris.normal,
+          art_crop: $card.image_uris.art_crop,
+          orientation: face_orientation($card.layout; $card.type_line)
+        }]
       end),
       layout: $card.layout,
       name: $card.name,
@@ -125,7 +147,11 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
     {
       oracle_id: $tok.oracle_id,
       face_names: [$tok.name | js_downcase],
-      faces: [{normal: $tok.image_uris.normal, art_crop: $tok.image_uris.art_crop}],
+      faces: [{
+        normal: $tok.image_uris.normal,
+        art_crop: $tok.image_uris.art_crop,
+        orientation: face_orientation($tok.layout; $tok.type_line)
+      }],
       layout: $tok.layout,
       name: $tok.name,
       mana_cost: "",

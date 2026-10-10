@@ -1270,6 +1270,14 @@ pub enum GameEvent {
         /// CR 120.10: Excess damage beyond lethal for creatures/planeswalkers/battles.
         #[serde(default)]
         excess: u32,
+        /// CR 400.7 + CR 608.2h: the incarnation of the object that dealt the
+        /// damage. If it leaves the battlefield and returns before a trigger
+        /// that reads "that creature's controller" resolves (a blink), the
+        /// returned permanent is a new object; this names the one that dealt
+        /// the damage. `None` on legacy events and for a source with no live
+        /// object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_incarnation: Option<u64>,
     },
     /// CR 615: Damage was prevented (by a prevention shield or protection).
     /// Enables "when damage is prevented" triggers.
@@ -1585,6 +1593,11 @@ pub enum GameEvent {
         /// damage step — the sum of all `source_amounts` entries.
         #[serde(default)]
         total_damage: u32,
+        /// CR 400.7 + CR 608.2h: the incarnation of each `source_amounts`
+        /// source as it dealt the damage, carried into the per-source
+        /// `DamageDealt` a trigger records. Empty on legacy events.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_incarnations: Vec<crate::types::identifiers::ObjectIncarnationRef>,
     },
     PlayerEliminated {
         player_id: PlayerId,
@@ -2161,6 +2174,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
@@ -2185,6 +2199,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(ObjectId(10), 3), (ObjectId(11), 4)],
             total_damage: 7,
+            source_incarnations: vec![],
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

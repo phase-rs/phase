@@ -34912,6 +34912,7 @@ mod tests {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(9_401), 3)],
                 total_damage: 3,
+                source_incarnations: vec![],
             }],
             prevention_tally: vec![(
                 AppliedReplacementKey::Object {

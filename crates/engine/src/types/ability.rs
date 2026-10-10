@@ -5444,6 +5444,12 @@ pub enum PermissionGrantee {
     ObjectOwner,
     /// CR 109.4 — the player target of the parent effect in the chain.
     ParentTargetController,
+    /// CR 603.2 + CR 109.4 — the controller of the object that caused the
+    /// trigger ("that creature's controller may play that card" after
+    /// "Whenever a creature deals combat damage to enchanted player" — Curse
+    /// of Hospitality), read through `TargetFilter::TriggeringSourceController`
+    /// with its last-known-information fallback (CR 608.2h).
+    TriggeringSourceController,
 }
 
 /// Returns true when `grantee` is the default (`AbilityController`). Used as a

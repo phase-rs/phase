@@ -54529,6 +54529,7 @@ fn tinybones_3player_cast_restricted_to_damaged_player_graveyard() {
         player_id: damaged,
         source_amounts: vec![],
         total_damage: 1,
+        source_incarnations: vec![],
     });
 
     let ctx = crate::game::filter::FilterContext::neutral();

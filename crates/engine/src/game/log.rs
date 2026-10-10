@@ -1566,6 +1566,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             source_amounts,
             total_damage,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" is dealt "),
@@ -2465,6 +2466,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(ObjectId(7), 3), (ObjectId(8), 4)],
             total_damage: 7,
+            source_incarnations: vec![],
         };
 
         assert_eq!(
@@ -2725,6 +2727,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert_eq!(categorize(&event), LogCategory::Life);
     }
@@ -2737,6 +2740,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert_eq!(categorize(&event), LogCategory::Combat);
     }
@@ -3034,11 +3038,13 @@ mod tests {
                     amount: 5,
                     is_combat: true,
                     excess: 0,
+                    source_incarnation: None,
                 },
                 GameEvent::CombatDamageDealtToPlayer {
                     player_id: PlayerId(1),
                     source_amounts: vec![(ObjectId(7), 5)],
                     total_damage: 5,
+                    source_incarnations: vec![],
                 },
             ],
             &state,
@@ -3072,16 +3078,19 @@ mod tests {
                 amount: 5,
                 is_combat: true,
                 excess: 0,
+                source_incarnation: None,
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(7), 5)],
                 total_damage: 5,
+                source_incarnations: vec![],
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(7), 5)],
                 total_damage: 5,
+                source_incarnations: vec![],
             },
         ];
 
@@ -3138,6 +3147,7 @@ mod tests {
                     amount: 5,
                     is_combat: false,
                     excess: 0,
+                    source_incarnation: None,
                 },
             ],
             &state,
@@ -3348,6 +3358,7 @@ mod tests {
                     amount: 2,
                     is_combat: false,
                     excess: 0,
+                    source_incarnation: None,
                 },
                 LogImportance::Essential,
                 LogTone::Negative,

@@ -172,9 +172,11 @@ function sameBoundGameSession(
  * `clearPromptOverlayState` (a game-session boundary). Bumping
  * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
  * decline, so a `processAction` continuation still in flight can neither commit
- * nor release a newer dispatch's mutex. That covers the dispatch pipeline only:
- * `dispatchInteraction` and `restoreGameState` commit without capturing the
- * generation, so they are unaffected by the bump and can still write.
+ * nor release a newer dispatch's mutex. That covers the action and remote
+ * dispatch pipelines. `dispatchInteraction` also captures this generation and
+ * its bound session, then checks both after each asynchronous boundary.
+ * `restoreGameState` still commits without capturing the generation, so it
+ * remains unaffected by the bump and can write.
  * Queued work is *resolved*, not rejected: a caller
  * awaiting an action in an abandoned game has nothing to recover from and
  * must not see a spurious rejection.
@@ -861,9 +863,14 @@ export async function dispatchAiActionProposal(
 export async function dispatchInteraction(
   submission: InteractionSubmission,
   actor: number = getPlayerId(),
-): Promise<void> {
-  const { adapter, gameState, gameMode } = useGameStore.getState();
-  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+): Promise<{ status: "applied" | "stale" }> {
+  const { adapter, gameState, gameMode, gameSessionGeneration } = useGameStore.getState();
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return { status: "stale" };
+  }
+
+  const generation = dispatchGeneration;
+  const session: BoundGameSession = { adapter, generation: gameSessionGeneration };
 
   try {
     if (!adapter.submitInteraction) {
@@ -874,13 +881,20 @@ export async function dispatchInteraction(
       );
     }
     const result = await adapter.submitInteraction(submission, actor);
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
+
     const snapshot = await adapter.getSnapshot();
-    useGameStore.getState().commitEngineSnapshot(snapshot, {
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
+
+    const committed = useGameStore.getState().commitEngineSnapshot(snapshot, {
       events: result.events,
       logEntries: result.log_entries ?? [],
       extraState: { restoredStackAutomation: null },
     });
+    return { status: committed ? "applied" : "stale" };
   } catch (err) {
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
+
     reportActionError(err);
     throw err;
   }
