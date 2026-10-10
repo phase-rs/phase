@@ -864,7 +864,7 @@ pub fn resolve_event_context_targets(
 /// - `ZoneChanged` into the battlefield records the entrant's incarnation; a
 ///   `ZoneChanged` out of the battlefield (or to any other zone) names an object
 ///   that no longer exists as such — any permanent now at that id is a new one.
-fn event_names_live_incarnation(
+fn event_source_is_live_incarnation(
     event: &GameEvent,
     obj: &crate::game::game_object::GameObject,
 ) -> bool {
@@ -899,6 +899,50 @@ fn event_names_live_incarnation(
     }
 }
 
+/// CR 400.7 + CR 120.1: whether the live permanent `obj` is the very object a
+/// damage event dealt damage to (the recipient role, `EventTarget`), as opposed
+/// to a later incarnation at the same `ObjectId`. The event itself stamps only
+/// the dealer, so the recipient's own incarnation is read from the damage ledger
+/// entry for this very instance (`DamageRecord::target_incarnation`): the
+/// records matching the event's dealer incarnation, recipient, amount and
+/// combat-ness. When no record exists (legacy state, a synthetic event) or none
+/// stamped a recipient, identity cannot be established and the live object is
+/// accepted, exactly as for any event that records no incarnation. A recipient
+/// that left and returned matches no stamped record and is rejected.
+fn event_recipient_is_live_incarnation(
+    state: &GameState,
+    event: &GameEvent,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    let GameEvent::DamageDealt {
+        source_id,
+        target: TargetRef::Object(target_id),
+        amount,
+        is_combat,
+        source_incarnation,
+        ..
+    } = event
+    else {
+        return true;
+    };
+    if *target_id != obj.id {
+        return true;
+    }
+    let mut stamped = state
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|record| {
+            record.source_id == *source_id
+                && record.source_incarnation == *source_incarnation
+                && record.target == TargetRef::Object(*target_id)
+                && record.amount == *amount
+                && record.is_combat == *is_combat
+        })
+        .filter_map(|record| record.target_incarnation)
+        .peekable();
+    stamped.peek().is_none() || stamped.any(|incarnation| incarnation == obj.incarnation)
+}
+
 /// CR 608.2k + CR 400.7: the objects a pure event-context reference ("that
 /// creature", "it") names, resolved from the published trigger event(s) and
 /// kept only while each is still the incarnation the event recorded. A referent
@@ -912,13 +956,14 @@ pub(crate) fn resolve_event_referent_objects(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    // Only the filters that name the trigger event's own object carry an event
-    // incarnation. Bound references (`SpecificObject`, `LastCreated`, ...) and
-    // every other pure-event filter keep the shared resolver unchanged.
-    if !matches!(
-        filter,
-        TargetFilter::TriggeringSource | TargetFilter::EventTarget
-    ) {
+    // The two roles of a trigger event are validated against their own recorded
+    // identity and never against each other's: `TriggeringSource` (the tapped /
+    // entered / damaging / attacking object) against the event's source stamp,
+    // `EventTarget` (the damaged object) against its own ledger stamp. Bound
+    // references (`SpecificObject`, `LastCreated`, ...) and every other
+    // pure-event filter keep the shared resolver unchanged.
+    let recipient = matches!(filter, TargetFilter::EventTarget);
+    if !recipient && !matches!(filter, TargetFilter::TriggeringSource) {
         return resolve_event_context_targets(state, filter, source_id)
             .into_iter()
             .filter_map(|target| match target {
@@ -955,7 +1000,12 @@ pub(crate) fn resolve_event_referent_objects(
                 return None;
             };
             let live = state.objects.get(&id)?;
-            event_names_live_incarnation(event, live).then_some(id)
+            let is_live = if recipient {
+                event_recipient_is_live_incarnation(state, event, live)
+            } else {
+                event_source_is_live_incarnation(event, live)
+            };
+            is_live.then_some(id)
         })
         .filter(|id| seen.insert(*id))
         .collect()

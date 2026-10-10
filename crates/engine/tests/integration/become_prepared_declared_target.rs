@@ -1122,11 +1122,31 @@ fn become_unprepared_event_referent_ignores_a_blinked_attacker() {
     give_prepare_face(&mut runner, attacker);
     pre_prepare(&mut runner, attacker);
 
+    // Reach guards: the stale trigger is still waiting, nothing has resolved
+    // it yet, and the returned creature carries its fresh designation — so the
+    // only thing left to keep it prepared is the incarnation check.
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: the stale attack trigger is still on the stack"
+    );
+    assert!(
+        !effect_resolved(&events, EffectKind::BecomeUnprepared),
+        "reach guard: the unprepare has not resolved before the pass"
+    );
+    assert!(
+        is_prepared(&runner, attacker),
+        "reach guard: fresh designation"
+    );
+
     pass_until_stack_empty(&mut runner, &mut events);
 
     assert!(
         effect_resolved(&events, EffectKind::BecomeUnprepared),
         "reach guard: the stale trigger still resolved"
+    );
+    assert!(
+        !became_unprepared(&events, attacker),
+        "the stale trigger must not unprepare the new incarnation"
     );
     assert!(
         is_prepared(&runner, attacker),
@@ -1244,6 +1264,15 @@ fn become_prepared_event_referent_ignores_a_blinked_tapped_creature() {
         "reach guard: the creature returned as a new object"
     );
     give_prepare_face(&mut runner, attacker);
+
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: the stale tap trigger is still on the stack"
+    );
+    assert!(
+        !effect_resolved(&events, EffectKind::BecomePrepared),
+        "reach guard: the prepare has not resolved before the pass"
+    );
 
     pass_until_stack_empty(&mut runner, &mut events);
 

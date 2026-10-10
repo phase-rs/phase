@@ -4087,6 +4087,37 @@ fn reduce_property_values(values: impl Iterator<Item = i32>, function: Aggregate
     }
 }
 
+/// CR 108.2 + CR 109.1: whether `filter` names CARDS ("cards you own in
+/// exile") rather than the generic objects in a zone. A conjunction is card-only
+/// when any conjunct is, a union only when every branch is, a complement takes
+/// its inner filter's population.
+fn filter_names_cards(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Card)),
+        TargetFilter::And { filters } => filters.iter().any(filter_names_cards),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_names_cards)
+        }
+        TargetFilter::Not { filter } => filter_names_cards(filter),
+        _ => false,
+    }
+}
+
+/// The objects a zone-ranged query over `filter` starts from: the cards in the
+/// zone when the filter names cards (the CR 722.3c retained prepare copy in
+/// exile is a copy of a card, not a card — CR 108.2 + CR 109.1), else every
+/// object there.
+fn zone_population_ids(state: &GameState, zone: Zone, filter: &TargetFilter) -> Vec<ObjectId> {
+    if filter_names_cards(filter) {
+        crate::game::targeting::zone_card_ids(state, zone)
+    } else {
+        crate::game::targeting::zone_object_ids(state, zone)
+    }
+}
+
 fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     let zones = filter.extract_zones();
     let zones = if zones.is_empty() {
@@ -4094,11 +4125,9 @@ fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<Objec
     } else {
         zones
     };
-    // CR 108.2 + CR 109.1: a zoned count ranges over the cards in that zone;
-    // the CR 722.3c retained prepare copy in exile is not a card.
     zones
         .into_iter()
-        .flat_map(|zone| crate::game::targeting::zone_card_ids(state, zone))
+        .flat_map(|zone| zone_population_ids(state, zone, filter))
         .collect()
 }
 
@@ -4270,11 +4299,10 @@ fn filter_population_anchor_ids(
             if zones.is_empty() {
                 return None;
             }
-            // CR 108.2 + CR 109.1: same card population as
-            // `filter_zone_object_ids`.
+            // Same population as `filter_zone_object_ids`.
             zones
                 .into_iter()
-                .flat_map(|zone| crate::game::targeting::zone_card_ids(state, zone))
+                .flat_map(|zone| zone_population_ids(state, zone, filter))
                 .collect()
         }
     };
@@ -4768,8 +4796,8 @@ fn resolve_ref(
             let mut signatures: std::collections::HashSet<Vec<Vec<String>>> =
                 std::collections::HashSet::new();
             // CR 108.2 + CR 109.1: distinct qualities among the cards in the
-            // zone; the CR 722.3c retained prepare copy is not a card.
-            for id in crate::game::targeting::zone_card_ids(state, zone) {
+            // zone when the filter names cards; generic queries see every object.
+            for id in zone_population_ids(state, zone, filter) {
                 // CR 400.3 + CR 109.5 + CR 108.4a: graveyard/hand/library
                 // membership is owner-scoped, not controller-scoped, so a
                 // stale `obj.controller` left by a control-change effect
@@ -24254,6 +24282,19 @@ mod exile_card_population_tests {
         );
     }
 
+    /// Like `assert_counts`, for a generic query that sees every object in exile.
+    fn assert_counts_objects(qty: QuantityRef, expected: i32) {
+        let mut board = board();
+        assert_non_cards_in_exile(&board);
+        assert_eq!(read(&board, qty.clone()), expected, "{qty:?}");
+        add_second_card(&mut board);
+        assert_eq!(
+            read(&board, qty.clone()),
+            expected + 1,
+            "{qty:?}: second card"
+        );
+    }
+
     #[test]
     fn exile_card_population_target_zone_card_count() {
         assert_counts(
@@ -24305,13 +24346,47 @@ mod exile_card_population_tests {
         assert_counts(
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Not {
-                    filter: Box::new(TargetFilter::Typed(
-                        TypedFilter::new(TypeFilter::Creature)
-                            .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
-                    )),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::Opponent,
+                        },
+                        FilterProp::InZone { zone: Zone::Exile },
+                    ]))),
                 },
             },
             1,
+        );
+    }
+
+    /// A GENERIC (non-card-qualified) object filter ranges over every object in
+    /// the zone: the retained prepare copy (and any other object) counts, so one
+    /// real card plus a copy and a token is three, four with a second card.
+    #[test]
+    fn generic_exile_object_count_includes_non_card_objects() {
+        assert_counts_objects(
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Any)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                ),
+            },
+            3,
+        );
+    }
+
+    /// The distinct-name count is generic the same way: the differently named
+    /// retained copy raises it.
+    #[test]
+    fn generic_exile_object_count_distinct_names_includes_non_card_objects() {
+        assert_counts_objects(
+            QuantityRef::ObjectCountDistinct {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Any)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                ),
+                qualities: vec![SharedQuality::Name],
+            },
+            3,
         );
     }
 
