@@ -3355,6 +3355,9 @@ mod tests {
     /// `ZoneChangeRecord` gains `arrival`; a v125 peer rejects the journal when the
     /// departure owner differs from the command owner, so it must be refused before it
     /// receives v126 state.
+    /// `GameState::linked_exile_lki` holds one incarnation-bounded `LinkedExileLki` per
+    /// departure (CR 400.7); a v126 peer cannot decode a non-empty map, so it must be
+    /// refused before it receives v127 state.
     /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
     /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
     /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
@@ -3488,8 +3491,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_126_for_zone_change_arrival_identity() {
-        assert_eq!(PROTOCOL_VERSION, 126);
+    fn protocol_version_is_127_for_linked_exile_lki_bounds() {
+        assert_eq!(PROTOCOL_VERSION, 127);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3500,7 +3503,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_126_for_zone_change_arrival_identity` stays
+    /// `protocol_version_is_127_for_linked_exile_lki_bounds` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

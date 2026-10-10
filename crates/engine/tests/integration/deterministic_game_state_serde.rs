@@ -17,9 +17,9 @@ use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell,
-    LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot, PendingConniveReentry,
-    PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind,
-    StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
+    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
+    StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
     WaitingFor,
 };
@@ -1815,19 +1815,38 @@ fn build_all_direct_numeric_maps_state() -> GameState {
     state.linked_exile_lki = HashMap::from([
         (
             ObjectId(1),
-            vec![LinkedExileSnapshot {
-                exiled_id: ObjectId(11),
-                owner: PlayerId(0),
-                mana_value: 1,
+            vec![LinkedExileLki {
+                departed: 3,
+                successor: 4,
+                snapshot: vec![LinkedExileSnapshot {
+                    exiled_id: ObjectId(11),
+                    owner: PlayerId(0),
+                    mana_value: 1,
+                }],
             }],
         ),
         (
             ObjectId(2),
-            vec![LinkedExileSnapshot {
-                exiled_id: ObjectId(22),
-                owner: PlayerId(1),
-                mana_value: 2,
-            }],
+            vec![
+                LinkedExileLki {
+                    departed: 5,
+                    successor: 6,
+                    snapshot: vec![LinkedExileSnapshot {
+                        exiled_id: ObjectId(22),
+                        owner: PlayerId(1),
+                        mana_value: 2,
+                    }],
+                },
+                LinkedExileLki {
+                    departed: 7,
+                    successor: 8,
+                    snapshot: vec![LinkedExileSnapshot {
+                        exiled_id: ObjectId(23),
+                        owner: PlayerId(0),
+                        mana_value: 3,
+                    }],
+                },
+            ],
         ),
     ]);
     state.ring_level = HashMap::from([(PlayerId(0), 1), (PlayerId(1), 2)]);

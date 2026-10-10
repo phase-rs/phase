@@ -4,7 +4,7 @@ use crate::game::game_object::LinkedAbilitySource;
 use crate::types::ability::{AbilityProvenance, Duration, ResolvedAbility};
 use crate::types::game_state::{
     ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume, LookGrant,
-    RepeatUntilStopWitness, StackEntryKind,
+    RepeatUntilStopWitness, StackEntry, StackEntryKind,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -304,6 +304,21 @@ fn record_link(
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
     true
+}
+
+/// CR 400.7 + CR 113.7a: The incarnation of `source_id` a linked-exile read or
+/// write is made for. A resolving ability of that source acts as the object that
+/// put it on the stack (its push-time capture); anything else acts as the object
+/// as it now exists. `None` when the object no longer exists.
+pub(crate) fn linked_exile_incarnation(state: &GameState, source_id: ObjectId) -> Option<u64> {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.source_id == source_id)
+        .and_then(StackEntry::ability)
+        .and_then(|ability| ability.source_ref(state))
+        .map(|source| source.incarnation)
+        .or_else(|| state.objects.get(&source_id).map(|obj| obj.incarnation))
 }
 
 /// CR 607.1 + CR 607.2a + CR 607.5 + CR 113.7a: the pairing identity of the

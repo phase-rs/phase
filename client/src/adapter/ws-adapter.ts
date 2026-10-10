@@ -210,6 +210,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 127 — `GameState::linked_exile_lki` holds one incarnation-bounded
+ *      `LinkedExileLki` per departure (CR 400.7); a v126 peer cannot decode a
+ *      non-empty map. Wire 109 moves with it; no lobby frame names it.
  * 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the
  *      destination object holds) inside `GameState` and the resolved-rules
  *      journal's zone-change commands; a v125 peer rejects the journal when the
@@ -781,7 +784,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 126;
+export const PROTOCOL_VERSION = 127;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

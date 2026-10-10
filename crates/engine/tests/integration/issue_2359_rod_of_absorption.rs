@@ -276,3 +276,90 @@ fn rod_activation_free_casts_exiled_spells_and_sacrifices_rod() {
         );
     }
 }
+
+/// Rod ruling: "Each Rod of Absorption tracks the cards it has exiled
+/// separately. If Rod of Absorption is destroyed and then later brought back to
+/// the battlefield, it will not be able to access any of the cards that it had
+/// exiled before."
+///
+/// CR 400.7 + CR 607.2b: the Rod that returns is a new object, and none of the
+/// cards its predecessor exiled are exiled with it, even within the same step.
+#[test]
+fn rod_returned_to_the_battlefield_cannot_cast_its_predecessors_exiles() {
+    use engine::types::ability::CastingPermission;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let rod = scenario
+        .add_creature(P0, "Rod of Absorption", 0, 0)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text(ROD_TEXT)
+        .id();
+    let bolt_a = scenario
+        .add_spell_to_hand(P0, "Bolt A", true)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let bolt_b = scenario
+        .add_spell_to_hand(P0, "Bolt B", true)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let colorless = || {
+        ManaUnit::new(
+            ManaType::Colorless,
+            engine::types::identifiers::ObjectId(0),
+            false,
+            vec![],
+        )
+    };
+    scenario.with_mana_pool(P0, vec![colorless(), colorless()]);
+
+    let mut runner = scenario.build();
+    cast_and_resolve(&mut runner, P0, bolt_a);
+    cast_and_resolve(&mut runner, P0, bolt_b);
+    assert_eq!(runner.state().objects[&bolt_a].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&bolt_b].zone, Zone::Exile);
+
+    // The ruling's "destroyed and then later brought back", within one step.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), rod, Zone::Graveyard, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), rod, Zone::Battlefield, &mut events);
+    assert!(
+        runner.state().linked_exile_lki.contains_key(&rod),
+        "the departure recorded the first Rod's linked exiles"
+    );
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+
+    for _ in 0..4 {
+        if runner.state().priority_player == P0 && runner.state().stack.is_empty() {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    let idx = rod_activated_index(runner.state(), rod);
+    runner.activate(rod, idx).x(2).accept_optional().resolve();
+
+    assert_ne!(
+        runner.state().objects[&rod].zone,
+        Zone::Battlefield,
+        "the returned Rod was sacrificed as the activation's cost"
+    );
+    for (id, label) in [(bolt_a, "Bolt A"), (bolt_b, "Bolt B")] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Exile, "{label} stays in exile");
+        assert!(
+            !obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost { cost, .. }
+                    if cost.is_without_paying_mana()
+            )),
+            "{label} was exiled with the first Rod, not the returned one; \
+             permissions = {:?}",
+            obj.casting_permissions
+        );
+    }
+}

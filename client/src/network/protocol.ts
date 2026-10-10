@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  109 — GameState.linked_exile_lki holds one incarnation-bounded LinkedExileLki per
+ *       departure in game_setup and state_update; a v108 peer cannot decode a non-empty
+ *       map. Bumped with full-game protocol 127.
  *  108 — ZoneChangeRecord carries arrival (the owner and controller the destination
  *       object holds) in game_setup and state_update. Bumped with full-game protocol 126.
  *  107 — MulliganDecisionEntry and MulliganDeclaration carry free_reveals_taken in
@@ -619,7 +622,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 108 as const;
+export const WIRE_PROTOCOL_VERSION = 109 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

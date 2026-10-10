@@ -2077,6 +2077,29 @@ pub struct LinkedExileSnapshot {
     pub mana_value: u32,
 }
 
+/// CR 400.7 + CR 607.2a + CR 607.2b + CR 113.7a: The linked exiles a source had
+/// when it left the battlefield, bounded to the object that left (`departed`) and
+/// the object it became in its new zone (`successor`). A later incarnation under
+/// the same id is a new object with no cards exiled with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedExileLki {
+    pub departed: u64,
+    pub successor: u64,
+    pub snapshot: Vec<LinkedExileSnapshot>,
+}
+
+impl LinkedExileLki {
+    /// CR 113.7a: Admits the departed object's own abilities. The successor's
+    /// incarnation is admitted too because an ability of the departed object can
+    /// carry it: an activation that sacrifices its source is stamped after its
+    /// costs are paid, and a trigger put on the stack after the source left is
+    /// stamped from the object it became. (CR 400.7: the successor itself has no
+    /// cards exiled with it; a bare read made for it is over-admitted.)
+    pub fn admits(&self, incarnation: u64) -> bool {
+        incarnation == self.departed || incarnation == self.successor
+    }
+}
+
 #[cfg(test)]
 impl ZoneChangeRecord {
     /// Minimal skeleton for tests. Non-transition fields default to empty/zero;
@@ -22670,7 +22693,7 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub departed_stack_spells: im::HashMap<ObjectId, im::HashMap<u64, DepartedStackSpell>>,
 
-    /// CR 607.2b + CR 603.10e: Last-known "cards exiled with [source]" linkage,
+    /// CR 607.2a + CR 607.2b + CR 113.7a: Last-known "cards exiled with [source]" linkage,
     /// captured when a source with `TrackedBySource` exile links leaves the
     /// battlefield. The live `exile_links` are pruned on battlefield exit
     /// (CR 400.7), but an ability that sacrifices its own source as a cost and
@@ -22678,10 +22701,13 @@ declare_game_state! {
     /// must still see those cards at resolution. `linked_exile_cards_for_source`
     /// consults this as its final fallback, filtered to cards still in exile, so
     /// stale entries (cards that later left exile) contribute nothing.
+    /// One entry per battlefield departure (a source can leave more than once in
+    /// a step), each bounded to that departure's incarnations, so a later
+    /// incarnation of the same id never reads it (CR 400.7).
     /// Cleared on phase/step transitions via `advance_phase()`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
-    pub linked_exile_lki: HashMap<ObjectId, Vec<LinkedExileSnapshot>>,
+    pub linked_exile_lki: HashMap<ObjectId, Vec<LinkedExileLki>>,
 
     /// Transient: set by PayCost resolver when payment fails.
     /// Gates IfYouDo sub-abilities. Reset in DecideOptionalEffect handler.

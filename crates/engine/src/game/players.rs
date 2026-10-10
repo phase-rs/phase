@@ -349,6 +349,7 @@ pub fn apnap_order_from(
 /// Leaves-the-battlefield triggers prefer the trigger event's zone-change snapshot
 /// because `TrackedBySource` links are pruned immediately on battlefield exit per
 /// CR 400.7. Outside that look-back path, fall back to the live exile-link store.
+/// The final linked-exile LKI fallback is incarnation-bounded (CR 400.7).
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -383,26 +384,26 @@ pub fn linked_exile_cards_for_source(
         return live;
     }
 
-    // CR 607.2b + CR 603.10e: The live links are gone (the source left the
-    // battlefield — e.g. sacrificed as its own ability's cost). Fall back to the
-    // persisted linked-exile LKI, filtered to cards STILL in exile so stale
-    // entries (cards that later left exile) contribute nothing.
+    // CR 607.2a + CR 607.2b + CR 113.7a: The live links are gone (the source left
+    // the battlefield, e.g. sacrificed as its own ability's cost). Fall back to the
+    // linked-exile LKI, but only to the piles of the incarnation this read is made
+    // for (CR 400.7), filtered to cards STILL in exile.
+    let reader = crate::game::exile_links::linked_exile_incarnation(state, source_id);
     state
         .linked_exile_lki
         .get(&source_id)
-        .map(|snapshots| {
-            snapshots
-                .iter()
-                .filter(|snap| {
-                    state
-                        .objects
-                        .get(&snap.exiled_id)
-                        .is_some_and(|obj| obj.zone == Zone::Exile)
-                })
-                .cloned()
-                .collect()
+        .into_iter()
+        .flatten()
+        .filter(|lki| reader.is_none_or(|incarnation| lki.admits(incarnation)))
+        .flat_map(|lki| &lki.snapshot)
+        .filter(|snap| {
+            state
+                .objects
+                .get(&snap.exiled_id)
+                .is_some_and(|obj| obj.zone == Zone::Exile)
         })
-        .unwrap_or_default()
+        .cloned()
+        .collect()
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
@@ -519,7 +520,11 @@ mod tests {
         );
     }
     use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{LinkedExileLki, StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
 
     fn make_state(player_count: u8, config: FormatConfig) -> GameState {
         GameState::new(config, player_count, 0)
@@ -1070,5 +1075,170 @@ mod tests {
             aggregate_over_teams(&state, empty, AggregateFunction::Sum),
             0
         );
+    }
+
+    // --- linked-exile LKI incarnation bounds (CR 400.7 + CR 113.7a) ---
+
+    /// The incarnation the source had when it left the battlefield.
+    const DEPARTED: u64 = 4;
+
+    fn departure(departed: u64, card: ObjectId) -> LinkedExileLki {
+        LinkedExileLki {
+            departed,
+            successor: departed + 1,
+            snapshot: vec![LinkedExileSnapshot {
+                exiled_id: card,
+                owner: PlayerId(1),
+                mana_value: 0,
+            }],
+        }
+    }
+
+    /// Source `S` with no live links, a card in exile, and one departure entry
+    /// `{DEPARTED, DEPARTED + 1, [card]}`. `live` is S's current incarnation;
+    /// `None` removes S from the game.
+    fn departed_pile(live: Option<u64>) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Card".into(),
+            Zone::Exile,
+        );
+        match live {
+            Some(incarnation) => {
+                state.objects.get_mut(&source).unwrap().incarnation = incarnation;
+            }
+            None => {
+                state.objects.remove(&source);
+            }
+        }
+        state
+            .linked_exile_lki
+            .insert(source, vec![departure(DEPARTED, card)]);
+        (state, source, card)
+    }
+
+    /// An activated ability of `source`, put on the stack while `source` had
+    /// incarnation `stamp`, is resolving.
+    fn resolving_ability_of(state: &mut GameState, source: ObjectId, stamp: u64) {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(stamp);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+    }
+
+    fn linked_ids(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+        linked_exile_cards_for_source(state, source)
+            .iter()
+            .map(|snapshot| snapshot.exiled_id)
+            .collect()
+    }
+
+    /// CR 113.7a + CR 400.7: a departure entry admits exactly the object that
+    /// left and the object it became.
+    #[test]
+    fn linked_exile_lki_admits_only_its_departure_incarnations() {
+        let lki = LinkedExileLki {
+            departed: 4,
+            successor: 5,
+            snapshot: Vec::new(),
+        };
+        assert!(lki.admits(4));
+        assert!(lki.admits(5));
+        assert!(!lki.admits(3));
+        assert!(!lki.admits(6));
+    }
+
+    /// CR 400.7: the object the source became still reads the pile; a later
+    /// object under the same id does not.
+    #[test]
+    fn linked_exile_lki_is_not_read_by_a_later_incarnation() {
+        let (state, source, card) = departed_pile(Some(DEPARTED + 1));
+        assert_eq!(linked_ids(&state, source), vec![card]);
+
+        let (state, source, _) = departed_pile(Some(DEPARTED + 2));
+        assert!(linked_ids(&state, source).is_empty());
+    }
+
+    /// CR 113.7a + CR 607.2a: an ability of the departed object, resolving after
+    /// its source came back, reads the departed object's pile; an ability of the
+    /// returned object, or of another source, does not.
+    #[test]
+    fn linked_exile_lki_is_read_by_a_resolving_ability_of_the_departed_object() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 2));
+        resolving_ability_of(&mut state, source, DEPARTED);
+        assert_eq!(linked_ids(&state, source), vec![card]);
+
+        resolving_ability_of(&mut state, source, DEPARTED + 2);
+        assert!(linked_ids(&state, source).is_empty());
+
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other Source".into(),
+            Zone::Battlefield,
+        );
+        resolving_ability_of(&mut state, other, DEPARTED);
+        assert!(
+            linked_ids(&state, source).is_empty(),
+            "another source's ability reads for the live object"
+        );
+    }
+
+    /// A source that no longer exists (a token) left once, so its only
+    /// departure entry is read.
+    #[test]
+    fn linked_exile_lki_is_read_when_the_source_no_longer_exists() {
+        let (state, source, card) = departed_pile(None);
+        assert_eq!(linked_ids(&state, source), vec![card]);
+    }
+
+    /// CR 113.7a + CR 400.7: two departures of one id in one step keep two
+    /// entries, and each is read only for its own incarnations.
+    #[test]
+    fn linked_exile_lki_keeps_each_departure_for_its_own_incarnation() {
+        let (mut state, source, first) = departed_pile(Some(DEPARTED + 4));
+        let second = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Second Exiled Card".into(),
+            Zone::Exile,
+        );
+        state
+            .linked_exile_lki
+            .get_mut(&source)
+            .unwrap()
+            .push(departure(DEPARTED + 2, second));
+
+        resolving_ability_of(&mut state, source, DEPARTED);
+        assert_eq!(linked_ids(&state, source), vec![first]);
+        resolving_ability_of(&mut state, source, DEPARTED + 2);
+        assert_eq!(linked_ids(&state, source), vec![second]);
     }
 }

@@ -1,7 +1,8 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
+    GameState, LinkedExileLki, LinkedExileSnapshot, ResolutionSourceRelatch, StackEntry,
+    StackEntryKind, ZoneChangeCombatStatus,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1505,15 +1506,6 @@ pub(crate) fn move_to_zone_with_entry_flags(
             .cloned()
             .unwrap_or_default(),
     );
-    // CR 607.2b + CR 603.10e: Persist the linked-exile snapshot as last-known
-    // information so a self-sacrifice ability that refers to "cards exiled with
-    // this permanent" (Rod of Absorption) still resolves correctly after its own
-    // source is gone and the live `TrackedBySource` links have been pruned.
-    if !zone_change_record.linked_exile_snapshot.is_empty() {
-        state
-            .linked_exile_lki
-            .insert(object_id, zone_change_record.linked_exile_snapshot.clone());
-    }
     zone_change_record.combat_status = if let Some(target) = liminal_attack_target {
         ZoneChangeCombatStatus {
             attacking: true,
@@ -1608,6 +1600,13 @@ pub(crate) fn move_to_zone_with_entry_flags(
                 true,
             )
         };
+    record_linked_exile_departure(
+        state,
+        object_id,
+        pre_bump_incarnation,
+        new_incarnation,
+        &zone_change_record.linked_exile_snapshot,
+    );
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
     // leaves-battlefield last-known-information scan in
@@ -2140,6 +2139,33 @@ pub(crate) fn capture_linked_exile_snapshot(
         .collect()
 }
 
+/// CR 607.2a + CR 607.2b + CR 113.7a: Persist a battlefield departure's
+/// linked-exile snapshot as last-known information so an ability of the departed
+/// source (Rod of Absorption sacrificing itself) still finds the cards exiled
+/// with it. CR 400.7: bound it to this departure's incarnations so a later
+/// object under the same id cannot read it. Shared by every departure path
+/// (`move_to_zone_with_entry_flags`, `move_to_library_at_index`).
+fn record_linked_exile_departure(
+    state: &mut GameState,
+    object_id: ObjectId,
+    departed: u64,
+    successor: u64,
+    snapshot: &[LinkedExileSnapshot],
+) {
+    if snapshot.is_empty() {
+        return;
+    }
+    state
+        .linked_exile_lki
+        .entry(object_id)
+        .or_default()
+        .push(LinkedExileLki {
+            departed,
+            successor,
+            snapshot: snapshot.to_vec(),
+        });
+}
+
 /// After leave-time snapshots are captured on the zone-change record, sever
 /// live attachment graph edges for a permanent departing the battlefield.
 ///
@@ -2379,6 +2405,10 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+    // CR 603.10a + CR 607.2a: as in `move_to_zone_with_entry_flags`, snapshot
+    // the linked "exiled with" cards before CR 400.7 cleanup prunes them.
+    zone_change_record.linked_exile_snapshot =
+        capture_linked_exile_snapshot(state, object_id, from);
     zone_change_record.sync_trigger_source_exiled_cards(
         state
             .cards_exiled_with_source_this_turn
@@ -2433,6 +2463,13 @@ pub fn move_to_library_at_index(
     }
     if let Some((pre, new)) = bump {
         record_resolution_source_relatch(state, object_id, from, pre, new);
+        record_linked_exile_departure(
+            state,
+            object_id,
+            pre,
+            new,
+            &zone_change_record.linked_exile_snapshot,
+        );
     }
 
     super::restrictions::record_zone_change(state, &mut zone_change_record);
@@ -5029,6 +5066,55 @@ mod tests {
                 .all(|link| link.source_id != source),
             "TrackedBySource links keyed to a re-entering source must be dropped (CR 400.7)"
         );
+    }
+
+    /// CR 400.7 + CR 607.2a + CR 113.7a: each battlefield departure of a source
+    /// records its own linked-exile entry, bounded to that departure's
+    /// incarnations; a second departure in the same step does not overwrite
+    /// the first.
+    #[test]
+    fn each_battlefield_departure_records_its_own_bounded_linked_exile_entry() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(64),
+            PlayerId(0),
+            "Departing Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        let mut departures = Vec::new();
+        for card_id in [65, 66] {
+            if state.objects[&source].zone != Zone::Battlefield {
+                move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+            }
+            let exiled = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(1),
+                "Exiled With Source".to_string(),
+                Zone::Exile,
+            );
+            state.exile_links.push(crate::types::game_state::ExileLink {
+                source_id: source,
+                exiled_id: exiled,
+                kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            });
+            let departed = state.objects[&source].incarnation;
+            move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+            departures.push(LinkedExileLki {
+                departed,
+                successor: state.objects[&source].incarnation,
+                snapshot: vec![LinkedExileSnapshot {
+                    exiled_id: exiled,
+                    owner: PlayerId(1),
+                    mana_value: 0,
+                }],
+            });
+        }
+
+        assert_ne!(departures[0].successor, departures[1].departed);
+        assert_eq!(state.linked_exile_lki.get(&source), Some(&departures));
     }
 
     /// CR 712.8a + CR 400.7: An MDFC permanent that entered the battlefield as
