@@ -972,6 +972,30 @@ describe("TargetingOverlay", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the token-host prompt", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "ChooseTokenHost",
+        data: { player: 0, source_id: 1, legal_targets: [{ Object: 7 }, { Object: 8 }], pending_ability: null },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(
+      screen.getByText("Choose a host for the token"),
+    ).toBeInTheDocument();
+  });
+
   it("renders the plain prompt when no mode label is present", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({

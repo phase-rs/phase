@@ -2727,6 +2727,7 @@ impl ReflexiveGateParent {
             | Effect::BecomeSaddled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateBoon { .. }
             | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
@@ -2772,6 +2773,7 @@ impl ReflexiveGateParent {
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseAndSacrificeRest { .. }
@@ -10779,6 +10781,29 @@ fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
 }
 
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
+    parse_where_x_quantity_expression_inner(where_x_expression, None)
+}
+
+/// CR 608.2k: owner-threaded where-X tail parse. Identical arm order to
+/// [`parse_where_x_quantity_expression`]; the only difference is that the CDA
+/// interpreter (and the N-plus/minus recursion) runs with `owner` as the
+/// `characteristic_pronoun_owner`, so possessive pronouns ("its power", "2
+/// plus its power", "half its toughness") bind the owner structurally during
+/// the shared parse instead of defaulting to `Source`. Used for boon-granted
+/// "it"/"that" perpetual tails, where the pronoun names the triggering
+/// object. Explicit self-references ("~'s power") keep `Source` — the pronoun
+/// grammar never matches them.
+pub(crate) fn parse_where_x_quantity_expression_with_owner(
+    where_x_expression: &str,
+    owner: ObjectScope,
+) -> Option<QuantityExpr> {
+    parse_where_x_quantity_expression_inner(where_x_expression, Some(owner))
+}
+
+fn parse_where_x_quantity_expression_inner(
+    where_x_expression: &str,
+    characteristic_pronoun_owner: Option<ObjectScope>,
+) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
     // CR 702.51c + CR 603.3: Knight-Errant of Eos reads the number of
@@ -10853,7 +10878,10 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
         .parse(expression_lower.as_str())
     {
         let consumed = expression_lower.len() - rest_lower.len();
-        if let Some(inner) = parse_where_x_quantity_expression(&expression[consumed..]) {
+        if let Some(inner) = parse_where_x_quantity_expression_inner(
+            &expression[consumed..],
+            characteristic_pronoun_owner,
+        ) {
             let inner = if sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
@@ -10940,7 +10968,17 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
     // "the number of age counters on this enchantment", etc.).
-    if let Some(expr) = parse_cda_quantity(where_x_expression) {
+    let cda_expr = match characteristic_pronoun_owner {
+        Some(owner) => {
+            let mut owner_ctx = ParseContext {
+                characteristic_pronoun_owner: Some(owner),
+                ..ParseContext::default()
+            };
+            parse_cda_quantity_with_context(where_x_expression, &mut owner_ctx)
+        }
+        None => parse_cda_quantity(where_x_expression),
+    };
+    if let Some(expr) = cda_expr {
         return Some(expr);
     }
     // CR 107.3i: Keep the compositional nom quantity grammar available to
@@ -12670,7 +12708,7 @@ fn apply_where_x_static_condition(
     }
 }
 
-fn parse_pt_modifier(text: &str) -> Option<(PtValue, PtValue)> {
+pub(crate) fn parse_pt_modifier(text: &str) -> Option<(PtValue, PtValue)> {
     let token = text.trim();
     let slash = token.find('/')?;
     let power = parse_signed_pt_component(token[..slash].trim())?;
@@ -13064,12 +13102,110 @@ mod tests {
         extract_put_counter_multi_target, gate_other_revealed_card_on_multiplayer_reveal,
         match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
         parse_enter_counters_clause_body, parse_where_x_quantity_expression,
+        parse_where_x_quantity_expression_with_owner,
         patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
         relink_gated_tracked_set_consumers, strip_redundant_flip_win_quantifier,
         strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
         strip_trailing_duration, strip_trailing_where_x,
         value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
+
+    #[test]
+    fn where_x_with_owner_binds_bare_and_composed_pronouns_to_owner() {
+        for (tail, check) in [
+            (
+                "its power",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            ),
+            (
+                "its toughness",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            ),
+            (
+                "its mana value",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            ),
+            (
+                "2 plus its power",
+                QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }),
+                    offset: 2,
+                },
+            ),
+            (
+                "half its power",
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }),
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Down,
+                },
+            ),
+            (
+                "twice its power",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }),
+                },
+            ),
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression_with_owner(tail, ObjectScope::EventSource),
+                Some(check),
+                "tail {tail:?} must bind the owner structurally",
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_with_owner_preserves_explicit_self_reference() {
+        assert_eq!(
+            parse_where_x_quantity_expression_with_owner("~'s power", ObjectScope::EventSource),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn where_x_default_still_binds_pronoun_to_source() {
+        assert_eq!(
+            parse_where_x_quantity_expression("2 plus its power"),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                }),
+                offset: 2,
+            }),
+        );
+    }
     use crate::parser::oracle_ir::diagnostic::ClauseGapKind;
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{

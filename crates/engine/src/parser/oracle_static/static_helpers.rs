@@ -1729,6 +1729,13 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
                 *player = antecedent.clone();
             }
         }
+        // Digital-only Alchemy (no CR entry): same scoped-subject rebind as
+        // the monarch arm above.
+        StaticCondition::HasBoon { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
         // Only boolean structure carries nested static conditions. Quantities
         // and filters are separate scopes, so this clause does not rebind them.
         StaticCondition::DevotionGE { .. }

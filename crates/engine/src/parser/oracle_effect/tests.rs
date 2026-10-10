@@ -44300,8 +44300,9 @@ fn perpetual_parser_maps_modify_pt() {
         e,
         Effect::ApplyPerpetual {
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 3,
-                toughness_delta: 3,
+                power: QuantityExpr::Fixed { value: 3 },
+                toughness: QuantityExpr::Fixed { value: 3 },
+                ..
             },
             ..
         }
@@ -44313,8 +44314,9 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 1,
-                toughness_delta: 0,
+                power: QuantityExpr::Fixed { value: 1 },
+                toughness: QuantityExpr::Fixed { value: 0 },
+                ..
             },
             ..
         }
@@ -44326,8 +44328,9 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 3,
-                toughness_delta: 0,
+                power: QuantityExpr::Fixed { value: 3 },
+                toughness: QuantityExpr::Fixed { value: 0 },
+                ..
             },
             ..
         }
@@ -44339,8 +44342,9 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::Typed(ref filter),
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: -1,
-                toughness_delta: -2,
+                power: QuantityExpr::Fixed { value: -1 },
+                toughness: QuantityExpr::Fixed { value: -2 },
+                ..
             },
         } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
             && filter.controller == Some(crate::types::ability::ControllerRef::Opponent)
@@ -44352,12 +44356,81 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::Typed(ref filter),
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 1,
-                toughness_delta: 0,
+                power: QuantityExpr::Fixed { value: 1 },
+                toughness: QuantityExpr::Fixed { value: 0 },
+                ..
             },
         } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
             && filter.controller == Some(crate::types::ability::ControllerRef::You)
     ));
+}
+
+/// M4: the dynamic "that <subject>" arm validates its subject through the
+/// shared anaphor grammar. A valid demonstrative binds `ParentTarget` with
+/// the trigger-anaphor tail scope; a compound or unmodelled subject fails
+/// closed (honest gap) instead of silently becoming a single-object edit.
+#[test]
+fn perpetual_dynamic_that_subject_validates_and_rejects_compounds() {
+    use crate::types::ability::PerpetualModification;
+
+    let e = parse_effect("that vehicle perpetually gets +X/+0, where X is its power.");
+    assert!(
+        matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::EventSource
+                        }
+                    },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    ..
+                },
+                ..
+            }
+        ),
+        "a valid demonstrative subject must bind: {e:?}"
+    );
+
+    for bad in [
+        "that artifact and this creature perpetually gets +X/+0, where X is its power.",
+        "that thingamajig perpetually gets +X/+0, where X is its power.",
+    ] {
+        let e = parse_effect(bad);
+        // Reach-guard: the `perpetual_modify_pt` gap name proves the clause
+        // was recognized as a perpetual P/T edit (subject split + signed
+        // delta head) and failed at subject validation — not declined
+        // earlier as a non-perpetual clause.
+        assert!(
+            matches!(&e, Effect::Unimplemented { name, .. } if name == "perpetual_modify_pt"),
+            "a compound/unmodelled subject must fail closed at the perpetual gap, got {e:?} for {bad:?}"
+        );
+    }
+}
+
+/// M4 twin for the fixed arm: compounds fail closed there too.
+#[test]
+fn perpetual_fixed_that_subject_rejects_compounds() {
+    // Reach-guard: the valid single subject binds, proving the fixed "that"
+    // path reaches the subject validator the compound below must fail.
+    let ok = parse_effect("that artifact perpetually gets +1/+0.");
+    assert!(
+        matches!(
+            ok,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach-guard: valid single subject must bind, got {ok:?}"
+    );
+    let e = parse_effect("that artifact and this creature perpetually gets +1/+0.");
+    assert!(
+        matches!(&e, Effect::Unimplemented { name, .. } if name == "perpetual_modify_pt"),
+        "a compound subject must fail closed at the perpetual gap, got {e:?}"
+    );
 }
 
 #[test]
@@ -45454,8 +45527,9 @@ fn perpetual_anaphor_after_chosen_card_targets_parent_target() {
             Effect::ApplyPerpetual {
                 target: TargetFilter::ParentTarget,
                 modification: PerpetualModification::ModifyPowerToughness {
-                    power_delta: 3,
-                    toughness_delta: 0,
+                    power: QuantityExpr::Fixed { value: 3 },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    ..
                 },
             }
         ),
@@ -65210,6 +65284,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -65254,6 +65329,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -81238,6 +81314,1253 @@ fn self_cost_modification_after_closed_quote_is_its_own_chunk() {
 
     let anaphoric = chunk_texts(&format!("{grant} The token is goaded."));
     assert_eq!(anaphoric.len(), 1, "{anaphoric:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Digital-only Alchemy (no CR entry): one-time boons (issue #7495).
+//
+// Every printed one-time-boon grant parses to `Effect::CreateBoon` — never to
+// a phantom prose counter, never to a permanent trigger, never silently
+// dropped. The 22 grants below are the full printed population (MTGJSON
+// corpus count), including Klement, Life Acolyte (whose grant hides behind
+// "specializes" reminder text) and Jaheira, Stirring Harper.
+// ---------------------------------------------------------------------------
+
+use crate::parser::oracle::ParsedAbilities;
+use crate::types::ability::{PlayerScope, TriggerCondition};
+use crate::types::counter::CounterType;
+use crate::types::triggers::TriggerMode;
+
+/// Shared boon-test traversal: collects `def` and everything reachable through
+/// modal branches, chained siblings, and mode abilities. `descend_boon`
+/// additionally walks granted-trigger bodies — grant/phantom collectors pass
+/// `true` (the whole tree is one search space); gap-name collectors pass
+/// `false` to keep the outer/inner split (`outer_gap_names` never descends
+/// into inners; those are `inner_gap_names`' job).
+fn collect_test_tree<'a>(
+    def: &'a AbilityDefinition,
+    descend_boon: bool,
+    out: &mut Vec<&'a AbilityDefinition>,
+) {
+    out.push(def);
+    if descend_boon {
+        if let Effect::CreateBoon { trigger, .. } = def.effect.as_ref() {
+            if let Some(execute) = trigger.execute.as_deref() {
+                collect_test_tree(execute, descend_boon, out);
+            }
+        }
+    }
+    if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
+        for branch in branches {
+            collect_test_tree(branch, descend_boon, out);
+        }
+    }
+    for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        collect_test_tree(child, descend_boon, out);
+    }
+    for mode in &def.mode_abilities {
+        collect_test_tree(mode, descend_boon, out);
+    }
+}
+
+/// Root walk shared by every whole-tree boon collector: abilities, triggers,
+/// AND replacements (a grant or gap hiding in a replacement body is still in
+/// the tree). `descend_boon` keeps the outer/inner split — grant/phantom
+/// collectors pass `true`, `outer_gap_names` passes `false`.
+fn collect_parsed_roots<'a>(
+    parsed: &'a ParsedAbilities,
+    descend_boon: bool,
+    out: &mut Vec<&'a AbilityDefinition>,
+) {
+    for ability in &parsed.abilities {
+        collect_test_tree(ability, descend_boon, out);
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect_test_tree(execute, descend_boon, out);
+        }
+    }
+    for replacement in &parsed.replacements {
+        if let Some(execute) = replacement.execute.as_deref() {
+            collect_test_tree(execute, descend_boon, out);
+        }
+    }
+}
+
+/// Every `CreateBoon` grant anywhere in the parsed abilities/triggers,
+/// descending through modal branches (Bloodrage Alpha's grant is a
+/// choose-one branch, not a chain node).
+fn boon_grants(parsed: &ParsedAbilities) -> Vec<(&TargetFilter, &TriggerDefinition)> {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, true, &mut defs);
+    defs.into_iter()
+        .filter_map(|def| match def.effect.as_ref() {
+            Effect::CreateBoon { recipient, trigger } => Some((recipient, trigger.as_ref())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The issue #7495 phantom: a `PutCounter` whose counter type is quoted
+/// trigger prose ("\"when you cast a creature spell, that creature enters
+/// with an additional +1/+1\"") instead of a real counter.
+fn prose_counter_phantoms(parsed: &ParsedAbilities) -> Vec<String> {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, true, &mut defs);
+    defs.into_iter()
+        .filter_map(|def| match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type: CounterType::Generic(name),
+                ..
+            } if name.to_lowercase().contains("when ") => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn boon_strings(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| w.to_string()).collect()
+}
+
+/// Gap names anywhere in a boon inner's body (descending modal branches —
+/// Swiftspear's Teachings grants a choice).
+fn inner_gap_names(inner: &TriggerDefinition) -> Vec<String> {
+    let mut defs = Vec::new();
+    if let Some(execute) = inner.execute.as_deref() {
+        collect_test_tree(execute, false, &mut defs);
+    }
+    defs.into_iter()
+        .filter_map(|def| unimplemented_name(def).map(str::to_string))
+        .collect()
+}
+
+/// Gap names anywhere OUTSIDE boon-inner bodies (the granting clauses).
+/// Never descends into `CreateBoon` inners — those are `inner_gap_names`' job.
+fn outer_gap_names(parsed: &ParsedAbilities) -> Vec<String> {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, false, &mut defs);
+    defs.into_iter()
+        .filter_map(|def| unimplemented_name(def).map(str::to_string))
+        .collect()
+}
+
+/// Shared spine: exactly one grant, the expected recipient, a recognized
+/// trigger with a gap-free body, and no phantom prose counter.
+fn assert_single_boon<'a>(
+    parsed: &'a ParsedAbilities,
+    recipient: &TargetFilter,
+    card: &str,
+) -> &'a TriggerDefinition {
+    let grants = boon_grants(parsed);
+    assert_eq!(
+        grants.len(),
+        1,
+        "{card}: expected one boon grant: {parsed:#?}"
+    );
+    let (got_recipient, inner) = grants[0];
+    assert_eq!(
+        got_recipient, recipient,
+        "{card}: wrong boon recipient: {parsed:#?}"
+    );
+    assert!(
+        !matches!(inner.mode, TriggerMode::Unknown(_)),
+        "{card}: boon inner must be a recognized trigger: {parsed:#?}"
+    );
+    assert!(
+        inner.execute.is_some(),
+        "{card}: boon inner must carry its body: {parsed:#?}"
+    );
+    assert!(
+        inner_gap_names(inner).is_empty(),
+        "{card}: boon inner must be gap-free, got {:?}: {parsed:#?}",
+        inner_gap_names(inner)
+    );
+    assert!(
+        prose_counter_phantoms(parsed).is_empty(),
+        "{card}: phantom prose counter: {:#?}",
+        prose_counter_phantoms(parsed)
+    );
+    inner
+}
+
+#[test]
+fn boon_march_toward_perfection() {
+    let parsed = parse_oracle_text(
+        "You get a one-time boon with \"When you cast a Phyrexian creature spell, that creature enters with an additional +1/+1 counter and deathtouch counter on it.\"\nDraft a card from March Toward Perfection's spellbook.",
+        "March Toward Perfection",
+        &[],
+        &boon_strings(&["Sorcery"]),
+        &[],
+    );
+    let inner = assert_single_boon(
+        &parsed,
+        &TargetFilter::Controller,
+        "March Toward Perfection",
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    assert!(
+        parsed.replacements.is_empty(),
+        "the grant must not route to the replacement parser: {:#?}",
+        parsed.replacements
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let draft = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("the spellbook draft chains after the grant");
+    assert!(
+        matches!(draft.effect.as_ref(), Effect::DraftFromSpellbook { .. }),
+        "the spellbook draft survives as the grant's chained sibling: {parsed:#?}"
+    );
+}
+
+#[test]
+fn boon_arcane_archery() {
+    let parsed = parse_oracle_text(
+        "Target creature gets +3/+3 and gains reach and trample until end of turn.\nYou get a one-time boon with \"When you cast a creature spell, that creature enters with an additional +1/+1 counter, reach counter, and trample counter on it.\"",
+        "Arcane Archery",
+        &[],
+        &boon_strings(&["Instant"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Arcane Archery");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    assert!(parsed.replacements.is_empty());
+}
+
+#[test]
+fn boon_tenacious_pup() {
+    let parsed = parse_oracle_text(
+        "When Tenacious Pup enters the battlefield, you gain 1 life. You get a one-time boon with \"When you cast a creature spell, that creature enters the battlefield with an additional +1/+1 counter, trample counter, and vigilance counter on it.\"",
+        "Tenacious Pup",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Wolf"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Tenacious Pup");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_loch_larent() {
+    let parsed = parse_oracle_text(
+        "Loch Larent enters tapped.\n{T}: Add {U}.\n{1}{U}, {T}: Scry 3. Target opponent gets a one-time boon with \"When you cast a creature spell, that creature enters tapped and with a stun counter on it.\" Activate only during your turn and only once.",
+        "Loch Larent",
+        &[],
+        &boon_strings(&["Land"]),
+        &[],
+    );
+    let opponent = TargetFilter::Typed(TypedFilter {
+        type_filters: Vec::new(),
+        controller: Some(ControllerRef::Opponent),
+        properties: Vec::new(),
+    });
+    let inner = assert_single_boon(&parsed, &opponent, "Loch Larent");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    // "enters tapped and with a stun counter": the floating replacement taps
+    // first, then places the stun counter (only a replacement can tap at
+    // entry — CR 110.5).
+    let install = inner.execute.as_deref().expect("floating install");
+    let Effect::AddTargetReplacement { replacement, .. } = install.effect.as_ref() else {
+        panic!("expected a floating replacement install: {parsed:#?}");
+    };
+    let tap = replacement.execute.as_deref().expect("replacement body");
+    assert!(
+        matches!(tap.effect.as_ref(), Effect::SetTapState { .. }),
+        "tap-first composition: {parsed:#?}"
+    );
+    let counters = tap.sub_ability.as_deref().expect("counters after the tap");
+    assert!(
+        matches!(
+            counters.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Stun,
+                ..
+            }
+        ),
+        "stun counter after the tap: {parsed:#?}"
+    );
+}
+
+#[test]
+fn boon_benalish_knight_counselor() {
+    let parsed = parse_oracle_text(
+        "Enlist\nWhenever Benalish Knight-Counselor enlists a creature, you get a one-time boon with \"When you cast a creature spell, that creature enters with a +1/+1 counter on it.\"",
+        "Benalish Knight-Counselor",
+        &boon_strings(&["Enlist"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Knight"]),
+    );
+    let inner = assert_single_boon(
+        &parsed,
+        &TargetFilter::Controller,
+        "Benalish Knight-Counselor",
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    assert!(parsed.replacements.is_empty());
+    // Outer trigger: "Whenever ~ enlists a creature" is a real Enlisted trigger
+    // (not Unknown) — the card is fully supported end to end.
+    assert_eq!(parsed.triggers.len(), 1);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::Enlisted);
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Benalish host must be gap-free, got {:?}",
+        outer_gap_names(&parsed)
+    );
+}
+
+#[test]
+fn boon_klement_life_acolyte() {
+    let parsed = parse_oracle_text(
+        "Lifelink\nWhen this creature specializes, you get a one-time boon with \"When you cast a creature spell, that creature enters with a lifelink counter on it.\"",
+        "Klement, Life Acolyte",
+        &boon_strings(&["Lifelink"]),
+        &boon_strings(&["Legendary", "Creature"]),
+        &boon_strings(&["Tiefling", "Cleric"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Klement, Life Acolyte");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    assert!(parsed.replacements.is_empty());
+}
+
+#[test]
+fn boon_patchplate_resolute() {
+    let parsed = parse_oracle_text(
+        "When Patchplate Resolute enters or leaves the battlefield, you get a one-time boon with \"When you cast a creature spell, that creature enters with an additional +1/+1 counter on it.\"\nUnearth {1}{W}",
+        "Patchplate Resolute",
+        &boon_strings(&["Unearth"]),
+        &boon_strings(&["Artifact", "Creature"]),
+        &boon_strings(&["Soldier"]),
+    );
+    // "enters or leaves" is two triggers, each granting its own boon.
+    assert_eq!(parsed.triggers.len(), 2, "{parsed:#?}");
+    let grants = boon_grants(&parsed);
+    assert_eq!(grants.len(), 2, "{parsed:#?}");
+    for (recipient, inner) in grants {
+        assert_eq!(*recipient, TargetFilter::Controller, "{parsed:#?}");
+        assert_eq!(inner.mode, TriggerMode::SpellCast, "{parsed:#?}");
+        assert!(inner.execute.is_some(), "{parsed:#?}");
+        assert!(
+            inner_gap_names(inner).is_empty(),
+            "gap-free inners, got {:?}: {parsed:#?}",
+            inner_gap_names(inner)
+        );
+    }
+    assert!(
+        prose_counter_phantoms(&parsed).is_empty(),
+        "{:#?}",
+        prose_counter_phantoms(&parsed)
+    );
+    assert!(parsed.replacements.is_empty());
+}
+
+#[test]
+fn boon_champions_of_tyr() {
+    let parsed = parse_oracle_text(
+        "Flying\nDouble team\nWhen this creature enters, you get a one-time boon with \"When you cast a creature spell, that creature enters the battlefield with your choice of a +1/+1 counter, a flying counter, or a lifelink counter on it.\"",
+        "Champions of Tyr",
+        &boon_strings(&["Flying", "Double team"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Angel", "Knight"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Champions of Tyr");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_bloodrage_alpha() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, choose one —\n• Another target Wolf or Werewolf you control fights target creature you don't control.\n• You get a one-time boon with \"When you cast a Wolf or Werewolf spell, it gains 'When this creature enters, it fights up to one target creature you don't control.'\"",
+        "Bloodrage Alpha",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Wolf"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Bloodrage Alpha");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    // The granted ETB-fight trigger survives nested-quote promotion WHOLE:
+    // the apostrophe in "don't" must not truncate it to "you don".
+    let body = inner.execute.as_deref().expect("grant body");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = body.effect.as_ref()
+    else {
+        panic!("expected a trigger grant, got {:?}", body.effect);
+    };
+    assert_eq!(static_abilities.len(), 1, "{parsed:#?}");
+    let grant = static_abilities[0]
+        .modifications
+        .iter()
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantTrigger { trigger } => Some(trigger.as_ref()),
+            _ => None,
+        })
+        .expect("a granted trigger");
+    assert_eq!(grant.mode, TriggerMode::ChangesZone);
+    assert!(
+        !matches!(
+            grant
+                .execute
+                .as_deref()
+                .map(|execute| execute.effect.as_ref()),
+            Some(Effect::Unimplemented { .. }) | None
+        ),
+        "the granted fight body must be complete: {parsed:#?}"
+    );
+}
+
+#[test]
+fn boon_dragonborn_immolator() {
+    let parsed = parse_oracle_text(
+        "{2}{R}: This creature gets +1/+0 until end of turn.\nGift of Tiamat — When this creature dies, if its power is greater than 0, note its power. You get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+0, where X is the noted number.\"",
+        "Dragonborn Immolator",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Dragon", "Shaman"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Dragonborn Immolator");
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "granting clause must be gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    // Dies trigger: CR 603.4 intervening-if gates the WHOLE ability —
+    // "note its power" reads the died creature anaphorically, then the
+    // grant follows in the same body, both legs ungated within the
+    // trigger.
+    assert_eq!(parsed.triggers.len(), 1, "dies trigger: {parsed:#?}");
+    let outer = &parsed.triggers[0];
+    assert_eq!(outer.mode, TriggerMode::ChangesZone);
+    match outer.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert!(
+                matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    }
+                ),
+                "gate must read the dying source's power, got {lhs:?}"
+            );
+            assert_eq!(*comparator, Comparator::GT, "greater than 0");
+            assert!(
+                matches!(rhs, QuantityExpr::Fixed { value: 0 }),
+                "greater than 0, got {rhs:?}"
+            );
+        }
+        other => panic!("expected hoisted QuantityComparison gate, got {other:?}"),
+    }
+    let note = outer.execute.as_deref().expect("note leg");
+    assert!(
+        note.condition.is_none(),
+        "the intervening-if gates the trigger, not the note leg: {parsed:#?}"
+    );
+    match note.effect.as_ref() {
+        Effect::NoteNumber { value } => assert!(
+            matches!(
+                value,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Anaphoric
+                    }
+                }
+            ),
+            "note must read the died creature anaphorically, got {value:?}"
+        ),
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+    let grant = note.sub_ability.as_deref().expect("grant leg");
+    assert!(
+        grant.condition.is_none(),
+        "the intervening-if gates the trigger, not the grant leg: {parsed:#?}"
+    );
+    assert!(
+        matches!(grant.effect.as_ref(), Effect::CreateBoon { .. }),
+        "grant must follow the note: {parsed:#?}"
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    let body = inner.execute.as_deref().expect("inner body");
+    let Effect::ApplyPerpetual {
+        target,
+        modification,
+    } = body.effect.as_ref()
+    else {
+        panic!("expected ApplyPerpetual, got {:?}", body.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::ParentTarget,
+        "'it' is the cast spell: {parsed:#?}"
+    );
+    match modification {
+        crate::types::ability::PerpetualModification::ModifyPowerToughness {
+            power,
+            toughness,
+            ..
+        } => {
+            assert!(
+                matches!(
+                    power,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::NotedNumber
+                    }
+                ),
+                "X must read the noted number, got {power:?}"
+            );
+            assert!(
+                matches!(toughness, QuantityExpr::Fixed { value: 0 }),
+                "+X/+0 keeps a fixed 0 toughness, got {toughness:?}"
+            );
+        }
+        other => panic!("expected live-expr perpetual P/T, got {other:?}"),
+    }
+}
+
+/// M3-1: a composed bare possessive in a NON-SELF trigger body binds the
+/// trigger subject through the shared owner-threaded composition — the
+/// context-free fallback would misbind the pronoun leaf to Source. (No
+/// printed fractional-note witness; synthetic control.)
+#[test]
+fn note_fractional_possessive_in_non_self_trigger_binds_event_subject() {
+    let parsed = parse_oracle_text(
+        "Whenever another creature dies, note half its power, rounded up.",
+        "Fractional Chronicler",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Wizard"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "dies trigger: {parsed:#?}");
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    let note = trigger.execute.as_deref().expect("note leg");
+    match note.effect.as_ref() {
+        Effect::NoteNumber { value } => assert!(
+            matches!(
+                value,
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                } if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Anaphoric,
+                        },
+                    },
+                )
+            ),
+            "fractional note must read the died creature anaphorically, got {value:?}"
+        ),
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+}
+
+/// M3-1 opposite control: an explicit self possessive keeps Source even
+/// inside a trigger-body fraction — the pronoun grammar never matches it.
+#[test]
+fn note_fractional_self_possessive_in_trigger_keeps_source() {
+    let parsed = parse_oracle_text(
+        "Whenever Fractional Chronicler dies, note half Fractional Chronicler's power, rounded up.",
+        "Fractional Chronicler",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Wizard"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "dies trigger: {parsed:#?}");
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    let note = trigger.execute.as_deref().expect("note leg");
+    match note.effect.as_ref() {
+        Effect::NoteNumber { value } => assert!(
+            matches!(
+                value,
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                } if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source,
+                        },
+                    },
+                )
+            ),
+            "explicit self possessive must keep Source, got {value:?}"
+        ),
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+}
+
+/// M3-1 no-change pin: outside a trigger body the context-free fallback
+/// still binds Source ("its" there can only be the source).
+#[test]
+fn note_fractional_possessive_in_spell_keeps_source() {
+    let effect = parse_effect("Note half its power, rounded up.");
+    match &effect {
+        Effect::NoteNumber { value } => assert!(
+            matches!(
+                value,
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                } if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source,
+                        },
+                    },
+                )
+            ),
+            "spell-body fractional note must keep Source, got {value:?}"
+        ),
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+}
+
+#[test]
+fn boon_dunbarrow_revivalist() {
+    let parsed = parse_oracle_text(
+        "Bargain\nWhen Dunbarrow Revivalist enters, you get a one-time boon with \"When one or more creatures enter under your control, create a Wicked Role token attached to one of them.\" Then if Dunbarrow Revivalist was bargained, return a creature card from your graveyard to your hand.",
+        "Dunbarrow Revivalist",
+        &boon_strings(&["Bargain"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Warlock"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Dunbarrow Revivalist");
+    // "One or more" is batch semantics: the fire path stamps every matching
+    // entrant so "one of them" can offer a resolution-time choice.
+    assert!(
+        inner.batched,
+        "the enters batch must be flagged: {parsed:#?}"
+    );
+    let body = inner.execute.as_deref().expect("inner body");
+    let Effect::Token { attach_to, .. } = body.effect.as_ref() else {
+        panic!("expected Token creation, got {:?}", body.effect);
+    };
+    assert_eq!(
+        attach_to.as_ref(),
+        Some(&TargetFilter::ParentTarget),
+        "'one of them' is the entrant-set reference: {parsed:#?}"
+    );
+}
+
+/// M1: scope rewrites reach into note values and perpetual P/T deltas — a
+/// scope-bearing ref inside either still binds. Drives the shared mutable
+/// visitor with an Anaphoric→EventSource rebind (the shape production
+/// rebinders use) and asserts both carriers were rewritten.
+#[test]
+fn each_quantity_expr_mut_rebinds_scopes_inside_note_and_perpetual() {
+    use crate::types::ability::ObjectScope;
+
+    let rebind = |effect: &mut Effect| {
+        super::each_quantity_expr_mut(effect, &mut |expr| {
+            super::each_quantity_ref_mut(expr, &mut |qty| {
+                if let QuantityRef::Power { scope } = qty {
+                    *scope = ObjectScope::EventSource;
+                }
+            });
+        });
+    };
+    let anaphoric_power = || QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    };
+
+    let mut note = Effect::NoteNumber {
+        value: anaphoric_power(),
+    };
+    rebind(&mut note);
+    assert!(
+        matches!(
+            note,
+            Effect::NoteNumber {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource
+                    }
+                }
+            }
+        ),
+        "the note value must be rebound, got {note:?}"
+    );
+
+    let mut perpetual = Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: PerpetualModification::ModifyPowerToughness {
+            power: anaphoric_power(),
+            toughness: QuantityExpr::Fixed { value: 0 },
+            keywords: Vec::new(),
+        },
+    };
+    rebind(&mut perpetual);
+    assert!(
+        matches!(
+            perpetual,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource
+                        }
+                    },
+                    ..
+                },
+                ..
+            }
+        ),
+        "the perpetual power delta must be rebound, got {perpetual:?}"
+    );
+}
+
+#[test]
+fn boon_electrostatic_blast() {
+    let parsed = parse_oracle_text(
+        "Electrostatic Blast deals 2 damage to any target. You get a one-time boon with \"When you cast an instant or sorcery spell, exile the top three cards of your library. You may play one of those cards until end of turn.\"",
+        "Electrostatic Blast",
+        &[],
+        &boon_strings(&["Instant"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Electrostatic Blast");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_illuminating_lash() {
+    let parsed = parse_oracle_text(
+        "Illuminating Lash deals 3 damage to any target.\nYou get a one-time boon with \"When you cast a noncreature spell, draw a card.\"",
+        "Illuminating Lash",
+        &[],
+        &boon_strings(&["Sorcery"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Illuminating Lash");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_lulu_forgetful_hollyphant() {
+    let parsed = parse_oracle_text(
+        "Flying\nSpecialize {2}\nWhen Lulu, Forgetful Hollyphant enters, you get a one-time boon with \"When you cast a creature spell without flying, it perpetually gains flying.\"",
+        "Lulu, Forgetful Hollyphant",
+        &boon_strings(&["Flying", "Specialize"]),
+        &boon_strings(&["Legendary", "Creature"]),
+        &boon_strings(&["Elephant", "Angel"]),
+    );
+    assert_single_boon(
+        &parsed,
+        &TargetFilter::Controller,
+        "Lulu, Forgetful Hollyphant",
+    );
+}
+
+#[test]
+fn boon_mephits_enthusiasm() {
+    let parsed = parse_oracle_text(
+        "This sorcery deals 4 damage to target creature or planeswalker. If excess damage was dealt this way, note that excess damage, then you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+0, where X is the noted number.\"",
+        "Mephit's Enthusiasm",
+        &[],
+        &boon_strings(&["Sorcery"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Mephit's Enthusiasm");
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "granting clause must be gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    // "This sorcery deals 4 … If excess … note … then you get a boon."
+    let head = &parsed.abilities[0];
+    match head.effect.as_ref() {
+        Effect::DealDamage { amount, .. } => assert!(
+            matches!(amount, QuantityExpr::Fixed { value: 4 }),
+            "Mephit's deals 4, got {amount:?}"
+        ),
+        other => panic!("expected DealDamage, got {other:?}"),
+    }
+    let note = head.sub_ability.as_deref().expect("note leg");
+    match note.effect.as_ref() {
+        Effect::NoteNumber { value } => assert!(
+            matches!(
+                value,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Excess,
+                        ..
+                    }
+                }
+            ),
+            "note must read the excess channel, got {value:?}"
+        ),
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+    let grant = note.sub_ability.as_deref().expect("grant leg");
+    assert!(
+        matches!(grant.effect.as_ref(), Effect::CreateBoon { .. }),
+        "grant must follow the note: {parsed:#?}"
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    let body = inner.execute.as_deref().expect("inner body");
+    let Effect::ApplyPerpetual {
+        target,
+        modification,
+    } = body.effect.as_ref()
+    else {
+        panic!("expected ApplyPerpetual, got {:?}", body.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::ParentTarget,
+        "'it' is the cast spell: {parsed:#?}"
+    );
+    match modification {
+        crate::types::ability::PerpetualModification::ModifyPowerToughness {
+            power,
+            toughness,
+            ..
+        } => {
+            assert!(
+                matches!(
+                    power,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::NotedNumber
+                    }
+                ),
+                "X must read the noted number, got {power:?}"
+            );
+            assert!(
+                matches!(toughness, QuantityExpr::Fixed { value: 0 }),
+                "+X/+0 keeps a fixed 0 toughness, got {toughness:?}"
+            );
+        }
+        other => panic!("expected live-expr perpetual P/T, got {other:?}"),
+    }
+}
+
+#[test]
+fn boon_molten_impact() {
+    let parsed = parse_oracle_text(
+        "This sorcery deals 4 damage to target creature or planeswalker. If excess damage was dealt this way, note that excess damage, then you get a one-time boon with \"When you cast an instant or sorcery spell, this boon deals damage equal to the noted number to target creature or planeswalker an opponent controls.\"",
+        "Molten Impact",
+        &[],
+        &boon_strings(&["Sorcery"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Molten Impact");
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "granting clause must be gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    // Outer chain mirrors Mephit's Enthusiasm.
+    let head = &parsed.abilities[0];
+    match head.effect.as_ref() {
+        Effect::DealDamage { amount, .. } => assert!(
+            matches!(amount, QuantityExpr::Fixed { value: 4 }),
+            "Molten Impact deals 4, got {amount:?}"
+        ),
+        other => panic!("expected DealDamage, got {other:?}"),
+    }
+    let note = head.sub_ability.as_deref().expect("note leg");
+    match note.effect.as_ref() {
+        Effect::NoteNumber { value } => assert!(
+            matches!(
+                value,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Excess,
+                        ..
+                    }
+                }
+            ),
+            "note must read the excess channel, got {value:?}"
+        ),
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+    let grant = note.sub_ability.as_deref().expect("grant leg");
+    assert!(
+        matches!(grant.effect.as_ref(), Effect::CreateBoon { .. }),
+        "grant must follow the note: {parsed:#?}"
+    );
+    // "this boon deals damage equal to the noted number to target creature
+    // or planeswalker an opponent controls": default (ability) source, the
+    // noted amount, an opponent-held target.
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    let body = inner.execute.as_deref().expect("inner body");
+    match body.effect.as_ref() {
+        Effect::DealDamage {
+            amount,
+            target,
+            damage_source,
+            ..
+        } => {
+            assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::NotedNumber
+                    }
+                ),
+                "boon damage must read the noted number, got {amount:?}"
+            );
+            assert!(
+                damage_source.is_none(),
+                "boon damage uses the default source: {parsed:#?}"
+            );
+            match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 2, "creature or planeswalker: {parsed:#?}");
+                    for filter in filters {
+                        match filter {
+                            TargetFilter::Typed(typed) => assert_eq!(
+                                typed.controller,
+                                Some(crate::types::ability::ControllerRef::Opponent),
+                                "an opponent controls the target: {parsed:#?}"
+                            ),
+                            other => panic!("expected typed target, got {other:?}"),
+                        }
+                    }
+                }
+                other => panic!("expected creature-or-planeswalker target, got {other:?}"),
+            }
+        }
+        other => panic!("expected DealDamage, got {other:?}"),
+    }
+}
+
+#[test]
+fn boon_reflective_rimekin() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, you get a one-time boon with \"When you cast an instant or sorcery spell with mana value 3 or less, copy it. You may choose new targets for the copy.\"",
+        "Reflective Rimekin",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Elemental", "Wizard"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Reflective Rimekin");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_rothga_bonded_engulfer() {
+    let parsed = parse_oracle_text(
+        "Trample\nWhen Rothga, Bonded Engulfer enters, you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+X, where X is its power.\"",
+        "Rothga, Bonded Engulfer",
+        &boon_strings(&["Trample"]),
+        &boon_strings(&["Legendary", "Creature"]),
+        &boon_strings(&["Phyrexian", "Beast"]),
+    );
+    let inner = assert_single_boon(
+        &parsed,
+        &TargetFilter::Controller,
+        "Rothga, Bonded Engulfer",
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "granting clause must be gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    // "it perpetually gets +X/+X, where X is its power": a dynamic
+    // perpetual off the CAST SPELL's power — not Rothga's own.
+    let body = inner.execute.as_deref().expect("inner body");
+    let Effect::ApplyPerpetual {
+        target,
+        modification,
+    } = body.effect.as_ref()
+    else {
+        panic!("expected ApplyPerpetual, got {:?}", body.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::ParentTarget,
+        "'it' is the cast spell: {parsed:#?}"
+    );
+    let crate::types::ability::PerpetualModification::ModifyPowerToughness {
+        power, toughness, ..
+    } = modification
+    else {
+        panic!("expected live-expr perpetual P/T, got {modification:?}");
+    };
+    for axis in [power, toughness] {
+        match axis {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power { scope },
+            } => assert_eq!(
+                scope,
+                &crate::types::ability::ObjectScope::EventSource,
+                "'its power' is the spell's power: {parsed:#?}"
+            ),
+            other => panic!("X must read the spell's power, got {other:?}"),
+        }
+    }
+}
+
+/// CR 120.10 (Fall of Cair Andros): "note that excess damage" inside a
+/// TRIGGER body stays an honest gap — the antecedent would be the triggering
+/// event (a different resolution), not this resolution's excess tally.
+#[test]
+fn note_that_excess_damage_in_trigger_body_stays_unimplemented() {
+    let parsed = parse_oracle_text(
+        "Whenever a creature an opponent controls is dealt excess noncombat damage, note that excess damage.",
+        "Cair Andros Memorial",
+        &[],
+        &boon_strings(&["Creature"]),
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "trigger must parse: {parsed:#?}");
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must carry its body");
+    match execute.effect.as_ref() {
+        Effect::Unimplemented { name, .. } => assert_eq!(
+            name, "unparsed_verb_arguments",
+            "verb known, demonstrative refused: {parsed:#?}"
+        ),
+        other => panic!("trigger-body excess note must fail closed, got {other:?}"),
+    }
+}
+
+/// Mephit's Enthusiasm / Molten Impact outer halves: "This sorcery deals …"
+/// binds a self-source DealDamage, and the gated "note that excess damage"
+/// binds the resolution-local excess tally.
+#[test]
+fn note_that_excess_damage_in_spell_binds_previous_effect_excess() {
+    let parsed = parse_oracle_text(
+        "This sorcery deals 4 damage to target creature. If excess damage was dealt this way, note that excess damage.",
+        "Mephit Memorial",
+        &[],
+        &boon_strings(&["Sorcery"]),
+        &[],
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "outer halves must be gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::DealDamage { .. }),
+        "self-subject damage must bind, got {:?}",
+        head.effect
+    );
+    let note = head.sub_ability.as_deref().expect("note leg");
+    match note.effect.as_ref() {
+        Effect::NoteNumber { value } => match value {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Excess,
+                        ..
+                    },
+            } => {}
+            other => panic!("note must read the excess channel, got {other:?}"),
+        },
+        other => panic!("expected NoteNumber, got {other:?}"),
+    }
+}
+
+#[test]
+fn boon_swiftspears_teachings() {
+    let parsed = parse_oracle_text(
+        "You get a one-time boon with \"When you cast a creature spell, it gains your choice of prowess or haste.\"\nDraw a card.",
+        "Swiftspear's Teachings",
+        &[],
+        &boon_strings(&["Sorcery"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Swiftspear's Teachings");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_underbridge_warlock() {
+    let parsed = parse_oracle_text(
+        "Deathtouch\nWhen Underbridge Warlock enters, you get a one-time boon with \"At the beginning of your end step, if three or more creatures died this turn, each opponent loses 5 life and you gain 5 life.\"\nAt the beginning of your end step, if you have a boon, you mill three cards, draw a card, and lose 2 life.",
+        "Underbridge Warlock",
+        &boon_strings(&["Deathtouch"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Ogre", "Warlock"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Underbridge Warlock");
+    assert!(
+        inner.condition.is_some(),
+        "the boon inner keeps its intervening-if: {parsed:#?}"
+    );
+    // F3: the scoped body the AI classifier reads — targetless loss under
+    // opponent scope, chained to a holder gain. Harm to the holder's enemies
+    // is a benefit to hold; the continuation forces a Contextual direction.
+    let body = inner.execute.as_deref().expect("grant body");
+    let Effect::LoseLife { target, amount } = body.effect.as_ref() else {
+        panic!("expected a life-loss root, got {:?}", body.effect);
+    };
+    assert_eq!(target, &None, "the loss names no target: {parsed:#?}");
+    assert_eq!(amount, &QuantityExpr::Fixed { value: 5 });
+    assert_eq!(
+        body.player_scope,
+        Some(PlayerFilter::Opponent),
+        "the loss iterates over each opponent: {parsed:#?}"
+    );
+    let sub = body.sub_ability.as_deref().expect("gain continuation");
+    let Effect::GainLife { player, amount } = sub.effect.as_ref() else {
+        panic!("expected a life-gain continuation, got {:?}", sub.effect);
+    };
+    assert_eq!(player, &TargetFilter::Controller);
+    assert_eq!(amount, &QuantityExpr::Fixed { value: 5 });
+    let has_boon = parsed.triggers.iter().find(|trigger| {
+        matches!(
+            trigger.condition,
+            Some(TriggerCondition::HasBoon {
+                player: PlayerScope::Controller
+            })
+        )
+    });
+    assert!(
+        has_boon.is_some(),
+        "the end-step trigger gates on having a boon: {parsed:#?}"
+    );
+}
+
+#[test]
+fn boon_valiant_batrider() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhenever Valiant Batrider deals combat damage to a player, that player gets a one-time boon with \"When you cast a noncreature spell, you may pay {1}. If you don't, each opponent draws a card.\"",
+        "Valiant Batrider",
+        &boon_strings(&["Flying"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Knight"]),
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::TriggeringPlayer, "Valiant Batrider");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_jaheira_stirring_harper() {
+    let parsed = parse_oracle_text(
+        "Hexproof from artifacts and enchantments\nWhen this creature specializes, destroy up to one target artifact or enchantment. You get a one-time boon with \"When you cast a creature spell, it perpetually gets +1/+0 and gains haste.\"",
+        "Jaheira, Stirring Harper",
+        &boon_strings(&["Hexproof from artifacts and enchantments"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Elf", "Druid"]),
+    );
+    let inner = assert_single_boon(
+        &parsed,
+        &TargetFilter::Controller,
+        "Jaheira, Stirring Harper",
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Jaheira host (specialize + destroy + hexproof-from) must be gap-free, got {:?}",
+        outer_gap_names(&parsed)
+    );
+    // Mixed body: fixed perpetual +1/+0 on the cast spell AND perpetual
+    // haste, one combined modification (the leading "perpetually" scopes over
+    // the compound verb phrase).
+    let body = inner.execute.as_deref().expect("grant body");
+    let Effect::ApplyPerpetual {
+        target,
+        modification:
+            PerpetualModification::ModifyPowerToughness {
+                power,
+                toughness,
+                keywords,
+            },
+    } = body.effect.as_ref()
+    else {
+        panic!("expected a perpetual P/T root, got {:?}", body.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::ParentTarget,
+        "'it' is the cast spell: {parsed:#?}"
+    );
+    assert_eq!(power, &QuantityExpr::Fixed { value: 1 });
+    assert_eq!(toughness, &QuantityExpr::Fixed { value: 0 });
+    assert_eq!(
+        keywords,
+        &vec![crate::types::keywords::Keyword::Haste],
+        "Jaheira grants perpetual haste alongside +1/+0"
+    );
+}
+
+#[test]
+fn boon_recipient_heads() {
+    let inner = "\"When you cast a noncreature spell, draw a card.\"";
+    for (text, recipient) in [
+        (
+            format!("You get a one-time boon with {inner}"),
+            TargetFilter::Controller,
+        ),
+        (
+            format!("Target opponent gets a one-time boon with {inner}"),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller: Some(ControllerRef::Opponent),
+                properties: Vec::new(),
+            }),
+        ),
+        (
+            format!("That player gets a one-time boon with {inner}"),
+            TargetFilter::TriggeringPlayer,
+        ),
+        (
+            format!("gets a one-time boon with {inner}"),
+            TargetFilter::ParentTarget,
+        ),
+        (
+            format!("get a one-time boon with {inner}"),
+            TargetFilter::Controller,
+        ),
+    ] {
+        let effect = try_parse_boon_creation(&text.to_lowercase(), &text)
+            .unwrap_or_else(|| panic!("boon head must parse: {text}"));
+        let Effect::CreateBoon {
+            recipient: got,
+            trigger,
+        } = effect
+        else {
+            panic!("boon head must build CreateBoon: {text}");
+        };
+        assert_eq!(got, recipient, "{text}");
+        assert_eq!(trigger.mode, TriggerMode::SpellCast, "{text}");
+        assert!(trigger.execute.is_some(), "{text}");
+    }
+    assert_eq!(
+        try_parse_boon_creation(
+            "you get an emblem with \"whenever you cast a spell, draw a card.\"",
+            "You get an emblem with \"Whenever you cast a spell, draw a card.\"",
+        ),
+        None,
+        "emblem grants belong to the emblem parser, not the boon parser"
+    );
+}
+
+#[test]
+fn boon_unrecognized_inner_fails_closed() {
+    let text = "You get a one-time boon with \"Whenever you splunge the woggle, frotz.\"";
+    let effect = try_parse_boon_creation(&text.to_lowercase(), text)
+        .expect("the grant wrapper must still be recognized");
+    assert!(
+        matches!(&effect, Effect::Unimplemented { name, .. } if name == "one_time_boon"),
+        "an unrecognized inner must fail closed to an explicit gap, got {effect:?}"
+    );
 }
 
 const FINALE_OF_PROMISE: &str = "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.";

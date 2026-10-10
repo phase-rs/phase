@@ -1,6 +1,7 @@
 use crate::types::ability::{
-    AbilityDefinition, DelayedTriggerCondition, Effect, EffectError, EffectKind, ManaProduction,
-    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError,
+    EffectKind, ManaProduction, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -704,6 +705,7 @@ pub fn resolve(
             controller: ability.controller,
             source_id: delayed_source_id,
             one_shot,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,

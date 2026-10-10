@@ -222,6 +222,8 @@ fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
+        // "note <number>" evaluates its operand silently — no player prompt.
+        Effect::NoteNumber { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -426,6 +428,11 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        // Digital-only Alchemy (no CR entry): installing the boon opens no
+        // prompt itself, but the granted body resolves later as its own
+        // ability and may prompt then (Valiant Batrider's "you may pay") —
+        // probe-worthy like a delayed body.
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }

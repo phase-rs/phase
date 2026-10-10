@@ -709,6 +709,17 @@ where
                 visit_ability_def_scoped(effect, scope, visit)?
             }
         }
+        // BOUNDARY CARRIER (digital-only Alchemy, no CR entry): a boon
+        // installs a delayed trigger for its holder that resolves later as
+        // its own ability on the stack (CR 603.3 via CR 603.7). Its payload
+        // is not an instruction THIS ability follows during its own
+        // resolution (CR 608.2c), so `OwnResolutionOnly` stops here — the
+        // same treatment as `CreateDelayedTrigger`.
+        Effect::CreateBoon { trigger, .. } => {
+            if scope == ResolutionScope::IncludeRegisteredLater {
+                visit_trigger_scoped(trigger, scope, visit)?
+            }
+        }
         Effect::FlipCoin {
             win_effect,
             lose_effect,
@@ -984,6 +995,7 @@ where
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

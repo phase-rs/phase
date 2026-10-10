@@ -28,7 +28,7 @@
 
 use crate::game::effects::copy_spell::{open_copy_retarget_choice, set_resolved_source_recursive};
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility,
+    DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -96,6 +96,7 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
         // it is never stored — `epic_effects` is the persistent generator.
         one_shot: true,
+        kind: DelayedTriggerKind::Ordinary,
         provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     }
 }

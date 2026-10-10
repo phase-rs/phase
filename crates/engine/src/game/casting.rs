@@ -5899,6 +5899,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -28653,6 +28654,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted

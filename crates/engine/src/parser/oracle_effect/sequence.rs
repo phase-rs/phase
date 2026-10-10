@@ -1852,6 +1852,23 @@ pub(crate) fn is_emblem_creation_head(current: &str) -> bool {
     is_emblem_head
 }
 
+/// Digital-only Alchemy (no CR entry): the one-time-boon twin of
+/// `is_emblem_creation_head` — every printed recipient head, longest first.
+/// A boon is a held trigger with no board presence (less even than an
+/// emblem), so a sentence following its granted-trigger quote can never be
+/// an anaphor referring back to it.
+pub(crate) fn is_boon_creation_head(current: &str) -> bool {
+    alt((
+        tag_no_case::<_, _, OracleError<'_>>("target opponent gets a one-time boon with \""),
+        tag_no_case("that player gets a one-time boon with \""),
+        tag_no_case("you get a one-time boon with \""),
+        tag_no_case("get a one-time boon with \""),
+        tag_no_case("gets a one-time boon with \""),
+    ))
+    .parse(current.trim_start())
+    .is_ok()
+}
+
 fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool {
     let quoted_text_ends_sentence = current
         .chars()
@@ -1872,6 +1889,12 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // "… Search your library …" would otherwise be swallowed into the emblem's
     // static text (issue #5282).
     if is_emblem_creation_head(current) {
+        return true;
+    }
+    // Digital-only Alchemy (no CR entry): same always-split rule for a boon
+    // head — March Toward Perfection's "Draft a card from ~'s spellbook."
+    // would otherwise be swallowed into the granted trigger (issue #7495).
+    if is_boon_creation_head(current) {
         return true;
     }
 
@@ -7897,6 +7920,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -7986,6 +8010,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::Forage
         | Effect::CompletePlayerAction { .. }
         | Effect::Harness

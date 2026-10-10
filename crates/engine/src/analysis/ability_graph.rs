@@ -937,6 +937,8 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::NoteNumber { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -1319,6 +1321,11 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
             ..
         } => collect_effects(d, out),
         Effect::CreateDelayedTrigger { effect, .. } => collect_effects(effect, out),
+        Effect::CreateBoon { trigger, .. } => {
+            if let Some(execute) = trigger.execute.as_deref() {
+                collect_effects(execute, out)
+            }
+        }
         Effect::RollDie { results, .. } => {
             for branch in results {
                 collect_effects(&branch.effect, out);

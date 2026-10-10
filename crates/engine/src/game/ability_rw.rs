@@ -1964,6 +1964,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         // the parser can emit (`Controller`, `ScopedPlayer`) have non-legacy
         // `ControllerRef` analogues, so the monarch subject axis stays here.
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
@@ -2104,6 +2105,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         // CR 725.1: no `legacy_player_scope` classifier exists; see the
         // `legacy_trigger_condition` sibling arm for the same reasoning.
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2229,6 +2231,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         // CR 701.65b/701.66b/701.67c: controller-scoped per-turn bend accumulator
@@ -3519,6 +3522,8 @@ fn legacy_effect(x: &Effect) -> bool {
             statics.iter().any(legacy_static_definition)
                 || triggers.iter().any(legacy_trigger_definition)
         }
+        Effect::CreateBoon { trigger, .. } => legacy_trigger_definition(trigger),
+        Effect::NoteNumber { value } => legacy_quantity_expr(value),
         Effect::ForceAttack {
             target,
             required_defender,
@@ -5859,6 +5864,18 @@ fn rw_effect(
             effect,
             uses_tracked_set: _,
         } => (deferred(effect), None),
+        // Digital-only Alchemy (no CR entry): the boon's granted body is a
+        // deferred CR 603.7 payload like a delayed trigger's — descend reads,
+        // drop writes. An executeless inner (parser-unreachable; the boon
+        // parser requires a trigger body) contributes nothing.
+        Effect::CreateBoon { trigger, .. } => (
+            trigger
+                .execute
+                .as_deref()
+                .map(deferred)
+                .unwrap_or_else(RwProfile::empty),
+            None,
+        ),
         Effect::CreateDrawReplacement { replacement_effect } => {
             let (mut b, _) = rw_effect(replacement_effect, None, pscope, chain_move_owner);
             b.drop_writes();
@@ -6234,6 +6251,12 @@ fn rw_effect(
         // unclassifiable/fail-closed kind) rather than given a narrower kind that
         // no profiled read would conflict with.
         Effect::RevealChosenNumbers { players: _ } => (ext_write(StateKind::Other), None),
+        // Notes a number on the resolving player — same per-player store class as chosen numbers.
+        Effect::NoteNumber { value } => {
+            let mut p = ext_write(StateKind::Other);
+            p.merge(rw_quantity_expr(value));
+            (p, None)
+        }
 
         // ---- Histogram-absent ⇒ fail-closed conservative ----
         Effect::StartYourEngines { .. }
@@ -6587,6 +6610,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // CR 603.3b same-event ordering gate fail-closed for the producer/consumer
         // pair, exactly as for the object-axis `ChosenNumber` sibling.
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
@@ -6893,6 +6917,10 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // member/event binding; the read profile is entirely determined by the
         // subject scope, classified through the shared `PlayerScope` walker.
         TriggerCondition::IsMonarch { player } => rw_player_scope(player),
+        // Digital-only Alchemy (no CR entry): "if you have a boon" reads the
+        // holder's installed boons; like the monarch designation the read
+        // profile is entirely determined by the subject scope.
+        TriggerCondition::HasBoon { player } => rw_player_scope(player),
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -7035,6 +7063,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // CR 725.1: see the `rw_trigger_condition` sibling — the read profile is
         // entirely determined by the monarch subject scope.
         StaticCondition::IsMonarch { player } => rw_player_scope(player),
+        StaticCondition::HasBoon { player } => rw_player_scope(player),
         StaticCondition::DevotionGE { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents => reads_zone_membership(),
         StaticCondition::IsPresent { filter } => match filter {

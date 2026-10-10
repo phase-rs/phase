@@ -1272,8 +1272,8 @@ fn exile_return_fires_returned_creatures_etb_trigger() {
 #[test]
 fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
-        ResolvedAbility, TargetFilter, TriggerDefinition,
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, DelayedTriggerKind, Effect,
+        QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition,
     };
     use crate::types::game_state::DelayedTrigger;
 
@@ -1367,6 +1367,7 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
         controller: PlayerId(0),
         source_id: delayed_source,
         one_shot: true,
+        kind: DelayedTriggerKind::Ordinary,
         provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     });
     state.exile_links.push(ExileLink {

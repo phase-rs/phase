@@ -864,6 +864,7 @@
     "chooseCreatureToEquip": "Scegli una creatura da equipaggiare",
     "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
+    "chooseTokenHost": "Scegli un ospite per la pedina",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",

@@ -3147,12 +3147,17 @@ fn trigger_hex_companion_keeps_exile_or_battlefield_perpetual_condition() {
         Effect::ApplyPerpetual {
             modification:
                 PerpetualModification::ModifyPowerToughness {
-                    power_delta,
-                    toughness_delta,
+                    power, toughness, ..
                 },
             ..
         } => {
-            assert_eq!((*power_delta, *toughness_delta), (1, 1));
+            assert_eq!(
+                (power, toughness),
+                (
+                    &QuantityExpr::Fixed { value: 1 },
+                    &QuantityExpr::Fixed { value: 1 }
+                )
+            );
         }
         other => panic!("expected ApplyPerpetual +1/+1, got {other:?}"),
     }
@@ -6498,6 +6503,128 @@ fn trigger_exploits_a_creature() {
         "Exploit Payoff",
     );
     assert!(matches!(unsupported.mode, TriggerMode::Unknown(_)));
+}
+
+#[test]
+fn trigger_enlists_a_creature() {
+    // Benalish Knight-Counselor + Guardian of New Benalia: the only printed
+    // actor-side enlist triggers. Same shape as the synthesized Enlist keyword
+    // trigger (`valid_card` = subject), which `match_enlisted` fires on.
+    let cases = [
+        "Whenever Benalish Knight-Counselor enlists a creature, scry 1.",
+        "Whenever this creature enlists a creature, scry 2.",
+        "When Benalish Knight-Counselor enlists, scry 1.",
+    ];
+    for oracle in cases {
+        let def = parse_trigger_line(oracle, "Benalish Knight-Counselor");
+        assert_eq!(def.mode, TriggerMode::Enlisted, "{oracle}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{oracle}");
+        assert_eq!(def.valid_source, None, "{oracle}");
+        assert_no_unimplemented(def.execute.as_deref().expect("trigger body"));
+    }
+
+    // Goblin Morale Sergeant: victim-qualified ("nontoken") — fails closed,
+    // since `match_enlisted` keys on the attacker alone and would over-fire.
+    // Non-self subjects likewise (none printed).
+    let unsupported = [
+        "Whenever Goblin Morale Sergeant enlists a nontoken creature, scry 1.",
+        "Whenever a creature you control enlists a creature, scry 1.",
+    ];
+    for oracle in unsupported {
+        let def = parse_trigger_line(oracle, "Goblin Morale Sergeant");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{oracle}: {def:?}"
+        );
+    }
+}
+
+/// CR 201.5 + CR 603.4: opposite-power controls for strict possessive P/T
+/// gates. On a SELF trigger ("When this creature dies, if its power is
+/// greater than 0" — Dragonborn Immolator) "its" is the source and the GT
+/// gate binds `Power { Source }`. On a NON-SELF trigger the pronoun names
+/// the event object (whose past-tense form the dying-object arm owns), so
+/// the present-tense strict gate fails closed instead of checking the
+/// grantor's stat. Explicit source subjects ("this creature has ...") on
+/// non-self triggers keep working.
+#[test]
+fn strict_pronoun_pt_gate_binds_source_only_on_self_trigger() {
+    use crate::types::ability::{
+        Comparator, ObjectScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+
+    // Self: "its" == the source. Gate binds Source, strictly.
+    let zelf = parse_trigger_line(
+        "When this creature dies, if its power is greater than 0, draw a card.",
+        "Self Prober",
+    );
+    match zelf.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                },
+            comparator,
+            rhs,
+        }) => {
+            assert_eq!(*scope, ObjectScope::Source);
+            assert_eq!(*comparator, Comparator::GT);
+            assert_eq!(*rhs, QuantityExpr::Fixed { value: 0 });
+        }
+        other => panic!("self strict gate must bind Source GT 0, got {other:?}"),
+    }
+
+    // Non-self: the pronoun names the event object — fail closed (no hoisted
+    // gate), for both strict directions. Reach guard: the trigger head
+    // itself still parses; only the gate declines.
+    for oracle in [
+        "Whenever another creature dies, if its power is greater than 0, draw a card.",
+        "Whenever another creature dies, if its toughness is less than 3, draw a card.",
+    ] {
+        let def = parse_trigger_line(oracle, "Other Prober");
+        assert!(
+            matches!(def.mode, TriggerMode::ChangesZone),
+            "{oracle}: head must parse, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.condition, None,
+            "{oracle}: non-self strict pronoun gate must fail closed, got {:?}",
+            def.condition
+        );
+        // Body-gap control: the refused guard gaps the WHOLE trigger. The
+        // generic body fallback must not rescue the guard text as a
+        // Source-bound resolution condition with no fire-time check.
+        let body = def
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{oracle}: refused trigger keeps a body slot"));
+        assert!(
+            matches!(body.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{oracle}: refused leading guard must gap the whole body, got {:?}",
+            body.effect
+        );
+    }
+
+    // Explicit source subject on a non-self trigger: still binds Source.
+    let explicit = parse_trigger_line(
+        "Whenever another creature dies, if this creature has power greater than 2, draw a card.",
+        "Explicit Prober",
+    );
+    match explicit.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                },
+            comparator,
+            ..
+        }) => {
+            assert_eq!(*scope, ObjectScope::Source);
+            assert_eq!(*comparator, Comparator::GT);
+        }
+        other => panic!("explicit-source strict gate must survive, got {other:?}"),
+    }
 }
 
 #[test]
@@ -12514,13 +12641,14 @@ fn subtype_intervening_if_dispatches_by_trigger_kind() {
     );
 
     // Zone-change trigger (dies): event-snapshot `ZoneChangeObjectMatchesFilter`.
-    let (_, zone_change) = extract_if_condition_with_card_name(
+    let extraction = extract_if_condition_with_card_name(
         "if it's not a spirit, draw a card",
         "",
         None,
         Some((Zone::Battlefield, Zone::Graveyard)),
         false,
     );
+    let zone_change = extraction.condition;
     let Some(TriggerCondition::Not { condition }) = zone_change else {
         panic!("expected negated condition, got {zone_change:?}");
     };

@@ -1978,15 +1978,13 @@ pub(crate) enum AttachIllegality {
     Prohibited,
 }
 
-/// Returns `Some(reason)` when an object host forbids `attachment` via
-/// protection or a can't-be-attached static, else `None`.
-///
-/// Does NOT evaluate the Enchant filter or zone — that legality is applied by
-/// the caller (`is_valid_attachment_target` checks it for the SBA path). The
-/// checks here are purely additive prohibitions that apply equally at attach
-/// time and continuously thereafter, so routing both paths through this resolver
-/// keeps them from drifting.
-pub(crate) fn attachment_illegality(
+/// Live-object convenience over [`attachment_illegality_projected`], kept for
+/// the unit tests below: production routes live reads through
+/// `sba::is_valid_attachment_target_for_attacher` (which feeds the stored
+/// object) and pre-entry reads through the projected resolver directly, so a
+/// second production entry point would be a second authority to drift.
+#[cfg(test)]
+fn attachment_illegality(
     state: &GameState,
     attachment_id: ObjectId,
     host_id: ObjectId,

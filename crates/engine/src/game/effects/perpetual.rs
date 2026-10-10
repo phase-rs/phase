@@ -12,8 +12,10 @@
 //! (Stationed/VehicleCrewed events, chain propagation) bind the correct object;
 //! `Any` falls back to the source when no referent is available.
 
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, PerpetualModification,
+    QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -27,6 +29,14 @@ fn parent_object_from_trigger_event(
         GameEvent::Stationed { creature_id, .. } => Some(*creature_id),
         GameEvent::VehicleCrewed { vehicle_id, .. } => Some(*vehicle_id),
         GameEvent::Saddled { mount_id, .. } => Some(*mount_id),
+        // CR 608.2k: "it" on a SpellCast trigger is the cast spell
+        // (one-time boons: "when you cast a creature spell, it perpetually
+        // gets …" — Rothga, Bonded Engulfer; Dragonborn Immolator; Mephit's
+        // Enthusiasm). Kept perpetual-local, NOT in the shared
+        // event-context target fn: a shared arm would shadow the
+        // `ability.targets` fallback that other SpellCast bodies rely on
+        // (Orvar, the All-Form copies the targeted permanent, not the spell).
+        GameEvent::SpellCast { object_id, .. } => Some(*object_id),
         _ => None,
     }
 }
@@ -172,7 +182,30 @@ pub fn resolve(
     else {
         return Err(EffectError::MissingParam("ApplyPerpetual".to_string()));
     };
-    let modification = modification.clone();
+    // Digital-only Alchemy (no CR entry): a dynamic P/T delta carries live
+    // `QuantityExpr`s ("it perpetually gets +X/+X, where X is its power",
+    // Rothga, Bonded Engulfer) — evaluate once here, at application time,
+    // and freeze to `Fixed`. Perpetual edits are permanent, never live
+    // expressions: the frozen record is what
+    // `apply_perpetual_modification` installs AND persists in
+    // `perpetual_mods`, so a later copy-rebuild re-applies the resolved
+    // numbers, never the stale exprs.
+    let modification = match modification {
+        PerpetualModification::ModifyPowerToughness {
+            power,
+            toughness,
+            keywords,
+        } => PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed {
+                value: resolve_quantity_with_targets(state, power, ability),
+            },
+            toughness: QuantityExpr::Fixed {
+                value: resolve_quantity_with_targets(state, toughness, ability),
+            },
+            keywords: keywords.clone(),
+        },
+        other => other.clone(),
+    };
     let target = target.clone();
 
     let ids = perpetual_target_object_ids(state, ability, &target);
@@ -208,8 +241,8 @@ mod tests {
     use crate::game::scenario::GameRunner;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        CardSelectionMode, Chooser, Effect, PerpetualModification, ResolvedAbility, TargetFilter,
-        TargetRef, ZoneOwner,
+        CardSelectionMode, Chooser, Effect, PerpetualModification, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, ZoneOwner,
     };
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
@@ -321,8 +354,9 @@ mod tests {
             Effect::ApplyPerpetual {
                 target: crate::types::ability::TargetFilter::Any,
                 modification: PerpetualModification::ModifyPowerToughness {
-                    power_delta: 3,
-                    toughness_delta: 3,
+                    power: QuantityExpr::Fixed { value: 3 },
+                    toughness: QuantityExpr::Fixed { value: 3 },
+                    keywords: Vec::new(),
                 },
             },
             vec![TargetRef::Object(id)],

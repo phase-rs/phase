@@ -106,6 +106,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  106 — game_setup and state_update carry GameState, whose one-time boons
+ *       (#7495) add Effect.CreateBoon / Effect.NoteNumber, the HasBoon
+ *       conditions, and WaitingFor.ChooseTokenHost, and whose perpetual P/T
+ *       edit retypes power_delta/toughness_delta integers to required tagged
+ *       QuantityExpr power/toughness. A v105 peer cannot parse the new tags or
+ *       the retyped edit, so first contact rejects the skew. Bumped in
+ *       lockstep with full-game protocol 124.
  *  105 — game_setup and state_update carry GameState, whose ability
  *       definitions now carry the "prepared spell" filter tag, a scope on
  *       the become-prepared / become-unprepared effects, the prepared-copy
@@ -611,7 +618,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 105 as const;
+export const WIRE_PROTOCOL_VERSION = 106 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

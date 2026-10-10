@@ -108,6 +108,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // enchant-player Auras). Legal picks come from `getWaitingForClickTargetRefs`
     // (viewmodel/gameStateView.ts), which every click surface reads.
     "ReturnAsAuraTarget",
+    // Digital-only Alchemy (no CR entry): batch boon "one of them" token-host
+    // pick. Same board/HUD click route as ReturnAsAuraTarget above.
+    "ChooseTokenHost",
     "EquipTarget",
     "CrewVehicle",
     "StationTarget",

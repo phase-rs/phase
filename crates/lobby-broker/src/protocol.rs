@@ -60,6 +60,23 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 124 — One-time boons (#7495) add serialized `GameState` tags, and the
+///      perpetual P/T edit is retyped. `Effect::CreateBoon` (with its granted
+///      `TriggerDefinition`), `Effect::NoteNumber`, the `HasBoon` trigger and
+///      static conditions, and `WaitingFor::ChooseTokenHost` are new tags with
+///      no fallback: a v123 peer fails deserialization on any of them — a
+///      conditional PARSE bump like 76/79, breaking only while a boon grant,
+///      note, or host prompt is actually serialized.
+///      `PerpetualModification::ModifyPowerToughness` retypes
+///      `power_delta`/`toughness_delta: i32` to required `power`/`toughness:
+///      QuantityExpr` (plus a defaulted `keywords` rider): a v123 peer's
+///      bare-integer fields miss the new required keys, and a v124 peer's
+///      tagged exprs fail a v123 `i32` — the break is unconditional for
+///      frames carrying the edit, in BOTH directions. Saved games still
+///      load: the former `power_delta`/`toughness_delta` keys survive as
+///      serde aliases, with the bare ints riding the existing `QuantityExpr`
+///      legacy-integer decoder into `Fixed`. P2P moves in lockstep (wire
+///      106); lobby messages are unchanged.
 /// 123 — `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
 ///      CR 722.3d), `scope` on `Effect::BecomePrepared` /
 ///      `BecomeUnprepared` (mass "each creature you control becomes
@@ -932,7 +949,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 123;
+pub const PROTOCOL_VERSION: u32 = 124;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the

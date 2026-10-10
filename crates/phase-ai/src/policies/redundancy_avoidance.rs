@@ -529,6 +529,8 @@ fn redundancy_delta(
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::NoteNumber { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }

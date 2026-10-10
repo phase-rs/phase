@@ -2255,6 +2255,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
@@ -2404,6 +2405,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2588,6 +2590,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
@@ -2898,6 +2901,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 120.1: damage records store the amount actually dealt.
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::PlayerChosenNumber { .. }
         // CR 508.1: declaration-time attacker snapshots.
         | QuantityRef::AttackedThisTurn { .. }
@@ -3161,6 +3165,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
@@ -6178,6 +6183,20 @@ fn resolve_ref(
                     _ => None,
                 })
             })
+            .unwrap_or(0),
+        // Digital-only Alchemy (no CR entry): the noted number. Inside a
+        // granted boon body this is the grant's CAPTURE — what the granting
+        // resolution noted, snapshotted into the ability's context at
+        // install (`SpellContext::boon_captured_noted_number`) — so
+        // sequential or cross-card notes never leak into each other's
+        // boons. Outside a boon grant the capture is `None` and the read
+        // falls back to the resolving player's live global
+        // (`Player::noted_number`), written by `Effect::NoteNumber`
+        // ("where X is the noted number" — Dragonborn Immolator / Mephit's
+        // Enthusiasm / Molten Impact). Nothing noted anywhere reads as 0.
+        QuantityRef::NotedNumber => ability
+            .and_then(|a| a.context.boon_captured_noted_number)
+            .or_else(|| player.as_ref().and_then(|p| p.noted_number))
             .unwrap_or(0),
         // CR 101.4 + CR 608.2d: the number a PLAYER secretly chose this
         // resolution, read off `Player::chosen_attributes`. `AllPlayers { Max }`

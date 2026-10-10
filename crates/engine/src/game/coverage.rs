@@ -2022,6 +2022,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
+        QuantityRef::NotedNumber => "noted number".into(),
         QuantityRef::PlayerChosenNumber { player } => {
             format!("secretly chosen number ({})", fmt_player_scope(player))
         }
@@ -3607,6 +3608,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("tracked".into(), "yes".into()));
             }
         }
+        Effect::CreateBoon { recipient, trigger } => {
+            d.push(("recipient".into(), fmt_target(recipient)));
+            d.push(("trigger".into(), format!("{:?}", trigger.mode)));
+        }
+        Effect::NoteNumber { value } => {
+            d.push(("value".into(), format!("{value:?}")));
+        }
         Effect::AddTargetReplacement { replacement, .. } => {
             d.push(("event".into(), format!("{:?}", replacement.event)));
             if let Some(zone) = replacement.destination_zone {
@@ -4835,6 +4843,10 @@ fn fmt_trigger_condition(
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
+        TC::HasBoon {
+            player: PlayerScope::Controller,
+        } => "has a boon".into(),
+        TC::HasBoon { .. } => "that player has a boon".into(),
         TC::IsInitiative => "has the initiative".into(),
         TC::NoMonarch => "no monarch".into(),
         TC::WasStartingPlayer { .. } => "was the starting player".into(),
@@ -5073,6 +5085,10 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
+        SC::HasBoon {
+            player: PlayerScope::Controller,
+        } => "has a boon".into(),
+        SC::HasBoon { .. } => "that player has a boon".into(),
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
@@ -5584,6 +5600,16 @@ pub fn build_parse_details(
     items
 }
 
+/// Digital-only Alchemy (no CR entry): a boon grant requires an executable
+/// granted body — the grant resolver errors on `execute: None`
+/// (game/effects/create_boon.rs), while ordinary triggers may legitimately
+/// lack bodies. All three canonical coverage authorities (carrier support,
+/// parse-details items, missing parts) share this predicate at their
+/// `CreateBoon` arms.
+fn boon_grant_has_body(trigger: &TriggerDefinition) -> bool {
+    trigger.execute.is_some()
+}
+
 /// Build a `ParsedItem` for a single `TriggerDefinition`, recursing into its
 /// `execute` ability. Shared between top-level triggers and triggers granted
 /// by static abilities (`ContinuousModification::GrantTrigger`).
@@ -5944,6 +5970,19 @@ fn append_effect_static_carrier_items(
                     token_static_traversal,
                 ));
             }
+        }
+        // Digital-only Alchemy (no CR entry): a boon is a single-trigger
+        // carrier like an emblem's trigger half. The granted body is
+        // required even when the mode is registered (shared M2 predicate).
+        Effect::CreateBoon { trigger, .. } => {
+            let mut child = build_trigger_item(
+                trigger,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            );
+            child.supported &= boon_grant_has_body(trigger);
+            children.push(child);
         }
         _ => {}
     }
@@ -7886,6 +7925,11 @@ fn visit_effect_static_carrier_modifications(
                 }
             }
         }
+        Effect::CreateBoon { trigger, .. } => {
+            if let Some(execute) = &trigger.execute {
+                visit_ability_modifications(execute, token_static_traversal, visit);
+            }
+        }
         _ => {}
     }
 }
@@ -8179,6 +8223,7 @@ fn effect_static_carriers_have_unimplemented_parts(
             statics.iter().any(static_has_unimplemented_parts)
                 || triggers.iter().any(trigger_has_unimplemented_parts)
         }
+        Effect::CreateBoon { trigger, .. } => trigger_has_unimplemented_parts(trigger),
         _ => false,
     };
     statics_have_unimplemented_parts || {
@@ -8322,6 +8367,23 @@ fn collect_effect_static_carrier_missing_parts(
             );
             check_triggers(
                 triggers,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+                missing,
+            );
+        }
+        Effect::CreateBoon { trigger, .. } => {
+            // The granted body is required even when the mode is registered
+            // (shared M2 predicate); ordinary bodyless triggers stay legal.
+            if !boon_grant_has_body(trigger) {
+                let label = "Effect:BodylessBoon".to_string();
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
+            check_triggers(
+                std::slice::from_ref(trigger),
                 trigger_registry,
                 static_registry,
                 token_static_traversal,
@@ -9156,6 +9218,20 @@ fn effect_static_carriers_are_supported(
                     )
                 })
         }
+        // Digital-only Alchemy (no CR entry): a one-time boon grant is
+        // supported exactly when its granted trigger is supported AND has an
+        // executable body (shared M2 predicate — the wrapper parser guards
+        // this for parsed fixtures; serialized/constructed model values
+        // need the classifier to say so too).
+        Effect::CreateBoon { trigger, .. } => {
+            boon_grant_has_body(trigger)
+                && is_trigger_supported(
+                    trigger,
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                )
+        }
         _ => true,
     };
     static_carriers_supported && {
@@ -9745,6 +9821,9 @@ fn extract_effect_static_carrier_features(
                 extract_trigger_features(trigger, features, token_static_traversal);
             }
         }
+        Effect::CreateBoon { trigger, .. } => {
+            extract_trigger_features(trigger, features, token_static_traversal);
+        }
         _ => {}
     }
     visit_effect_modification_carriers(effect, |modification| {
@@ -9816,6 +9895,22 @@ fn extract_effect_quantity_features(
             if let PtValue::Quantity(qty) = toughness {
                 extract_quantity_features(qty, features);
             }
+        }
+        // Digital-only Alchemy (no CR entry): the noted value and a perpetual
+        // P/T delta's exprs are live quantities — extract their refs so an
+        // unhandled reference nested inside either is classified unhandled
+        // rather than silently advertised as supported. Other
+        // `PerpetualModification` variants carry no `QuantityExpr`.
+        Effect::NoteNumber { value, .. } => extract_quantity_features(value, features),
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power, toughness, ..
+                },
+            ..
+        } => {
+            extract_quantity_features(power, features);
+            extract_quantity_features(toughness, features);
         }
         _ => {}
     }
@@ -10263,6 +10358,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // strict-failure marker anywhere, so it is genuinely handled.
         QuantityRef::TurnsTaken => ("TurnsTaken", Handled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
+        // Digital-only Alchemy (no CR entry): resolved live in
+        // `quantity::resolve_ref` over `Player::noted_number`.
+        QuantityRef::NotedNumber => ("NotedNumber", Handled),
         // CR 101.4 + CR 608.2d: resolved live in `quantity::resolve_quantity`
         // over `Player::chosen_attributes` (per-candidate and aggregate scopes).
         QuantityRef::PlayerChosenNumber { .. } => ("PlayerChosenNumber", Handled),
@@ -10440,6 +10538,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             player: PlayerScope::Controller | PlayerScope::RecipientController,
         } => ("IsMonarch", Handled),
         StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
+        // Digital-only Alchemy (no CR entry): same scope rule as the monarch
+        // arm above — the layer evaluator binds both subjects. The unbound
+        // arm keeps a DISTINCT key: same-key insert would let sibling order
+        // decide the verdict (a later Handled overwriting an Unhandled, or
+        // vice versa), so mixed scopes on one card would resolve by
+        // HashMap insertion order instead of by restriction.
+        StaticCondition::HasBoon {
+            player: PlayerScope::Controller | PlayerScope::RecipientController,
+        } => ("HasBoon", Handled),
+        StaticCondition::HasBoon { .. } => ("HasBoonUnboundScope", Unhandled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
@@ -10802,6 +10910,14 @@ fn pump_matches_oracle(
         p_match && t_match
     }
 
+    // Numeric Oracle expectations require fixed equality: a dynamic delta on
+    // a "+N/+M" line is a lowering defect (or a dynamic expectation the audit
+    // does not model), never a silent accept. The pre-existing `pt_matches`
+    // leniency above is untouched — it is not this carrier's license.
+    fn expr_matches(expr: &QuantityExpr, expected: i32) -> bool {
+        matches!(expr, QuantityExpr::Fixed { value } if *value == expected)
+    }
+
     match &*def.effect {
         Effect::Pump {
             power, toughness, ..
@@ -10825,16 +10941,17 @@ fn pump_matches_oracle(
         // pump effect` finding. Gated on `PerpetualPump::Allowed` so a *temporary*
         // "+N/+M until end of turn" line that mis-lowered to a permanent
         // `ApplyPerpetual` is still flagged rather than silently accepted.
+        // Live (non-`Fixed`) deltas never satisfy a numeric expectation — a
+        // dynamic quantity on a "+N/+M" line is flagged, not excused.
         Effect::ApplyPerpetual {
             modification:
                 PerpetualModification::ModifyPowerToughness {
-                    power_delta,
-                    toughness_delta,
+                    power, toughness, ..
                 },
             ..
         } if perpetual == PerpetualPump::Allowed
-            && *power_delta == expected_power
-            && *toughness_delta == expected_toughness =>
+            && expr_matches(power, expected_power)
+            && expr_matches(toughness, expected_toughness) =>
         {
             return true;
         }
@@ -19223,6 +19340,176 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// M2: a `CreateBoon` grant with no executable body classifies
+    /// unsupported — the grant resolver errors on a bodyless boon, so the
+    /// classifier must agree even though `is_trigger_supported` permits
+    /// `execute: None` for ordinary triggers. The bodied twin is the
+    /// control (supported).
+    #[test]
+    fn create_boon_without_execute_body_is_unsupported() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        let grant = |execute: Option<Box<AbilityDefinition>>| {
+            let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+            trigger.execute = execute;
+            Effect::CreateBoon {
+                recipient: TargetFilter::Controller,
+                trigger: Box::new(trigger),
+            }
+        };
+        let supported_body = || {
+            Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )))
+        };
+
+        assert!(
+            !effect_static_carriers_are_supported(
+                &grant(None),
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "a bodyless boon grant must classify unsupported"
+        );
+        assert!(
+            effect_static_carriers_are_supported(
+                &grant(supported_body()),
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "the bodied control must stay supported"
+        );
+    }
+
+    /// M2 canonical: the shared body requirement reaches the missing-parts
+    /// and parse-details authorities, not just the carrier classifier. A
+    /// constructed bodyless grant (registered mode, no body) is unsupported
+    /// with an `Effect:BodylessBoon` gap and a red trigger child; the bodied
+    /// twin is the positive control (supported, gap-free).
+    #[test]
+    fn create_boon_bodyless_rejected_across_canonical_coverage() {
+        let grant_def = |execute: Option<Box<AbilityDefinition>>| {
+            let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+            trigger.execute = execute;
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateBoon {
+                    recipient: TargetFilter::Controller,
+                    trigger: Box::new(trigger),
+                },
+            )
+        };
+        let body = || {
+            Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )))
+        };
+
+        // Missing-parts authority.
+        let mut missing = Vec::new();
+        collect_test_ability_missing_parts(&grant_def(None), &mut missing);
+        assert!(
+            missing.contains(&"Effect:BodylessBoon".to_string()),
+            "bodyless grant must record the structural gap, got {missing:?}"
+        );
+        let mut control_missing = Vec::new();
+        collect_test_ability_missing_parts(&grant_def(body()), &mut control_missing);
+        assert!(
+            control_missing.is_empty(),
+            "bodied control must record no gaps, got {control_missing:?}"
+        );
+
+        // Full canonical card coverage + parse details.
+        for (execute, supported) in [(None, false), (body(), true)] {
+            let mut face = make_face();
+            face.name = "Coverage Boon Probe".to_string();
+            face.abilities = vec![grant_def(execute)];
+            let card = coverage_result_for_face(face);
+            assert_eq!(card.supported, supported, "bodied={supported}: {card:?}");
+            let item = card
+                .parse_details
+                .iter()
+                .find(|item| item.category == ParseCategory::Ability)
+                .expect("grant ability reaches face coverage");
+            let trigger_child = item
+                .children
+                .iter()
+                .find(|child| child.category == ParseCategory::Trigger)
+                .expect("granted trigger reaches parse details");
+            assert_eq!(
+                trigger_child.supported, supported,
+                "bodied={supported}: {trigger_child:?}"
+            );
+            if supported {
+                assert!(card.gap_details.is_empty(), "{card:?}");
+            } else {
+                assert!(
+                    card.gap_details
+                        .iter()
+                        .any(|gap| gap.handler == "Effect:BodylessBoon"),
+                    "canonical gaps must carry the structural label: {card:?}"
+                );
+            }
+        }
+    }
+
+    /// M1: an unhandled reference nested inside a note value or a perpetual
+    /// P/T delta is classified unhandled — not silently advertised as
+    /// supported. `ChosenNumber` is the probe (tagged `Unhandled` by
+    /// `quantity_ref_feature`); `NotedNumber` is the handled control.
+    ///
+    /// REVERT-PROBE: drop either new arm from
+    /// `extract_effect_quantity_features` and the matching leg FAILS (empty
+    /// features); the control passes in both builds.
+    #[test]
+    fn unhandled_ref_nested_in_note_or_perpetual_is_classified() {
+        let probe = || QuantityExpr::Ref {
+            qty: QuantityRef::ChosenNumber,
+        };
+        let key = |name: &str| ResolverFeatureFamily::QuantityRef.key(name);
+        for effect in [
+            Effect::NoteNumber { value: probe() },
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: probe(),
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    keywords: Vec::new(),
+                },
+            },
+        ] {
+            let mut features = HashMap::new();
+            extract_effect_quantity_features(&effect, &mut features);
+            assert_eq!(
+                features.get(&key("ChosenNumber")),
+                Some(&FeatureSupport::Unhandled),
+                "unhandled refs must survive traversal, got {features:?} for {effect:?}"
+            );
+        }
+        let handled = Effect::NoteNumber {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::NotedNumber,
+            },
+        };
+        let mut features = HashMap::new();
+        extract_effect_quantity_features(&handled, &mut features);
+        assert_eq!(
+            features.get(&key("NotedNumber")),
+            Some(&FeatureSupport::Handled),
+            "handled refs keep their tag, got {features:?}"
+        );
+    }
+
     /// T22 (Step 7c). `battlefield_entry_matches_filter` fails closed on the
     /// `FilterProp`s the entry snapshot never captured, so a ledger read over one
     /// of them resolves a silent constant 0. The classifier must stop calling that
@@ -19969,8 +20256,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 Effect::ApplyPerpetual {
                     target: TargetFilter::Any,
                     modification: PerpetualModification::ModifyPowerToughness {
-                        power_delta,
-                        toughness_delta,
+                        power: QuantityExpr::Fixed { value: power_delta },
+                        toughness: QuantityExpr::Fixed {
+                            value: toughness_delta,
+                        },
+                        keywords: Vec::new(),
                     },
                 },
             )
@@ -20034,6 +20324,61 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             !temporary_findings.is_empty(),
             "a temporary +N/+M line mislowered to a permanent ApplyPerpetual must still be flagged: {temporary_findings:?}"
+        );
+
+        // Numeric wrong-Fixed end-to-end: a perpetual line whose delta does not
+        // match the "+N/+M" text is flagged through the same audit boundary.
+        let mut wrong_fixed_face = make_face();
+        wrong_fixed_face.oracle_text = Some(perpetual_line.to_string());
+        wrong_fixed_face.abilities.push(perpetual_pump(2, 2));
+        let wrong_fixed_findings = audit_card_lines(perpetual_line, &wrong_fixed_face);
+        assert!(
+            wrong_fixed_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("perpetually gets +1/+1")
+            )),
+            "a perpetual +1/+1 line with an ApplyPerpetual(+2/+2) delta must be flagged: {wrong_fixed_findings:?}"
+        );
+
+        // Wrong-dynamic end-to-end (F7): a live (non-`Fixed`) delta on a numeric
+        // "+N/+M" line is a lowering defect, never a silent accept. The dynamic
+        // reference below (source power — unrelated to the +1/+1 text) must be
+        // flagged exactly like the wrong-Fixed delta above.
+        let dynamic_pump = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                    toughness: QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                    keywords: Vec::new(),
+                },
+            },
+        );
+        assert!(
+            !pump_matches_oracle(&dynamic_pump, 1, 1, PerpetualPump::Allowed),
+            "a dynamic ApplyPerpetual delta must not satisfy a numeric +N/+M expectation"
+        );
+        let mut dynamic_face = make_face();
+        dynamic_face.oracle_text = Some(perpetual_line.to_string());
+        dynamic_face.abilities.push(dynamic_pump);
+        let dynamic_findings = audit_card_lines(perpetual_line, &dynamic_face);
+        assert!(
+            dynamic_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("perpetually gets +1/+1")
+            )),
+            "a perpetual +1/+1 line with a dynamic ApplyPerpetual delta must be flagged: {dynamic_findings:?}"
         );
     }
 
@@ -21144,6 +21489,50 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             })
             .get("static_condition:IsMonarch"),
             Some(&FeatureSupport::Handled)
+        );
+    }
+
+    /// Mixed `HasBoon` scopes on one card resolve by restriction, not by
+    /// sibling order: the bound and unbound arms emit distinct keys, so an
+    /// `And`/`Or` pairing reports Unhandled in BOTH orders instead of
+    /// letting a later Handled overwrite it (or vice versa).
+    #[test]
+    fn has_boon_mixed_scopes_report_unhandled_in_both_orders() {
+        let feature_map = |cond: &StaticCondition| {
+            let mut features = HashMap::new();
+            extract_static_condition_features(cond, &mut features);
+            features
+        };
+        let bound = || StaticCondition::HasBoon {
+            player: PlayerScope::Controller,
+        };
+        let unbound = || StaticCondition::HasBoon {
+            player: PlayerScope::Target,
+        };
+        for siblings in [vec![bound(), unbound()], vec![unbound(), bound()]] {
+            let features = feature_map(&StaticCondition::And {
+                conditions: siblings,
+            });
+            assert_eq!(
+                features.get("static_condition:HasBoon"),
+                Some(&FeatureSupport::Handled),
+                "the bound arm keeps its own verdict"
+            );
+            assert_eq!(
+                features.get("static_condition:HasBoonUnboundScope"),
+                Some(&FeatureSupport::Unhandled),
+                "the unbound arm must survive in both sibling orders: {features:?}"
+            );
+        }
+        // Single-scope controls: each arm alone keeps its verdict.
+        assert_eq!(
+            feature_map(&bound()).get("static_condition:HasBoon"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert!(!feature_map(&bound()).contains_key("static_condition:HasBoonUnboundScope"));
+        assert_eq!(
+            feature_map(&unbound()).get("static_condition:HasBoonUnboundScope"),
+            Some(&FeatureSupport::Unhandled)
         );
     }
 

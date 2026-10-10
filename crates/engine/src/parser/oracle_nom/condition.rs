@@ -1719,6 +1719,14 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
                 ],
             }
         }),
+        // Digital-only Alchemy (no CR entry): "if you have a boon"
+        // (Underbridge Warlock). Only the controller subject is printed.
+        value(
+            StaticCondition::HasBoon {
+                player: PlayerScope::Controller,
+            },
+            tag("you have a boon"),
+        ),
         // CR 726.3: Initiative status
         value(
             StaticCondition::IsInitiative,
@@ -3064,25 +3072,46 @@ fn parse_this_type_entered_this_turn(input: &str) -> OracleResult<'_, StaticCond
 /// continuations such as "Then if ~ has power 7 or greater, …" (Cloud,
 /// Ex-SOLDIER). Without it, those clauses silently swallow the condition and
 /// the gated sub-ability fires unconditionally.
+///
+/// Strict comparatives against a fixed threshold compose through the same
+/// arm: "its power is greater than N" / "less than N" (Dragonborn
+/// Immolator's dies trigger: "if its power is greater than 0"). The
+/// comparative head is disjoint from the threshold head ("exactly"/number),
+/// and the comparative requires a number after it, so relative-comparison
+/// phrases ("greater than each other creature's power", "less than ~'s
+/// power") still fall through to their own arms and every previously
+/// supported parse is unchanged.
 pub(crate) fn parse_source_power_toughness_condition(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, qty) = alt((parse_possessive_property, parse_subject_has_property)).parse(input)?;
-    // CR 208.1: "exactly N" → EQ (Amalia Benavides Aguirre: "if its power is
-    // exactly 20"). The "exactly " prefix is consumed before the number, mirroring
-    // the proven "exactly N" → EQ leaf in `parse_hand_size_predicate`; otherwise
-    // the standard "N or less" / "N or greater" thresholds select LE / GE.
-    let (rest, exactly) = opt(tag("exactly ")).parse(rest)?;
-    let (rest, n) = parse_number(rest)?;
-    let (rest, comparator) = if exactly.is_some() {
-        (rest, Comparator::EQ)
-    } else {
-        alt((
-            value(Comparator::LE, tag(" or less")),
-            value(Comparator::GE, tag(" or greater")),
-        ))
-        .parse(rest)?
-    };
+    let (rest, (comparator, n)) = alt((
+        map(preceded(tag("greater than "), parse_number), |n| {
+            (Comparator::GT, n)
+        }),
+        map(preceded(tag("less than "), parse_number), |n| {
+            (Comparator::LT, n)
+        }),
+        // CR 208.1: "exactly N" → EQ (Amalia Benavides Aguirre: "if its power is
+        // exactly 20"). The "exactly " prefix is consumed before the number, mirroring
+        // the proven "exactly N" → EQ leaf in `parse_hand_size_predicate`; otherwise
+        // the standard "N or less" / "N or greater" thresholds select LE / GE.
+        |rest| {
+            let (rest, exactly) = opt(tag("exactly ")).parse(rest)?;
+            let (rest, n) = parse_number(rest)?;
+            let (rest, comparator) = if exactly.is_some() {
+                (rest, Comparator::EQ)
+            } else {
+                alt((
+                    value(Comparator::LE, tag(" or less")),
+                    value(Comparator::GE, tag(" or greater")),
+                ))
+                .parse(rest)?
+            };
+            Ok((rest, (comparator, n)))
+        },
+    ))
+    .parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -23699,6 +23728,57 @@ mod tests {
                 assert_eq!(aggregate.function(), AggregateFunction::Min);
             }
             other => panic!("expected QuantityComparison with Aggregate, got {other:?}"),
+        }
+    }
+
+    /// CR 208.1: strict comparatives against a fixed threshold — "its power
+    /// is greater than 0" (Dragonborn Immolator's dies trigger) and the
+    /// symmetric "less than N". The comparative head requires a number, so
+    /// the relative-comparison phrases above still route to their own arms.
+    #[test]
+    fn parse_inner_condition_source_power_strict_comparative_fixed_threshold() {
+        let (rest, c) = parse_inner_condition("its power is greater than 0.").unwrap();
+        assert_eq!(rest, ".");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    }
+                );
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+
+        let (rest, c) = parse_inner_condition("its toughness is less than 4.").unwrap();
+        assert_eq!(rest, ".");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::LT);
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Source,
+                        },
+                    }
+                );
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 4 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
         }
     }
 

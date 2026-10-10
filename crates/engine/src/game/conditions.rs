@@ -181,6 +181,17 @@ pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -
     state.enduring_story.contains(&controller)
 }
 
+/// Digital-only Alchemy (no CR entry): True when the given player holds at
+/// least one unconsumed one-time boon. Boons live in `delayed_triggers` as
+/// `DelayedTriggerKind::Boon` entries and are removed the moment they fire,
+/// so mere presence is the whole check — no consumed shell can linger.
+pub(crate) fn eval_has_boon(state: &GameState, controller: PlayerId) -> bool {
+    state
+        .delayed_triggers
+        .iter()
+        .any(|trigger| trigger.kind.is_boon() && trigger.controller == controller)
+}
+
 /// CR 400.7: True when the source permanent entered the battlefield this turn.
 pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: ObjectId) -> bool {
     state

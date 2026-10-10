@@ -33,6 +33,21 @@ pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
     })
 }
 
+/// Digital-only Alchemy (no CR entry): true when the line grants a one-time
+/// boon — "you get a one-time boon with …", "target opponent gets a one-time
+/// boon with …", "that player gets a one-time boon with …", or the same grant
+/// as a trigger/activated consequence ("Whenever …, you get a one-time boon
+/// with …"). The quoted ability inside routinely contains replacement-shaped
+/// tokens ("enters", "counter"), so the top-level router must exclude these
+/// lines from the replacement interceptor and the replacement gate and let
+/// the effect chain parse the grant via `try_parse_boon_creation` instead.
+/// Matches on the wrapper head only — never on the quoted body — so
+/// "if you have a boon" (Underbridge Warlock, no "one-time boon with")
+/// never matches.
+pub(crate) fn is_one_time_boon_grant_line(lower: &str) -> bool {
+    scan_contains(lower, "one-time boon with \"")
+}
+
 /// CR 603.1: `When`/`Whenever`/`At` are the printed templating for triggered
 /// abilities. CR 701.27e adds one more head that is a triggered ability without
 /// using those words — `As ⟨this permanent⟩ transforms into ⟨name⟩, …` — and

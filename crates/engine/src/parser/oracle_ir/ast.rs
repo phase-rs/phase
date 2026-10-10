@@ -872,6 +872,16 @@ pub(crate) enum ImperativeFamilyAst {
     /// Ice Cauldron's "note the type AND AMOUNT..." sibling is intentionally
     /// left unmatched (see `parse_imperative_family_ast`).
     NoteManaSpent,
+    /// Digital-only Alchemy (no CR entry): "note <quantity>" — record a
+    /// number for the resolving player ("note its power", Dragonborn
+    /// Immolator; "note that excess damage", Mephit's Enthusiasm / Molten
+    /// Impact), overwriting any previous note. Read back by
+    /// `QuantityRef::NotedNumber`. The "that excess damage" demonstrative is
+    /// licensed at parse time by trigger-context (see
+    /// `parse_note_number_clause`), not by a sibling condition.
+    NoteNumber {
+        value: QuantityExpr,
+    },
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
         target: TargetFilter,
@@ -3075,6 +3085,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
@@ -3116,6 +3127,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

@@ -34,6 +34,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RetargetChoice { .. }
         | WaitingFor::DistributeAmong { .. }
         | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::RemoveCountersChoice { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,

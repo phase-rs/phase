@@ -2499,6 +2499,27 @@ pub(crate) fn is_valid_attachment_target(
     let Some(attacher) = state.objects.get(&attacher_id) else {
         return false;
     };
+    is_valid_attachment_target_for_attacher(state, attacher_id, attacher, target_id)
+}
+
+/// [`is_valid_attachment_target`] against an explicitly supplied attacher:
+/// the same verdict for a token that does not exist yet, judged from its
+/// projected characteristics. The boon "one of them" offer path
+/// (`effects::token::boon_host_passes_projected_legality`) calls this with
+/// its synthetic Role projection so the offer-time verdict runs the COMPLETE
+/// authority — protection/prohibition, the Enchant filter, and the zone gate
+/// — instead of the protection/prohibition subset, and so offer-time and
+/// entry-time legality cannot drift.
+///
+/// Verdict-identical to [`is_valid_attachment_target`] when `attacher` is the
+/// object stored under `attacher_id`: `attachment_illegality` IS the
+/// projected resolver fed `state.objects.get(&attacher_id)`.
+pub(crate) fn is_valid_attachment_target_for_attacher(
+    state: &GameState,
+    attacher_id: crate::types::identifiers::ObjectId,
+    attacher: &crate::game::game_object::GameObject,
+    target_id: crate::types::identifiers::ObjectId,
+) -> bool {
     let Some(target) = state.objects.get(&target_id) else {
         return false;
     };
@@ -2508,7 +2529,13 @@ pub(crate) fn is_valid_attachment_target(
     // Protection acquired by the host, or a prohibition static, makes the host
     // an illegal attachment target even though the Enchant filter / zone below
     // may still match.
-    if crate::game::effects::attach::attachment_illegality(state, attacher_id, target_id).is_some()
+    if crate::game::effects::attach::attachment_illegality_projected(
+        state,
+        attacher_id,
+        Some(attacher),
+        target_id,
+    )
+    .is_some()
     {
         return false;
     }

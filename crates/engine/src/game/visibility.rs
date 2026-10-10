@@ -107,6 +107,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::CrewVehicle { .. }
         | WaitingFor::StationTarget { .. }

@@ -120,7 +120,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +52: v123 adds FilterProp::PrepareSpell, the BecomePrepared/BecomeUnprepared
 // scope field, SpellCastRecord.prepared_copy_source, CopiableValues.prepare_face
 // and GameObject.copied_prepare_face.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 52;
+// +53: v124 adds one-time boon tags (CreateBoon, NoteNumber, HasBoon,
+// ChooseTokenHost) and retypes the perpetual P/T edit to QuantityExpr.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 53;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -198,7 +200,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +49: wire 103 moves with full-game v121 for player-relative trigger mana.
 // +50: wire 104 moves with full-game v122 for the `TriggeringSourceController` grantee.
 // +51: wire 105 moves with full-game v123 for the prepared-spell qualifier, mass-prepare scope, prepared-copy source and copiable prepare face.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 51;
+// +52: wire 106 moves with full-game v124 for one-time boons.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 52;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

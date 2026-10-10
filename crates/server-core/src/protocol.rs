@@ -3346,6 +3346,11 @@ mod tests {
         }
     }
 
+    /// One-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
+    /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
+    /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
+    /// required `QuantityExpr` `power`/`toughness`. A v123 peer cannot parse
+    /// the new shapes, so it must be refused before it receives v124 state.
     /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
     /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
     /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
@@ -3479,8 +3484,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_123_for_prepared_spell_and_mass_prepare() {
-        assert_eq!(PROTOCOL_VERSION, 123);
+    fn protocol_version_is_124_for_one_time_boons() {
+        assert_eq!(PROTOCOL_VERSION, 124);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3491,7 +3496,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_123_for_prepared_spell_and_mass_prepare` stays
+    /// `protocol_version_is_124_for_one_time_boons` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

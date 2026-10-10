@@ -5669,8 +5669,8 @@ pub(crate) fn create_warp_delayed_trigger(
     events: &mut Vec<GameEvent>,
 ) {
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Effect,
-        ResolvedAbility,
+        AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition,
+        DelayedTriggerKind, Effect, ResolvedAbility,
     };
     use crate::types::phase::Phase;
 
@@ -5729,6 +5729,7 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
             source_id: object_id,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,

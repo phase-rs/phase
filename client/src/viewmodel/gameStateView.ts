@@ -293,6 +293,11 @@ export function getWaitingForClickTargetRefs(
       // mixes both. The engine owns which hosts are legal; the client only routes
       // each ref to the surface that can render it.
       return waitingFor.data.legal_targets;
+    case "ChooseTokenHost":
+      // Digital-only Alchemy (no CR entry): a batch boon's "one of them" host
+      // pick. Same cluster shape as ReturnAsAuraTarget — the engine owns which
+      // stamped entrants are still legal; the client only routes each ref.
+      return waitingFor.data.legal_targets;
     default:
       return null;
   }
@@ -350,6 +355,12 @@ export function getWaitingForObjectChoiceIds(
       // the board; player hosts are projected by
       // `getWaitingForPlayerChoiceIds` above, which every seat-rendering
       // surface reads.
+      return waitingFor.data.legal_targets.flatMap((target) =>
+        "Object" in target ? [target.Object] : [],
+      );
+    case "ChooseTokenHost":
+      // Same mixed-axis projection as ReturnAsAuraTarget: object entrants glow
+      // on the board, player hosts on the seats.
       return waitingFor.data.legal_targets.flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );

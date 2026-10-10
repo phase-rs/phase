@@ -5931,6 +5931,11 @@ pub(crate) fn static_condition_to_ability_condition(
             player: PlayerScope::Controller,
         } => Some(AbilityCondition::IsMonarch),
         StaticCondition::IsMonarch { .. } => None,
+        // Digital-only Alchemy (no CR entry): no `AbilityCondition` boon
+        // variant exists — "if you have a boon" is printed only as a
+        // trigger intervening-if (Underbridge Warlock), which bridges to
+        // `TriggerCondition::HasBoon` instead.
+        StaticCondition::HasBoon { .. } => None,
         StaticCondition::IsInitiative => Some(AbilityCondition::IsInitiative),
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
         // CR 702.195b: The enduring story designation is available to effects.

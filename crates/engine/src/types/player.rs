@@ -189,6 +189,13 @@ pub struct Player {
     /// Stored as card data (not a GameObject) until moved to hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion: Option<CompanionInfo>,
+    /// Digital-only Alchemy (no CR entry): the number this player last noted
+    /// ("note its power", "note that excess damage"). Read by
+    /// `QuantityRef::NotedNumber` ("where X is the noted number",
+    /// Dragonborn Immolator / Mephit's Enthusiasm / Molten Impact). A new
+    /// note overwrites; `None` (nothing noted) reads as 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noted_number: Option<i32>,
 
     /// CR 607.2d / CR 607.2m (by analogy): durable per-player chosen attributes —
     /// the player-axis mirror of `GameObject.chosen_attributes`. Today this holds
@@ -246,6 +253,7 @@ impl Default for Player {
             player_counters: HashMap::new(),
             companion: None,
             chosen_attributes: Vec::new(),
+            noted_number: None,
             can_look_at_top_of_library: false,
             commander_color_identity: Vec::new(),
             status: PlayerStatus::Active,

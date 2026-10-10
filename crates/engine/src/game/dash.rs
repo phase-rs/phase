@@ -17,8 +17,8 @@
 //! on `cast_variant_paid` surviving zone changes.
 
 use crate::types::ability::{
-    ContinuousModification, DelayedTriggerCondition, Duration, Effect, ResolvedAbility,
-    TargetFilter,
+    ContinuousModification, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::ObjectId;
@@ -72,6 +72,7 @@ pub(crate) fn install_dash_riders(
             controller,
             source_id: object_id,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,

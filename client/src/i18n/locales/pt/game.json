@@ -864,6 +864,7 @@
     "chooseCreatureToEquip": "Escolha uma criatura para equipar",
     "chooseCreatureTokenToPopulate": "Escolha uma ficha de criatura para popular",
     "chooseReturnAsAuraTarget": "Escolha um permanente para encantar",
+    "chooseTokenHost": "Escolha um hospedeiro para a ficha",
     "tapUntappedCreatures_one": "Vire {{count}} criatura desvirada",
     "tapUntappedCreatures_other": "Vire {{count}} criaturas desviradas",
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",

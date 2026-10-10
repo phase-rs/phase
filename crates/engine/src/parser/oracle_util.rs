@@ -997,10 +997,24 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
 ///
 /// "this spell" — `oracle_casting.rs` matches literal "this spell" for alternative costs/restrictions.
 /// "this card" — context-dependent in costs, conditions, and static abilities.
+/// "this sorcery" / "this instant" — spell-subject self-reference ("This
+/// sorcery deals 4 damage …", Mephit's Enthusiasm / Molten Impact). Parse-only
+/// like "this spell": a spell subject must stay literal so possessive tails
+/// ("this spell's mana cost") keep matching.
+/// "this boon" — Digital-only Alchemy (no CR entry): the granted one-time
+/// boon as a damage subject ("this boon deals damage …", Molten Impact).
+/// Binds `SelfRef` (the ability source — the granting card); the damage
+/// resolver attributes the damage to the resolving holder through it.
 ///
 /// Used by: `parse_target` (target recognition), `subject.rs` (subject stripping).
 /// NOT used by: `normalize_card_name_refs` (must not replace these with `~`).
-pub const SELF_REF_PARSE_ONLY_PHRASES: &[&str] = &["this spell", "this card"];
+pub const SELF_REF_PARSE_ONLY_PHRASES: &[&str] = &[
+    "this spell",
+    "this card",
+    "this sorcery",
+    "this instant",
+    "this boon",
+];
 
 /// Test whether `text` matches `"{prefix} {word} {suffix}"` for any word in `variants`,
 /// using the given match strategy.

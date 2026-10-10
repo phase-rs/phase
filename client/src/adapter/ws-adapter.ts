@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 124 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
+ *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
+ *       edit retypes power_delta/toughness_delta to required QuantityExpr
+ *       power/toughness. A v123 peer cannot parse the new shapes; the
+ *       exact-match handshake refuses the pairing. P2P moves in lockstep
+ *       (wire 106).
  * 123 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
  *      CR 722.3d), scope on Effect BecomePrepared / BecomeUnprepared (mass
  *      "each creature you control becomes prepared", CR 722.3a + CR 115.10a),
@@ -769,7 +775,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 123;
+export const PROTOCOL_VERSION = 124;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

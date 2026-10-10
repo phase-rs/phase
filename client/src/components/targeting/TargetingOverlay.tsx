@@ -142,6 +142,10 @@ export function TargetingOverlay() {
   // CHOICE (not a target), but the action shape mirrors ExploreChoice
   // (`GameAction::ChooseTarget` with the chosen ObjectId).
   const isReturnAsAuraTarget = waitingFor?.type === "ReturnAsAuraTarget";
+  // Digital-only Alchemy (no CR entry): a batch boon's "one of them" token-host
+  // pick. Picker is a CHOICE (not a target), and the action shape mirrors
+  // ReturnAsAuraTarget (`GameAction::ChooseTarget` with the chosen host ref).
+  const isChooseTokenHost = waitingFor?.type === "ChooseTokenHost";
   // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are picked on the
   // board through this overlay; multi-target retargets keep the dialog.
   const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
@@ -202,6 +206,8 @@ export function TargetingOverlay() {
         : waitingFor?.type === "PopulateChoice"
           ? waitingFor.data.source_id
         : waitingFor?.type === "ReturnAsAuraTarget"
+          ? waitingFor.data.source_id
+        : waitingFor?.type === "ChooseTokenHost"
           ? waitingFor.data.source_id
         : undefined
   );
@@ -290,6 +296,8 @@ export function TargetingOverlay() {
           ? t("targeting.chooseCreatureTokenToPopulate")
           : isReturnAsAuraTarget
             ? t("targeting.chooseReturnAsAuraTarget")
+            : isChooseTokenHost
+              ? t("targeting.chooseTokenHost")
             : isRetargetChoice
               ? (retargetSpellName
                   ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
@@ -363,7 +371,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isBoardChoice, waitingFor]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isChooseTokenHost && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;

@@ -2066,6 +2066,7 @@ impl GameRunner {
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
+            WaitingFor::ChooseTokenHost { .. } => "ChooseTokenHost",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",

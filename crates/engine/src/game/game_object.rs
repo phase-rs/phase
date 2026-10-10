@@ -2202,7 +2202,9 @@ impl GameObject {
         modification: &crate::types::ability::PerpetualModification,
         all_creature_types: &[String],
     ) {
-        use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+        use crate::types::ability::{
+            PerpetualGrantModification, PerpetualModification, QuantityExpr,
+        };
         use crate::types::card_type::CoreType;
         match modification {
             PerpetualModification::SetBasePowerToughness { power, toughness } => {
@@ -2215,9 +2217,31 @@ impl GameObject {
                 self.layer_base_toughness = Some(*toughness);
             }
             PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power,
+                toughness,
+                keywords,
             } => {
+                // Digital-only Alchemy (no CR entry): live (non-`Fixed`)
+                // exprs cannot be installed — this installer has no game
+                // state to evaluate against. `effects/perpetual.rs` (the
+                // single caller) freezes exprs to `Fixed` first. A live
+                // expr reaching here is a bug: refuse to install AND refuse
+                // to record (the post-match `perpetual_mods` push must never
+                // persist an uninstalled mod — cf. the `GrantAbility`
+                // wildcard note below).
+                let (
+                    QuantityExpr::Fixed { value: power_delta },
+                    QuantityExpr::Fixed {
+                        value: toughness_delta,
+                    },
+                ) = (power, toughness)
+                else {
+                    debug_assert!(
+                        false,
+                        "live P/T exprs must be frozen by effects/perpetual.rs"
+                    );
+                    return;
+                };
                 let base_power = self
                     .base_power
                     .or(self.power)
@@ -2232,6 +2256,16 @@ impl GameObject {
                 self.base_toughness = Some(base_toughness);
                 self.layer_base_power = Some(base_power);
                 self.layer_base_toughness = Some(base_toughness);
+                // Mixed "perpetually gets +N/+M and gains [keywords]" (Jaheira):
+                // same live+base grant as the standalone GrantKeywords arm.
+                for keyword in keywords {
+                    if !self.keywords.contains(keyword) {
+                        self.keywords.push(keyword.clone());
+                    }
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
+                }
             }
             PerpetualModification::GrantKeywords { keywords } => {
                 for keyword in keywords {

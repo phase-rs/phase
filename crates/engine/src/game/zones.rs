@@ -1867,6 +1867,12 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
         .objects
         .get(&object_id)
         .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
+    // CR 400.7: entries from no zone are created in place — no `move_to_zone`
+    // call fills the entered incarnation — so the authority fills it here from
+    // the birth incarnation, mirroring the battlefield arm there. Without it,
+    // entry-event pins (`zone_change_parent_target_pin`) and arrival
+    // forwarding cannot see token/conjured entrants at all.
+    record.entered_incarnation = state.objects.get(&object_id).map(|obj| obj.incarnation);
     super::restrictions::record_zone_change(state, &mut record);
     events.push(GameEvent::ZoneChanged {
         object_id,

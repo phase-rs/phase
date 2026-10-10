@@ -1292,8 +1292,34 @@ fn next_nested_ability_quote_span(body: &str, search_from: usize) -> Option<(usi
     }
     let open_quote = next_open?;
     let content_start = open_quote + 1;
-    let rel_close = body[content_start..].find('\'')?;
-    let close_quote = content_start + rel_close;
+    // Digital-only Alchemy (no CR entry): the closer is the next `'` that is
+    // NOT a mid-word apostrophe. A naive first-quote close breaks on
+    // contractions inside the granted ability (Bloodrage Alpha's boon: "…
+    // you don't control.'" closed at "don", corrupting the granted trigger
+    // and stranding "t control.'"). A `'` with word characters on BOTH sides
+    // is always an apostrophe, never a delimiter; the genuine closer follows
+    // sentence punctuation (`.'`) or whitespace.
+    let bytes = body.as_bytes();
+    let mut rel_close = None;
+    for (i, ch) in body[content_start..].char_indices() {
+        if ch != '\'' {
+            continue;
+        }
+        let abs = content_start + i;
+        let prev_word = abs
+            .checked_sub(1)
+            .and_then(|p| bytes.get(p))
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        let next_word = bytes
+            .get(abs + 1)
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        if prev_word && next_word {
+            continue;
+        }
+        rel_close = Some(i);
+        break;
+    }
+    let close_quote = content_start + rel_close?;
     Some((open_quote, close_quote))
 }
 

@@ -12,8 +12,8 @@
 
 use crate::game::targeting::extract_source_from_event;
 use crate::types::ability::{
-    CastingPermission, DelayedTriggerCondition, Effect, EffectError, EffectKind, ExiledSpellRider,
-    PermissionGrantee, ResolvedAbility, TargetFilter, TargetRef,
+    CastingPermission, DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError,
+    EffectKind, ExiledSpellRider, PermissionGrantee, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -221,6 +221,7 @@ fn arm_return_to(
             source_id,
             // CR 603.7b: one-shot — removed after it fires.
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,

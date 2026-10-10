@@ -396,6 +396,7 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsBlocking
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::WasStartingPlayer { .. }

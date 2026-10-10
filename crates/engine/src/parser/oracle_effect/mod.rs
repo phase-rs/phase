@@ -98,10 +98,10 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target, parse_target,
-    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    resolve_singular_exiled_card_target, TargetSyntax,
+    parse_anaphoric_target_ref, parse_definite_parent_reference, parse_event_context_ref,
+    parse_fight_target, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -11656,7 +11656,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // Digital-only Alchemy: "[~/that X] perpetually gets +N/+M" — persistent
     // base P/T modifier (Heir to Dragonfire, Tiana's Vehicle).
-    if let Some(effect) = try_parse_perpetual_modify_pt(tp) {
+    if let Some(effect) = try_parse_perpetual_modify_pt(tp, ctx) {
         return parsed_clause(effect);
     }
 
@@ -12086,8 +12086,26 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
 /// [`TargetFilter::ParentTarget`] (the trigger/event object, e.g. Tiana's
 /// crewed Vehicle). The clause tail must be fully consumed so compound riders
 /// on other perpetual forms fall through to `Unimplemented`.
-fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
-    try_parse_perpetual_modify_pt_single(tp).or_else(|| perpetual_modify_pt_gap(tp))
+fn try_parse_perpetual_modify_pt(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
+    try_parse_perpetual_modify_pt_single(tp, ctx).or_else(|| perpetual_modify_pt_gap(tp))
+}
+
+/// Mixed perpetual rider: " and gains/gain <keyword list>" (Jaheira, Stirring
+/// Harper's boon; By Elspeth's Command mode 1). The leading "perpetually"
+/// scopes over the compound verb phrase, so the keywords join the SAME
+/// modification (cf. `Become`'s combined P/T + keywords payload) rather than
+/// a temporary grant. Reuses the standalone perpetual keyword-list grammar
+/// (evergreen table + the "storm" supplement). Returns the keywords and the
+/// remaining tail; the caller still requires `tail_done`.
+fn parse_mixed_perpetual_keyword_rider(rest: &str) -> Option<(Vec<Keyword>, &str)> {
+    let (after_and, _) = alt((
+        tag::<_, _, OracleError<'_>>(" and gains "),
+        tag::<_, _, OracleError<'_>>(" and gain "),
+    ))
+    .parse(rest)
+    .ok()?;
+    sequence::parse_keyword_grant_list(after_and)
+        .or_else(|| parse_perpetual_non_evergreen_keyword(after_and))
 }
 
 /// "<subject> perpetually get(s) " head used by the gap arm: splits
@@ -12235,11 +12253,12 @@ fn parse_zone_list_tail(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// A "perpetually get(s) ±" clause no arm above can model faithfully (a dynamic
-/// "+X/+X where X is …" amount, a compound subject, a battlefield-wide or
-/// random/topmost subject, a trailing rider). `ModifyPowerToughness` carries
-/// fixed deltas and the resolver has no such subject binding, so lowering it to
-/// the generic pump would silently turn a permanent edit into an
+/// A "perpetually get(s) ±" clause no arm above can model faithfully (a
+/// declared-target dynamic "+X/+X where X is …" amount, a `-X` axis, a
+/// compound subject, a battlefield-wide or random/topmost subject, a trailing
+/// rider). The "it"/"that"/self dynamic form is modelled by
+/// `try_parse_perpetual_modify_pt_dynamic`; what remains here would lower to
+/// the generic pump and silently turn a permanent edit into an
 /// until-end-of-turn one. Fail closed instead.
 ///
 /// Zone-wide subjects ("creature cards in your graveyard perpetually get +1/+1")
@@ -12263,12 +12282,172 @@ fn perpetual_modify_pt_gap(tp: TextPair) -> Option<Effect> {
     Some(Effect::unimplemented("perpetual_modify_pt", tp.original))
 }
 
-fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
+/// Validate a perpetual arm's "that <subject>" demonstrative through the
+/// shared anaphor grammar, returning the text after the subject phrase.
+/// A compound ("that Artifact and this creature") or unmodelled noun phrase
+/// fails closed (`None` → honest gap) instead of silently becoming a
+/// single-object edit; the caller additionally requires the remainder to
+/// start with "perpetually ", so a partially consumed subject (trailing
+/// conjuncts) also fails closed.
+fn validated_that_subject_rest(head_lower: &str) -> Option<&str> {
+    let (_, rest) = parse_anaphoric_target_ref(head_lower, true)?;
+    Some(rest)
+}
+
+/// Digital-only Alchemy (no CR entry): parse the dynamic "perpetually gets
+/// +X/+X / +X/+0, where X is …" form (Rothga, Bonded Engulfer; Dragonborn
+/// Immolator; Mephit's Enthusiasm) into [`Effect::ApplyPerpetual`] with
+/// [`PerpetualModification::ModifyPowerToughness`] carrying live exprs, which
+/// the resolver evaluates once at application time and freezes to `Fixed`.
+///
+/// Subjects mirror the fixed arm: "it" / "that …" (the trigger/event object,
+/// [`TargetFilter::ParentTarget`]) and the self list (`~` / "this creature" /
+/// …, [`TargetFilter::Any`]). A declared-target subject ("target creature …
+/// +X …") stays a gap — no printed card needs it. Each X axis binds the
+/// where-X tail parsed by the shared [`lower::parse_where_x_quantity_expression`];
+/// a missing tail, an unparseable tail, a `-X` axis, or a non-X variable
+/// fails closed.
+///
+/// CR 608.2k: in an "it"/"that" clause the tail pronoun ("its power")
+/// names the triggering object, so the tail parses owner-threaded
+/// (`parse_where_x_quantity_expression_with_owner` with `EventSource`): bare,
+/// composed ("2 plus its power"), and nested pronouns bind the owner
+/// structurally during the shared CDA recursion, and any residual `Anaphoric`
+/// scope rebinds to the same owner. Explicit self-references ("~'s power")
+/// never match the pronoun grammar and keep `Source`. Self subjects keep the
+/// tail's scopes as parsed.
+fn try_parse_perpetual_modify_pt_dynamic(tp: TextPair) -> Option<Effect> {
+    let (head, where_x) = lower::strip_trailing_where_x(tp);
+    let where_x = where_x?;
+    let head_lower = head.lower;
+
+    /// Whether the clause subject is the trigger/event anaphor ("it" /
+    /// "that …", `ParentTarget`) or the ability source (`~` / …, `Any`).
+    /// Only the anaphor retargets a tail pronoun to the triggering object.
+    #[derive(PartialEq, Eq)]
+    enum DynamicSubject {
+        TriggerAnaphor,
+        Source,
+    }
+
+    // Subject dispatch (mirrors the fixed arm's heads).
+    let (delta_text, target, subject) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(head_lower) {
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            (
+                rest,
+                TargetFilter::ParentTarget,
+                DynamicSubject::TriggerAnaphor,
+            )
+        } else if tag::<_, _, OracleError<'_>>("that ")
+            .parse(head_lower)
+            .is_ok()
+        {
+            let after_subject = validated_that_subject_rest(head_lower)?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(after_subject.trim_start())
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            (
+                rest,
+                TargetFilter::ParentTarget,
+                DynamicSubject::TriggerAnaphor,
+            )
+        } else {
+            let after_subject = [
+                "~ ",
+                "this creature ",
+                "this artifact ",
+                "this enchantment ",
+                "this permanent ",
+                "this token ",
+                "this card ",
+            ]
+            .iter()
+            .find_map(|subject| {
+                tag::<_, _, OracleError<'_>>(*subject)
+                    .parse(head_lower)
+                    .ok()
+                    .map(|(rest, _)| rest)
+            })?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(after_subject)
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            (rest, TargetFilter::Any, DynamicSubject::Source)
+        };
+
+    let (power_value, toughness_value) =
+        lower::parse_pt_modifier(delta_text.trim_end_matches('.').trim())?;
+    let is_x = |value: &PtValue| matches!(value, PtValue::Variable(alias) if alias.eq_ignore_ascii_case("X"));
+    if !is_x(&power_value) && !is_x(&toughness_value) {
+        // Both axes fixed: the fixed arm owns this shape (its `tail_done`
+        // rejects the where-X tail, so it stays an honest gap there).
+        return None;
+    }
+    let x = if subject == DynamicSubject::TriggerAnaphor {
+        // The anaphoric pronoun ("its power", "2 plus its power") names the
+        // triggering object — bind it STRUCTURALLY via the owner-threaded
+        // tail parse (the owner rides the shared CDA recursion, so composed
+        // and nested forms bind at every level). Any residual `Anaphoric`
+        // scope rebinds to the same owner; explicit "~'s" keeps `Source`.
+        let mut parsed = lower::parse_where_x_quantity_expression_with_owner(
+            &where_x,
+            ObjectScope::EventSource,
+        )?;
+        rebind_anaphoric_object_scope(&mut parsed, ObjectScope::EventSource);
+        parsed
+    } else {
+        lower::parse_where_x_quantity_expression(&where_x)?
+    };
+    let bind = |value: PtValue| -> Option<QuantityExpr> {
+        match value {
+            PtValue::Fixed(n) => Some(QuantityExpr::Fixed { value: n }),
+            PtValue::Variable(alias) if alias.eq_ignore_ascii_case("X") => Some(x.clone()),
+            _ => None,
+        }
+    };
+    Some(Effect::ApplyPerpetual {
+        target,
+        modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+            power: bind(power_value)?,
+            toughness: bind(toughness_value)?,
+            // No printed dynamic inner carries a keyword rider; the mixed
+            // shape stays fixed-form-only and fails closed here.
+            keywords: Vec::new(),
+        },
+    })
+}
+
+fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
 
     let lower = tp.lower;
+
+    // Digital-only Alchemy (no CR entry): dynamic "+X/+X / +X/+0, where X
+    // is …" (Rothga, Bonded Engulfer; Dragonborn Immolator; Mephit's
+    // Enthusiasm). Tried before the fixed arms: disjoint (fixed deltas
+    // reject X), so existing cards are untouched.
+    if let Some(effect) = try_parse_perpetual_modify_pt_dynamic(tp) {
+        return Some(effect);
+    }
 
     // Explicit target form: "Target creature perpetually gets -2/-0."
     // `parse_target` owns the target/filter grammar; this arm only recognizes the
@@ -12291,23 +12470,31 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
             .ok()?;
             let (rest, (power_delta, toughness_delta)) =
                 nom_primitives::parse_pt_modifier(rest).ok()?;
+            // Mixed "… and gains [keywords]" rider (By Elspeth's Command mode
+            // 1): the explicit target is always bound, so no context gate.
+            let (rest, keywords) = parse_mixed_perpetual_keyword_rider(rest)
+                .map(|(keywords, rest)| (rest, keywords))
+                .unwrap_or((rest, Vec::new()));
             return tail_done(rest).then_some(Effect::ApplyPerpetual {
                 target,
                 modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                    power_delta,
-                    toughness_delta,
+                    power: QuantityExpr::Fixed { value: power_delta },
+                    toughness: QuantityExpr::Fixed {
+                        value: toughness_delta,
+                    },
+                    keywords,
                 },
             });
         }
     }
 
-    // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
-    if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
-        let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
-            .parse(after_that)
-            .ok()?;
+    // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0". The
+    // subject validates through the shared anaphor grammar (compounds and
+    // unmodelled phrases fail closed — see `validated_that_subject_rest`).
+    if tag::<_, _, OracleError<'_>>("that ").parse(lower).is_ok() {
+        let after_subject = validated_that_subject_rest(lower)?;
         let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-            .parse(rest)
+            .parse(after_subject.trim_start())
             .ok()?;
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gets "),
@@ -12320,8 +12507,12 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power: QuantityExpr::Fixed { value: power_delta },
+                toughness: QuantityExpr::Fixed {
+                    value: toughness_delta,
+                },
+                // No printed "that <type>" inner carries a keyword rider.
+                keywords: Vec::new(),
             },
         });
     }
@@ -12336,11 +12527,27 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
         .ok()?;
         let (rest, (power_delta, toughness_delta)) =
             nom_primitives::parse_pt_modifier(rest).ok()?;
+        // Mixed "… and gains [keywords]" rider (Jaheira's boon inner): a bare
+        // "it" is only bound when the enclosing trigger body pinned an
+        // object-pronoun antecedent. Standalone ("It perpetually gets +1/+1
+        // and gains vigilance", By Elspeth's Command mode 2 / #6965) has no
+        // antecedent, so the rider stays declined and the clause keeps
+        // failing closed exactly as before.
+        let (rest, keywords) = if ctx.object_pronoun_ref.is_some() {
+            parse_mixed_perpetual_keyword_rider(rest)
+                .map(|(keywords, rest)| (rest, keywords))
+                .unwrap_or((rest, Vec::new()))
+        } else {
+            (rest, Vec::new())
+        };
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power: QuantityExpr::Fixed { value: power_delta },
+                toughness: QuantityExpr::Fixed {
+                    value: toughness_delta,
+                },
+                keywords,
             },
         });
     }
@@ -12374,8 +12581,12 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
     tail_done(rest).then_some(Effect::ApplyPerpetual {
         target: TargetFilter::Any,
         modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-            power_delta,
-            toughness_delta,
+            power: QuantityExpr::Fixed { value: power_delta },
+            toughness: QuantityExpr::Fixed {
+                value: toughness_delta,
+            },
+            // No printed self-subject inner carries a keyword rider.
+            keywords: Vec::new(),
         },
     })
 }
@@ -14424,6 +14635,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
@@ -19360,7 +19572,9 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     // effect.
     {
         let lower = text.to_lowercase();
-        if try_parse_emblem_creation(&lower, text).is_some() {
+        if try_parse_emblem_creation(&lower, text).is_some()
+            || try_parse_boon_creation(&lower, text).is_some()
+        {
             return ClauseAst::Imperative {
                 text: text.to_string(),
             };
@@ -28635,6 +28849,90 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     }
 }
 
+/// Digital-only Alchemy (no CR entry): parse one-time-boon creation from
+/// Oracle text — "you get a one-time boon with \"[trigger]\"", "target
+/// opponent gets a one-time boon with \"[trigger]\"", "that player gets a
+/// one-time boon with \"[trigger]\"", plus the subject-stripped "get/gets a
+/// one-time boon with \"[trigger]\"" forms. Every printed boon grants exactly
+/// one trigger, always trigger-shaped inside the quotes.
+///
+/// The quoted text routes to the SAME recognizers a printed trigger line
+/// would: the cast-enters-with-counters shape first (boon inners print the
+/// singular "When you cast …" and both "enters with" / "enters the
+/// battlefield with" frames, all accepted by the shared grammar), then the
+/// generic trigger parser. Anything else fails closed to an explicit
+/// `one_time_boon` gap — the wrapper must never reach the counter grammar
+/// (issue #7495).
+fn try_parse_boon_creation(lower: &str, original: &str) -> Option<Effect> {
+    // Strip the recipient head and get the original-case remainder. Longest
+    // heads first so a bare "gets …" can never shadow a named subject.
+    let (recipient, rest) = nom_on_lower(original, lower, |i| {
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: Vec::new(),
+                    controller: Some(ControllerRef::Opponent),
+                    properties: Vec::new(),
+                }),
+                tag("target opponent gets a one-time boon with "),
+            ),
+            value(
+                TargetFilter::TriggeringPlayer,
+                tag("that player gets a one-time boon with "),
+            ),
+            value(
+                TargetFilter::Controller,
+                tag("you get a one-time boon with "),
+            ),
+            value(TargetFilter::Controller, tag("get a one-time boon with ")),
+            value(
+                TargetFilter::ParentTarget,
+                tag("gets a one-time boon with "),
+            ),
+        ))
+        .parse(i)
+    })?;
+
+    // Remove only the boon's OUTER quote wrapper, then promote any nested
+    // single-quoted granted ability to double quotes (Bloodrage Alpha's
+    // "… it gains 'When this creature enters, …'"), mirroring the emblem
+    // path so the standard grant parsers recognise it.
+    let body = strip_balanced_outer_quotes(rest);
+    let promoted = crate::parser::oracle_static::promote_nested_ability_quotes(body);
+    let inner = promoted.trim().trim_end_matches('.').trim();
+
+    if inner.is_empty() {
+        return Some(Effect::unimplemented("one_time_boon", original));
+    }
+
+    // The cast-enters-with-counters inners ("When you cast a creature spell,
+    // that creature enters with …") lower through the dedicated trigger
+    // recognizer, which builds the SpellCast trigger plus the floating
+    // install — the generic trigger parser cannot see that shape.
+    if let Some(trigger) =
+        crate::parser::oracle_replacement::parse_whenever_you_cast_enters_with_trigger(inner, "~")
+    {
+        let mut trigger = trigger;
+        trigger.description = Some(inner.to_string());
+        return Some(Effect::CreateBoon {
+            recipient,
+            trigger: Box::new(trigger),
+        });
+    }
+
+    // Every other printed inner is an ordinary trigger line.
+    let mut trigger = crate::parser::oracle_trigger::parse_trigger_line(inner, "~");
+    if !matches!(trigger.mode, TriggerMode::Unknown(_)) && trigger.execute.is_some() {
+        trigger.description = Some(inner.to_string());
+        return Some(Effect::CreateBoon {
+            recipient,
+            trigger: Box::new(trigger),
+        });
+    }
+
+    Some(Effect::unimplemented("one_time_boon", original))
+}
+
 /// CR 109.2b: the bare informational head-noun WORD that closes a cast type
 /// gate — "spell(s)" / "card(s)". CR 109.2b: "If a spell or ability uses a
 /// description of an object that includes the word 'spell,' it means a spell
@@ -32361,6 +32659,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy (no CR entry): the creation clause owns the boon's
+    // quoted trigger; parse its envelope before broad imperative families can
+    // claim the body (issue #7495).
+    if let Some(effect) = try_parse_boon_creation(tp.lower, tp.original) {
+        return parsed_clause(effect);
+    }
+
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
@@ -35238,6 +35543,22 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         Effect::Discover {
             mana_value_limit, ..
         } => f(mana_value_limit),
+        // Digital-only Alchemy (no CR entry): the noted value ("note their
+        // power") and a perpetual P/T delta's exprs ("…where X is their …")
+        // surface possessive quantities, so scope/possessive rewrites must
+        // reach them. Other `PerpetualModification` variants carry no
+        // `QuantityExpr`.
+        Effect::NoteNumber { value, .. } => f(value),
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power, toughness, ..
+                },
+            ..
+        } => {
+            f(power);
+            f(toughness);
+        }
         // CR 109.5: "you"/"your" in a delayed payload resolve to the delayed
         // ability's controller (the creating spell's or ability's controller,
         // per CR 603.7d-f), so its nested quantity references need the same
@@ -35743,9 +36064,17 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     each_quantity_expr_mut(&mut def.effect, &mut |expr| {
         each_quantity_ref_mut(expr, &mut rewrite_quantity_ref)
     });
-    // CR 109.5: Explicit All scopes retain Controller for their ScopedPlayer rewrite;
-    // inherited opponent-decline nodes have no local scope and still rebind here.
-    if !matches!(def.player_scope, Some(PlayerFilter::All))
+    // CR 109.5: Only scopeless decline nodes rebind here. A scopeless node
+    // inherits its iteration from an outer "for each opponent who doesn't",
+    // so its `Controller` refs mean the fixed printed controller ("you") and
+    // must survive the fan-out as `OriginalController`. A node with its OWN
+    // local scope ("If you don't, each opponent draws a card" — Valiant
+    // Batrider's boon) has self-contained subjects: its `Controller` refs
+    // are the fan-out iteration variable and must stay rebindable, so the
+    // decline rebind must not touch them. (Explicit `All` scopes were already
+    // excluded for their own `ScopedPlayer` rewrite below; `is_none` subsumes
+    // that exclusion.)
+    if def.player_scope.is_none()
         && def
             .condition
             .as_ref()
@@ -36235,6 +36564,13 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
             rebind_event_context_amount_counts_in_ability(inner, gate_qty);
         }
+        // Digital-only Alchemy (no CR entry): a boon's granted body is a
+        // CR 603.7 payload like a delayed trigger's — same rebind.
+        Effect::CreateBoon { trigger, .. } => {
+            if let Some(execute) = trigger.execute.as_deref_mut() {
+                rebind_event_context_amount_counts_in_ability(execute, gate_qty);
+            }
+        }
         Effect::Vote {
             per_choice_effect,
             subject,
@@ -36464,6 +36800,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

@@ -121,6 +121,7 @@ function currentPromptSummary({
     case "CopyTargetChoice":
     case "CopyRetarget":
     case "ReturnAsAuraTarget":
+    case "ChooseTokenHost":
     case "ExploreChoice":
     case "PopulateChoice":
       return t("help.prompt.targetSelection");

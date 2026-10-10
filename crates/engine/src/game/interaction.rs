@@ -305,6 +305,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::RevealChoice { .. }
@@ -564,6 +565,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
@@ -4773,6 +4775,7 @@ fn selection_projection(
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }

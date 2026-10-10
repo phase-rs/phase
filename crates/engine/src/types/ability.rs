@@ -5905,6 +5905,35 @@ impl DelayedTriggerPlayerBinding {
     }
 }
 
+/// Which family a `DelayedTrigger` entry belongs to. A one-time boon is a
+/// structurally distinct entry (holder-relative matching, "if you have a
+/// boon" membership, the boon-only embedded-condition gate), not a flag on
+/// an ordinary entry — hence a typed axis rather than a bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DelayedTriggerKind {
+    /// DEFAULT — an ordinary CR 603.7 delayed trigger. Every pre-existing
+    /// entry is this variant.
+    #[default]
+    Ordinary,
+    /// Digital-only Alchemy (no CR entry): a one-time boon installed by
+    /// `Effect::CreateBoon`.
+    Boon,
+}
+
+impl DelayedTriggerKind {
+    /// Serde skip-helper: `Ordinary` is the default and is omitted from
+    /// JSON, so every pre-existing serialized delayed trigger round-trips
+    /// byte-identical.
+    pub fn is_ordinary(&self) -> bool {
+        matches!(self, DelayedTriggerKind::Ordinary)
+    }
+
+    /// True for a one-time boon entry.
+    pub fn is_boon(self) -> bool {
+        matches!(self, DelayedTriggerKind::Boon)
+    }
+}
+
 /// When a delayed triggered ability fires (CR 603.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -9830,6 +9859,11 @@ pub enum QuantityRef {
         )]
         channel: DamageChannel,
     },
+    /// Digital-only Alchemy (no CR entry): the resolving player's noted
+    /// number (`Player::noted_number`) — "where X is the noted number"
+    /// (Dragonborn Immolator / Mephit's Enthusiasm / Molten Impact). Reads
+    /// 0 when nothing was noted (digital-only engine convention; no CR entry).
+    NotedNumber,
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
@@ -10194,6 +10228,7 @@ impl QuantityRef {
             | QuantityRef::ZoneChangeAggregateThisTurn { .. }
             | QuantityRef::DamageDealtThisTurn { .. }
             | QuantityRef::ChosenNumber
+            | QuantityRef::NotedNumber
             | QuantityRef::AttackedThisTurn { .. }
             | QuantityRef::DescendedThisTurn
             | QuantityRef::SpellsCastLastTurn
@@ -12246,6 +12281,17 @@ pub enum StaticCondition {
         )]
         player: PlayerScope,
     },
+    /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
+    /// `player` holds at least one unconsumed one-time boon. Static-side
+    /// spelling of [`TriggerCondition::HasBoon`], bridged 1:1 for
+    /// intervening-ifs; only `Controller` is printed (Underbridge Warlock).
+    HasBoon {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 726.3: True when the controller has the initiative.
     IsInitiative,
     /// CR 725.1: True when no player holds the monarch designation. Distinct
@@ -12553,7 +12599,11 @@ impl StaticCondition {
     pub(crate) fn designation_anchor(&self) -> Option<(Designation, &PlayerScope)> {
         match self {
             StaticCondition::IsMonarch { player } => Some((Designation::Monarch, player)),
-            StaticCondition::DevotionGE { .. }
+            // Digital-only Alchemy (no CR entry): a held boon is not a CR
+            // designation — several players can hold boons at once — so it
+            // carries no designation anchor.
+            StaticCondition::HasBoon { .. }
+            | StaticCondition::DevotionGE { .. }
             | StaticCondition::IsPresent { .. }
             | StaticCondition::ChosenColorIs { .. }
             | StaticCondition::ChosenLabelIs { .. }
@@ -12684,6 +12734,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
             | StaticCondition::HasCityBlessing
@@ -12917,6 +12968,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
             | StaticCondition::HasCityBlessing
@@ -13034,6 +13086,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
             | StaticCondition::HasCityBlessing
@@ -16559,9 +16612,32 @@ pub enum PerpetualModification {
     SetBasePowerToughness { power: i32, toughness: i32 },
     /// "[object] perpetually gets +N/+M" — permanently modifies base power and
     /// toughness by the given deltas (Heir to Dragonfire, Tiana's Vehicle).
+    /// Fixed deltas are `QuantityExpr::Fixed`; the dynamic "+X/+X / +X/+0,
+    /// where X is …" form (Rothga, Bonded Engulfer; Dragonborn Immolator;
+    /// Mephit's Enthusiasm) carries live exprs that `effects/perpetual.rs`
+    /// evaluates ONCE at application time and freezes to `Fixed` before
+    /// installing — perpetual edits are permanent, never live expressions,
+    /// so only `Fixed` may ever persist in `perpetual_mods`.
+    ///
+    /// The leading "perpetually" scopes over a compound verb phrase, so the
+    /// mixed "[subject] perpetually gets +N/+M and gains [keyword(s)]" shape
+    /// (Jaheira, Stirring Harper's boon; By Elspeth's Command) carries its
+    /// keywords here, mirroring `Become`'s combined P/T + keywords payload —
+    /// one application, one recording, no sibling variant. Empty (and off the
+    /// wire) for every pure-P/T edit.
+    ///
+    /// Pre-#7495 snapshots stored these deltas as bare-integer
+    /// `power_delta`/`toughness_delta`; the aliases below keep those saves
+    /// decodable, with the bare ints riding the existing `QuantityExpr`
+    /// legacy-integer decoder into `Fixed`. Canonical emission stays the
+    /// tagged `power`/`toughness` form.
     ModifyPowerToughness {
-        power_delta: i32,
-        toughness_delta: i32,
+        #[serde(alias = "power_delta")]
+        power: QuantityExpr,
+        #[serde(alias = "toughness_delta")]
+        toughness: QuantityExpr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<crate::types::keywords::Keyword>,
     },
     /// "[object] perpetually gains [keyword] [and [keyword]]" — permanently
     /// grants evergreen keywords (Monoist Gravliner station trigger).
@@ -19030,6 +19106,36 @@ pub enum Effect {
         #[serde(default)]
         triggers: Vec<TriggerDefinition>,
     },
+    /// Digital-only Alchemy (no CR entry): "you get a one-time boon with
+    /// `<ability>`" grants the recipient a single-use trigger. Resolved by
+    /// `game::effects::create_boon` into a Persistent one-shot
+    /// `WhenNextEvent` delayed trigger (`DelayedTriggerKind::Boon`), so
+    /// one-shot removal, intervening-if gating, and cross-turn persistence
+    /// all reuse the CR 603.7 machinery. The `trigger` keeps its parsed
+    /// `execute` here; resolve splits it into the delayed condition matcher
+    /// (execute stripped) and the delayed ability.
+    CreateBoon {
+        /// The boon holder: `Controller` ("you get"), a player-shaped
+        /// `Typed` filter ("target opponent gets", which declares a target
+        /// slot), `TriggeringPlayer` ("that player gets"), or `ParentTarget`
+        /// (subject-stripped "gets", inheriting the chain target). Lowered
+        /// to a concrete player at resolution; the delayed trigger is
+        /// controlled by the holder, not necessarily the creator.
+        recipient: TargetFilter,
+        /// The granted trigger, exactly as printed inside the quotes,
+        /// `execute` included. Always trigger-shaped on every printed card.
+        trigger: Box<TriggerDefinition>,
+    },
+    /// Digital-only Alchemy (no CR entry): "note <number>" — record a number
+    /// for the resolving player ("note its power", Dragonborn Immolator;
+    /// "note that excess damage", Mephit's Enthusiasm / Molten Impact),
+    /// overwriting any previous note. Read back by
+    /// `QuantityRef::NotedNumber` ("where X is the noted number"). Stored on
+    /// `Player::noted_number`, so the note survives zone changes and turns
+    /// until a later boon trigger reads it.
+    NoteNumber {
+        value: QuantityExpr,
+    },
     /// CR 118.1: Pay a cost during effect resolution. Carries the unified
     /// `AbilityCost` taxonomy directly (no parallel `PaymentCost` hierarchy) so
     /// resolution-time costs route through the single payment authority
@@ -20628,6 +20734,7 @@ pub enum NestedDefinitionEdge {
     SeparateIntoPilesUnchosen,
     RevealFromHandOnDecline,
     CreateDelayedTriggerEffect,
+    CreateBoonTrigger,
     RollDieResult,
     FlipCoinWin,
     FlipCoinLose,
@@ -22372,6 +22479,14 @@ impl Effect {
             // announced as a target, but surfacing the filter keeps chain-time
             // resolution consistent.
             Effect::HideawayConceal { target, .. } => Some(target),
+            // Digital-only Alchemy (no CR entry): surface the boon recipient
+            // so "target opponent gets a one-time boon" (Loch Larent)
+            // declares its player slot and CR 608.2b re-validates it at
+            // resolution. The context-ref recipients (`Controller`,
+            // `TriggeringPlayer`, `ParentTarget`) claim no slot via the
+            // `is_context_ref` guard downstream, exactly like
+            // `BecomeMonarch`'s printed default above.
+            Effect::CreateBoon { recipient, .. } => Some(recipient),
 
             // Heist targets the opponent whose library is heisted.
             Effect::Heist { target, .. } => Some(target),
@@ -22799,6 +22914,9 @@ impl Effect {
             // CR 106.1b: NoteManaSpent has no target field — it reads back a
             // payment already made on its own source, nothing to target.
             | Effect::NoteManaSpent => None,
+            // Digital-only Alchemy (no CR entry): NoteNumber writes the
+            // resolving player's own note — no target field, nothing to slot.
+            | Effect::NoteNumber { .. } => None,
             // CR 115.1 + CR 601.2c: "two target players each reveal the top card of
             // their library" (Parker Luck) needs a stack-time player target slot so
             // the multi_target spec expands to one slot per revealer. Scoped to the
@@ -23315,6 +23433,10 @@ impl Effect {
             // CR 114.1: an emblem is a distinct object in the command zone; its
             // abilities are the emblem's.
             | Effect::CreateEmblem { .. }
+            // Digital-only Alchemy (no CR entry): a boon installs a delayed
+            // trigger for its holder; the trigger's own body is a separate
+            // ability resolved later, never a move by this node.
+            | Effect::CreateBoon { .. }
             // CR 611.2: a continuous effect; any `GrantAbility` inside belongs to
             // the affected object.
             | Effect::GenericEffect { .. }
@@ -23457,6 +23579,7 @@ impl Effect {
             | Effect::Myriad
             | Effect::NoOp
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::OpponentGuess { .. }
             | Effect::PairWith { .. }
             | Effect::PhaseIn { .. }
@@ -23639,6 +23762,24 @@ impl Effect {
             }
             Effect::Scry { count, .. } => {
                 f(count);
+            }
+            // Digital-only Alchemy (no CR entry): the noted `value` is a live
+            // quantity — visit it so fixed-ness audits see through the note.
+            Effect::NoteNumber { value } => {
+                f(value);
+            }
+            // Digital-only Alchemy (no CR entry): a perpetual P/T delta's
+            // exprs are live quantities pre-freeze — visit them so
+            // fixed-ness audits see through the modification. Other
+            // `PerpetualModification` variants carry no `QuantityExpr` and
+            // stay in the empty arm below.
+            Effect::ApplyPerpetual {
+                modification:
+                    PerpetualModification::ModifyPowerToughness { power, toughness, .. },
+                ..
+            } => {
+                f(power);
+                f(toughness);
             }
             Effect::PumpAll {
                 power, toughness, ..
@@ -24085,6 +24226,7 @@ impl Effect {
             | Effect::GrantNextSpellAbility { .. }
             | Effect::AddPendingEntersModifications { .. }
             | Effect::CreateEmblem { .. }
+            | Effect::CreateBoon { .. }
             | Effect::CastFromZone { .. }
             | Effect::FreeCastFromZones { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
@@ -24236,6 +24378,15 @@ impl Effect {
             // CR 603.7a: the delayed triggered ability's own body.
             Effect::CreateDelayedTrigger { effect, .. } => {
                 f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
+            }
+            // Digital-only Alchemy (no CR entry): the boon's granted trigger
+            // body. Visited so guard resolution, description rendering, and
+            // unimplemented detection see through the boon wrapper exactly as
+            // they see through `CreateDelayedTrigger`.
+            Effect::CreateBoon { trigger, .. } => {
+                if let Some(execute) = trigger.execute.as_deref() {
+                    f(NestedDefinitionEdge::CreateBoonTrigger, execute)
+                }
             }
             // CR 706.3a: one payload per results-table striation.
             Effect::RollDie { results, .. } => {
@@ -24438,6 +24589,7 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseAndSacrificeRest { .. }
@@ -24701,6 +24853,7 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
@@ -24716,6 +24869,7 @@ impl Effect {
             | Effect::CreateDrawReplacement { .. }
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::CreateEmblem { .. }
+            | Effect::CreateBoon { .. }
             | Effect::Discover { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
@@ -24966,6 +25120,7 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
@@ -24981,6 +25136,7 @@ impl Effect {
             | Effect::CreateDrawReplacement { .. }
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::CreateEmblem { .. }
+            | Effect::CreateBoon { .. }
             | Effect::Discover { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
@@ -25186,6 +25342,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::AddPendingETBCounters { .. } => "AddPendingETBCounters",
         Effect::AddPendingEntersModifications { .. } => "AddPendingEntersModifications",
         Effect::CreateEmblem { .. } => "CreateEmblem",
+        Effect::CreateBoon { .. } => "CreateBoon",
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::FreeCastFromZones { .. } => "FreeCastFromZones",
@@ -25226,6 +25383,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
         Effect::RememberCard { .. } => "RememberCard",
         Effect::NoteManaSpent => "NoteManaSpent",
+        Effect::NoteNumber { .. } => "NoteNumber",
         Effect::ForEachCategory { .. } => "ForEachCategory",
         Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
@@ -25436,6 +25594,7 @@ pub enum EffectKind {
     AddPendingETBCounters,
     AddPendingEntersModifications,
     CreateEmblem,
+    CreateBoon,
     PayCost,
     CastFromZone,
     FreeCastFromZones,
@@ -25476,6 +25635,7 @@ pub enum EffectKind {
     ChooseFromZone,
     RememberCard,
     NoteManaSpent,
+    NoteNumber,
     ChooseObjectsIntoTrackedSet,
     ChooseCounterKind,
     PutChosenCounter,
@@ -25711,6 +25871,7 @@ impl From<&Effect> for EffectKind {
                 EffectKind::AddPendingEntersModifications
             }
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
+            Effect::CreateBoon { .. } => EffectKind::CreateBoon,
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::FreeCastFromZones { .. } => EffectKind::FreeCastFromZones,
@@ -25757,6 +25918,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
             Effect::RememberCard { .. } => EffectKind::RememberCard,
             Effect::NoteManaSpent => EffectKind::NoteManaSpent,
+            Effect::NoteNumber { .. } => EffectKind::NoteNumber,
             // The per-member iteration parks `ChooseFromZoneChoice` prompts and
             // emits `ChooseFromZone` resolution events; it shares the kind.
             Effect::ForEachCategory {
@@ -28567,6 +28729,32 @@ pub struct SpellContext {
     /// event-delayed trigger, which reads the event that fires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
+    /// Digital-only Alchemy (no CR entry): the noted number this boon
+    /// grant captured. Each "note ..." + "you get a one-time boon with
+    /// [... the noted number ...]" resolution snapshots the noting
+    /// player's `Player::noted_number` into the granted ability at install
+    /// time, so sequential notes (or notes from different cards) never
+    /// leak into each other's boons: a boon reads what its own grant
+    /// captured, not the live global. `None` outside boon grants (and for
+    /// grants whose resolution noted nothing), where `NotedNumber` falls
+    /// back to the live global. Stamped only by
+    /// `game::effects::create_boon::resolve`; the stored ability rides the
+    /// delayed-fire path untouched, so the capture survives fire, stack,
+    /// and resolution without any trigger-entry lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boon_captured_noted_number: Option<i32>,
+    /// Digital-only Alchemy (no CR entry): the matching entrant set of a
+    /// batch-semantics boon trigger ("one or more creatures enter",
+    /// Dunbarrow Revivalist), pinned at fire time in batch order. A
+    /// one-shot delayed trigger fires once per batch, so the single fired
+    /// event cannot serve a "one of them" resolution choice — the fire
+    /// path stamps every matching entrant here (with incarnations, so a
+    /// departed-and-returned entrant is a new object per CR 400.7) and the
+    /// token host resolver offers the still-legal subset as the choice.
+    /// Empty for every non-batch boon and outside boons; stamped only by
+    /// the delayed-fire path in `game::triggers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boon_trigger_batch_objects: Vec<crate::types::identifiers::ObjectIncarnationRef>,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks
@@ -29141,6 +29329,19 @@ pub enum TriggerCondition {
         )]
         player: PlayerScope,
     },
+    /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
+    /// `player` holds at least one unconsumed one-time boon (a
+    /// `DelayedTriggerKind::Boon` entry they control). Checked at fire time
+    /// and again as the ability resolves (CR 603.4), mirroring `IsMonarch`.
+    /// `player` is the CR 109.5 subject axis; only `Controller` is printed
+    /// (Underbridge Warlock).
+    HasBoon {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 726.3: "if you have the initiative" is true when the controller has
     /// the initiative designation.
     IsInitiative,
@@ -29498,6 +29699,10 @@ impl TriggerCondition {
             | TriggerCondition::SpellCastWithVariantThisTurn { .. }
             | TriggerCondition::HasCityBlessing
             | TriggerCondition::HasEnduringStory
+            // Digital-only Alchemy (no CR entry): a held boon is not a CR
+            // designation — several players can hold boons at once — so it
+            // carries no designation anchor despite the player axis.
+            | TriggerCondition::HasBoon { .. }
             | TriggerCondition::CompletedDungeon { .. }
             | TriggerCondition::SourceIsTapped
             | TriggerCondition::SourceIsTransformed
@@ -34281,6 +34486,7 @@ impl ResolvedAbility {
             | Effect::AddPendingETBCounters { .. }
             | Effect::AddPendingEntersModifications { .. }
             | Effect::CreateEmblem { .. }
+            | Effect::CreateBoon { .. }
             | Effect::PayCost { .. }
             | Effect::CastFromZone { .. }
             | Effect::FreeCastFromZones { .. }
@@ -34319,6 +34525,7 @@ impl ResolvedAbility {
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseAndSacrificeRest { .. }
@@ -37408,6 +37615,69 @@ mod tests {
         let mut visited = Vec::new();
         effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
         assert_eq!(visited, vec![count, rhs]);
+    }
+
+    /// V-QE: the digital-Alchemy quantity carriers are visited — the noted
+    /// `value` of `NoteNumber`, and both delta exprs of a perpetual P/T
+    /// modification (live pre-freeze, `Fixed` after). Without these arms a
+    /// fixed-ness audit cannot see through a note or a dynamic perpetual.
+    #[test]
+    fn note_and_perpetual_quantity_visitor_reaches_live_exprs() {
+        let noted = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Anaphoric,
+            },
+        };
+        let effect = Effect::NoteNumber {
+            value: noted.clone(),
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![noted]);
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::NotedNumber,
+        };
+        let toughness = QuantityExpr::Fixed { value: 0 };
+        let effect = Effect::ApplyPerpetual {
+            target: TargetFilter::Any,
+            modification: PerpetualModification::ModifyPowerToughness {
+                power: power.clone(),
+                toughness: toughness.clone(),
+                keywords: Vec::new(),
+            },
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![power, toughness]);
+    }
+
+    /// M8 serde contract: the unified P/T axis emits `power`/`toughness`
+    /// quantity exprs (fixed deltas as `Fixed`), never the pre-unification
+    /// `power_delta`/`toughness_delta` bare numbers. Pins the exact emission
+    /// the card-data export and test fixture carry.
+    #[test]
+    fn modify_power_toughness_serde_shape_is_fixed_quantities() {
+        let modification = PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: 1 },
+            toughness: QuantityExpr::Fixed { value: 1 },
+            keywords: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&modification).unwrap(),
+            r#"{"kind":"ModifyPowerToughness","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1}}"#
+        );
+        // Mixed "perpetually gets +N/+M and gains [keywords]" (Jaheira): the
+        // keyword list rides the same modification, off the wire when empty.
+        let mixed = PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: 1 },
+            toughness: QuantityExpr::Fixed { value: 0 },
+            keywords: vec![crate::types::keywords::Keyword::Haste],
+        };
+        assert_eq!(
+            serde_json::to_string(&mixed).unwrap(),
+            r#"{"kind":"ModifyPowerToughness","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":0},"keywords":["Haste"]}"#
+        );
     }
 
     /// V-QE: `ChooseAndSacrificeRest`'s TWO secondary quantity slots —

@@ -52,6 +52,7 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "PopulateChoice",
   "ReturnAsAuraTarget",
   "EquipTarget",
+  "ChooseTokenHost",
   "UntapChoice",
   "ChooseUntapSubset",
 ]);

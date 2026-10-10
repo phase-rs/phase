@@ -548,6 +548,13 @@ fn def_tree_has_countered_spell_zone_redirect(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_countered_spell_zone_redirect(inner) {
+                return true;
+            }
+        }
+    }
     def.sub_ability
         .as_deref()
         .is_some_and(def_tree_has_countered_spell_zone_redirect)
@@ -1112,6 +1119,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         } => end_cost.is_some() || static_abilities.iter().any(static_definition_has_optional),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
+        Effect::CreateBoon { trigger, .. } => trigger_tree_has_optional(trigger),
         Effect::CreateEmblem { statics, triggers } => {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
@@ -1185,6 +1193,13 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_target_replacement(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_target_replacement(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -1423,6 +1438,13 @@ fn def_tree_has_exile_parent_rider(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_exile_parent_rider(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_exile_parent_rider(sub) {
             return true;
@@ -1470,6 +1492,13 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_cast_graveyard_redirect_rider(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_cast_graveyard_redirect_rider(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -1530,6 +1559,13 @@ fn def_tree_has_parent_target_cant_gain_life(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_parent_target_cant_gain_life(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_parent_target_cant_gain_life(sub) {
             return true;
@@ -1585,6 +1621,13 @@ fn def_tree_has_parent_target_discard(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_parent_target_discard(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_parent_target_discard(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -1652,6 +1695,13 @@ fn def_tree_has_graveyard_cast_from_zone(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_graveyard_cast_from_zone(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_graveyard_cast_from_zone(sub) {
             return true;
@@ -1704,6 +1754,13 @@ fn def_tree_has_instead_condition(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_instead_condition(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_instead_condition(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -1835,6 +1892,13 @@ fn def_tree_has_replacement_carrier(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_replacement_carrier(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_replacement_carrier(sub) {
             return true;
@@ -1928,6 +1992,13 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_conditional_mana_spell_grant(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_conditional_mana_spell_grant(sub) {
             return true;
@@ -1968,6 +2039,13 @@ fn def_tree_has_cast_from_zone_alt_ability_cost(def: &AbilityDefinition) -> bool
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_cast_from_zone_alt_ability_cost(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_cast_from_zone_alt_ability_cost(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -2019,6 +2097,13 @@ fn def_tree_has_play_from_exile_alt_ability_cost(def: &AbilityDefinition) -> boo
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_play_from_exile_alt_ability_cost(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_play_from_exile_alt_ability_cost(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -2214,6 +2299,13 @@ fn def_tree_has_conditional_modal_max(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_conditional_modal_max(inner) {
+                return true;
+            }
+        }
+    }
     def.sub_ability
         .as_ref()
         .is_some_and(|sub| def_tree_has_conditional_modal_max(sub))
@@ -2291,6 +2383,13 @@ fn unit_has_end_of_turn_mana_expiry(parsed: &ParsedAbilities) -> bool {
         if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
             if def_has(effect) {
                 return true;
+            }
+        }
+        if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+            if let Some(inner) = trigger.execute.as_deref() {
+                if def_has(inner) {
+                    return true;
+                }
             }
         }
         def.sub_ability.as_deref().is_some_and(def_has)
@@ -2388,6 +2487,13 @@ fn def_tree_has_activation_limit(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_activation_limit(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_activation_limit(sub) {
             return true;
@@ -2433,6 +2539,13 @@ fn def_tree_has_apnap_ordering(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_apnap_ordering(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_apnap_ordering(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -3502,6 +3615,9 @@ fn iteration_count_below(
         Effect::CreateDelayedTrigger { effect, .. } => {
             def_tree_co_scoped_parent_target_iteration_count(effect, pop)
         }
+        Effect::CreateBoon { trigger, .. } => trigger.execute.as_deref().map_or(0, |inner| {
+            def_tree_co_scoped_parent_target_iteration_count(inner, pop)
+        }),
         _ => 0,
     };
     delayed
@@ -3718,6 +3834,13 @@ fn def_tree_has_plotted_grant(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_plotted_grant(inner) {
+                return true;
+            }
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_plotted_grant(sub) {
             return true;
@@ -3758,6 +3881,13 @@ fn def_tree_has_dig(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_dig(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_dig(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -3833,6 +3963,13 @@ fn def_tree_has_exile_resolving_rider(def: &AbilityDefinition) -> bool {
     if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
         if def_tree_has_exile_resolving_rider(effect) {
             return true;
+        }
+    }
+    if let Effect::CreateBoon { trigger, .. } = &*def.effect {
+        if let Some(inner) = trigger.execute.as_deref() {
+            if def_tree_has_exile_resolving_rider(inner) {
+                return true;
+            }
         }
     }
     if let Some(ref sub) = def.sub_ability {
@@ -6024,9 +6161,10 @@ mod tests {
     use crate::parser::swallow_evidence::UnitEvidence;
 
     use super::{
-        any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
-        detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
-        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
+        any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_target_replacement,
+        def_tree_has_unimplemented, detect_replacement,
+        dynamic_markers_are_all_recorded_unrecognized, effect_has_internal_optionality,
+        trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_effect::gap_diagnosis::{
@@ -14075,6 +14213,76 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         // the guard above cannot be passing by rejecting everything.
         assert_eq!(classify_conjunct("each opponent"), ConjunctShape::Player);
         assert_eq!(classify_conjunct("each player"), ConjunctShape::Player);
+    }
+
+    /// Klement, Life Acolyte (HBG): the boon-granted trigger carries an
+    /// enters-with-counter replacement ("that creature enters with a lifelink
+    /// counter on it"). The `Replacement` detector must see through `CreateBoon`
+    /// exactly as it sees through `CreateDelayedTrigger`.
+    #[test]
+    fn boon_inner_replacement_discharges_replacement_detector() {
+        // `parse_named` passes no MTGJSON keywords, which would leave the bare
+        // "Lifelink" line `Unimplemented` and skip the whole unit; pass the
+        // keyword as production does.
+        let parsed = parse_oracle_text(
+            "Lifelink\nWhen this creature specializes, you get a one-time boon with \
+             \"When you cast a creature spell, that creature enters with a lifelink \
+             counter on it.\"",
+            "Klement, Life Acolyte",
+            &["Lifelink".to_string()],
+            &["Creature".to_string()],
+            &[],
+        );
+        // Reach guards: the unit is audited (no Unimplemented skip) and the boon
+        // shape is really there.
+        assert!(!any_ability_has_unimplemented(&parsed));
+        let grant = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("specialize body");
+        let Effect::CreateBoon { trigger, .. } = &*grant.effect else {
+            panic!("expected CreateBoon, got {:?}", grant.effect);
+        };
+        let inner = trigger.execute.as_deref().expect("boon body");
+        assert!(def_tree_has_target_replacement(inner));
+        assert!(
+            def_tree_has_target_replacement(grant),
+            "CreateBoon must descend into the granted trigger like CreateDelayedTrigger"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Replacement"),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// Reflective Rimekin (HBG): the boon-granted trigger carries "You may choose
+    /// new targets for the copy." `Optional_YouMay` must see through `CreateBoon`.
+    #[test]
+    fn boon_inner_you_may_discharges_optional_detector() {
+        let parsed = parse_named(
+            "When this creature enters, you get a one-time boon with \"When you cast \
+             an instant or sorcery spell with mana value 3 or less, copy it. You may \
+             choose new targets for the copy.\"",
+            "Reflective Rimekin",
+            &["Creature"],
+        );
+        assert!(!any_ability_has_unimplemented(&parsed));
+        let grant = parsed.triggers[0].execute.as_deref().expect("ETB body");
+        let Effect::CreateBoon { trigger, .. } = &*grant.effect else {
+            panic!("expected CreateBoon, got {:?}", grant.effect);
+        };
+        let inner = trigger.execute.as_deref().expect("boon body");
+        assert!(def_tree_has_optional(inner));
+        assert!(
+            def_tree_has_optional(grant),
+            "CreateBoon must descend into the granted trigger like CreateDelayedTrigger"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "{:?}",
+            parsed.parse_warnings
+        );
     }
 }
 
