@@ -543,6 +543,12 @@ pub fn resolve(
         let Some(discard_player) =
             super::resolve_player_for_context_ref(state, ability, &target_filter)
         else {
+            // CR 608.2b: a missing player discards nothing; the completion marker is what publishes the zero count.
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
             return Ok(());
         };
 

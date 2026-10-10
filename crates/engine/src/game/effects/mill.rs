@@ -43,6 +43,8 @@ pub fn resolve(
     };
     // CR 608.2b: a declared player whose target was illegal is not milled.
     let Some(target_player) = target_player else {
+        // CR 608.2b + CR 608.2c: a missing player mills nothing, the zero count a zero-card mill hands on.
+        state.last_effect_count = Some(0);
         return Ok(());
     };
 

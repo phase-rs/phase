@@ -265,6 +265,8 @@ pub fn resolve(
                 let Some(drawing_player) =
                     super::resolve_player_for_context_ref(state, ability, target)
                 else {
+                    // CR 608.2b + CR 608.2c: a missing player draws nothing, the zero result a zero-card draw hands on.
+                    state.last_effect_count = Some(0);
                     return Ok(());
                 };
                 // CR 121.3: "if an effect says that a player can't draw cards
@@ -339,6 +341,8 @@ pub fn resolve(
     };
     // CR 608.2b: a declared player whose target was illegal draws nothing.
     let Some(drawing_player) = drawing_player else {
+        // CR 608.2b + CR 608.2c: as above.
+        state.last_effect_count = Some(0);
         return Ok(());
     };
 

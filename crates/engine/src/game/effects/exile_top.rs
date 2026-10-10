@@ -42,6 +42,8 @@ pub fn resolve(
     // parent's Player target and exile from the wrong library.
     let Some(target_player) = super::resolve_player_for_context_ref(state, ability, &player_filter)
     else {
+        // CR 608.2b + CR 609.3: a missing player exiles nothing, the same verdict an empty library hands on.
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
         return Ok(());
     };
     // CR 608.2c: the player performing this exile — the controller unless the

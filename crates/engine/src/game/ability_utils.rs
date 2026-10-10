@@ -7650,10 +7650,12 @@ fn rewrite_relative_controller(
     }
 }
 
-/// CR 109.4 + CR 102.2 / CR 102.3 + CR 608.2c: rewrite every selected-player scope
-/// (`TargetPlayer`, `TargetOpponent`, `DeclaredPlayer`) to `to`.
+/// CR 109.4 + CR 102.2 / CR 102.3: rewrite every selected-player scope
+/// (`TargetPlayer`, `TargetOpponent`) to `to`.
 /// `relative_controller_kind` normalizes them to one kind, so a rewrite of a single
 /// variant would leave another behind and the per-player enumeration would fail closed.
+/// A `DeclaredPlayer` is bound to its group's announced player beforehand or names no one
+/// (CR 608.2b), so it is never rewritten.
 // ponytail: covers the dependent-object-slot subclass ("destroy target creature
 // target opponent controls"); the mass class (Quick Draw / DamageAll) has
 // target_filter() == None and never reaches these rewrite sites.
@@ -7667,9 +7669,7 @@ fn rewrite_declared_target_player(
         &|controller| {
             matches!(
                 controller,
-                ControllerRef::TargetPlayer
-                    | ControllerRef::TargetOpponent
-                    | ControllerRef::DeclaredPlayer { .. }
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
             )
         },
         &to,
@@ -7864,17 +7864,12 @@ fn legal_targets_for_selected_slot(
         if !super::filter::bind_declared_groups(&mut bound_filter, &players) {
             return Vec::new();
         }
-        let relative_kind = relative_controller_kind(&bound_filter);
-        let controller = if relative_kind.is_some() {
+        // CR 109.4: only a selected-player scope moves the enumeration to the latest selected player.
+        let enumeration_filter = rewrite_declared_target_player(&bound_filter, ControllerRef::You);
+        let controller = if enumeration_filter != bound_filter {
             relative_filter_controller(ability, selected_slots)
         } else {
             ability.controller
-        };
-        let enumeration_filter = match relative_kind {
-            Some(ControllerRef::TargetPlayer | ControllerRef::DeclaredPlayer { .. }) => {
-                rewrite_declared_target_player(&bound_filter, ControllerRef::You)
-            }
-            _ => bound_filter,
         };
 
         // CR 601.2c + CR 603.3d: a filter qualified relative to an object chosen
@@ -24589,6 +24584,245 @@ mod tests {
             "reach-guard: without the local declaration the carried player's creature is offered"
         );
         assert_eq!(offered(&payload(true)), Vec::<TargetRef>::new());
+    }
+
+    /// Three seats, one creature each (`Creature {seat}`), and the object ids in seat order.
+    fn one_creature_per_seat() -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        let creatures: Vec<ObjectId> = (0..3u8)
+            .map(|seat| {
+                let id = create_object(
+                    &mut state,
+                    CardId(u64::from(seat) + 1),
+                    PlayerId(seat),
+                    format!("Creature {seat}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            })
+            .collect();
+        (state, creatures)
+    }
+
+    /// The legal targets of `payload`'s last slot after `picks` fill the slots before it.
+    fn offered_after_picks(
+        state: &GameState,
+        payload: &ResolvedAbility,
+        picks: &[PlayerId],
+    ) -> Vec<TargetRef> {
+        let specs = target_slot_specs(state, payload);
+        let reader_slot = specs.len() - 1;
+        assert_eq!(
+            picks.len(),
+            reader_slot,
+            "reach guard: one pick per earlier slot"
+        );
+        let selected: Vec<_> = picks.iter().map(|p| Some(TargetRef::Player(*p))).collect();
+        legal_targets_for_selected_slot(
+            state,
+            payload,
+            &specs[reader_slot],
+            &specs[..reader_slot],
+            &selected,
+        )
+    }
+
+    /// CR 608.2b + CR 601.2c: a selection-time reader of a group that names no one is offered
+    /// nothing, whoever controls creatures and whoever was selected last; the legacy
+    /// `TargetPlayer` reader still follows the latest selected player.
+    #[test]
+    fn slot_reading_a_group_that_names_no_one_offers_nothing() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let (state, creatures) = one_creature_per_seat();
+        let source = ObjectId(100);
+        let objects = |ids: &[usize]| -> Vec<TargetRef> {
+            ids.iter()
+                .map(|&i| TargetRef::Object(creatures[i]))
+                .collect()
+        };
+        let populations = [
+            TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+            ),
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { group },
+            }])),
+        ];
+        let reader = |filter: &TargetFilter| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: filter.clone(),
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let offered = offered_after_picks;
+        let with_pick = |tail: ResolvedAbility| {
+            let mut head = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Player,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            head.sub_ability = Some(Box::new(tail));
+            head
+        };
+        for filter in &populations {
+            let carried = |mut ability: ResolvedAbility| {
+                ability.context.outer_declared_players = vec![(group, PlayerId(1))];
+                ability
+            };
+            assert_eq!(
+                offered(&state, &carried(reader(filter)), &[]),
+                objects(&[1]),
+                "reach guard: the carried player's creature"
+            );
+            assert_eq!(
+                offered(&state, &carried(with_pick(reader(filter))), &[PlayerId(2)]),
+                objects(&[1]),
+                "reach guard: an earlier pick does not replace the carried player"
+            );
+            let mut silent = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            silent.declares_chosen_group = Some(group);
+            silent.sub_ability = Some(Box::new(reader(filter)));
+            let silent = carried(silent);
+            let mut gone = state.clone();
+            gone.players[1].is_eliminated = true;
+            for (case, state, payload, pick) in [
+                ("silent local declaration", &state, silent, &[][..]),
+                ("never carried", &state, reader(filter), &[][..]),
+                (
+                    "never carried, earlier pick",
+                    &state,
+                    with_pick(reader(filter)),
+                    &[PlayerId(2)][..],
+                ),
+                (
+                    "carried player left",
+                    &gone,
+                    carried(reader(filter)),
+                    &[][..],
+                ),
+                (
+                    "carried player left, earlier pick",
+                    &gone,
+                    carried(with_pick(reader(filter))),
+                    &[PlayerId(2)][..],
+                ),
+            ] {
+                assert_eq!(
+                    offered(state, &payload, pick),
+                    Vec::<TargetRef>::new(),
+                    "{case}"
+                );
+            }
+        }
+        // The legacy reader brings its own companion player slot.
+        let legacy = reader(&TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+        ));
+        assert_eq!(
+            offered(&state, &legacy, &[PlayerId(2)]),
+            objects(&[2]),
+            "legacy TargetPlayer follows the latest selected player"
+        );
+    }
+
+    /// CR 608.2b + CR 601.2c: beside a `TargetPlayer` reader, a group that names no one changes
+    /// nothing, whichever reader is written first.
+    #[test]
+    fn mixed_group_and_selected_player_readers_do_not_depend_on_their_order() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let (state, creatures) = one_creature_per_seat();
+        let reader = |filter: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: filter,
+                    cant_regenerate: false,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let group_reader = TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+        );
+        let player_reader =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+        let mut cases = Vec::new();
+        for (connective, expected) in [("or", vec![creatures[2]]), ("and", vec![])] {
+            for group_first in [true, false] {
+                let filters = if group_first {
+                    vec![group_reader.clone(), player_reader.clone()]
+                } else {
+                    vec![player_reader.clone(), group_reader.clone()]
+                };
+                let filter = if connective == "or" {
+                    TargetFilter::Or { filters }
+                } else {
+                    TargetFilter::And { filters }
+                };
+                let name = format!("{connective}, group first: {group_first}");
+                cases.push((name, reader(filter), expected.clone()));
+            }
+        }
+        // "You" is the caster, not the latest selected player, even beside a group naming no one.
+        let you_reader =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let mut after_pick = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        after_pick.sub_ability = Some(Box::new(reader(TargetFilter::Or {
+            filters: vec![group_reader, you_reader],
+        })));
+        cases.push((
+            "you beside a group".to_string(),
+            after_pick,
+            vec![creatures[0]],
+        ));
+        for (name, payload, expected) in cases {
+            let expected: Vec<TargetRef> = expected.into_iter().map(TargetRef::Object).collect();
+            assert_eq!(
+                offered_after_picks(&state, &payload, &[PlayerId(2)]),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     /// T7: a single-slot ability already carrying `ObjectScope::Target` — with

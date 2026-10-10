@@ -458,6 +458,9 @@ enum After {
     Hexproof,
     Eliminate,
     ExtraCreature,
+    /// P1's Bear gets a +1/+1 counter and deals 2 damage to P0.
+    Records,
+    RecordsThenEliminate,
 }
 
 #[derive(Clone, Copy)]
@@ -481,6 +484,8 @@ struct Out {
     tokens: Vec<(u8, u8)>,
     /// `StackPushed` events over the whole run.
     pushed: usize,
+    /// Delayed triggers still installed at the end of the run.
+    delayed_left: usize,
 }
 
 fn grant_hexproof(state: &mut GameState, player: PlayerId) {
@@ -505,6 +510,50 @@ fn grant_hexproof(state: &mut GameState, player: PlayerId) {
     ));
 }
 
+fn seed_records(state: &mut GameState) {
+    use engine::types::card_type::CoreType;
+    let bear = state
+        .objects
+        .values()
+        .find(|o| o.name == "Bear" && o.controller == P1)
+        .expect("P1's Bear")
+        .id;
+    state
+        .counter_added_this_turn
+        .push(engine::types::game_state::CounterAddedRecord {
+            actor: P1,
+            object_id: bear,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            name: "Bear".into(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            power: Some(2),
+            toughness: Some(2),
+            colors: vec![],
+            mana_value: 0,
+            controller: P1,
+            owner: P1,
+            counters: Default::default(),
+        });
+    state
+        .damage_dealt_this_turn
+        .push_back(engine::types::game_state::DamageRecord {
+            source_id: bear,
+            source_controller: P1,
+            source_controller_snapshot: P1,
+            source_owner: P1,
+            target: TargetRef::Player(P0),
+            target_controller: P0,
+            amount: 2,
+            source_name: "Bear".into(),
+            source_core_types: vec![CoreType::Creature],
+            ..Default::default()
+        });
+}
+
 fn apply(state: &mut GameState, change: After) {
     match change {
         After::Nothing => {}
@@ -512,6 +561,11 @@ fn apply(state: &mut GameState, change: After) {
         After::Eliminate => {
             engine::game::elimination::eliminate_player(state, P1, &mut Vec::new());
             assert!(!engine::game::players::is_alive(state, P1));
+        }
+        After::Records => seed_records(state),
+        After::RecordsThenEliminate => {
+            seed_records(state);
+            apply(state, After::Eliminate);
         }
         After::ExtraCreature => {
             let id = engine::game::zones::create_object(
@@ -549,11 +603,50 @@ fn run_deciding(
     after_install: After,
     decide: Option<bool>,
 ) -> Out {
+    run_on(
+        Board::Plain,
+        root,
+        picks,
+        phases,
+        before_resolve,
+        after_install,
+        decide,
+    )
+}
+
+/// The creatures on the table: one Bear each for P1 and P2 (`Out.bears[0..2]`), and with
+/// `CasterBear` a third for the caster (`Out.bears[2]`).
+#[derive(Clone, Copy)]
+enum Board {
+    Plain,
+    CasterBear,
+}
+
+fn run_on(
+    board: Board,
+    root: AbilityDefinition,
+    picks: &[Pick],
+    phases: &[Phase],
+    before_resolve: After,
+    after_install: After,
+    decide: Option<bool>,
+) -> Out {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    let bears: Vec<ObjectId> = [P1, P2]
+    let mut bear_owners = vec![P1, P2];
+    if matches!(board, Board::CasterBear) {
+        bear_owners.push(P0);
+    }
+    let bears: Vec<ObjectId> = bear_owners
         .iter()
-        .map(|p| scenario.add_creature(*p, "Bear", 2, 2).id())
+        .map(|p| {
+            let mut bear = scenario.add_creature(*p, "Bear", 2, 2);
+            if *p == P0 {
+                // A caster creature must not stop the run at the declare-attackers prompt.
+                bear.defender();
+            }
+            bear.id()
+        })
         .collect();
     for player in [P0, P1, P2] {
         for i in 0..8 {
@@ -674,6 +767,7 @@ fn run_deciding(
             .iter()
             .filter(|event| matches!(event, GameEvent::StackPushed { .. }))
             .count(),
+        delayed_left: state.delayed_triggers.len(),
         tokens: state
             .objects
             .values()
@@ -1596,11 +1690,15 @@ fn c9_payload_local_declaration_shadows_the_carried_player() {
 // Targeted payload slots that read a carried group
 // ---------------------------------------------------------------------------------------------
 
-fn destroy_creature_of(group: ChosenGroupId) -> AbilityDefinition {
+fn destroy(target: TargetFilter) -> AbilityDefinition {
     def(Effect::Destroy {
-        target: TargetFilter::Typed(creature_of(group)),
+        target,
         cant_regenerate: false,
     })
+}
+
+fn destroy_creature_of(group: ChosenGroupId) -> AbilityDefinition {
+    destroy(TargetFilter::Typed(creature_of(group)))
 }
 
 fn targeted_run(payload: AbilityDefinition, picks: &[Pick], after: After) -> Out {
@@ -1752,12 +1850,12 @@ fn g2_gate_on_a_carried_player_who_left_does_nothing() {
     );
 }
 
-/// CR 603.4 + CR 800.4a: a gate on a carried player who left the game is read once, at
-/// resolution: the ability is put on the stack as the ungated payload is, and its body takes
-/// effect exactly when resolution alone decides the same gate. While the player is present, a
-/// false gate still keeps the ability off the stack.
+/// CR 603.4 + CR 608.2b: a carried player who left the game is no one at the event as at
+/// resolution. A false gate keeps the ability off the stack and consumes a one-shot; a true gate
+/// puts it there, and the body then takes effect exactly when resolution alone decides the same
+/// gate (the else-branch variant, which cannot be hoisted).
 #[test]
-fn g3_gate_on_a_carried_player_who_left_is_read_at_resolution() {
+fn g3_gate_on_a_carried_player_who_left_reads_no_one_at_the_event_and_at_resolution() {
     let creatures = || creature_of(G);
     let not = |c| AbilityCondition::Not {
         condition: Box::new(c),
@@ -1768,6 +1866,47 @@ fn g3_gate_on_a_carried_player_who_left_is_read_at_resolution() {
                 from: None,
                 to: None,
                 filter: TargetFilter::Typed(creatures()),
+            },
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed { value: n },
+    };
+    let died_power = |comparator, n| AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: None,
+                to: None,
+                filter: TargetFilter::Typed(creatures()),
+                function: engine::types::ability::AggregateFunction::Sum,
+                property: engine::types::ability::ObjectProperty::Power,
+            },
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed { value: n },
+    };
+    let owned = TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Owned {
+        controller: declared(G),
+    }]);
+    let counters_added = |comparator, n| AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CounterAddedThisTurn {
+                actor: engine::types::ability::CountScope::All,
+                counters: engine::types::counter::CounterMatch::Any,
+                target: TargetFilter::Typed(creatures()),
+            },
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed { value: n },
+    };
+    let damage_dealt = |comparator, n| AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Typed(creatures())),
+                target: Box::new(TargetFilter::Any),
+                aggregate: engine::types::ability::AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: engine::types::ability::DamageKindFilter::Any,
+                channel: engine::types::ability::DamageChannel::Total,
             },
         },
         comparator,
@@ -1785,63 +1924,261 @@ fn g3_gate_on_a_carried_player_who_left_is_read_at_resolution() {
     let untouched = payload_run(noop_payload(), After::Nothing, After::Eliminate);
     let effective = |out: &Out| out.life[0] != untouched.life[0];
     let (mut took_effect, mut did_not) = (false, false);
-    for (name, condition, true_of_one) in [
+    // (shape, true with P1 present, true of no one, reads a ledger seeded for P1)
+    for (name, condition, true_of_one, true_of_none, seeded) in [
         (
             "presence",
             count_check(creatures(), Comparator::GE, 1),
-            true,
+            Some(true),
+            false,
+            false,
         ),
         (
             "comparison",
             count_check(creatures(), Comparator::GE, 5),
+            Some(false),
+            false,
             false,
         ),
         (
             "at most none",
             count_check(creatures(), Comparator::LE, 0),
+            Some(false),
+            true,
+            false,
+        ),
+        (
+            "owned presence",
+            count_check(owned, Comparator::GE, 1),
+            Some(true),
+            false,
             false,
         ),
         (
             "not presence",
             not(count_check(creatures(), Comparator::GE, 1)),
+            Some(false),
+            true,
             false,
         ),
         (
             "not at most none",
             not(count_check(creatures(), Comparator::LE, 0)),
-            true,
+            Some(true),
+            false,
+            false,
         ),
-        ("zone changes", zone_changes(Comparator::GE, 1), false),
-        ("no zone changes", zone_changes(Comparator::LE, 0), true),
+        (
+            "zone changes",
+            zone_changes(Comparator::GE, 1),
+            Some(false),
+            false,
+            false,
+        ),
+        (
+            "no zone changes",
+            zone_changes(Comparator::LE, 0),
+            Some(true),
+            true,
+            false,
+        ),
         (
             "not zone changes",
             not(zone_changes(Comparator::GE, 1)),
+            Some(true),
+            true,
+            false,
+        ),
+        (
+            "died power",
+            died_power(Comparator::GE, 1),
+            None,
+            false,
+            false,
+        ),
+        (
+            "no died power",
+            died_power(Comparator::LE, 0),
+            None,
+            true,
+            false,
+        ),
+        (
+            "counter added",
+            counters_added(Comparator::GE, 1),
+            Some(true),
+            false,
+            true,
+        ),
+        (
+            "no counter added",
+            counters_added(Comparator::LE, 0),
+            Some(false),
+            true,
+            true,
+        ),
+        (
+            "damage dealt",
+            damage_dealt(Comparator::GE, 1),
+            Some(true),
+            false,
+            true,
+        ),
+        (
+            "not damage dealt",
+            not(damage_dealt(Comparator::GE, 1)),
+            Some(false),
+            true,
             true,
         ),
     ] {
-        let present = gated(&condition, false, After::Nothing);
-        assert_eq!(
-            present.pushed,
-            ungated(After::Nothing).pushed - usize::from(!true_of_one),
-            "{name}: with P1 present a false gate stays off the stack"
-        );
-        let gone = gated(&condition, false, After::Eliminate);
-        let by_resolution = gated(&condition, true, After::Eliminate);
+        let (present, left) = if seeded {
+            (After::Records, After::RecordsThenEliminate)
+        } else {
+            (After::Nothing, After::Eliminate)
+        };
+        if let Some(true_of_one) = true_of_one {
+            assert_eq!(
+                gated(&condition, false, present).pushed,
+                ungated(After::Nothing).pushed - usize::from(!true_of_one),
+                "{name}: with P1 present a false gate stays off the stack"
+            );
+        }
+        let gone = gated(&condition, false, left);
+        let by_resolution = gated(&condition, true, left);
         assert!(by_resolution.pushed > 0, "{name}: reach guard");
         assert_eq!(
             gone.pushed,
-            ungated(After::Eliminate).pushed,
-            "{name}: put on the stack as the ungated payload is"
+            ungated(After::Eliminate).pushed - usize::from(!true_of_none),
+            "{name}: the event check reads no one"
+        );
+        assert_eq!(
+            effective(&by_resolution),
+            true_of_none,
+            "{name}: the resolution check reads no one"
         );
         assert_eq!(
             effective(&gone),
             effective(&by_resolution),
-            "{name}: takes effect exactly when resolution alone decides"
+            "{name}: the hoisted and the resolution check agree"
         );
+        if !true_of_none {
+            assert_eq!(gone.delayed_left, 0, "{name}: a false one-shot is consumed");
+        }
         took_effect |= effective(&by_resolution);
         did_not |= !effective(&by_resolution);
     }
     assert!(took_effect && did_not, "reach guard: both outcomes occur");
+}
+
+/// CR 603.4 + CR 603.7b: for a duration-bearing "whenever" generator whose carried player left, a
+/// false gate declines the occurrence and a true one puts the ability on the stack.
+#[test]
+fn g4_duration_bearing_generator_on_a_carried_player_who_left_reads_no_one() {
+    let whenever = |payload: AbilityDefinition| {
+        let mut trigger = engine::types::ability::TriggerDefinition::new(
+            engine::types::triggers::TriggerMode::Phase,
+        );
+        trigger.phase = Some(Phase::End);
+        def(Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: engine::types::ability::WheneverEventExpiry::EndOfTurn,
+            },
+            effect: Box::new(payload),
+            uses_tracked_set: false,
+        })
+    };
+    let gated = |condition: Option<AbilityCondition>, after| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = condition;
+        run(
+            then(head(), whenever(payload)),
+            &[Pick::Player(P1)],
+            &[Phase::End],
+            After::Nothing,
+            after,
+        )
+    };
+    let presence = count_check(creature_of(G), Comparator::GE, 1);
+    let ungated = gated(None, After::Eliminate);
+    let false_gate = gated(Some(presence.clone()), After::Eliminate);
+    assert_ne!(
+        ungated.life, false_gate.life,
+        "reach guard: the ungated generator fires and takes effect"
+    );
+    assert_eq!(false_gate.pushed, ungated.pushed - 1, "false gate");
+    let true_gate = gated(
+        Some(AbilityCondition::Not {
+            condition: Box::new(presence),
+        }),
+        After::Eliminate,
+    );
+    assert_eq!(true_gate.pushed, ungated.pushed, "true gate");
+    assert_eq!(true_gate.life, ungated.life, "true gate takes effect");
+}
+
+/// CR 603.4 + CR 603.7a: a gate on a group the payload declares itself names a player only once
+/// the payload is on the stack, so the event check leaves it to resolution, which reads the
+/// announced player.
+#[test]
+fn g6_gate_on_a_payload_local_group_is_decided_at_resolution() {
+    let gated = |condition: Option<AbilityCondition>| {
+        let mut payload = declaring(lose(TargetFilter::Player), G);
+        payload.condition = condition;
+        run(
+            then(head(), delayed(payload, Phase::End)),
+            &[Pick::Player(P1), Pick::Player(P2)],
+            &[Phase::End],
+            After::Nothing,
+            After::Nothing,
+        )
+    };
+    let ungated = gated(None);
+    assert!(ungated.life[2] < 20, "reach guard: the payload hits P2");
+    for (name, comparator, n, takes_effect) in [
+        ("true gate", Comparator::GE, 1, true),
+        ("false gate", Comparator::GE, 5, false),
+    ] {
+        let out = gated(Some(count_check(creature_of(G), comparator, n)));
+        assert_eq!(out.pushed, ungated.pushed, "{name}: on the stack");
+        let expected = if takes_effect {
+            &ungated.life
+        } else {
+            &vec![20; 3]
+        };
+        assert_eq!(&out.life, expected, "{name}: resolution decides");
+    }
+}
+
+/// CR 603.4 + CR 608.2b: a group that was never carried (illegal at install) reads no one on
+/// both legs, exactly as a carried player who left does.
+#[test]
+fn g5_gate_on_a_group_that_was_never_carried_reads_no_one() {
+    let gated = |condition: Option<AbilityCondition>| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = condition;
+        run(
+            with_bear(delayed(payload, Phase::End)),
+            &[Pick::Player(P1), Pick::Bear(1)],
+            &[Phase::End],
+            After::Hexproof,
+            After::Nothing,
+        )
+    };
+    let presence = count_check(creature_of(G), Comparator::GE, 1);
+    let ungated = gated(None);
+    let false_gate = gated(Some(presence.clone()));
+    assert_ne!(
+        ungated.life, false_gate.life,
+        "reach guard: the ungated payload fires and takes effect"
+    );
+    assert_eq!(false_gate.pushed, ungated.pushed - 1, "false");
+    let true_gate = gated(Some(AbilityCondition::Not {
+        condition: Box::new(presence),
+    }));
+    assert_eq!(true_gate.pushed, ungated.pushed, "true");
+    assert_eq!(true_gate.life, ungated.life, "true takes effect");
 }
 
 /// A declared player who was an illegal target as the creating chain began to resolve names no
@@ -1905,4 +2242,144 @@ fn b4b_slot_after_a_silent_declaration_offers_no_carried_objects() {
     );
     let out = run(then(silent, destroy_creature_of(G)));
     assert_eq!((out.bears, out.prompts), (vec![true, true], 1));
+}
+
+// ---------------------------------------------------------------------------------------------
+// A group that names no one offers nothing at selection (CR 608.2b, CR 601.2c)
+// ---------------------------------------------------------------------------------------------
+
+/// Populations read through group G: controlled, wrapped, owner-scoped.
+fn reader_populations() -> [(&'static str, TargetFilter); 3] {
+    let creature = || TypedFilter::new(TypeFilter::Creature);
+    [
+        ("controlled", TargetFilter::Typed(creature_of(G))),
+        (
+            "wrapped",
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(creature_of(G)),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(
+                            creature().properties(vec![FilterProp::Token]),
+                        )),
+                    },
+                ],
+            },
+        ),
+        (
+            "owned",
+            TargetFilter::Typed(creature().properties(vec![FilterProp::Owned {
+                controller: declared(G),
+            }])),
+        ),
+    ]
+}
+
+fn caster_board_run(root: AbilityDefinition, picks: &[Pick], before: After, after: After) -> Out {
+    run_on(
+        Board::CasterBear,
+        root,
+        picks,
+        &[Phase::End],
+        before,
+        after,
+        None,
+    )
+}
+
+fn payload_root(payload: AbilityDefinition) -> AbilityDefinition {
+    then(head(), delayed(payload, Phase::End))
+}
+
+/// A payload slot reading a group that names no one is offered nothing, so neither the caster's
+/// creature nor the latest selected player's is a choice. Beside it, the legal carried player.
+#[test]
+fn b5_payload_slot_of_a_group_naming_no_one_offers_nothing() {
+    let silent = || {
+        declaring(
+            Effect::TargetOnly {
+                target: TargetFilter::Controller,
+            },
+            G,
+        )
+    };
+    for (name, population) in reader_populations() {
+        let reader = || destroy(population.clone());
+        let legal = caster_board_run(
+            payload_root(reader()),
+            &[Pick::Player(P1), Pick::Bear(0)],
+            After::Nothing,
+            After::ExtraCreature,
+        );
+        assert_eq!(
+            (legal.bears.clone(), legal.prompts),
+            (vec![false, true, true], 2),
+            "{name}: reach guard, the carried player's creature is a choice ({})",
+            legal.last_wait
+        );
+        let beside = caster_board_run(
+            payload_root(then(def(pick_player()), reader())),
+            &[Pick::Player(P1), Pick::Player(P2), Pick::Bear(0)],
+            After::Nothing,
+            After::ExtraCreature,
+        );
+        assert_eq!(
+            (beside.bears, beside.prompts),
+            (vec![false, true, true], 3),
+            "{name}: reach guard, an earlier unrelated pick leaves the carried player in force"
+        );
+        // A hexproof P1 is an illegal target as the spell resolves, so a creature target keeps
+        // the spell alive and the group is not carried.
+        let uncarried = |payload| with_bear(delayed(payload, Phase::End));
+        for (case, root, picks, before, after, bears, prompts) in [
+            (
+                "silent local declaration",
+                payload_root(then(silent(), reader())),
+                vec![Pick::Player(P1), Pick::Bear(2)],
+                After::Nothing,
+                After::Nothing,
+                vec![true, true, true],
+                1,
+            ),
+            (
+                "never carried",
+                uncarried(reader()),
+                vec![Pick::Player(P1), Pick::Bear(1), Pick::Bear(2)],
+                After::Hexproof,
+                After::Nothing,
+                vec![true, true, true],
+                2,
+            ),
+            (
+                "never carried, earlier player pick",
+                uncarried(then(def(pick_player()), reader())),
+                vec![
+                    Pick::Player(P1),
+                    Pick::Bear(1),
+                    Pick::Player(P2),
+                    Pick::Bear(1),
+                ],
+                After::Hexproof,
+                After::Nothing,
+                vec![true, true, true],
+                2,
+            ),
+            (
+                "carried player left",
+                payload_root(reader()),
+                vec![Pick::Player(P1), Pick::Bear(2)],
+                After::Nothing,
+                After::Eliminate,
+                vec![false, true, true],
+                1,
+            ),
+        ] {
+            let out = caster_board_run(root, &picks, before, after);
+            assert_eq!(
+                (out.bears, out.prompts),
+                (bears, prompts),
+                "{name}, {case}: nothing is offered"
+            );
+        }
+    }
 }

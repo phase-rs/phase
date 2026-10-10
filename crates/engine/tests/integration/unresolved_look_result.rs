@@ -27,6 +27,48 @@ fn reveal_top(player: TargetFilter) -> Effect {
     Effect::RevealTop { player, count: 1 }
 }
 
+fn exile_top() -> Effect {
+    Effect::ExileTop {
+        player: declared(),
+        count: q(1),
+        position: LibraryPosition::Top,
+        face_down: false,
+        actor: LibraryInstructionActor::Controller,
+    }
+}
+
+fn blight() -> Effect {
+    Effect::BlightEffect {
+        count: 1,
+        player: declared(),
+    }
+}
+
+fn draw(count: QuantityExpr) -> Effect {
+    Effect::Draw {
+        count,
+        target: declared(),
+    }
+}
+
+fn mill() -> Effect {
+    Effect::Mill {
+        count: q(1),
+        target: declared(),
+        destination: Zone::Graveyard,
+    }
+}
+
+fn discard() -> Effect {
+    Effect::Discard {
+        count: q(1),
+        target: declared(),
+        selection: Default::default(),
+        unless_filter: None,
+        filter: None,
+    }
+}
+
 fn dig(keep: u32, count: i32, source: DigSource) -> Effect {
     Effect::Dig {
         player: declared(),
@@ -90,6 +132,8 @@ enum Dependent {
     ParentTarget,
     LastRevealed,
     LoseTrackedSetSize,
+    LosePreviousEffectCount,
+    LosePreviousEffectAmount,
 }
 
 impl Dependent {
@@ -100,6 +144,18 @@ impl Dependent {
             Dependent::LoseTrackedSetSize => Effect::LoseLife {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
+                },
+                target: Some(TargetFilter::Controller),
+            },
+            Dependent::LosePreviousEffectCount => Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectCount,
+                },
+                target: Some(TargetFilter::Controller),
+            },
+            Dependent::LosePreviousEffectAmount => Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
                 },
                 target: Some(TargetFilter::Controller),
             },
@@ -115,6 +171,14 @@ struct Case {
     p1_library_empty: bool,
     /// A prior `RevealTop{Controller}` that leaves a stale result behind.
     with_r1: bool,
+    /// A prior `Draw` of two cards that leaves `last_effect_count` and the amount at 2 behind it.
+    with_stamp: bool,
+    /// A prior `ExileTop` of the controller's library whose card a later reader must still count.
+    with_prior_exile: bool,
+    /// Cards in the controller's library.
+    p0_library: usize,
+    /// P1 controls a creature and holds two cards in hand, so a legal blight or discard has input.
+    p1_has_cards: bool,
     /// An intermediate hop between the producer and the dependent; `true` = SequentialSibling.
     hop: Option<bool>,
 }
@@ -127,6 +191,10 @@ impl Case {
             eliminate_p1: false,
             p1_library_empty: false,
             with_r1: true,
+            with_stamp: false,
+            with_prior_exile: false,
+            p0_library: 4,
+            p1_has_cards: false,
             hop: None,
         }
     }
@@ -140,6 +208,22 @@ impl Case {
     }
     fn no_r1(mut self) -> Self {
         self.with_r1 = false;
+        self
+    }
+    fn stamped(mut self) -> Self {
+        self.with_stamp = true;
+        self
+    }
+    fn prior_exile(mut self) -> Self {
+        self.with_prior_exile = true;
+        self
+    }
+    fn p0_library(mut self, n: usize) -> Self {
+        self.p0_library = n;
+        self
+    }
+    fn p1_has_cards(mut self) -> Self {
+        self.p1_has_cards = true;
         self
     }
     fn hop(mut self, sequential: bool) -> Self {
@@ -161,12 +245,18 @@ fn run(case: Case) -> Outcome {
     let mut sc = GameScenario::new_n_player(3, 7);
     sc.at_phase(Phase::PreCombatMain);
     let creature = sc.add_creature(P0, "C0", 3, 9).id();
-    for p in [P0, P1] {
-        if p == P1 && case.p1_library_empty {
-            continue;
-        }
-        for i in 0..4 {
+    for (p, cards) in [
+        (P0, case.p0_library),
+        (P1, if case.p1_library_empty { 0 } else { 4 }),
+    ] {
+        for i in 0..cards {
             sc.add_card_to_library_top(p, &format!("L{}-{i}", p.0));
+        }
+    }
+    if case.p1_has_cards {
+        sc.add_creature(P1, "C1", 2, 2);
+        for i in 0..2 {
+            sc.add_card_to_hand(P1, &format!("H1-{i}"));
         }
     }
     let mut guard = AbilityDefinition::new(
@@ -205,6 +295,25 @@ fn run(case: Case) -> Outcome {
     };
     let mut producer = AbilityDefinition::new(AbilityKind::Spell, case.producer);
     producer.sub_ability = Some(Box::new(below));
+    let prior = [
+        case.with_stamp.then(|| Effect::Draw {
+            count: q(2),
+            target: TargetFilter::Controller,
+        }),
+        case.with_prior_exile.then(|| Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: q(1),
+            position: LibraryPosition::Top,
+            face_down: false,
+            actor: LibraryInstructionActor::Controller,
+        }),
+    ];
+    for effect in prior.into_iter().flatten() {
+        producer.sub_link = SubAbilityLink::SequentialSibling;
+        let mut link = AbilityDefinition::new(AbilityKind::Spell, effect);
+        link.sub_ability = Some(Box::new(producer));
+        producer = link;
+    }
     let chain = if case.with_r1 {
         producer.sub_link = SubAbilityLink::ContinuationStep;
         let mut r1 =
@@ -250,6 +359,13 @@ fn run(case: Case) -> Outcome {
                 r.act(GameAction::ChooseTarget { target: Some(t) })
                     .expect("choose target");
             }
+            WaitingFor::EffectZoneChoice { cards, .. }
+            | WaitingFor::DiscardChoice { cards, .. } => {
+                r.act(GameAction::SelectCards {
+                    cards: cards.iter().take(1).copied().collect(),
+                })
+                .expect("select the offered card");
+            }
             WaitingFor::Priority { .. } => {
                 if r.state().stack.is_empty() {
                     break;
@@ -291,6 +407,24 @@ fn acted_on_nothing(o: &Outcome) {
         "stale result {:?}",
         o.last_revealed
     );
+    assert_eq!(o.guard_counters, Some(1), "guard did not run");
+}
+
+/// A `PreviousEffectCount` reader after an unresolved producer reads zero, not an earlier count.
+fn read_zero_count(o: &Outcome) {
+    assert_eq!(o.p0_life, 20, "stale effect count was read");
+    assert_eq!(o.guard_counters, Some(1), "guard did not run");
+}
+
+/// A `PreviousEffectCount`/`EventContextAmount` reader after a legal producer that acted once.
+fn read_one(o: &Outcome) {
+    assert_eq!(o.p0_life, 19, "the producer's own count was not read");
+    assert_eq!(o.guard_counters, Some(1), "guard did not run");
+}
+
+/// A `TrackedSetSize` reader counts the one card an earlier ExileTop exiled this way.
+fn read_one_exiled_card(o: &Outcome) {
+    assert_eq!(o.p0_life, 19, "the earlier exiled card was dropped");
     assert_eq!(o.guard_counters, Some(1), "guard did not run");
 }
 
@@ -386,6 +520,138 @@ row!(
     read_empty_tracked_set
 );
 
+row!(
+    exile_top_missing_player,
+    Case::new(exile_top(), Dependent::ParentTarget)
+        .eliminated()
+        .no_r1(),
+    acted_on_nothing
+);
+row!(
+    exile_top_empty_library,
+    Case::new(exile_top(), Dependent::ParentTarget)
+        .empty_library()
+        .no_r1(),
+    acted_on_nothing
+);
+row!(
+    exile_top_missing_player_behind_sequential_hop,
+    Case::new(exile_top(), Dependent::ParentTarget)
+        .eliminated()
+        .no_r1()
+        .hop(true),
+    acted_on_nothing
+);
+row!(
+    exile_top_missing_player_behind_continuation_hop,
+    Case::new(exile_top(), Dependent::ParentTarget)
+        .eliminated()
+        .no_r1()
+        .hop(false),
+    acted_on_nothing
+);
+// A later exile that finds nothing keeps the cards an earlier ExileTop exiled this way.
+row!(
+    exile_top_chain_keeps_earlier_card_after_empty_library,
+    Case::new(exile_top(), Dependent::LoseTrackedSetSize)
+        .no_r1()
+        .prior_exile()
+        .p0_library(1)
+        .empty_library(),
+    read_one_exiled_card
+);
+row!(
+    exile_top_chain_keeps_earlier_card_after_missing_player,
+    Case::new(exile_top(), Dependent::LoseTrackedSetSize)
+        .eliminated()
+        .no_r1()
+        .prior_exile(),
+    read_one_exiled_card
+);
+
+// A missing player hands on what the producer's own nothing-happened path hands on: a zero result.
+macro_rules! zero_result_rows {
+    ($producer:expr, $count:ident, $amount:ident, $legal_count:ident, $legal_amount:ident, $legal:expr) => {
+        row!(
+            $count,
+            Case::new($producer, Dependent::LosePreviousEffectCount)
+                .eliminated()
+                .no_r1()
+                .stamped(),
+            read_zero_count
+        );
+        row!(
+            $amount,
+            Case::new($producer, Dependent::LosePreviousEffectAmount)
+                .eliminated()
+                .no_r1()
+                .stamped(),
+            read_zero_count
+        );
+        row!(
+            $legal_count,
+            $legal(Case::new($producer, Dependent::LosePreviousEffectCount)),
+            read_one
+        );
+        row!(
+            $legal_amount,
+            $legal(Case::new($producer, Dependent::LosePreviousEffectAmount)),
+            read_one
+        );
+    };
+}
+fn legal_blight(c: Case) -> Case {
+    c.no_r1().stamped().p1_has_cards()
+}
+fn legal(c: Case) -> Case {
+    c.no_r1().stamped()
+}
+zero_result_rows!(
+    blight(),
+    blight_missing_player_reads_zero_count,
+    blight_missing_player_reads_zero_amount,
+    legal_blight_reads_count,
+    legal_blight_reads_amount,
+    legal_blight
+);
+zero_result_rows!(
+    draw(q(1)),
+    draw_missing_player_reads_zero_count,
+    draw_missing_player_reads_zero_amount,
+    legal_draw_reads_count,
+    legal_draw_reads_amount,
+    legal
+);
+zero_result_rows!(
+    mill(),
+    mill_missing_player_reads_zero_count,
+    mill_missing_player_reads_zero_amount,
+    legal_mill_reads_count,
+    legal_mill_reads_amount,
+    legal
+);
+zero_result_rows!(
+    discard(),
+    discard_missing_player_reads_zero_count,
+    discard_missing_player_reads_zero_amount,
+    legal_discard_reads_count,
+    legal_discard_reads_amount,
+    legal_blight
+);
+row!(
+    draw_up_to_missing_player_reads_zero_count,
+    Case::new(
+        draw(QuantityExpr::UpTo {
+            max: Box::new(q(1))
+        }),
+        Dependent::LosePreviousEffectCount
+    )
+    .eliminated()
+    .no_r1()
+    .stamped(),
+    read_zero_count
+);
+
 // The verdict reaches a `ParentTarget` dependent behind an intermediate hop of either link kind.
 row!(
     rt_empty_library_behind_continuation_hop,
@@ -452,6 +718,19 @@ row!(
     legal_dig_behind_hop,
     Case::new(peek(), Dependent::ParentTarget).hop(true),
     moved_p1_top_card
+);
+row!(
+    legal_exile_top,
+    Case::new(exile_top(), Dependent::ParentTarget).no_r1(),
+    |o: &Outcome| {
+        assert_eq!(
+            o.p1_hand,
+            vec!["L1-3".to_string()],
+            "the exiled card to hand"
+        );
+        assert!(o.p0_hand.is_empty(), "P0 hand {:?}", o.p0_hand);
+        assert_eq!(o.guard_counters, Some(1), "guard did not run");
+    }
 );
 // RevealUntil keeps its hit itself, and a `LastRevealed` reader cannot be cast against it.
 row!(

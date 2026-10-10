@@ -13117,18 +13117,26 @@ fn delayed_intervening_if(
     if delayed_body_outlives_a_false_gate(ability) {
         return None;
     }
-    // CR 603.7a + CR 608.2c: both CR 603.4 legs evaluate the condition with no ability, so a live
-    // carried declared player is bound into it first; a group the payload declares itself, or
-    // whose carried player left, stays unbound and declines the hoist, leaving the gate to
-    // resolution.
+    // CR 603.7a + CR 608.2c: the fire-time leg evaluates the condition with no ability, so a live
+    // carried declared player is bound into it first. A group the payload declares itself declines
+    // the hoist; any other group is left unbound.
+    let declared_locally =
+        |group| super::ability_utils::declared_group_player_slot(ability, group).is_some();
     let mut condition = ability.condition.clone()?;
     crate::game::filter::rebind_declared_groups_in_condition(&mut condition, &mut |group| {
-        if super::ability_utils::declared_group_player_slot(ability, group).is_some() {
+        if declared_locally(group) {
             return None;
         }
         super::targeting::carried_declared_player(state, ability, group)
     });
-    if gate_binding_diverges_at_fire_time(&condition) {
+    // CR 603.4 + CR 608.2b: an unbound non-local group names no one on both legs (the fire-time
+    // reader has no ability; the resolution lookup finds no live carried player), so a literal
+    // stands in for it in the divergence test alone.
+    let mut classified = condition.clone();
+    crate::game::filter::rebind_declared_groups_in_condition(&mut classified, &mut |group| {
+        (!declared_locally(group)).then_some(ability.controller)
+    });
+    if gate_binding_diverges_at_fire_time(&classified) {
         return None;
     }
     let static_condition =
@@ -26744,7 +26752,8 @@ pub mod tests {
 
     /// CR 603.7a + CR 603.4: the hoisted gate binds the group the payload CARRIES, not whatever
     /// a same-source entry on the stack declares under the same id; a group the payload declares
-    /// itself, or does not carry, stays unbound and declines the hoist.
+    /// itself declines the hoist, and a group with no live carried player stays unbound and is
+    /// hoisted as it is, which both legs read as no one.
     #[test]
     fn delayed_intervening_if_binds_the_carried_group() {
         use crate::types::ability::ChosenGroupId;
@@ -26815,10 +26824,21 @@ pub mod tests {
             bound(PlayerId(1)),
             "the carried player, although a same-source stack entry declares the id as P0"
         );
+        let unbound = Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        });
         assert_eq!(
             delayed_intervening_if(&state, &payload(None, false)),
-            None,
-            "a group the payload does not carry declines the hoist"
+            unbound,
+            "a group the payload does not carry is hoisted unbound"
         );
         assert_eq!(
             delayed_intervening_if(&state, &payload(Some(PlayerId(1)), true)),
@@ -26828,8 +26848,8 @@ pub mod tests {
         crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
         assert_eq!(
             delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
-            None,
-            "a carried player who left names no one"
+            unbound,
+            "a carried player who left is hoisted unbound, never by identity"
         );
     }
 
