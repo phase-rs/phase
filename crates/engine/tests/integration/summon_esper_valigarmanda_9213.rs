@@ -82,18 +82,24 @@ const GAIN_THREE: &str = "You gain 3 life.";
 const GAIN_ONE: &str = "You gain 1 life.";
 const COUNTERSPELL: &str = "Counter target spell.";
 
-/// A `{1}{W}` sorcery: red mana pays it only through the any-type rider.
-fn white_sorcery(
+/// `{1}{W}`: red mana pays it only through the any-type rider.
+fn white_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 1,
+    }
+}
+
+/// A sorcery with the given printed cost.
+fn sorcery_card(
     scenario: &mut GameScenario,
     owner: engine::types::player::PlayerId,
+    cost: ManaCost,
     text: &str,
 ) -> ObjectId {
     scenario
-        .add_spell_to_graveyard(owner, "White Sorcery", false)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::White],
-            generic: 1,
-        })
+        .add_spell_to_graveyard(owner, "Linked Sorcery", false)
+        .with_mana_cost(cost)
         .from_oracle_text(text)
         .id()
 }
@@ -132,6 +138,16 @@ struct Board {
 /// next precombat main, chapter II on the one after; returns with chapter II
 /// resolving.
 fn reach_chapter_two(instant_text: &str, sorcery_text: &str) -> Board {
+    reach_chapter_two_with(VALIGARMANDA, instant_text, white_cost(), sorcery_text)
+}
+
+/// [`reach_chapter_two`] with a given Saga text and sorcery cost.
+fn reach_chapter_two_with(
+    saga_text: &str,
+    instant_text: &str,
+    sorcery_cost: ManaCost,
+    sorcery_text: &str,
+) -> Board {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
@@ -140,10 +156,10 @@ fn reach_chapter_two(instant_text: &str, sorcery_text: &str) -> Board {
         .add_creature(P0, "Summon: Esper Valigarmanda", 6, 6)
         .as_enchantment()
         .with_subtypes(vec!["Saga"])
-        .from_oracle_text(VALIGARMANDA)
+        .from_oracle_text(saga_text)
         .id();
     let instant = blue_instant(&mut scenario, P0, instant_text);
-    let sorcery = white_sorcery(&mut scenario, P1, sorcery_text);
+    let sorcery = sorcery_card(&mut scenario, P1, sorcery_cost, sorcery_text);
     let unlinked = scenario
         .add_spell_to_exile(P0, "Unlinked Instant", true)
         .from_oracle_text("You gain 5 life.")
@@ -396,5 +412,78 @@ fn declining_the_pick_leaves_no_later_permission() {
     assert!(
         !castable.contains(&sorcery) && !castable.contains(&instant),
         "no lingering permission over the linked exile: {castable:?}"
+    );
+}
+
+/// CR 118.6 + CR 601.2h: a linked sorcery with no mana cost (Living End,
+/// Crashing Footfalls) has an unpayable cost. Chapter II casts at the printed
+/// cost, so that card is not offered and cannot be cast for free; the payable
+/// linked instant still is.
+#[test]
+fn a_linked_card_with_no_mana_cost_is_not_offered() {
+    let Board {
+        mut runner,
+        sorcery,
+        instant,
+        ..
+    } = reach_chapter_two_with(VALIGARMANDA, GAIN_ONE, ManaCost::NoCost, GAIN_THREE);
+    assert_eq!(
+        runner.state().objects[&sorcery].mana_cost,
+        ManaCost::NoCost,
+        "reach guard: the linked sorcery has no mana cost"
+    );
+    assert_eq!(pool_of(&runner), vec![instant]);
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![sorcery],
+            })
+            .is_err(),
+        "picking it directly is refused"
+    );
+    assert_eq!(runner.state().objects[&sorcery].zone, Zone::Exile);
+}
+
+/// Control for the test above: a linked sorcery costing {0} has a payable
+/// cost, so the same chapter offers it and casts it, paying nothing.
+#[test]
+fn a_linked_card_costing_zero_is_offered_and_cast() {
+    let Board {
+        mut runner,
+        sorcery,
+        instant,
+        ..
+    } = reach_chapter_two_with(VALIGARMANDA, GAIN_ONE, ManaCost::zero(), GAIN_THREE);
+    let mut pool = pool_of(&runner);
+    pool.sort();
+    let mut expected = vec![sorcery, instant];
+    expected.sort();
+    assert_eq!(pool, expected, "both linked cards are offered");
+    let pool_before = runner.state().players[0].mana_pool.total();
+    assert_eq!(
+        pool_before, 2,
+        "reach guard: the chapter's {{R}}{{R}} floats"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![sorcery],
+        })
+        .expect("pick the linked sorcery");
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pay {0}");
+    }
+    assert_eq!(
+        runner.state().objects[&sorcery].zone,
+        Zone::Stack,
+        "the {{0}} sorcery is cast, found {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        pool_before,
+        "{{0}} spends no mana"
     );
 }

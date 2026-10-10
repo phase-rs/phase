@@ -9201,6 +9201,35 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
+    // CR 118.6 + CR 601.2h: a normal-cost grant restates the card's printed
+    // cost, so for a card with no mana cost it is an unpayable cost, which
+    // can't be paid. Refuse it rather than reading the resolved `NoCost` as a
+    // free cast. A printed {0} is payable; a "without paying its mana cost"
+    // grant is an alternative cost and may be paid instead (CR 118.6a).
+    // Methods with their own alternative cost (face-down and other riders)
+    // never elect this slot (`selected_object_cast_permission_index`).
+    if matches!(
+        alt_cost_from_exile,
+        Some(crate::types::mana::ManaCost::NoCost)
+    ) && casting_permission_index
+        .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
+        .is_some_and(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+                    ..
+                } | crate::types::ability::CastingPermission::ExileWithAltCost {
+                    cost: crate::types::mana::ManaCost::SelfManaCost,
+                    ..
+                }
+            )
+        })
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+        ));
+    }
 
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
     //
