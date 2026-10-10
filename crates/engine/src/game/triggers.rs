@@ -1200,7 +1200,8 @@ struct FiringConditions<'a> {
     /// (`stack_condition_for_trigger`).
     head: Option<&'a TriggerCondition>,
     /// A delayed body's hoisted intervening-if (`delayed_intervening_if`). Its
-    /// resolution recheck is carried on the pending trigger separately.
+    /// resolution recheck is carried on the pending trigger; `stack::bind_resolution_scope`
+    /// derives it again for a payload carrying declared players.
     body_if: Option<&'a TriggerCondition>,
     /// CR 603.4 + CR 607.1c: the `trigger_definition_ref` the gated ability's
     /// builder installs, so a self-linked leaf ("if you haven't added mana with

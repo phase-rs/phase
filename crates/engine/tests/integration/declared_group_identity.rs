@@ -628,6 +628,7 @@ fn run_deciding(
             before_resolve,
             after_install,
             on_stack: After::Nothing,
+            on_reflexive: After::Nothing,
         },
         decide,
     )
@@ -651,9 +652,17 @@ fn run_late(
             before_resolve,
             after_install,
             on_stack,
+            on_reflexive: After::Nothing,
         },
         None,
     )
+}
+
+fn stack_pushes(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::StackPushed { .. }))
+        .count()
 }
 
 /// The creatures on the table: one Bear each for P1 and P2 (`Out.bears[0..2]`), and with
@@ -665,11 +674,13 @@ enum Board {
 }
 
 /// When each [`After`] change lands: while the spell is on the stack, once the delayed ability is
-/// installed, and once it has triggered and sits on the stack.
+/// installed, once it has triggered and sits on the stack, and once a reflexive trigger it created
+/// sits on the stack.
 struct Changes {
     before_resolve: After,
     after_install: After,
     on_stack: After,
+    on_reflexive: After,
 }
 
 fn run_on(
@@ -684,6 +695,7 @@ fn run_on(
         before_resolve,
         after_install,
         on_stack,
+        on_reflexive,
     } = changes;
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -730,6 +742,8 @@ fn run_on(
     let mut prompts = 0;
     let mut applied_before = false;
     let mut applied_on_stack = false;
+    let mut applied_on_reflexive = false;
+    let mut pushes_at_install: Option<usize> = None;
     let mut last_wait = String::new();
     let mut asked: Vec<String> = Vec::new();
     let mut events: Vec<GameEvent> = Vec::new();
@@ -756,7 +770,13 @@ fn run_on(
                         apply(runner.state_mut(), before_resolve);
                     } else if !applied_on_stack && runner.state().phase != Phase::PreCombatMain {
                         applied_on_stack = true;
+                        pushes_at_install = Some(stack_pushes(events));
                         apply(runner.state_mut(), on_stack);
+                    } else if !applied_on_reflexive
+                        && pushes_at_install.is_some_and(|n| stack_pushes(events) > n)
+                    {
+                        applied_on_reflexive = true;
+                        apply(runner.state_mut(), on_reflexive);
                     }
                     events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
                 }
@@ -797,6 +817,10 @@ fn run_on(
     assert!(
         applied_on_stack || matches!(on_stack, After::Nothing),
         "the delayed ability never reached the stack"
+    );
+    assert!(
+        applied_on_reflexive || matches!(on_reflexive, After::Nothing),
+        "no reflexive trigger reached the stack"
     );
     let state = runner.state();
     Out {
@@ -1944,7 +1968,7 @@ fn g1_false_gate_on_a_carried_group_does_not_trigger() {
 }
 
 /// A gate on a carried player who left the game names no one at the event as at resolution, and
-/// does nothing (CR 603.4 + CR 800.4a).
+/// does nothing (CR 603.4 + CR 608.2b).
 #[test]
 fn g2_gate_on_a_carried_player_who_left_does_nothing() {
     let gated = |after| {
@@ -2291,7 +2315,7 @@ fn departure_run(payload: &AbilityDefinition, form: usize, install: After, on_st
     )
 }
 
-/// CR 603.4 + CR 800.4a: a gate on history of a carried player who leaves after the event, with
+/// CR 603.4 + CR 608.2b: a gate on history of a carried player who leaves after the event, with
 /// the payload on the stack, names no one at resolution: the outcome is that of the same final
 /// state reached with the player gone before the event.
 fn assert_departure_after_the_event_reads_no_one(gate: &AbilityCondition, departure: After) {
@@ -2355,7 +2379,7 @@ fn h4_presence_gate_of_a_player_who_leaves_with_the_payload_on_the_stack() {
     assert_eq!(outcome(Comparator::GE, 1), vec![20, 20, 20]);
 }
 
-/// CR 603.4 + CR 800.4a: "no counter was put on a creature the declared player controls this
+/// CR 603.4 + CR 608.2b: "no counter was put on a creature the declared player controls this
 /// turn", true at the event; a counter lands and the player leaves with the payload on the stack.
 /// With the player still in the game the gate is false and the payload does nothing.
 #[test]
@@ -2396,6 +2420,55 @@ fn h6_gate_false_by_resolution_stops_the_whole_ability() {
         "reach guard: both clauses run while the gate holds"
     );
     assert_eq!(run(After::BearDies), vec![20, 20, 20]);
+}
+
+/// CR 603.12 + CR 603.4: a reflexive trigger created while a declared-player payload resolves
+/// keeps only the gate it was put on the stack with; when that gate turns false while it waits,
+/// its gated clause is skipped and the unconditional clause after it still runs.
+#[test]
+fn h7_reflexive_trigger_gate_false_by_resolution_skips_only_its_clause() {
+    let run = |guard: Option<AbilityCondition>, on_reflexive| {
+        let mut gated = def(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 5 },
+            player: TargetFilter::Controller,
+        });
+        gated.condition = Some(match guard {
+            Some(guard) => AbilityCondition::when_you_do_with_guard(guard),
+            None => AbilityCondition::WhenYouDo,
+        });
+        let payload =
+            def(lose(dp(G))).sub_ability(then(gated, def(lose(TargetFilter::Controller))));
+        run_on(
+            Board::Plain,
+            payload_root(payload),
+            &[Pick::Player(P1)],
+            &[Phase::End],
+            Changes {
+                before_resolve: After::Nothing,
+                after_install: After::Nothing,
+                on_stack: After::Nothing,
+                on_reflexive,
+            },
+            None,
+        )
+        .life
+    };
+    let present = || Some(count_check(creature_of(G), Comparator::GE, 1));
+    assert_eq!(
+        run(None, After::BearDies),
+        vec![22, 17, 20],
+        "reach guard: the reflexive trigger is driven and both clauses run"
+    );
+    assert_eq!(
+        run(present(), After::Nothing),
+        vec![22, 17, 20],
+        "the guard still holds: both clauses run"
+    );
+    assert_eq!(
+        run(present(), After::BearDies),
+        vec![17, 17, 20],
+        "the guard is false at resolution: only the unconditional clause runs"
+    );
 }
 
 /// A declared player who was an illegal target as the creating chain began to resolve names no
@@ -2502,6 +2575,7 @@ fn caster_board_run(root: AbilityDefinition, picks: &[Pick], before: After, afte
             before_resolve: before,
             after_install: after,
             on_stack: After::Nothing,
+            on_reflexive: After::Nothing,
         },
         None,
     )
