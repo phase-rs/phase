@@ -161,6 +161,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         },
         incarnation: 0,
     });

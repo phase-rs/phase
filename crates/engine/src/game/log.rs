@@ -2976,6 +2976,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");

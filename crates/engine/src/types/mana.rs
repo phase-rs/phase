@@ -59,6 +59,19 @@ pub enum ManaType {
     Colorless,
 }
 
+impl ManaType {
+    /// CR 106.1b: the six types of mana, in canonical order — the five colors
+    /// in WUBRG order (CR 105.1), then colorless.
+    pub const ALL: [ManaType; 6] = [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+    ];
+}
+
 impl From<ManaColor> for ManaType {
     fn from(color: ManaColor) -> Self {
         match color {
@@ -102,6 +115,27 @@ impl ManaTypeSet {
     /// mana that satisfies `self` also satisfies `other`.
     pub const fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
+    }
+
+    /// Every mana type in either set.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// CR 105.1: the colored members only. Colorless is a type of mana
+    /// (CR 106.1b) but not a color, so a clause that asks for mana *colors*
+    /// (Exotic Orchard, Fellwar Stone) never offers it.
+    pub const fn colors(self) -> Self {
+        Self(self.0 & !Self::of(ManaType::Colorless).0)
+    }
+
+    /// The members in canonical [`ManaType::ALL`] order (W, U, B, R, G, C), so
+    /// anything built from the set — a choice prompt, an LKI snapshot — is
+    /// deterministic.
+    pub fn iter(self) -> impl Iterator<Item = ManaType> {
+        ManaType::ALL
+            .into_iter()
+            .filter(move |mana_type| self.contains(*mana_type))
     }
 }
 

@@ -25,7 +25,7 @@ use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
 };
-use super::super::oracle_target::parse_type_phrase_folding;
+use super::super::oracle_target::{parse_cost_paid_object_reference, parse_type_phrase_folding};
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
@@ -368,36 +368,52 @@ pub(super) fn try_parse_add_mana_effect_with_context(
             });
         }
 
-        // CR 106.7 + CR 106.1b: "mana of any type that a land [scope] could
-        // produce" — Reflecting Pool, Naga Vitalist, Incubation Druid, Cactus
-        // Preserve, Horizon of Progress. The trailing scope phrase is
-        // dispatched via `alt()` over the printed variants so future
-        // opponent-/player-scoped printings slot in by adding a tag without
-        // touching the runtime. Per "build for the class": the resulting
-        // `TargetFilter` carries `ControllerRef` so a single primitive covers
-        // every scoping variant.
-        if let Some((controller_ref, _)) = nom_on_lower(rest, &rest_lower, |i| {
+        // CR 106.7 + CR 106.1b: "mana of any type [that] <subject> could
+        // produce". The subject is one of two forms:
+        // - a census, "a land you control / an opponent controls" — Reflecting
+        //   Pool, Naga Vitalist, Incubation Druid, Cactus Preserve, Horizon of
+        //   Progress. The resulting `TargetFilter` carries `ControllerRef` so a
+        //   single primitive covers every scoping variant;
+        // - CR 608.2k + CR 400.7j: the cost referent, "the sacrificed land" —
+        //   Squandered Resources. `parse_cost_paid_object_reference` is the
+        //   shared authority for that phrase, so the noun and participle axes
+        //   (and the exile-cost gate) stay in one place.
+        // Each axis is one `alt()`, so a future printing slots in by adding a
+        // tag without touching the runtime.
+        let cost_context: &ParseContext = ctx;
+        if let Some((land_filter, _)) = nom_on_lower(rest, &rest_lower, |i| {
             preceded(
-                tag("mana of any type that a land "),
+                (tag("mana of any type "), opt(tag("that "))),
                 terminated(
                     alt((
-                        value(
-                            crate::types::ability::ControllerRef::You,
-                            tag("you control"),
+                        map(
+                            preceded(
+                                tag("a land "),
+                                alt((
+                                    value(
+                                        crate::types::ability::ControllerRef::You,
+                                        tag("you control"),
+                                    ),
+                                    value(
+                                        crate::types::ability::ControllerRef::Opponent,
+                                        tag("an opponent controls"),
+                                    ),
+                                )),
+                            ),
+                            |controller_ref| {
+                                TargetFilter::Typed(
+                                    crate::types::ability::TypedFilter::land()
+                                        .controller(controller_ref),
+                                )
+                            },
                         ),
-                        value(
-                            crate::types::ability::ControllerRef::Opponent,
-                            tag("an opponent controls"),
-                        ),
+                        |input| parse_cost_paid_object_reference(input, cost_context),
                     )),
                     tag(" could produce"),
                 ),
             )
             .parse(i)
         }) {
-            let land_filter = TargetFilter::Typed(
-                crate::types::ability::TypedFilter::land().controller(controller_ref),
-            );
             return Some(Effect::Mana {
                 produced: ManaProduction::AnyTypeProduceableBy { count, land_filter },
                 restrictions: vec![],
@@ -3315,6 +3331,67 @@ mod tests {
             panic!("expected Typed land filter");
         };
         assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+    }
+
+    /// CR 106.7 + CR 608.2k: Squandered Resources — "any type the sacrificed
+    /// land could produce" names the cost referent, so it parses to
+    /// `AnyTypeProduceableBy` with `TargetFilter::CostPaidObject`, the same
+    /// variant the census form uses.
+    #[test]
+    fn sacrificed_land_could_produce_binds_the_cost_referent() {
+        use crate::types::ability::TargetFilter;
+        let effect =
+            try_parse_add_mana_effect("Add one mana of any type the sacrificed land could produce")
+                .expect("Squandered Resources clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        assert_eq!(
+            produced,
+            ManaProduction::AnyTypeProduceableBy {
+                count: QuantityExpr::Fixed { value: 1 },
+                land_filter: TargetFilter::CostPaidObject,
+            }
+        );
+    }
+
+    /// CR 608.2k: the referent form composes the optional relative pronoun and
+    /// every noun `parse_cost_paid_object_reference` accepts, not just "land".
+    #[test]
+    fn sacrificed_object_referent_accepts_that_and_other_nouns() {
+        use crate::types::ability::TargetFilter;
+        let effect = try_parse_add_mana_effect(
+            "Add one mana of any type that the sacrificed creature could produce",
+        )
+        .expect("noun and pronoun axes must compose");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyTypeProduceableBy { land_filter, .. } = produced else {
+            panic!("expected AnyTypeProduceableBy, got {produced:?}");
+        };
+        assert_eq!(land_filter, TargetFilter::CostPaidObject);
+    }
+
+    /// Benthic Explorers' "that land" is an `EffectCost` referent this parser
+    /// does not bind, and "the exiled card" is an effect participle unless the
+    /// ability has an exile cost. Both must stay unparsed (coverage honest-red)
+    /// rather than fall into the census or the cost-referent arm. The
+    /// sacrificed-land form on the same parser is the paired positive.
+    #[test]
+    fn unbound_could_produce_referents_stay_unparsed() {
+        assert!(
+            try_parse_add_mana_effect("Add one mana of any type the sacrificed land could produce")
+                .is_some(),
+            "reach-guard: the referent arm is live"
+        );
+        assert!(
+            try_parse_add_mana_effect("Add one mana of any type that land could produce").is_none()
+        );
+        assert!(try_parse_add_mana_effect(
+            "Add one mana of any type the exiled card could produce"
+        )
+        .is_none());
     }
 
     /// CR 106.1 + CR 601.2h: "add an amount of {C} equal to the

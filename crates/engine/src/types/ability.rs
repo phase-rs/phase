@@ -3440,6 +3440,10 @@ pub enum ManaProduction {
     /// Per CR 106.7 the union ignores cost-payability of the surveyed lands'
     /// mana abilities — only the resulting *type set* matters. CR 106.5 applies
     /// when the union is empty (e.g. no matching lands → no mana).
+    /// `land_filter` may also be the cost referent `TargetFilter::CostPaidObject`
+    /// ("the sacrificed land could produce" — Squandered Resources, CR 608.2k),
+    /// read from the referent's LKI (`LKISnapshot::produceable_mana_types`,
+    /// CR 608.2h) rather than a battlefield census.
     AnyTypeProduceableBy {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,

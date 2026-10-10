@@ -35,6 +35,7 @@ pub mod contraptions;
 mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
+pub mod could_produce;
 pub mod coverage;
 pub mod crew_payment;
 pub mod dash;

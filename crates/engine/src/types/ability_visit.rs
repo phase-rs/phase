@@ -71,6 +71,18 @@
 //! `scope_prunes_nested_ability` for the CR 603.12 decision and neither
 //! re-implements it.
 //!
+//! **A third axis: cost carriers on the effect walk ([`CostCarriers`]).** The
+//! effect walk enters `def.cost` and `def.unless_pay.cost` (and a trigger's or
+//! replacement's cost) through `AbilityCost::EffectCost`, so an `Effect` reached
+//! that way is indistinguishable, to an `FnMut(&Effect)` visitor, from one the
+//! ability performs. CR 605.1a consumers need that descent ("its cost and
+//! effect"); a CR 106.7 consumer must not have it ("ignore whether any costs of
+//! the ability could or could not be paid" — a cost is paid on activation,
+//! CR 601.2h via CR 602.2b, or as a resolution-time cost, CR 118.12, and neither
+//! is what the ability produces). [`WalkScope`] carries both axes through the
+//! walk's recursion; [`visit_own_resolution_effects`] is the only entry that
+//! skips cost carriers.
+//!
 //! **Scope-reset invariant.** `visit_trigger_scoped`, `visit_replacement_scoped`,
 //! `visit_static_scoped`, `visit_continuous_mod_scoped`, and
 //! `visit_copiable_values_scoped` are unreachable under `OwnResolutionOnly`
@@ -105,6 +117,48 @@ pub enum ResolutionScope {
     /// Visit the entire printed subtree, including separately-registered
     /// payloads. The historical behavior of every existing entry point.
     IncludeRegisteredLater,
+}
+
+/// CR 605.1a vs CR 106.7: whether the effect walk enters cost carriers — an
+/// ability's activation cost, its `unless_pay` cost, and a trigger's or
+/// replacement's cost — on its way to the `Effect`s inside them.
+///
+/// A separate axis from [`ResolutionScope`] rather than a field on one of its
+/// variants: the two are independent (a CR 605.1a reader wants own-resolution
+/// effects *with* costs, a CR 106.7 reader wants them *without*), and folding it
+/// into `OwnResolutionOnly` would force an edit at every existing call site for
+/// no semantic gain. A hand-rolled walk calling `visit_effect_scoped` per node
+/// was rejected because it re-enters nested definitions' costs, and the
+/// `nodes` expansion because it flattens the sub / else / "instead" structure a
+/// CR 106.7 reader must mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostCarriers {
+    /// Enter every cost carrier (every existing entry point).
+    Descend,
+    /// Leave every cost carrier unvisited ([`visit_own_resolution_effects`]).
+    Skip,
+}
+
+/// The two axes the effect walk threads through its recursion.
+///
+/// `pub(crate)`, not private, because the macro-generated `pub(crate)` `_scoped`
+/// functions carry it in their signatures, and at module root so the `nodes` /
+/// `nodes_mut` expansions see it through `use super::*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WalkScope {
+    resolution: ResolutionScope,
+    costs: CostCarriers,
+}
+
+impl WalkScope {
+    /// `resolution` with every cost carrier entered — the behavior of every
+    /// entry point that predates [`CostCarriers`].
+    const fn descending(resolution: ResolutionScope) -> Self {
+        Self {
+            resolution,
+            costs: CostCarriers::Descend,
+        }
+    }
 }
 
 /// CR 603.12 + CR 603.7 + CR 603.3: a reflexive triggered ability ("when you do")
@@ -244,6 +298,35 @@ where
     ControlFlow::Continue(())
 }
 
+/// CR 106.7 + CR 608.2c: every `Effect` that `effect` performs during this
+/// resolution — inline branch carriers included, boundary carriers pruned, and
+/// no cost carrier entered anywhere.
+///
+/// Inline branch carriers (coin flip, die roll, vote, choose-one, piles,
+/// reveal-or-decline) are decided by chance or choice during the resolution, so
+/// every branch is something the ability could do (CR 705.1, CR 706.1).
+/// Boundary carriers are pruned exactly as under
+/// [`ResolutionScope::OwnResolutionOnly`]. Costs are skipped because CR 106.7
+/// says to "ignore whether any costs of the ability could or could not be
+/// paid": a cost is paid on activation (CR 601.2h via CR 602.2b) or as a
+/// resolution-time cost (CR 118.12), and neither is what the ability produces —
+/// a Braid of Fire-shaped "cumulative upkeep — add {R}" is a cost the player
+/// "may pay" (CR 702.24a), not the ability's output.
+///
+/// Visits `effect` and what it nests, not the `sub_ability` / `else_ability`
+/// links of the definition that owns it: a caller that mirrors the chain
+/// resolver walks those links itself.
+pub(crate) fn visit_own_resolution_effects<F>(effect: &Effect, visit: &mut F) -> ControlFlow<()>
+where
+    F: FnMut(&Effect) -> ControlFlow<()>,
+{
+    let scope = WalkScope {
+        resolution: ResolutionScope::OwnResolutionOnly,
+        costs: CostCarriers::Skip,
+    };
+    visit_effect_scoped(effect, scope, visit)
+}
+
 /// The effect-axis walk, written once and expanded in two borrow modes so both
 /// descend the one carrier list: shared (every `Effect`) at this module's root,
 /// exclusive (every definition node) in [`nodes_mut`].
@@ -254,16 +337,16 @@ macro_rules! define_walk {
 /// gate goes through here.
 fn visit_nested_ability_def_scoped<F>(
     def: &$($mut_)? AbilityDefinition,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
     F: $($bound)+,
 {
-    if scope_prunes_nested_ability(def, scope) {
+    if scope_prunes_nested_ability(def, scope.resolution) {
         return ControlFlow::Continue(());
     }
-    visit_ability_def_scoped(def, scope, visit)
+    walk_ability_def(def, scope, visit)
 }
 
 pub fn visit_ability_def<F>(def: &$($mut_)? AbilityDefinition, visit: &mut F) -> ControlFlow<()>
@@ -273,6 +356,8 @@ where
     visit_ability_def_scoped(def, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
+/// The crate-facing ability walk: `scope` on the resolution axis, every cost
+/// carrier entered (CR 605.1a "its cost and effect").
 pub(crate) fn visit_ability_def_scoped<F>(
     def: &$($mut_)? AbilityDefinition,
     scope: ResolutionScope,
@@ -281,10 +366,25 @@ pub(crate) fn visit_ability_def_scoped<F>(
 where
     F: $($bound)+,
 {
+    walk_ability_def(def, WalkScope::descending(scope), visit)
+}
+
+/// The ability walk's internal recursion entry, carrying both [`WalkScope`]
+/// axes. The two cost descents run only under [`CostCarriers::Descend`].
+fn walk_ability_def<F>(
+    def: &$($mut_)? AbilityDefinition,
+    scope: WalkScope,
+    visit: &mut F,
+) -> ControlFlow<()>
+where
+    F: $($bound)+,
+{
     $on_node!(visit, Ability, def);
     visit_effect_scoped(&$($mut_)? def.effect, scope, visit)?;
-    if let Some(cost) = &$($mut_)? def.cost {
-        visit_cost_scoped(cost, scope, visit)?;
+    if scope.costs == CostCarriers::Descend {
+        if let Some(cost) = &$($mut_)? def.cost {
+            visit_cost_scoped(cost, scope, visit)?;
+        }
     }
     if let Some(sub) = &$($mut_)? def.sub_ability {
         visit_nested_ability_def_scoped(sub, scope, visit)?;
@@ -296,8 +396,10 @@ where
         visit_nested_ability_def_scoped(mode, scope, visit)?;
     }
     // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
-    if let Some(unless_pay) = &$($mut_)? def.unless_pay {
-        visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
+    if scope.costs == CostCarriers::Descend {
+        if let Some(unless_pay) = &$($mut_)? def.unless_pay {
+            visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
+        }
     }
     ControlFlow::Continue(())
 }
@@ -306,24 +408,30 @@ pub fn visit_trigger<F>(trigger: &$($mut_)? TriggerDefinition, visit: &mut F) ->
 where
     F: $($bound)+,
 {
-    visit_trigger_scoped(trigger, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_trigger_scoped(
+        trigger,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_trigger_scoped<F>(
     trigger: &$($mut_)? TriggerDefinition,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
     F: $($bound)+,
 {
-    debug_assert_own_resolution_unreachable(scope, "visit_trigger_scoped");
+    debug_assert_own_resolution_unreachable(scope.resolution, "visit_trigger_scoped");
     $on_node!(visit, Trigger, trigger);
     if let Some(execute) = &$($mut_)? trigger.execute {
-        visit_ability_def_scoped(execute, scope, visit)?;
+        walk_ability_def(execute, scope, visit)?;
     }
-    if let Some(unless_pay) = &$($mut_)? trigger.unless_pay {
-        visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
+    if scope.costs == CostCarriers::Descend {
+        if let Some(unless_pay) = &$($mut_)? trigger.unless_pay {
+            visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
+        }
     }
     ControlFlow::Continue(())
 }
@@ -332,34 +440,40 @@ pub fn visit_replacement<F>(replacement: &$($mut_)? ReplacementDefinition, visit
 where
     F: $($bound)+,
 {
-    visit_replacement_scoped(replacement, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_replacement_scoped(
+        replacement,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_replacement_scoped<F>(
     replacement: &$($mut_)? ReplacementDefinition,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
     F: $($bound)+,
 {
-    debug_assert_own_resolution_unreachable(scope, "visit_replacement_scoped");
+    debug_assert_own_resolution_unreachable(scope.resolution, "visit_replacement_scoped");
     $on_node!(visit, Replacement, replacement);
     if let Some(execute) = &$($mut_)? replacement.execute {
-        visit_ability_def_scoped(execute, scope, visit)?;
+        walk_ability_def(execute, scope, visit)?;
     }
     // The mode carries the decline continuation (and, for MayCost, a cost),
     // either of which may conjure. Descend into both.
     match &$($mut_)? replacement.mode {
         ReplacementMode::MayCost { cost, decline } => {
-            visit_cost_scoped(cost, scope, visit)?;
+            if scope.costs == CostCarriers::Descend {
+                visit_cost_scoped(cost, scope, visit)?;
+            }
             if let Some(decline) = decline {
-                visit_ability_def_scoped(decline, scope, visit)?;
+                walk_ability_def(decline, scope, visit)?;
             }
         }
         ReplacementMode::Optional { decline } => {
             if let Some(decline) = decline {
-                visit_ability_def_scoped(decline, scope, visit)?;
+                walk_ability_def(decline, scope, visit)?;
             }
         }
         ReplacementMode::Mandatory => {}
@@ -373,18 +487,22 @@ pub fn visit_static<F>(static_def: &$($mut_)? StaticDefinition, visit: &mut F) -
 where
     F: $($bound)+,
 {
-    visit_static_scoped(static_def, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_static_scoped(
+        static_def,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_static_scoped<F>(
     static_def: &$($mut_)? StaticDefinition,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
     F: $($bound)+,
 {
-    debug_assert_own_resolution_unreachable(scope, "visit_static_scoped");
+    debug_assert_own_resolution_unreachable(scope.resolution, "visit_static_scoped");
     $on_node!(visit, Static, static_def);
     for modification in &$($mut_)? static_def.modifications {
         visit_continuous_mod_scoped(modification, scope, visit)?;
@@ -399,21 +517,25 @@ pub fn visit_continuous_mod<F>(
 where
     F: $($bound)+,
 {
-    visit_continuous_mod_scoped(modification, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_continuous_mod_scoped(
+        modification,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_continuous_mod_scoped<F>(
     modification: &$($mut_)? ContinuousModification,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
     F: $($bound)+,
 {
-    debug_assert_own_resolution_unreachable(scope, "visit_continuous_mod_scoped");
+    debug_assert_own_resolution_unreachable(scope.resolution, "visit_continuous_mod_scoped");
     match modification {
         ContinuousModification::GrantAbility { definition } => {
-            visit_ability_def_scoped(definition, scope, visit)?
+            walk_ability_def(definition, scope, visit)?
         }
         ContinuousModification::GrantTrigger { trigger } => {
             visit_trigger_scoped(trigger, scope, visit)?
@@ -494,20 +616,24 @@ pub fn visit_copiable_values<F>(values: &$($mut_)? CopiableValues, visit: &mut F
 where
     F: $($bound)+,
 {
-    visit_copiable_values_scoped(values, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_copiable_values_scoped(
+        values,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_copiable_values_scoped<F>(
     values: &$($mut_)? CopiableValues,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
     F: $($bound)+,
 {
-    debug_assert_own_resolution_unreachable(scope, "visit_copiable_values_scoped");
+    debug_assert_own_resolution_unreachable(scope.resolution, "visit_copiable_values_scoped");
     for ability in $arc_iter!(values.abilities) {
-        visit_ability_def_scoped(ability, scope, visit)?;
+        walk_ability_def(ability, scope, visit)?;
     }
     for trigger in $arc_iter!(values.trigger_definitions) {
         visit_trigger_scoped(trigger, scope, visit)?;
@@ -525,12 +651,16 @@ pub fn visit_cost<F>(cost: &$($mut_)? AbilityCost, visit: &mut F) -> ControlFlow
 where
     F: $($bound)+,
 {
-    visit_cost_scoped(cost, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_cost_scoped(
+        cost,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_cost_scoped<F>(
     cost: &$($mut_)? AbilityCost,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
@@ -593,12 +723,16 @@ pub fn visit_effect<F>(effect: &$($mut_)? Effect, visit: &mut F) -> ControlFlow<
 where
     F: $($bound)+,
 {
-    visit_effect_scoped(effect, ResolutionScope::IncludeRegisteredLater, visit)
+    visit_effect_scoped(
+        effect,
+        WalkScope::descending(ResolutionScope::IncludeRegisteredLater),
+        visit,
+    )
 }
 
 pub(crate) fn visit_effect_scoped<F>(
     effect: &$($mut_)? Effect,
-    scope: ResolutionScope,
+    scope: WalkScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
@@ -622,7 +756,7 @@ where
         // ability's own effect(s)"), so CR 605.1a's closing carve-out does not
         // reach it and the substitute effect is not part of THIS resolution.
         Effect::CreateDrawReplacement { replacement_effect } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 visit_effect_scoped(replacement_effect, scope, visit)?
             }
         }
@@ -633,7 +767,7 @@ where
         // BOUNDARY CARRIER — same reason as `CreateDrawReplacement` above:
         // CR 614.1 primary, not a CR 614.15 self-replacement.
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 visit_effect_scoped(replacement_effect, scope, visit)?
             }
         }
@@ -705,8 +839,8 @@ where
         // payload is not an instruction THIS ability follows during its own
         // resolution (CR 608.2c), so `OwnResolutionOnly` stops here.
         Effect::CreateDelayedTrigger { effect, .. } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
-                visit_ability_def_scoped(effect, scope, visit)?
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
+                walk_ability_def(effect, scope, visit)?
             }
         }
         Effect::FlipCoin {
@@ -749,7 +883,7 @@ where
         Effect::GenericEffect {
             static_abilities, ..
         } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 for static_def in static_abilities {
                     visit_static_scoped(static_def, scope, visit)?;
                 }
@@ -762,7 +896,7 @@ where
         // is not a CR 614.15 self-replacement effect of this ability and falls
         // outside CR 605.1a's carve-out.
         Effect::AddTargetReplacement { replacement, .. } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 visit_replacement_scoped(replacement, scope, visit)?
             }
         }
@@ -776,7 +910,7 @@ where
         // CR 614.15 self-replacement effect read directly by
         // `Effect::moves_card_to_or_from_library`, not by this walk.
         Effect::Counter { source_rider, .. } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 if let Some(CounterSourceRider::LosesAbilities { static_def, .. }) = source_rider {
                     visit_static_scoped(static_def, scope, visit)?;
                 }
@@ -790,7 +924,7 @@ where
         Effect::Token {
             static_abilities, ..
         } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 for static_def in static_abilities {
                     visit_static_scoped(static_def, scope, visit)?;
                 }
@@ -799,7 +933,7 @@ where
         // BOUNDARY CARRIER (CR 114.1): an emblem is a distinct object in the
         // command zone; its abilities are the emblem's, not this ability's.
         Effect::CreateEmblem { statics, triggers } => {
-            if scope == ResolutionScope::IncludeRegisteredLater {
+            if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 for static_def in statics {
                     visit_static_scoped(static_def, scope, visit)?;
                 }
@@ -1514,4 +1648,153 @@ pub(crate) fn each_granter_symbol(
     v: &mut impl FnMut(granter_symbols::Symbol<'_>),
 ) {
     granter_symbols::each_node(root, &mut |node| granter_symbols::node_fields(node, v));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{
+        AbilityKind, ContinuousModification, ManaContribution, ManaProduction, PlayerFilter,
+        QuantityExpr, TargetFilter, UnlessPayModifier,
+    };
+    use crate::types::mana::{ManaColor, ManaType};
+
+    fn mana(color: ManaColor) -> Effect {
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        }
+    }
+
+    fn mana_cost(color: ManaColor) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(mana(color)),
+        }
+    }
+
+    fn unless_pay(color: ManaColor) -> UnlessPayModifier {
+        UnlessPayModifier {
+            cost: mana_cost(color),
+            payer: TargetFilter::Controller,
+        }
+    }
+
+    fn draw() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    /// A visitor that records the colors of every `Effect::Mana` it sees.
+    fn collect_mana(colors: &mut Vec<ManaType>) -> impl FnMut(&Effect) -> ControlFlow<()> + '_ {
+        move |effect| {
+            if let Effect::Mana {
+                produced: ManaProduction::Fixed { colors: fixed, .. },
+                ..
+            } = effect
+            {
+                colors.extend(fixed.iter().map(|color| ManaType::from(*color)));
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn own_resolution_mana(effect: &Effect) -> Vec<ManaType> {
+        let mut colors = Vec::new();
+        let _ = visit_own_resolution_effects(effect, &mut collect_mana(&mut colors));
+        colors
+    }
+
+    /// V-1 (CR 106.7 "ignore … costs"): the own-resolution effect walk enters no
+    /// cost carrier — not the root's `unless_pay`, not an inline branch's own
+    /// cost or `unless_pay` — and visits only `effect`, not the owning
+    /// definition's chain links. The crate-facing CR 605.1a walk over the same
+    /// fixture does reach every cost-carried {G} / {R} / {U}, which proves the
+    /// fixture's cost nodes exist.
+    #[test]
+    fn own_resolution_effects_skip_every_cost_carrier() {
+        let branch = AbilityDefinition::new(AbilityKind::Spell, draw())
+            .cost(mana_cost(ManaColor::Green))
+            .unless_pay(unless_pay(ManaColor::Red));
+        let root = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![branch],
+            },
+        )
+        .unless_pay(unless_pay(ManaColor::Blue))
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana(ManaColor::White),
+        ));
+
+        let mut reach = Vec::new();
+        let _ = visit_ability_def_scoped(
+            &root,
+            ResolutionScope::OwnResolutionOnly,
+            &mut collect_mana(&mut reach),
+        );
+        reach.sort();
+        assert_eq!(
+            reach,
+            vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+            "reach-guard: the CR 605.1a walk descends every cost carrier"
+        );
+
+        assert!(own_resolution_mana(&root.effect).is_empty());
+        let sub = root.sub_ability.as_deref().unwrap();
+        assert_eq!(own_resolution_mana(&sub.effect), vec![ManaType::White]);
+    }
+
+    /// V-1: the new entry prunes the same CR 603.3 boundaries as
+    /// `OwnResolutionOnly` — a "when you do" reflexive branch and a granted
+    /// ability — while a plain branch is read.
+    #[test]
+    fn own_resolution_effects_prune_registered_later_payloads() {
+        let branches = |condition: Option<AbilityCondition>| {
+            let mut branch = AbilityDefinition::new(AbilityKind::Spell, mana(ManaColor::Green));
+            branch.condition = condition;
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![branch],
+            }
+        };
+        assert_eq!(own_resolution_mana(&branches(None)), vec![ManaType::Green]);
+        assert!(own_resolution_mana(&branches(Some(AbilityCondition::WhenYouDo))).is_empty());
+
+        let grant = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        mana(ManaColor::Green),
+                    )),
+                }])],
+            duration: None,
+            target: None,
+            end_cost: None,
+        };
+        assert!(own_resolution_mana(&grant).is_empty());
+        let mut granted = Vec::new();
+        let _ = visit_effect(&grant, &mut collect_mana(&mut granted));
+        assert_eq!(
+            granted,
+            vec![ManaType::Green],
+            "reach-guard: the granted ability carries the mana"
+        );
+    }
 }

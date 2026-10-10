@@ -3144,6 +3144,11 @@ impl GameObject {
             // snapshots that use this method never ask an attachment predicate, so an
             // empty set here is the same fail-closed answer they got before.
             attachments: Vec::new(),
+            // Empty by construction, NOT by choice: CR 106.7 needs `&GameState`
+            // (e.g. a Reflecting Pool's could-produce set reads the lands its
+            // controller controls). State-aware captures fill it via
+            // `mana_sources::snapshot_with_produceable_mana_types`.
+            produceable_mana_types: Vec::new(),
         }
     }
 

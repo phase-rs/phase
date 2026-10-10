@@ -4409,6 +4409,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
             incarnation: 0,
         });

@@ -1,5 +1,5 @@
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
-use crate::game::{mana_payment, mana_sources};
+use crate::game::{could_produce, mana_payment, mana_sources};
 #[cfg(test)]
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
@@ -773,11 +773,16 @@ fn resolve_mana_types_impl(
                 None => Vec::new(),
             }
         }
-        // CR 106.7: Produce mana of any color that a land an opponent controls could produce.
-        // Delegates to mana_sources::opponent_land_color_options for the shared computation.
+        // CR 106.7 + CR 105.1: Produce mana of any color that a land an opponent
+        // controls could produce — never colorless (the Exotic Orchard ruling).
+        // Delegates to the one CR 106.7 authority, `could_produce::census`.
         ManaProduction::OpponentLandColors { count } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
-            let color_options = mana_sources::opponent_land_color_options(state, controller);
+            let color_options = could_produce::census(
+                state,
+                could_produce::CouldProducePopulation::OpponentLands { controller },
+                could_produce::CouldProduceMeasure::Colors,
+            );
             // CR 106.5: If no color can be defined, produce no mana.
             let Some(first) = color_options.first().copied() else {
                 return Vec::new();
@@ -809,16 +814,15 @@ fn resolve_mana_types_impl(
         // mirroring the `OpponentLandColors` / `AnyOneColor` precedent. The
         // per-type choice prompt is surfaced by `mana_choice_prompt` when the
         // option set has more than one type. CR 106.5: an empty option set
-        // (no matching lands, or only mutually-recursive producers) produces
-        // no mana.
+        // (no matching lands, or an unanchored cycle of could-produce clauses)
+        // produces no mana. CR 608.2k: the cost-referent form ("the sacrificed
+        // land") reads the referent's could-produce set from `ability`'s
+        // cost-paid snapshot, so a one-type referent auto-picks and a land that
+        // could produce nothing yields no mana.
         ManaProduction::AnyTypeProduceableBy { count, land_filter } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
-            let type_options = mana_sources::produceable_mana_types_by_filter(
-                state,
-                land_filter,
-                controller,
-                source_id,
-            );
+            let type_options =
+                could_produce::types_for_clause(state, land_filter, controller, source_id, ability);
             let Some(first) = type_options.first().copied() else {
                 return Vec::new();
             };
@@ -2837,11 +2841,12 @@ mod tests {
         );
 
         // The full type union (helper-level) must include both colors.
-        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+        let options = crate::game::could_produce::types_for_clause(
             &state,
             &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
             PlayerId(0),
             ObjectId(100),
+            None,
         );
         assert!(options.contains(&ManaType::White), "union must include W");
         assert!(options.contains(&ManaType::Black), "union must include B");
@@ -2870,9 +2875,9 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
-    /// CR 106.7: Two Reflecting Pools facing each other (no other lands) — the
-    /// recursive `AnyTypeProduceableBy` skip prevents infinite recursion and
-    /// the union collapses to empty (CR 106.5 — no mana).
+    /// CR 106.7: Two Reflecting Pools facing each other (no other lands) — no
+    /// land anchors a type, so the least fixed point is empty (CR 106.5 — no
+    /// mana).
     #[test]
     fn any_type_produceable_by_recursive_yields_empty() {
         use crate::game::zones::create_object;
@@ -2925,7 +2930,8 @@ mod tests {
         )
         .unwrap();
 
-        // Both producers are recursive; no other lands → empty union → no mana.
+        // Both producers are could-produce clauses and no land anchors a type →
+        // the least fixed point is empty → no mana.
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
@@ -2970,11 +2976,12 @@ mod tests {
         );
 
         let land_filter = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
-        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+        let options = crate::game::could_produce::types_for_clause(
             &state,
             &land_filter,
             PlayerId(0),
             ObjectId(9999),
+            None,
         );
         assert!(
             options.contains(&ManaType::Colorless),
@@ -2984,11 +2991,10 @@ mod tests {
 
     /// CR 106.7 + CR 106.5: P0 controls Exotic Orchard (`OpponentLandColors`),
     /// P1 controls Reflecting Pool (`AnyTypeProduceableBy`), and neither
-    /// player controls any other land. The mutual recursion guard must be
-    /// symmetric — `opponent_land_color_options` skips both recursive
-    /// producers, so the survey terminates with the empty set rather than
-    /// re-anchoring `ControllerRef::You` to the wrong player or looping.
-    /// Activating either side produces no mana per CR 106.5.
+    /// player controls any other land. No anchor ⇒ the least fixed point is
+    /// empty: the solve terminates with the empty set rather than re-anchoring
+    /// `ControllerRef::You` to the wrong player or looping. Activating either
+    /// side produces no mana per CR 106.5.
     #[test]
     fn exotic_orchard_with_opponent_reflecting_pool_no_panic() {
         use crate::game::zones::create_object;
@@ -3056,22 +3062,28 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
 
-        // P0's Exotic Orchard surveys P1's lands → only finds Reflecting Pool
-        // (recursive — skipped) → empty set.
-        let orchard_opts =
-            crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
+        // P0's Exotic Orchard surveys P1's lands → only finds Reflecting Pool,
+        // whose own census reaches no anchor → empty set.
+        let orchard_opts = crate::game::could_produce::census(
+            &state,
+            crate::game::could_produce::CouldProducePopulation::OpponentLands {
+                controller: PlayerId(0),
+            },
+            crate::game::could_produce::CouldProduceMeasure::Colors,
+        );
         assert!(
             orchard_opts.is_empty(),
             "Exotic Orchard facing only an opponent's Reflecting Pool must yield empty (CR 106.5); got {orchard_opts:?}"
         );
 
-        // P1's Reflecting Pool surveys P1's lands → only itself (recursive,
-        // skipped) → empty set. (Cross-controller cycle terminates cleanly.)
-        let pool_opts = crate::game::mana_sources::produceable_mana_types_by_filter(
+        // P1's Reflecting Pool surveys P1's lands → only itself, no anchor →
+        // empty set. (Cross-controller cycle terminates cleanly.)
+        let pool_opts = crate::game::could_produce::types_for_clause(
             &state,
             &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
             PlayerId(1),
             pool,
+            None,
         );
         assert!(
             pool_opts.is_empty(),
@@ -3158,7 +3170,13 @@ mod tests {
     fn opponent_land_colors_reads_command_tower_for_its_controller() {
         let mut state = commander_board_with_opponent_command_tower();
 
-        let options = crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
+        let options = crate::game::could_produce::census(
+            &state,
+            crate::game::could_produce::CouldProducePopulation::OpponentLands {
+                controller: PlayerId(0),
+            },
+            crate::game::could_produce::CouldProduceMeasure::Colors,
+        );
         assert_eq!(options, vec![ManaType::Blue]);
 
         let mut events = Vec::new();
@@ -3182,11 +3200,12 @@ mod tests {
     fn produceable_types_by_opponent_filter_reads_command_tower_for_its_controller() {
         let state = commander_board_with_opponent_command_tower();
 
-        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+        let options = crate::game::could_produce::types_for_clause(
             &state,
             &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)),
             PlayerId(0),
             ObjectId(100),
+            None,
         );
         assert_eq!(options, vec![ManaType::Blue]);
     }

@@ -8511,7 +8511,7 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
 /// table, which keeps "the exiled card" → `TrackedSet` for the common
 /// effect-exile case.
-fn parse_cost_paid_object_reference<'a>(
+pub(crate) fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {

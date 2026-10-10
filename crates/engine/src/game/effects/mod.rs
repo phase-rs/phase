@@ -3276,6 +3276,7 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
                 tapped: subject.tapped,
                 is_suspected: subject.is_suspected,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
             incarnation: subject.identity.incarnation,
         }),
@@ -3339,6 +3340,7 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         // (SBA unattaches everything the instant the host leaves, CR 704.5m/n), so carry
         // it through rather than dropping it on the way into the LKI.
         attachments: record.attachments.clone(),
+        produceable_mana_types: Vec::new(),
     }
 }
 
@@ -15880,93 +15882,10 @@ fn resolve_chain_body(
                 }
                 resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
             } else if let Some(ref sub) = ability.sub_ability {
-                // CR 608.2c: A skipped `IfYouDo` head whose effect
-                // did not happen must still hand off to a paired `Not(IfYouDo)`
-                // continuation. The head's own condition gates only the head's
-                // effect — the `sub_ability` is the next chain link with its
-                // own condition. Springheart Nantuko's decline path resolves
-                // here: `CopyTokenOf {IfYouDo}` is skipped (no pay → effect not
-                // performed) and the chain descends to `Token(Insect)
-                // {Not(IfYouDo)}`, which evaluates true and creates the Insect.
-                // Restricted to performed-gate sub-conditions so a *dependent*
-                // continuation (one whose own gate references the parent's
-                // action, e.g. a `WhenYouDo` reflexive — Ezio's "When you do,
-                // that player loses the game") is never run when its parent's
-                // condition failed (that remains an early return).
-                //
-                // CR 608.2c: An UNCONDITIONAL `SequentialSibling` is the next
-                // INDEPENDENT instruction "in the order written", not a
-                // continuation of this node's action, so it resolves regardless
-                // of this node's condition. The `is_none()` guard is what keeps
-                // Ezio's gated reflexive blocked while letting a truly
-                // independent sibling through. This covers per-opponent
-                // `player_scope` continuations: when a scoped clause carries a
-                // conditional rider (Momentum Breaker's "each opponent who can't
-                // discards a card"), the remaining opponents' unconditional
-                // sacrifice clauses are appended after the first opponent's
-                // stashed rider as `SequentialSibling`s, and must still resolve
-                // when that rider's condition is false. Mirrors the gated-sub
-                // sibling escape hatch (the `next.sub_link == SequentialSibling`
-                // branch below).
-                // CR 608.2c: A dependent `SequentialSibling` whose direct condition
-                // is `AbilityUseCountThisTurn` is the next ordinal instruction of the
-                // same resolving ability (Belladonna Took / Omnath class). It must
-                // reach and evaluate its OWN ordinal condition when the preceding
-                // ordinal is false. Keep this exact escape local: other dependent
-                // conditional siblings remain suppressed with their false parent.
-                //
-                // CR 615.5 + CR 120.1: A sub whose gate is an INDEPENDENT per-event
-                // predicate — `PostReplacementDamageSourceMatchesFilter`
-                // (Comeuppance's two mutually-exclusive creature/noncreature
-                // reflection riders) — does not reference this node's effect, so it
-                // must be evaluated on its own regardless of whether this node's
-                // gate held. Without this, the noncreature rider never fires when
-                // the creature rider's gate is false (and vice-versa).
-                // CR 702.1c ("the same is true") + CR 608.2c (written order): A
-                // sub produced by per-item keyword-list replication
-                // (`SiblingCondition::ReplicatedOrBranch`) is an INDEPENDENT
-                // OR-branch gated on its OWN keyword — Mutable Pupa's "perpetually
-                // gains <K_i> if that creature has <K_i>" and Kathril's "put a
-                // <K_i> counter if a creature card in your graveyard has <K_i>".
-                // Its gate references neither this node's effect nor this node's
-                // keyword, so it must be evaluated regardless of whether this
-                // node's own gate (K_j's keyword check) held. Without this, once
-                // any earlier sibling's gate is false the rest of the keyword list
-                // never resolves ("list collapse"). Same shape of independent
-                // per-branch gate as `PostReplacementDamageSourceMatchesFilter`
-                // above, keyed on the replication marker rather than the condition
-                // variant (the gate here is a plain `ZoneChangeObjectMatchesFilter`
-                // / `QuantityCheck` that would otherwise look dependent).
-                //
-                // All THREE independent-sub classes above are the single authority
-                // `sub_outlives_false_parent_gate`, which
-                // `triggers::delayed_body_outlives_a_false_gate` also consults so
-                // the CR 603.4 fire-time hoist declines on exactly those sub
-                // shapes. The unconditional and ordinal `SequentialSibling` escapes
-                // below are local to this call site: neither is an independent
-                // intervening-if path that the delayed-body hoist may preserve.
-                // The escape is deliberately scoped to the ORDINAL reading
-                // (`Resolved`) of `AbilityUseCountThisTurn`, which is exactly
-                // what it covered before the tally axis existed. The `Activated`
-                // reading is a single terminal rider ("sacrifice this creature at
-                // the beginning of the next end step", Dragon Whelp class), never
-                // one of several ordinal clauses chained in written order, so it
-                // has no claim on an escape whose whole justification is CR 608.2c
-                // written-order evaluation of successive ordinals.
-                let is_ordinal_sequential_sibling = sub.sub_link
-                    == SubAbilityLink::SequentialSibling
-                    && sub.sibling_condition == SiblingCondition::Dependent
-                    && matches!(
-                        sub.condition.as_ref(),
-                        Some(AbilityCondition::AbilityUseCountThisTurn {
-                            tally: AbilityUseTally::Resolved,
-                            ..
-                        })
-                    );
-                if sub_outlives_false_parent_gate(sub)
-                    || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && (sub.condition.is_none() || is_ordinal_sequential_sibling))
-                {
+                // CR 608.2c: whether the sub still resolves is decided by
+                // `false_gate_escape`, the same selector the CR 106.7
+                // could-produce walker matches.
+                if let Some(escape) = false_gate_escape(sub) {
                     let mut sub_resolved = sub.as_ref().clone();
                     // CR 608.2d: a `Resolution`-timed sub makes its OWN
                     // untargeted choice at its own resolution (see the
@@ -15986,7 +15905,7 @@ fn resolve_chain_body(
                     // carry this printed ability's index to the next ordinal
                     // instruction. Otherwise `AbilityUseCountThisTurn` reads no
                     // `(source, ability_index)` ledger entry and can never match.
-                    if is_ordinal_sequential_sibling {
+                    if escape == FalseGateEscape::OrdinalSibling {
                         apply_parent_chain_context(&mut sub_resolved, ability, None, state);
                     }
                     resolve_ability_chain(state, &sub_resolved, events, depth + 1)?;
@@ -17904,63 +17823,39 @@ fn resolve_chain_body(
             // tail-runner fallback, so when teamwork was NOT paid the swap correctly did
             // not fire but the trailing `ChangeZone` was silently dropped along with the
             // consumed override node — the spell targeted a card and did nothing.
-            if matches!(
-                condition,
-                AbilityCondition::AdditionalCostPaidInstead
-                    | AbilityCondition::CastVariantPaidInstead { .. }
-                    | AbilityCondition::TargetHasKeywordInstead { .. }
-                    | AbilityCondition::ConditionInstead { .. }
-            ) {
-                if let Some(ref base_chain) = sub.else_ability {
-                    let mut resolved = base_chain.as_ref().clone();
-                    if should_propagate_parent_targets(ability, &resolved) {
-                        resolved.targets = ability.targets.clone();
-                    }
-                    apply_parent_chain_context(
-                        &mut resolved,
-                        ability,
-                        effect_context_object.as_ref(),
-                        state,
-                    );
-                    // If the parent effect entered an interactive state (e.g.,
-                    // SearchChoice), stash the else chain as a continuation so it
-                    // runs after the player responds — not immediately.
-                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                        debug_assert!(
-                            state.active_ability_continuation().is_none(),
-                            "pending_continuation overwritten before consumption — else_ability chain will be lost"
+            if is_instead_override(sub) {
+                // CR 608.2c: which continuation runs is decided by
+                // `instead_declined_continuation`, the same selector the CR 106.7
+                // could-produce walker matches, so the two cannot drift.
+                match instead_declined_continuation(sub) {
+                    Some(InsteadDeclined::Else(base_chain)) => {
+                        let mut resolved = base_chain.clone();
+                        if should_propagate_parent_targets(ability, &resolved) {
+                            resolved.targets = ability.targets.clone();
+                        }
+                        apply_parent_chain_context(
+                            &mut resolved,
+                            ability,
+                            effect_context_object.as_ref(),
+                            state,
                         );
-                        // The shared continuation authority places it relative to
-                        // whatever paused (a draw pair, a direct choice).
-                        append_to_pending_continuation(state, Some(Box::new(resolved)));
-                    } else {
-                        resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                        // If the parent effect entered an interactive state (e.g.,
+                        // SearchChoice), stash the else chain as a continuation so it
+                        // runs after the player responds — not immediately.
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            debug_assert!(
+                                state.active_ability_continuation().is_none(),
+                                "pending_continuation overwritten before consumption — else_ability chain will be lost"
+                            );
+                            // The shared continuation authority places it relative to
+                            // whatever paused (a draw pair, a direct choice).
+                            append_to_pending_continuation(state, Some(Box::new(resolved)));
+                        } else {
+                            resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                        }
                     }
-                } else if let Some(ref tail) = sub.sub_ability {
-                    // CR 608.2c (read the whole text; follow instructions in the order
-                    // written): a `SequentialSibling` clause printed AFTER the "instead"
-                    // sentence is an INDEPENDENT instruction — the "instead" replaced only
-                    // the prior sentence, so the tail runs in BOTH branches. The swap branch
-                    // runs it as the swapped node's sub via the general sub path below
-                    // (including the one-sided-fight source prepend at the swap block ~6844);
-                    // mirror that delivery here for the not-swap branch so the tail is not
-                    // silently dropped (Throw from the Saddle / Evil's Thrall / Take the
-                    // Fall / That's Rough Buddy / Too Evil to Stay Dead — issue #4772). This
-                    // `else if` fires only when `else_ability` is None: a card carrying a
-                    // distinct else-chain (From Father to Son: else = ChangeZone→Hand, a
-                    // DISTINCT node from its Shuffle sibling) takes the else path above and
-                    // never reaches here, so there is no double-run. Such a card's trailing
-                    // sibling is deliberately not run in this branch (out of scope; the only
-                    // corpus member is From Father to Son, whose from-hand shuffle is
-                    // supplied by SearchLibrary's auto-shuffle).
-                    // GUARDS: (1) `SequentialSibling` only — a `ContinuationStep` sub is part
-                    // of the REPLACED clause and must NOT run when the swap didn't fire;
-                    // (2) never run an `Unimplemented` tail — no speculative semantics
-                    // (Increasing Vengeance's "copy with new targets").
-                    if tail.sub_link == SubAbilityLink::SequentialSibling
-                        && !matches!(tail.effect, Effect::Unimplemented { .. })
-                    {
-                        let mut resolved = tail.as_ref().clone();
+                    Some(InsteadDeclined::Tail(tail)) => {
+                        let mut resolved = tail.clone();
                         // CR 120.1 + CR 115.10a + CR 601.2c: a one-sided-fight
                         // `DealDamage { damage_source: Target }` tail ("It deals damage equal
                         // to its power …") names the boosted creature (the base's chosen
@@ -18025,6 +17920,7 @@ fn resolve_chain_body(
                             resolve_ability_chain(state, &resolved, events, depth + 1)?;
                         }
                     }
+                    None => {}
                 }
                 return Ok(());
             }
@@ -19037,12 +18933,211 @@ fn resolves_for_each_target_player(ability: &ResolvedAbility) -> bool {
         )
 }
 
+/// CR 608.2c: why a sub-ability still resolves after its parent's gate was
+/// false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FalseGateEscape {
+    /// [`sub_outlives_false_parent_gate`] — the three independent-sub classes.
+    IndependentSub,
+    /// An unconditional `SequentialSibling` — the next independent instruction
+    /// in written order.
+    UnconditionalSibling,
+    /// A `Dependent` `SequentialSibling` gated on the ordinal (`Resolved`)
+    /// `AbilityUseCountThisTurn` — the next ordinal instruction of the same
+    /// resolving ability, which needs the parent's chain context to read its
+    /// `(source, ability_index)` ledger entry.
+    OrdinalSibling,
+}
+
+/// CR 608.2c: whether `sub`, the direct sub of a node whose own gate was false,
+/// still resolves — and if so, through which escape.
+///
+/// CR 608.2c: A skipped `IfYouDo` head whose effect
+/// did not happen must still hand off to a paired `Not(IfYouDo)`
+/// continuation. The head's own condition gates only the head's
+/// effect — the `sub_ability` is the next chain link with its
+/// own condition. Springheart Nantuko's decline path resolves
+/// here: `CopyTokenOf {IfYouDo}` is skipped (no pay → effect not
+/// performed) and the chain descends to `Token(Insect)
+/// {Not(IfYouDo)}`, which evaluates true and creates the Insect.
+/// Restricted to performed-gate sub-conditions so a *dependent*
+/// continuation (one whose own gate references the parent's
+/// action, e.g. a `WhenYouDo` reflexive — Ezio's "When you do,
+/// that player loses the game") is never run when its parent's
+/// condition failed (that remains an early return).
+///
+/// CR 608.2c: An UNCONDITIONAL `SequentialSibling` is the next
+/// INDEPENDENT instruction "in the order written", not a
+/// continuation of this node's action, so it resolves regardless
+/// of this node's condition. The `is_none()` guard is what keeps
+/// Ezio's gated reflexive blocked while letting a truly
+/// independent sibling through. This covers per-opponent
+/// `player_scope` continuations: when a scoped clause carries a
+/// conditional rider (Momentum Breaker's "each opponent who can't
+/// discards a card"), the remaining opponents' unconditional
+/// sacrifice clauses are appended after the first opponent's
+/// stashed rider as `SequentialSibling`s, and must still resolve
+/// when that rider's condition is false. Mirrors the gated-sub
+/// sibling escape hatch (the `next.sub_link == SequentialSibling`
+/// branch of `resolve_chain_body`).
+/// CR 608.2c: A dependent `SequentialSibling` whose direct condition
+/// is `AbilityUseCountThisTurn` is the next ordinal instruction of the
+/// same resolving ability (Belladonna Took / Omnath class). It must
+/// reach and evaluate its OWN ordinal condition when the preceding
+/// ordinal is false. Keep this exact escape local: other dependent
+/// conditional siblings remain suppressed with their false parent.
+///
+/// CR 615.5 + CR 120.1: A sub whose gate is an INDEPENDENT per-event
+/// predicate — `PostReplacementDamageSourceMatchesFilter`
+/// (Comeuppance's two mutually-exclusive creature/noncreature
+/// reflection riders) — does not reference this node's effect, so it
+/// must be evaluated on its own regardless of whether this node's
+/// gate held. Without this, the noncreature rider never fires when
+/// the creature rider's gate is false (and vice-versa).
+/// CR 702.1c ("the same is true") + CR 608.2c (written order): A
+/// sub produced by per-item keyword-list replication
+/// (`SiblingCondition::ReplicatedOrBranch`) is an INDEPENDENT
+/// OR-branch gated on its OWN keyword — Mutable Pupa's "perpetually
+/// gains <K_i> if that creature has <K_i>" and Kathril's "put a
+/// <K_i> counter if a creature card in your graveyard has <K_i>".
+/// Its gate references neither this node's effect nor this node's
+/// keyword, so it must be evaluated regardless of whether this
+/// node's own gate (K_j's keyword check) held. Without this, once
+/// any earlier sibling's gate is false the rest of the keyword list
+/// never resolves ("list collapse"). Same shape of independent
+/// per-branch gate as `PostReplacementDamageSourceMatchesFilter`
+/// above, keyed on the replication marker rather than the condition
+/// variant (the gate here is a plain `ZoneChangeObjectMatchesFilter`
+/// / `QuantityCheck` that would otherwise look dependent).
+///
+/// All THREE independent-sub classes above are the single authority
+/// `sub_outlives_false_parent_gate`, which
+/// `triggers::delayed_body_outlives_a_false_gate` also consults so
+/// the CR 603.4 fire-time hoist declines on exactly those sub
+/// shapes. The unconditional and ordinal `SequentialSibling` escapes
+/// are local to the chain resolver: neither is an independent
+/// intervening-if path that the delayed-body hoist may preserve.
+/// The escape is deliberately scoped to the ORDINAL reading
+/// (`Resolved`) of `AbilityUseCountThisTurn`, which is exactly
+/// what it covered before the tally axis existed. The `Activated`
+/// reading is a single terminal rider ("sacrifice this creature at
+/// the beginning of the next end step", Dragon Whelp class), never
+/// one of several ordinal clauses chained in written order, so it
+/// has no claim on an escape whose whole justification is CR 608.2c
+/// written-order evaluation of successive ordinals.
+///
+/// The ordinal shape is adjudicated FIRST on purpose: the runtime hands the
+/// parent's chain context to an ordinal sibling even when it is also an
+/// independent-sub class, so reporting that overlap as `IndependentSub` would
+/// skip the hand-off. Since the escape is a disjunction, the order changes only
+/// which variant is reported, never whether the sub resolves.
+pub(crate) fn false_gate_escape(sub: &ResolvedAbility) -> Option<FalseGateEscape> {
+    let is_sequential_sibling = sub.sub_link == SubAbilityLink::SequentialSibling;
+    let is_ordinal_sequential_sibling = is_sequential_sibling
+        && sub.sibling_condition == SiblingCondition::Dependent
+        && matches!(
+            sub.condition.as_ref(),
+            Some(AbilityCondition::AbilityUseCountThisTurn {
+                tally: AbilityUseTally::Resolved,
+                ..
+            })
+        );
+    if is_ordinal_sequential_sibling {
+        return Some(FalseGateEscape::OrdinalSibling);
+    }
+    if sub_outlives_false_parent_gate(sub) {
+        return Some(FalseGateEscape::IndependentSub);
+    }
+    if is_sequential_sibling && sub.condition.is_none() {
+        return Some(FalseGateEscape::UnconditionalSibling);
+    }
+    None
+}
+
+/// CR 608.2c: what runs after an "instead" override that did not apply.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InsteadDeclined<'a> {
+    /// The override's base chain (`sub.else_ability`).
+    Else(&'a ResolvedAbility),
+    /// A later independent instruction printed after the "instead" sentence:
+    /// `sub.sub_ability` when it is a `SequentialSibling` whose effect is not
+    /// `Unimplemented`.
+    Tail(&'a ResolvedAbility),
+}
+
+/// CR 608.2c: the continuation of `sub`, an "instead" override whose swap did
+/// not fire. `None` when nothing further runs.
+///
+/// "Instead" overrides are terminal — the swap either replaced the parent's
+/// effect (condition met) or didn't (condition not met). When NOT swapped, the
+/// base chain (`else_ability`) runs after the parent's own effect. This is
+/// shared by EVERY "instead" condition kind — additional-cost / cast-variant /
+/// target-keyword gated overrides, and the general `ConditionInstead` wrapper.
+///
+/// CR 608.2c (read the whole text; follow instructions in the order
+/// written): a `SequentialSibling` clause printed AFTER the "instead"
+/// sentence is an INDEPENDENT instruction — the "instead" replaced only
+/// the prior sentence, so the tail runs in BOTH branches. The swap branch
+/// runs it as the swapped node's sub via `resolve_chain_body`'s general sub path
+/// (including the one-sided-fight source prepend);
+/// `Tail` mirrors that delivery for the not-swap branch so the tail is not
+/// silently dropped (Throw from the Saddle / Evil's Thrall / Take the
+/// Fall / That's Rough Buddy / Too Evil to Stay Dead — issue #4772). This
+/// arm is chosen only when `else_ability` is None: a card carrying a
+/// distinct else-chain (From Father to Son: else = ChangeZone→Hand, a
+/// DISTINCT node from its Shuffle sibling) takes `Else` and
+/// never takes `Tail`, so there is no double-run. Such a card's trailing
+/// sibling is deliberately not run in this branch (out of scope; the only
+/// corpus member is From Father to Son, whose from-hand shuffle is
+/// supplied by SearchLibrary's auto-shuffle).
+/// GUARDS: (1) `SequentialSibling` only — a `ContinuationStep` sub is part
+/// of the REPLACED clause and must NOT run when the swap didn't fire;
+/// (2) never run an `Unimplemented` tail — no speculative semantics
+/// (Increasing Vengeance's "copy with new targets").
+pub(crate) fn instead_declined_continuation(sub: &ResolvedAbility) -> Option<InsteadDeclined<'_>> {
+    if let Some(base_chain) = sub.else_ability.as_deref() {
+        return Some(InsteadDeclined::Else(base_chain));
+    }
+    sub.sub_ability
+        .as_deref()
+        .filter(|tail| {
+            tail.sub_link == SubAbilityLink::SequentialSibling
+                && !matches!(tail.effect, Effect::Unimplemented { .. })
+        })
+        .map(InsteadDeclined::Tail)
+}
+
+/// CR 608.2c: a node that replaces its parent's effect when its condition
+/// holds.
+///
+/// The single membership test for the "instead" family: the chain resolver's
+/// swap ([`instead_swap_applies`]) and its not-swapped continuation, the stack
+/// reach walker, and the CR 106.7 could-produce walker all ask it, so no site can
+/// treat a sub as an override while another treats it as an ordinary link.
+pub(crate) fn is_instead_override(node: &ResolvedAbility) -> bool {
+    matches!(
+        node.condition,
+        Some(
+            AbilityCondition::AdditionalCostPaidInstead
+                | AbilityCondition::CastVariantPaidInstead { .. }
+                | AbilityCondition::TargetHasKeywordInstead { .. }
+                | AbilityCondition::ConditionInstead { .. }
+        )
+    )
+}
+
 /// CR 608.2c: whether `sub`, an "instead" override, replaces `ability`'s effect.
-fn instead_swap_applies(
+///
+/// Membership is decided by [`is_instead_override`]; the arms below are the
+/// per-kind swap DECISIONS, one per member.
+pub(crate) fn instead_swap_applies(
     state: &GameState,
     ability: &ResolvedAbility,
     sub: &ResolvedAbility,
 ) -> bool {
+    if !is_instead_override(sub) {
+        return false;
+    }
     if matches!(
         sub.condition,
         Some(AbilityCondition::AdditionalCostPaidInstead)
@@ -19069,6 +19164,9 @@ fn instead_swap_applies(
         // CR 608.2c: General "instead" replacement — evaluate the wrapped condition.
         evaluate_condition(inner, state, ability)
     } else {
+        // Reached only by an `is_instead_override` member with no decision arm
+        // above: fail in tests rather than silently never swapping.
+        debug_assert!(false, "instead override without a swap decision");
         false
     }
 }
@@ -23770,6 +23868,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
         );
 
@@ -27212,6 +27311,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
         );
         let events = vec![

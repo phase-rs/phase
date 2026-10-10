@@ -6897,6 +6897,7 @@ fn source_context_from_filter<'a>(
                     tapped: false,
                     is_suspected: false,
                     attachments: Vec::new(),
+                    produceable_mana_types: Vec::new(),
                 });
             (
                 lki,
@@ -9188,6 +9189,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         });
     SourceContext {
         id: context.source_id,
@@ -11122,6 +11124,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
         );
 
@@ -17095,6 +17098,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -17143,6 +17147,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
         let entrant = ObjectId(700);
         let filter = TargetFilter::Typed(
@@ -17281,6 +17286,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
         let filter =
             TargetFilter::Typed(
@@ -17427,6 +17433,7 @@ mod tests {
             tapped,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
 
         // Left the battlefield TAPPED.
@@ -18409,6 +18416,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -18430,6 +18438,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
 
         let filter =
@@ -18546,6 +18555,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
@@ -18689,6 +18699,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
         );
 
@@ -18760,6 +18771,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
             },
         );
 

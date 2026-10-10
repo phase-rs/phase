@@ -285,6 +285,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // last known information once its source has left the battlefield.
                 // Supplied by the caller: the sever already ran by the time we get here.
                 attachments,
+                produceable_mana_types: Vec::new(),
             };
             state.lki_cache.insert(object_id, lki.clone());
             state
