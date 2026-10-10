@@ -487,8 +487,14 @@ pub(crate) fn matches_player_scope(
                             && state
                                 .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
-                    // CR 508.6 + CR 102.2 + CR 508.1b: opponent of the controller
-                    // who is attacking the enchanted/defending player this combat.
+                    // CR 508.6 + CR 102.2 + CR 102.3: opponent of the controller
+                    // who IS ATTACKING the enchanted player when the effect is
+                    // applied. Live combat membership, kind-preserving (CR 506.3:
+                    // attacking that player's planeswalker or battle is not
+                    // attacking that player), and an attacker removed from combat
+                    // drops out (CR 506.4). Deliberately NOT the declaration
+                    // ledger, which records "has attacked" and collapses
+                    // planeswalker/battle attacks to the defending player.
                     // The "that player" anchor is the trigger source's AttachedTo
                     // host (the aura source is never itself an attacker, so it can
                     // never appear in `combat.attackers` for `DefendingPlayer`),
@@ -496,7 +502,9 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
                         crate::game::players::is_opponent(state, controller, p.id)
                             && enchanted_player_anchor(state, source_id).is_some_and(|enchanted| {
-                                state.player_attacked_player_this_combat(p.id, enchanted)
+                                crate::game::combat::player_is_attacking_player(
+                                    state, p.id, enchanted,
+                                )
                             })
                     }
                     PlayerFilter::HighestSpeed => {

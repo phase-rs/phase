@@ -10,7 +10,8 @@
 //! Each also has "Each opponent attacking that player does the same." Per
 //! CR 508.6 a player is "attacking [a player]" iff it controls a creature
 //! attacking that player, so the rider fans out only to the curse controller's
-//! opponents who declared a creature attacking the ENCHANTED player — never the
+//! opponents who, when the trigger resolves, control a creature attacking the
+//! ENCHANTED player itself (not its planeswalker or battle) — never the
 //! enchanted defending player themselves, and never a non-attacking opponent.
 //! In a two-player game the controller's only opponent IS the enchanted
 //! defending player, who cannot attack themselves, so the rider is a no-op.
@@ -23,11 +24,17 @@
 //!   - CR 102.2: opponents are measured relative to the curse controller.
 //!   - CR 303.4b: An Aura that enchants a player is attached to that player.
 //!   - CR 508.1a: The active player chooses which creatures will attack.
+//!   - CR 506.4: a creature removed from combat stops being an attacking
+//!     creature, so its controller is no longer "attacking" that player.
 
+use engine::game::combat::AttackerInfo;
 use engine::game::effects::attach::attach_to_player;
+use engine::game::effects::remove_from_combat::remove_object_from_combat;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
+use engine::game::zones::move_to_zone;
+use engine::types::ability::{AbilityCost, AbilityKind, Effect, ManaProduction};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -43,6 +50,7 @@ use super::rules::AttackTarget;
 const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
 const P4: PlayerId = PlayerId(4);
+const P5: PlayerId = PlayerId(5);
 
 // ─── Oracle text constants ───────────────────────────────────────────────────
 
@@ -56,7 +64,8 @@ const CURSE_OF_DISTURBANCE_ORACLE: &str = "Enchant player\n\
 
 const CURSE_OF_OPULENCE_ORACLE: &str = "Enchant player\n\
      Whenever enchanted player is attacked, create a Gold token. \
-     Each opponent attacking that player does the same.";
+     Each opponent attacking that player does the same. \
+     (A Gold token is an artifact with \"Sacrifice this token: Add one mana of any color.\")";
 
 const CURSE_OF_VERBOSITY_ORACLE: &str = "Enchant player\n\
      Whenever enchanted player is attacked, draw a card. \
@@ -309,8 +318,29 @@ fn curse_of_disturbance_fires_and_creates_zombie_token() {
 
 // ─── Curse of Opulence ───────────────────────────────────────────────────────
 
-/// CR 508.3b: Trigger fires when enchanted player is attacked; curse controller
-/// creates a Gold token.
+/// Gold tokens on the battlefield that `player` both owns and controls.
+fn gold_tokens(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner.state().objects.get(id).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.is_token
+                    && obj.owner == player
+                    && obj.controller == player
+                    && obj.card_types.subtypes.iter().any(|s| s == "Gold")
+            })
+        })
+        .collect()
+}
+
+/// CR 508.3b + CR 111.10c: Trigger fires when enchanted player is attacked; the
+/// curse controller creates exactly one Gold token ("Sacrifice this token: Add
+/// one mana of any color."). In a two-player game the rider is a no-op: the
+/// controller's only opponent is the enchanted player, who is not attacking.
 #[test]
 fn curse_of_opulence_fires_and_creates_gold_token() {
     let (mut runner, curse_id, attacker) =
@@ -325,24 +355,360 @@ fn curse_of_opulence_fires_and_creates_gold_token() {
 
     runner.advance_until_stack_empty();
 
-    // P0 should have at least one Gold token (artifact with "Gold" subtype).
-    let gold_count = runner
-        .state()
-        .battlefield
-        .iter()
-        .filter(|id| {
-            runner.state().objects.get(id).is_some_and(|obj| {
-                obj.zone == Zone::Battlefield
-                    && obj.controller == P0
-                    && obj.is_token
-                    && obj.card_types.subtypes.iter().any(|s| s == "Gold")
-            })
-        })
-        .count();
-
+    let p0_gold = gold_tokens(&runner, P0);
+    assert_eq!(
+        p0_gold.len(),
+        1,
+        "Curse of Opulence: P0 must have exactly one Gold token"
+    );
+    let gold = &runner.state().objects[&p0_gold[0]];
     assert!(
-        gold_count >= 1,
-        "Curse of Opulence: P0 must have at least one Gold token, got {gold_count}"
+        gold.abilities.iter().any(|ability| {
+            ability.kind == AbilityKind::Activated
+                && matches!(
+                    *ability.effect,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor { .. },
+                        ..
+                    }
+                )
+                && matches!(ability.cost, Some(AbilityCost::Sacrifice(_)))
+        }),
+        "the Gold token must have \"Sacrifice this token: Add one mana of any color.\""
+    );
+    assert!(
+        gold_tokens(&runner, P1).is_empty(),
+        "the enchanted player P1 is not attacking and gets no Gold"
+    );
+}
+
+// ─── Curse of Opulence: multiplayer "is attacking" (CR 508.6) ────────────────
+
+/// Build an `n`-player table with Curse of Opulence controlled by P0 and
+/// enchanting `enchanted`, plus one creature for each entry of `creatures`.
+/// Returns `(runner, curse_id, creature_ids)` with ids in `creatures` order.
+fn opulence_table(
+    n: u8,
+    enchanted: PlayerId,
+    creatures: &[PlayerId],
+) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new_n_player(n, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let curse_id = {
+        let mut builder = scenario.add_creature(P0, "Curse of Opulence", 0, 0);
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.from_oracle_text(CURSE_OF_OPULENCE_ORACLE);
+        builder.id()
+    };
+
+    let creature_ids = creatures
+        .iter()
+        .map(|&player| scenario.add_creature(player, "Grizzly Bears", 2, 2).id())
+        .collect();
+
+    for pid in 0..n {
+        for _ in 0..10 {
+            scenario.add_card_to_library_top(PlayerId(pid), "Plains");
+        }
+    }
+
+    let mut runner = scenario.build();
+    attach_to_player(runner.state_mut(), curse_id, enchanted);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), curse_id);
+
+    (runner, curse_id, creature_ids)
+}
+
+/// CR 508.6 + CR 506.4: an opponent whose attacker is removed from combat
+/// before the trigger resolves is no longer "attacking that player" and gets no
+/// Gold. The controller still gets the base Gold.
+///
+/// Revert-failing: the old declaration-ledger read still counted P2.
+#[test]
+fn curse_of_opulence_attacker_removed_from_combat_gets_no_gold() {
+    let (mut runner, curse_id, creatures) = opulence_table(4, P1, &[P2]);
+    let p2_attacker = creatures[0];
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[(p2_attacker, AttackTarget::Player(P1))])
+        .expect("P2 declares an attacker against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "curse must trigger when the enchanted player P1 is attacked"
+    );
+
+    remove_object_from_combat(runner.state_mut(), p2_attacker);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P0).len(),
+        1,
+        "controller P0 gets exactly one Gold (the trigger resolved)"
+    );
+    assert!(
+        gold_tokens(&runner, P2).is_empty(),
+        "P2's attacker was removed from combat: P2 is not attacking P1"
+    );
+    assert!(
+        gold_tokens(&runner, P1).is_empty(),
+        "the enchanted player gets no Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P3).is_empty(),
+        "a non-attacking opponent gets no Gold"
+    );
+}
+
+/// CR 508.6 + CR 603.2c: an opponent with two attackers, one of them removed
+/// from combat, is still attacking that player and gets exactly one Gold.
+///
+/// Regression guard (not revert-failing): the old ledger also yields one Gold
+/// here; this pins that the live predicate neither doubles nor drops a
+/// surviving attacker.
+#[test]
+fn curse_of_opulence_surviving_attacker_gets_exactly_one_gold() {
+    let (mut runner, curse_id, creatures) = opulence_table(4, P1, &[P2, P2]);
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[
+            (creatures[0], AttackTarget::Player(P1)),
+            (creatures[1], AttackTarget::Player(P1)),
+        ])
+        .expect("P2 declares two attackers against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "curse must trigger when the enchanted player P1 is attacked"
+    );
+
+    remove_object_from_combat(runner.state_mut(), creatures[0]);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P2).len(),
+        1,
+        "P2 is still attacking P1 and gets exactly one Gold"
+    );
+    assert_eq!(
+        gold_tokens(&runner, P0).len(),
+        1,
+        "controller P0 gets exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P1).is_empty(),
+        "enchanted P1 gets no Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P3).is_empty(),
+        "non-attacking P3 gets no Gold"
+    );
+}
+
+/// CR 508.6: the rider is set-valued over the opponents attacking that player
+/// when it resolves. P2 attacks P1 and P3 is also attacking P1; P2's attacker
+/// is then removed from combat. Only P3 is still attacking, so only P3 (and the
+/// controller) get Gold.
+///
+/// Revert-failing: the old ledger read gave P2 a Gold (declared, then removed)
+/// and gave P3 none (never written to the ledger).
+#[test]
+fn curse_of_opulence_gold_goes_only_to_opponents_still_attacking() {
+    let (mut runner, curse_id, creatures) = opulence_table(5, P1, &[P2, P3, P4]);
+    let (p2_attacker, p3_attacker) = (creatures[0], creatures[1]);
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[(p2_attacker, AttackTarget::Player(P1))])
+        .expect("P2 declares an attacker against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "curse must trigger when the enchanted player P1 is attacked"
+    );
+
+    // A second attacking controller: P3's creature is attacking P1 as well
+    // (only the active player declares, so it is placed in combat directly).
+    runner
+        .state_mut()
+        .combat
+        .as_mut()
+        .expect("combat is active after declaring attackers")
+        .attackers
+        .push(AttackerInfo::attacking_player(p3_attacker, P1));
+    remove_object_from_combat(runner.state_mut(), p2_attacker);
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P3).len(),
+        1,
+        "P3 is still attacking P1 and gets exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P2).is_empty(),
+        "P2's attacker was removed from combat: P2 gets no Gold"
+    );
+    assert_eq!(
+        gold_tokens(&runner, P0).len(),
+        1,
+        "controller P0 gets exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P1).is_empty(),
+        "enchanted P1 gets no Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P4).is_empty(),
+        "idle opponent P4 gets no Gold"
+    );
+}
+
+/// Declare P2's attacker at `target` on a 4-player Opulence table where P1
+/// (the enchanted player) controls a planeswalker. Returns the runner, the
+/// curse, and the planeswalker.
+fn opulence_table_with_enchanted_planeswalker(
+    target: impl FnOnce(ObjectId) -> AttackTarget,
+) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let curse_id = {
+        let mut builder = scenario.add_creature(P0, "Curse of Opulence", 0, 0);
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.from_oracle_text(CURSE_OF_OPULENCE_ORACLE);
+        builder.id()
+    };
+    let walker = scenario
+        .add_planeswalker_from_oracle(P1, "Test Walker", "Test", 3, "+1: You gain 1 life.")
+        .id();
+    let p2_attacker = scenario.add_creature(P2, "Grizzly Bears", 2, 2).id();
+
+    for pid in 0..4u8 {
+        for _ in 0..10 {
+            scenario.add_card_to_library_top(PlayerId(pid), "Plains");
+        }
+    }
+
+    let mut runner = scenario.build();
+    attach_to_player(runner.state_mut(), curse_id, P1);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), curse_id);
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[(p2_attacker, target(walker))])
+        .expect("P2 declares its attacker");
+    (runner, curse_id)
+}
+
+/// CR 508.3b: attacking only the enchanted player's planeswalker does not
+/// trigger "whenever enchanted player is attacked", so nobody gets Gold. The
+/// same table with the creature attacking P1 directly triggers and awards Gold.
+#[test]
+fn curse_of_opulence_planeswalker_only_attack_does_not_trigger() {
+    let (mut runner, curse_id) =
+        opulence_table_with_enchanted_planeswalker(AttackTarget::Planeswalker);
+    assert_eq!(
+        stack_triggers_from(&runner, curse_id),
+        0,
+        "attacking P1's planeswalker is not attacking P1 (CR 508.3b)"
+    );
+    runner.advance_until_stack_empty();
+    for player in [P0, P1, P2, P3] {
+        assert!(
+            gold_tokens(&runner, player).is_empty(),
+            "no Gold for {player:?} without a trigger"
+        );
+    }
+
+    // Reach-guard: the same table attacking P1 directly triggers.
+    let (mut runner, curse_id) =
+        opulence_table_with_enchanted_planeswalker(|_| AttackTarget::Player(P1));
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "attacking P1 directly triggers the curse"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(gold_tokens(&runner, P0).len(), 1, "controller gets Gold");
+    assert_eq!(
+        gold_tokens(&runner, P2).len(),
+        1,
+        "P2 is attacking P1 and gets Gold"
+    );
+}
+
+/// Ruling: a player may enchant themselves with the curse. P0 enchants P0 and
+/// P1 attacks P0: P0 gets the base Gold and P1, an opponent attacking that
+/// player, gets the rider's Gold.
+#[test]
+fn curse_of_opulence_self_enchanted_controller_and_attacker_each_get_gold() {
+    let (mut runner, curse_id, creatures) = opulence_table(2, P0, &[P1]);
+
+    hand_turn_to(&mut runner, P1);
+    runner
+        .declare_attackers(&[(creatures[0], AttackTarget::Player(P0))])
+        .expect("P1 declares an attacker against the enchanted player P0");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "curse must trigger when the enchanted player P0 is attacked"
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P0).len(),
+        1,
+        "controller P0 gets exactly one Gold (base effect)"
+    );
+    assert_eq!(
+        gold_tokens(&runner, P1).len(),
+        1,
+        "P1 is an opponent attacking P0 and gets exactly one Gold (rider)"
+    );
+}
+
+/// CR 608.2h + CR 303.4b: if the curse leaves the battlefield before its
+/// trigger resolves, "that player" is still the player it enchanted (last
+/// known information), so the controller and the attacking opponent still get
+/// Gold.
+#[test]
+fn curse_of_opulence_resolves_after_curse_leaves_battlefield() {
+    let (mut runner, curse_id, creatures) = opulence_table(4, P1, &[P2]);
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[(creatures[0], AttackTarget::Player(P1))])
+        .expect("P2 declares an attacker against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "curse must trigger when the enchanted player P1 is attacked"
+    );
+
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), curse_id, Zone::Graveyard, &mut events);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P0).len(),
+        1,
+        "controller P0 gets exactly one Gold"
+    );
+    assert_eq!(
+        gold_tokens(&runner, P2).len(),
+        1,
+        "attacking opponent P2 gets exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P1).is_empty(),
+        "enchanted P1 gets no Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P3).is_empty(),
+        "non-attacking P3 gets no Gold"
     );
 }
 
@@ -542,15 +908,20 @@ fn curse_of_vitality_rider_fans_out_only_to_attacking_opponents() {
 
 /// CR 508.6: the rider is SET-VALUED — it fans out to EVERY opponent attacking
 /// the enchanted player, not merely the active attacker. P2 attacks P1
-/// naturally; a second opponent P3 is additionally recorded as attacking P1 this
-/// combat (the combat model holds one entry per attacking controller — a state
-/// reachable whenever multiple players have creatures attacking the same player,
-/// e.g. via extra-combat / goad effects). Both P2 and P3 gain life; the
-/// non-attacking opponent P4 and the enchanted defender P1 do not. This proves
-/// the scope resolves to the full attacker set, not a single player.
+/// naturally; a second opponent P3 also has a creature attacking P1 (placed in
+/// combat directly, since only the active player declares — a state reachable
+/// whenever multiple players have creatures attacking the same player). Both P2
+/// and P3 gain life; the non-attacking opponent P4 and the enchanted defender P1
+/// do not. This proves the scope resolves to the full attacker set, not a
+/// single player.
+///
+/// CR 506.4: a third opponent P5 was recorded as having attacked P1 (its
+/// declaration is in the ledger) but its creature is removed from combat before
+/// the trigger resolves, so P5 is no longer attacking that player and gains
+/// nothing — the removed-attacker case for a non-token rider.
 #[test]
 fn curse_of_vitality_rider_fans_out_to_all_attacking_opponents() {
-    let mut scenario = GameScenario::new_n_player(5, 42);
+    let mut scenario = GameScenario::new_n_player(6, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
     let curse_id = {
@@ -564,8 +935,9 @@ fn curse_of_vitality_rider_fans_out_to_all_attacking_opponents() {
     let p2_attacker = scenario.add_creature(P2, "Grizzly Bears", 2, 2).id();
     let p3_attacker = scenario.add_creature(P3, "Hill Giant", 3, 3).id();
     let _p4_idle = scenario.add_creature(P4, "Bear Cub", 1, 1).id();
+    let p5_attacker = scenario.add_creature(P5, "Bear Cub", 1, 1).id();
 
-    for pid in 0..5u8 {
+    for pid in 0..6u8 {
         for _ in 0..10 {
             scenario.add_card_to_library_top(PlayerId(pid), "Plains");
         }
@@ -576,18 +948,17 @@ fn curse_of_vitality_rider_fans_out_to_all_attacking_opponents() {
     evaluate_layers(runner.state_mut());
     reindex_object_triggers(runner.state_mut(), curse_id);
 
-    let baseline: Vec<i32> = (0..5u8).map(|p| runner.life(PlayerId(p))).collect();
+    let baseline: Vec<i32> = (0..6u8).map(|p| runner.life(PlayerId(p))).collect();
 
     hand_turn_to(&mut runner, P2);
     runner
         .declare_attackers(&[(p2_attacker, AttackTarget::Player(P1))])
         .expect("P2 declares an attacker against the enchanted player P1");
 
-    // Record a SECOND opponent (P3) as attacking the enchanted player P1 this
-    // combat. Only the active player may *declare* attackers, but the per-combat
-    // ledger legitimately holds one entry per attacking controller, and the
-    // rider's fan-out reads that ledger (CR 508.6) at resolution time — so this
-    // exercises the multi-player set expansion the scope must perform.
+    // Additional attacking controllers. Only the active player may *declare*
+    // attackers, so P3's and P5's creatures are placed in combat directly. P5
+    // is also written to the declaration ledger (what a declaration does), and
+    // its creature is then removed from combat (CR 506.4).
     {
         let combat = runner
             .state_mut()
@@ -595,16 +966,18 @@ fn curse_of_vitality_rider_fans_out_to_all_attacking_opponents() {
             .as_mut()
             .expect("combat is active after declaring attackers");
         combat
-            .attacked_defenders_this_combat
-            .entry(P3)
-            .or_default()
-            .insert(P1);
+            .attackers
+            .push(AttackerInfo::attacking_player(p3_attacker, P1));
         combat
-            .creature_attacked_defenders_this_combat
-            .entry(p3_attacker)
+            .attackers
+            .push(AttackerInfo::attacking_player(p5_attacker, P1));
+        combat
+            .attacked_defenders_this_combat
+            .entry(P5)
             .or_default()
             .insert(P1);
     }
+    remove_object_from_combat(runner.state_mut(), p5_attacker);
 
     assert!(
         stack_triggers_from(&runner, curse_id) >= 1,
@@ -640,5 +1013,11 @@ fn curse_of_vitality_rider_fans_out_to_all_attacking_opponents() {
         runner.life(P4),
         baseline[4],
         "non-attacking opponent P4 must NOT gain life from the rider"
+    );
+    // Removed from combat before resolution → no longer attacking (CR 506.4).
+    assert_eq!(
+        runner.life(P5),
+        baseline[5],
+        "P5's attacker was removed from combat: P5 must NOT gain life from the rider"
     );
 }

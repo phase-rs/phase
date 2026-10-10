@@ -2099,13 +2099,16 @@ fn collect_matching_players(
                             )
                     }
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
-                    // the enchanted/defending player this combat.
+                    // the enchanted player. Delegates to the single scope
+                    // authority (live, kind-preserving, team-aware).
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
-                        p.id != source_controller
-                            && crate::game::effects::enchanted_player_anchor(state, source_id)
-                                .is_some_and(|enchanted| {
-                                    state.player_attacked_player_this_combat(p.id, enchanted)
-                                })
+                        crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            &PlayerFilter::OpponentAttackingEnchantedPlayer,
+                            source_controller,
+                            source_id,
+                        )
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -2356,16 +2359,16 @@ pub fn resolve_each_player(
                         ability.source_id,
                     ),
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
-                    // the enchanted/defending player this combat.
+                    // the enchanted player. Delegates to the single scope
+                    // authority (live, kind-preserving, team-aware).
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
-                        p.id != ability.controller
-                            && crate::game::effects::enchanted_player_anchor(
-                                state,
-                                ability.source_id,
-                            )
-                            .is_some_and(|enchanted| {
-                                state.player_attacked_player_this_combat(p.id, enchanted)
-                            })
+                        crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            &player_filter,
+                            ability.controller,
+                            ability.source_id,
+                        )
                     }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
@@ -3090,6 +3093,143 @@ mod tests {
         resolve_each_player(&mut state, &ability, &mut events).unwrap();
         assert_eq!(state.players[1].life, 14, "archenemy is below half of 40");
         assert_eq!(state.players[2].life, 15, "hero is above half of 20");
+    }
+
+    /// Curse-rider fixture (4-player free-for-all): a curse controlled by P0
+    /// enchanting P1; P2 and P3 each have a creature attacking P1, with the
+    /// declaration ledger written exactly as declaration writes it. P2's
+    /// attacker is then removed from combat, which prunes the attacker but not
+    /// the ledger. Returns the state and the curse.
+    fn curse_with_removed_attacker_fixture() -> (GameState, ObjectId) {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::game_object::AttachTarget;
+
+        let mut state = GameState::new(FormatConfig::standard(), 4, 0);
+        let curse = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let mut attacker_for = |player: PlayerId| {
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                card_id,
+                player,
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let p2_attacker = attacker_for(PlayerId(2));
+        let p3_attacker = attacker_for(PlayerId(3));
+
+        let mut combat = CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(p2_attacker, PlayerId(1)),
+                AttackerInfo::attacking_player(p3_attacker, PlayerId(1)),
+            ],
+            ..CombatState::default()
+        };
+        for player in [PlayerId(2), PlayerId(3)] {
+            combat
+                .attacked_defenders_this_combat
+                .entry(player)
+                .or_default()
+                .insert(PlayerId(1));
+        }
+        state.combat = Some(combat);
+
+        crate::game::effects::remove_from_combat::remove_object_from_combat(
+            &mut state,
+            p2_attacker,
+        );
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the declaration ledger still records P2 attacking P1"
+        );
+        (state, curse)
+    }
+
+    /// Life totals after the effect, against the 20-life start: only the still
+    /// attacking opponent P3 takes 1 damage.
+    fn assert_only_still_attacking_opponent_damaged(state: &GameState) {
+        assert_eq!(
+            state.players[2].life, 20,
+            "P2's attacker was removed from combat: P2 is not attacking P1"
+        );
+        assert_eq!(
+            state.players[3].life, 19,
+            "P3 is still attacking the enchanted player"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "the controller is not an opponent"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "the enchanted player is not attacking"
+        );
+    }
+
+    /// CR 508.6 + CR 506.4: `resolve_each_player` reads LIVE combat membership
+    /// for `OpponentAttackingEnchantedPlayer`. Reverting to the declaration
+    /// ledger damages P2, whose attacker was removed from combat.
+    #[test]
+    fn damage_each_player_opponent_attacking_enchanted_player_is_live() {
+        let (mut state, curse) = curse_with_removed_attacker_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: PlayerFilter::OpponentAttackingEnchantedPlayer,
+            },
+            vec![],
+            curse,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).unwrap();
+        assert_only_still_attacking_opponent_damaged(&state);
+    }
+
+    /// CR 508.6 + CR 506.4: `resolve_all`'s player population
+    /// (`collect_matching_players`) reads LIVE combat membership for
+    /// `OpponentAttackingEnchantedPlayer`. The object filter matches no
+    /// battlefield permanent, so only the player set is observed. Reverting to
+    /// the declaration ledger damages P2, whose attacker was removed from combat.
+    #[test]
+    fn damage_all_opponent_attacking_enchanted_player_is_live() {
+        let (mut state, curse) = curse_with_removed_attacker_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Planeswalker],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+                damage_source: None,
+            },
+            vec![],
+            curse,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        assert_only_still_attacking_opponent_damaged(&state);
     }
 
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {

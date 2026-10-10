@@ -11113,8 +11113,8 @@ pub enum PlayerFilter {
     /// Opulence / Vitality / Verbosity / Disturbance). Per CR 508.6 a player "is
     /// attacking [a player]" iff it controls a creature attacking that player;
     /// combined with CR 102.2 (opponent of the controller) the affected set is
-    /// {opponents of the controller who declared a creature attacking the
-    /// enchanted player, per CR 508.1b}. Note this legitimately fans out to the
+    /// {opponents of the controller who, when the effect is applied, control a
+    /// creature attacking the enchanted player}. Note this legitimately fans out to the
     /// EMPTY set in a two-player game: the controller's only opponent is the
     /// enchanted defending player, who cannot attack themselves — so the rider is
     /// a no-op two-player-side, exactly as the CR requires.
@@ -11125,7 +11125,12 @@ pub enum PlayerFilter {
     /// aura source is never itself a combat attacker, so `DefendingPlayer` — which
     /// keys on `source_id ∈ combat.attackers` — cannot resolve it). Resolved in
     /// `game/effects/mod.rs::matches_player_scope` via
-    /// `GameState::player_attacked_player_this_combat` against that host.
+    /// `combat::player_is_attacking_player` against that host: LIVE combat
+    /// membership, not the declaration ledger read by
+    /// `GameState::player_attacked_player_this_combat`. It is kind-preserving
+    /// (CR 506.3: a creature attacking that player's planeswalker or battle is
+    /// not attacking that player), and an attacker removed from combat drops out
+    /// (CR 506.4).
     OpponentAttackingEnchantedPlayer,
     /// All players.
     All,

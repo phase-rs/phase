@@ -28161,11 +28161,12 @@ impl GameState {
     }
 
     /// CR 508.6 + CR 506.1: Within the CURRENT combat, did `attacker_controller`
-    /// declare any creature attacking `defender`? Read from the combat's
-    /// declaration ledger, so it reflects only this combat while surviving
-    /// attackers leaving combat before a trigger resolves. `defending_player`
-    /// already resolves planeswalker/battle attacks to the defending player
-    /// (CR 508.5).
+    /// declare any creature attacking `defender`? Declaration history ("has
+    /// attacked"): read from the combat's declaration ledger, which is written
+    /// once at declaration and is not pruned when an attacker leaves combat.
+    /// `defending_player` already resolves planeswalker/battle attacks to the
+    /// defending player (CR 508.5). For the live "is attacking" relation use
+    /// `combat::player_is_attacking_player`.
     pub fn player_attacked_player_this_combat(
         &self,
         attacker_controller: PlayerId,

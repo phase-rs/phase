@@ -7905,6 +7905,40 @@ pub(crate) fn attacked_player_for_attacker(
     attacked_player_for_target(info.attack_target)
 }
 
+/// CR 508.6: the player `attacker_controller` "is attacking" player `defender`
+/// iff it controls a creature that is attacking that player RIGHT NOW. This is
+/// the live relation, the counterpart of the declaration-history accessor
+/// `GameState::player_attacked_player_this_combat` ("has attacked", the second
+/// sentence of CR 508.6).
+///
+/// - CR 506.3: only a player, a planeswalker, or a battle can be attacked, and
+///   attacking a planeswalker or battle is not attacking its controller or
+///   protector. The attack target is read kind-preserving through
+///   `attacked_player_for_target`; CR 508.5's collapse to the defending player
+///   is the CONTRAST here, not the warrant.
+/// - CR 506.4: a creature removed from combat stops being an attacking
+///   creature. `prune_object_from_combat` drops its `AttackerInfo`, and
+///   `is_attacker_in_play` rejects an attacker still listed after it left the
+///   battlefield or phased out.
+/// - The controller is read live from the attacking object, not from the
+///   declaration ledger.
+pub(crate) fn player_is_attacking_player(
+    state: &GameState,
+    attacker_controller: PlayerId,
+    defender: PlayerId,
+) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.attackers.iter().any(|info| {
+            attacked_player_for_target(info.attack_target) == Some(defender)
+                && is_attacker_in_play(state, info.object_id)
+                && state
+                    .objects
+                    .get(&info.object_id)
+                    .is_some_and(|obj| obj.controller == attacker_controller)
+        })
+    })
+}
+
 /// CR 508.5 + CR 508.5a: Single authority for resolving the defending player a
 /// `ControllerRef::DefendingPlayer` reference points at, given the ability's source
 /// object. Per CR 508.5, when an ability refers to both an attacking creature and a
@@ -12605,6 +12639,142 @@ mod tests {
         obj.chosen_attributes
             .push(crate::types::ability::ChosenAttribute::Player(protector));
         id
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 508.6 live "is attacking [a player]" — `player_is_attacking_player`
+    // ---------------------------------------------------------------------
+
+    /// Three-player state where P2 is the active (attacking) player.
+    fn is_attacking_state() -> GameState {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(2);
+        state
+    }
+
+    /// Commit `attacks` exactly as the declare-attackers step does, so the
+    /// declaration ledger (`attacked_defenders_this_combat`) is written too.
+    fn commit_attacks(state: &mut GameState, attacks: &[(ObjectId, AttackTarget)]) {
+        let mut events = Vec::new();
+        commit_attack_declaration(state, attacks, &[], &mut events);
+    }
+
+    /// CR 508.6 + CR 506.3: a creature attacking the enchanted player's
+    /// PLANESWALKER or BATTLE is not attacking that player. The declaration
+    /// ledger collapses both to the defending player (CR 508.5), so
+    /// `player_attacked_player_this_combat` says true; the live relation must
+    /// say false. Reverting the helper to the ledger flips the negatives.
+    #[test]
+    fn player_is_attacking_player_is_kind_preserving() {
+        let mut state = is_attacking_state();
+        let attacker = create_creature(&mut state, PlayerId(2), "Bear", 2, 2);
+        let walker = create_planeswalker(&mut state, PlayerId(1), "P1 Walker");
+        let battle = create_battle(&mut state, PlayerId(0), "Battle", PlayerId(1));
+
+        commit_attacks(
+            &mut state,
+            &[(attacker, AttackTarget::Planeswalker(walker))],
+        );
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the ledger collapses a planeswalker attack to P1 (CR 508.5)"
+        );
+        assert!(
+            !player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "attacking P1's planeswalker is not attacking P1"
+        );
+
+        commit_attacks(&mut state, &[(attacker, AttackTarget::Battle(battle))]);
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the ledger collapses a battle attack to its protector P1"
+        );
+        assert!(
+            !player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "attacking a battle P1 protects is not attacking P1"
+        );
+
+        commit_attacks(&mut state, &[(attacker, AttackTarget::Player(PlayerId(1)))]);
+        assert!(
+            player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "a creature attacking P1 directly makes P2 attacking P1"
+        );
+    }
+
+    /// CR 506.4 + CR 508.6: an attacker removed from combat, or one still listed
+    /// after it left the battlefield, no longer makes its controller "attacking"
+    /// the player. The ledger keeps both, so a ledger read would stay true.
+    #[test]
+    fn player_is_attacking_player_drops_attackers_that_left_combat() {
+        let mut state = is_attacking_state();
+        let removed = create_creature(&mut state, PlayerId(2), "Removed", 2, 2);
+        let departed = create_creature(&mut state, PlayerId(2), "Departed", 2, 2);
+
+        commit_attacks(
+            &mut state,
+            &[
+                (removed, AttackTarget::Player(PlayerId(1))),
+                (departed, AttackTarget::Player(PlayerId(1))),
+            ],
+        );
+        assert!(
+            player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "reach-guard: two live attackers make P2 attacking P1"
+        );
+
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, removed);
+        assert!(
+            player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "the remaining live attacker still makes P2 attacking P1"
+        );
+
+        // Still listed in `combat.attackers`, but no longer on the battlefield.
+        state.objects.get_mut(&departed).unwrap().zone = Zone::Graveyard;
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|info| info.object_id == departed),
+            "precondition: the departed attacker is still listed"
+        );
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the declaration ledger still records P2 attacking P1"
+        );
+        assert!(
+            !player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "with one attacker removed and the other gone, P2 is no longer attacking P1"
+        );
+    }
+
+    /// CR 508.6: the relation is keyed by the attacking creature's controller and
+    /// the attacked player; no combat means nobody is attacking.
+    #[test]
+    fn player_is_attacking_player_matches_controller_and_defender() {
+        let mut state = is_attacking_state();
+        assert!(
+            !player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "no combat: nobody is attacking"
+        );
+
+        let attacker = create_creature(&mut state, PlayerId(2), "Bear", 2, 2);
+        commit_attacks(&mut state, &[(attacker, AttackTarget::Player(PlayerId(1)))]);
+        assert!(
+            player_is_attacking_player(&state, PlayerId(2), PlayerId(1)),
+            "the attacking creature's controller is attacking P1"
+        );
+        assert!(
+            !player_is_attacking_player(&state, PlayerId(0), PlayerId(1)),
+            "a player who controls no attacker is not attacking P1"
+        );
+        assert!(
+            !player_is_attacking_player(&state, PlayerId(2), PlayerId(0)),
+            "P2 is not attacking a player its creature does not attack"
+        );
     }
 
     /// CR 604.1: a restriction-free board of K active-player attackers must NOT
