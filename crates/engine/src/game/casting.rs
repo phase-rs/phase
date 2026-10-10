@@ -27033,9 +27033,13 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
                     }
                     CardTypeSetSource::Zone { .. } => {}
                     // A member filter narrows the set; it cannot make a
-                    // look-back population target-relative.
+                    // look-back population target-relative. CR 608.2c +
+                    // CR 115.1: `TargetedObjects` joins this arm — its
+                    // announcement-bound members are look-back by identity
+                    // (live read with LKI fallback), never board-relative.
                     CardTypeSetSource::ExiledBySource
                     | CardTypeSetSource::TrackedSet { .. }
+                    | CardTypeSetSource::TargetedObjects { .. }
                     | CardTypeSetSource::TurnJournal { .. }
                     | CardTypeSetSource::AnyOf { .. } => relative = false,
                 },

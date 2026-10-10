@@ -1840,9 +1840,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             // The "those cards" short-circuit holds only for the UNFILTERED
             // tracked set: with a member filter present that string omits the
             // restriction, so fall through to the renderer that names it.
+            // CR 608.2c + CR 115.1: it also holds for the unslotted
+            // targeted-objects population — "those cards" names the ability's
+            // chosen targets, which is exactly this population. A slot-selected
+            // subset is not "those cards" and falls through below.
             let population = if matches!(
                 aggregate.source(),
                 CardTypeSetSource::TrackedSet { filter: None, .. }
+                    | CardTypeSetSource::TargetedObjects { slot: None }
             ) {
                 "those cards".into()
             } else {
@@ -1872,6 +1877,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             // A member filter renders through the bounded population
             // renderer below, which names the restriction.
             | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::TargetedObjects { .. }
             | CardTypeSetSource::TurnJournal { .. }
             | CardTypeSetSource::AnyOf { .. } => {
                 format!(
@@ -2784,6 +2790,14 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                 None => base,
             }
         }
+        // CR 608.2c + CR 115.1: the Oracle antecedent for the ability's chosen
+        // targets is "those cards" (Song of Inspiration's own surface form);
+        // a slot-selected subset is singular — "that card". The unslotted
+        // string matches the short-circuit above by construction.
+        CardTypeSetSource::TargetedObjects { slot } => match slot {
+            None => "those cards".into(),
+            Some(_) => "that card".into(),
+        },
         // CR 109.2: a set union renders as its members joined by "and", mirroring
         // the Oracle surface form ("permanents you control and spells you've cast
         // this turn").

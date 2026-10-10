@@ -290,7 +290,11 @@ pub(super) fn try_parse_die_roll_table(
     kind: AbilityKind,
 ) -> Option<(AbilityDefinition, usize)> {
     let lower = line.to_lowercase();
-    let (sides, modifier) = try_parse_roll_die_with_modifier(&lower)?;
+    // Bare-card binding is `None` here by construction: the line-initial table
+    // dispatch only fires on a first-clause roll header, which has no preceding
+    // publisher in its chain (CR 608.2c). Later-clause headers route through
+    // the chain dispatch, which passes its own binding.
+    let (sides, modifier) = try_parse_roll_die_with_modifier(&lower, None)?;
 
     let (branches, next_line) = parse_die_result_branches_ir(lines, i + 1, kind);
 

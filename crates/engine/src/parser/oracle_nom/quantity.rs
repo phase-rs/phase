@@ -2044,23 +2044,28 @@ fn parse_spell_history_property_aggregate_ref(input: &str) -> OracleResult<'_, Q
 /// entry points.
 pub(crate) fn parse_contextual_bare_card_aggregate_ref(
     input: &str,
-    source: crate::types::ability::TrackedAnaphorSource,
+    binding: crate::parser::oracle_ir::context::BareCardAggregateBinding,
 ) -> OracleResult<'_, QuantityRef> {
+    use crate::parser::oracle_ir::context::BareCardAggregateBinding;
     let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
     let (rest, _) = parse_bare_card_set_anaphor(rest)?;
+    // CR 608.2c + CR 115.1: a target-set binding emits the new population
+    // axis — the ability's chosen targets — never a chain-set TrackedSet.
+    let source = match binding {
+        BareCardAggregateBinding::ChainSet(set) => CardTypeSetSource::TrackedSet {
+            set,
+            caused_by: None,
+            filter: None,
+        },
+        BareCardAggregateBinding::AbilityTargets => {
+            CardTypeSetSource::TargetedObjects { slot: None }
+        }
+    };
     Ok((
         rest,
         QuantityRef::PropertyAggregate(
-            PropertyAggregate::new(
-                function,
-                property,
-                CardTypeSetSource::TrackedSet {
-                    set: source,
-                    caused_by: None,
-                    filter: None,
-                },
-            )
-            .expect("tracked populations support every aggregate property"),
+            PropertyAggregate::new(function, property, source)
+                .expect("tracked and targeted populations support every aggregate property"),
         ),
     ))
 }

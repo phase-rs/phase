@@ -927,6 +927,61 @@ fn conditional_publishers_require_the_same_source_on_both_branches() {
     }
 }
 
+/// C-1 — CLASSIFIER. `Effect::TargetOnly` publishes a target-set binding for
+/// the bare "those cards" aggregate (CR 608.2c + CR 115.1: the anaphor names
+/// the ability's chosen targets, not a chain set), while
+/// `Effect::ChooseObjectsIntoTrackedSet` stays `TerminalUnsupported` (M3: its
+/// published set's relation to the anaphor is a separate question).
+#[test]
+fn target_only_publishes_a_target_set_binding() {
+    let target_only = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+        )
+    };
+    assert_eq!(
+        classify_bare_card_aggregate_publisher(&target_only().effect),
+        Some(BareCardAggregatePublisher::TargetSetCompatible)
+    );
+    assert_eq!(
+        classify_latest_bare_card_publisher_in_ability(&target_only()),
+        Some(BareCardAggregatePublisher::TargetSetCompatible)
+    );
+    let tracked_choice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            min: 0,
+            max: None,
+            cardinality: None,
+            eligibility: None,
+        },
+    );
+    assert_eq!(
+        classify_bare_card_aggregate_publisher(&tracked_choice.effect),
+        Some(BareCardAggregatePublisher::TerminalUnsupported)
+    );
+    // Positive guards: the neighboring leaves did not move.
+    let ability = |text| AbilityDefinition::new(AbilityKind::Spell, parse_effect(text));
+    assert_eq!(
+        classify_latest_bare_card_publisher_in_ability(&ability("discard a card")),
+        Some(BareCardAggregatePublisher::ChainSetCompatible)
+    );
+    // Hostile: a nearer token creator still wins over an older TargetOnly.
+    let mut def = target_only();
+    def.sub_ability = Some(Box::new(ability(
+        "create a 1/1 green Insect creature token",
+    )));
+    assert_eq!(
+        classify_latest_bare_card_publisher_in_ability(&def),
+        Some(BareCardAggregatePublisher::EventFallbackBarrier)
+    );
+}
+
 #[test]
 fn nearer_token_blocks_bare_cards_rebind_from_older_mill() {
     let def = parse_effect_chain(

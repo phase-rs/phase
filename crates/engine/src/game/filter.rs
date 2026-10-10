@@ -3280,6 +3280,15 @@ fn card_type_set_source_grammar_any(
         CardTypeSetSource::TurnJournal { filter, .. } => filter
             .as_ref()
             .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        // CR 608.2c + CR 115.1: a targeted-objects population matches exactly
+        // when its canonical slot filter does, via the single
+        // `targeted_objects_filter` authority — never a hardcoded constant.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            filter_grammar_any(&CardTypeSetSource::targeted_objects_filter(slot), visit)
+        }
         CardTypeSetSource::AnyOf { .. } => {
             let mut contains = false;
             let complete = source.try_for_each_member(
@@ -3293,9 +3302,7 @@ fn card_type_set_source_grammar_any(
             // the conservative answer prevents an under-reported consumer.
             contains || !complete
         }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
     }
 }
 
@@ -10755,6 +10762,7 @@ fn matches_combat_relation(
     }
 }
 
+<<<<<<< HEAD
 /// CR 702.122b + CR 702.122c + CR 400.7: does the per-turn crew ledger pair the
 /// `candidate` incarnation with the filter source's incarnation in the
 /// direction `relation` names? The source resolves through the same authority
@@ -10785,7 +10793,10 @@ fn matches_crew_relation(
     state.crew_history_this_turn.contains(&pair)
 }
 
-fn referenced_targets_for_filter(
+/// Shared with `game/quantity.rs` for `CardTypeSetSource::TargetedObjects`, whose
+/// resolver arm selects the resolving ability's object targets through this
+/// authority rather than re-deriving slot selection.
+pub(crate) fn referenced_targets_for_filter<'a>(
     state: &GameState,
     target: &TargetFilter,
     ability: Option<&ResolvedAbility>,

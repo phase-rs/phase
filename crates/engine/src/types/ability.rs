@@ -9234,6 +9234,21 @@ pub enum CardTypeSetSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
+    /// CR 608.2c + CR 115.1: the object targets the RESOLVING ability chose —
+    /// the referent of a later "those cards" / "them" that names an earlier
+    /// target-selection clause in the same ability.
+    ///
+    /// Zone-independent by construction: members are addressed by identity from
+    /// `ResolvedAbility::targets`, read live from `state.objects` with an
+    /// `lki_cache` fallback, exactly as `TrackedSet` reads its members. This is
+    /// why it is NOT `Objects { filter: ParentTarget }` — that variant is a
+    /// zone-derived board census and would miss a graveyard target.
+    TargetedObjects {
+        /// `None` = every object target; `Some(i)` = the i-th slot, mirroring
+        /// `TargetFilter::ParentTargetSlot { index }`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<usize>,
+    },
     /// CR 109.2: The union of two or more populations — "among \<A\> and \<B\>" /
     /// "among \<A\> and/or \<B\>".
     ///
@@ -9251,6 +9266,26 @@ pub enum CardTypeSetSource {
     /// `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b ordering gate,
     /// and the resolver would return 0 with no diagnostic.
     AnyOf { sources: UnionSources },
+}
+
+impl CardTypeSetSource {
+    /// CR 608.2c + CR 115.1: the canonical [`TargetFilter`] a
+    /// [`CardTypeSetSource::TargetedObjects`] population denotes — `None` is
+    /// every object target (`ParentTarget`), `Some(i)` is the i-th slot
+    /// (`ParentTargetSlot { index }`), mirroring the target-slot axis exactly.
+    ///
+    /// Single authority for the population ≡ filter equivalence: every
+    /// classifier that answers a filter-routed question about a population
+    /// (binding divergence, cost-paid routing, life-total reads, census
+    /// profiles, zone extraction, predicate matching) calls the SAME
+    /// sub-function it calls for an `Objects { filter }` population, with this
+    /// filter — so the answers cannot drift from the canonical filter's.
+    pub(crate) fn targeted_objects_filter(slot: &Option<usize>) -> TargetFilter {
+        match slot {
+            None => TargetFilter::ParentTarget,
+            Some(index) => TargetFilter::ParentTargetSlot { index: *index },
+        }
+    }
 }
 
 /// CR 109.2: the members of a [`CardTypeSetSource::AnyOf`], carrying the
@@ -9351,6 +9386,13 @@ impl CardTypeSetSource {
                 CardTypeSetSource::TrackedSet { filter, .. } => filter
                     .as_ref()
                     .is_some_and(TargetFilter::references_cost_paid_object),
+                // CR 608.2c + CR 115.1: a targeted-objects population references
+                // the cost-paid object exactly when its canonical slot filter
+                // does — via the single `targeted_objects_filter` authority,
+                // never a hardcoded constant.
+                CardTypeSetSource::TargetedObjects { slot } => {
+                    CardTypeSetSource::targeted_objects_filter(slot).references_cost_paid_object()
+                }
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
                 | CardTypeSetSource::AnyOf { .. } => false,
@@ -9430,6 +9472,13 @@ impl CardTypeSetSource {
             // change this answer; `TurnJournal` has carried one all along.
             CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {
                 Vec::new()
+            }
+            // CR 608.2c + CR 115.1: the zones a targeted-objects population
+            // reads are exactly the canonical slot filter's — via the single
+            // `targeted_objects_filter` authority, never a hardcoded empty
+            // that could drift from the filter's answer.
+            CardTypeSetSource::TargetedObjects { slot } => {
+                CardTypeSetSource::targeted_objects_filter(slot).population_zones()
             }
             // Unreachable through the walker; empty rather than a panic so a
             // future direct caller degrades instead of crashing a game.

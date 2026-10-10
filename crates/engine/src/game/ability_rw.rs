@@ -4140,6 +4140,16 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         CardTypeSetSource::TurnJournal { journal, .. } => match journal {
             TurnJournalKind::SpellsCast => reads_player_of(StateKind::JournalCast),
         },
+        // CR 608.2c + CR 115.1: the resolving ability's announcement-bound
+        // targets (CR 601.2c), read by identity with an LKI fallback. Reports
+        // the SAME profile as the canonical slot filter it denotes (via the
+        // single `targeted_objects_filter` authority) — in particular a zone
+        // census is never claimed here (C-7: not `reads_zone_membership()`),
+        // and member-boundness follows the canonical filter (slot: member-
+        // bound; every-target: not), never a hardcoded constant.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            board_membership_read(&CardTypeSetSource::targeted_objects_filter(slot))
+        }
         // The union reads everything its members read. Deliberately UNCITED: no
         // CR rule defines set union of populations — "among <A> and <B>" is
         // English, and each member carries its own citation above. (This arm
@@ -6639,6 +6649,19 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
                         reads_live_object = true;
                         reads_tracked = true;
                     }
+                    // CR 608.2c + CR 115.1: the leaf reads live objects by
+                    // identity (state.objects with LKI fallback) whenever a
+                    // resolving ability is in scope. Member-boundness follows
+                    // the canonical slot filter via the single
+                    // `targeted_objects_filter` authority (indexed slot:
+                    // member-bound; every-target: not) — never a hardcoded
+                    // constant, so the flag cannot drift from the filter's.
+                    CardTypeSetSource::TargetedObjects { slot } => {
+                        reads_live_object = true;
+                        reads_tracked = member_bound_target_filter(
+                            &CardTypeSetSource::targeted_objects_filter(slot),
+                        );
+                    }
                     CardTypeSetSource::Zone { .. }
                     | CardTypeSetSource::ExiledBySource
                     | CardTypeSetSource::Objects { .. } => reads_live_object = true,
@@ -7738,6 +7761,16 @@ mod tests {
                         live = true;
                         tracked = true;
                     }
+                    // Test mirror of the `TargetedObjects` production arm:
+                    // the canonical slot filter's target read (live), with
+                    // member-boundness following the canonical filter
+                    // (slot: bound; every-target: not) — never hardcoded.
+                    CardTypeSetSource::TargetedObjects { slot } => {
+                        live = true;
+                        tracked |= member_bound_target_filter(
+                            &CardTypeSetSource::targeted_objects_filter(slot),
+                        );
+                    }
                     CardTypeSetSource::Zone { .. }
                     | CardTypeSetSource::ExiledBySource
                     | CardTypeSetSource::Objects { .. } => live = true,
@@ -7778,6 +7811,8 @@ mod tests {
                 caused_by: None,
                 filter: None,
             },
+            CardTypeSetSource::TargetedObjects { slot: None },
+            CardTypeSetSource::TargetedObjects { slot: Some(1) },
             journal.clone(),
             CardTypeSetSource::any_of(vec![objects, journal]).unwrap(),
         ];

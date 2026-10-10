@@ -919,6 +919,85 @@ fn parse_life_verb_remainder<'a>(
     .map(|(_, rest)| rest)
 }
 
+/// CR 119.3 + CR 115.1: "the amount of life [they|that player] [lost|gained]
+/// this turn" in a *targeted* life-change context ("Target opponent loses life
+/// equal to the amount of life they lost this turn" — Astarion, the Decadent's
+/// Feed/Friends modes). The third-person "they"/"that player" anaphor refers to
+/// the effect's player target, so it resolves through `PlayerScope::Target`
+/// (read from `ability.targets` by `resolve_quantity_with_targets`) — the same
+/// player the surrounding LoseLife/GainLife affects, so a target opponent loses
+/// life equal to *their own* life lost this turn.
+///
+/// The shared `parse_life_lost_ref` "they lost"/"that player lost" arms now also
+/// emit `PlayerScope::Target` (not `Controller`), so the bare article-only
+/// each-opponent phrasing ("the life they lost this turn", Archfiend of Despair /
+/// Wound Reflection) is `Target`-scoped at the leaf and then rebound to
+/// `ScopedPlayer` by `rewrite_player_scope_refs` under the per-opponent
+/// `player_scope` loop. This recognizer still runs first for the "amount of"
+/// gloss (Astarion), yielding the identical `Target` mapping, so both phrasings
+/// resolve to the affected player's own life lost this turn.
+fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<QuantityExpr> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("the "))
+        .parse(qty_text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("amount of life ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they "), tag("that player ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, gained) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("lost")),
+        value(true, tag("gained")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // "this turn" is the canonical duration; tolerate its absence for callers
+    // that strip trailing durations before this point.
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn"))
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let qty = if gained {
+        QuantityRef::LifeGainedThisTurn {
+            player: PlayerScope::Target,
+        }
+    } else {
+        QuantityRef::LifeLostThisTurn {
+            player: PlayerScope::Target,
+        }
+    };
+    Some(QuantityExpr::Ref { qty })
+}
+
+fn parse_life_equal_quantity(
+    after_verb_lower: &str,
+    bare_card_source: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
+) -> Option<QuantityExpr> {
+    let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
+        .parse(after_verb_lower)
+        .ok()?;
+    let qty_text = qty_text.trim_end_matches('.').trim();
+    // CR 115.1: target-relative "they/that player lost/gained this turn" → Target
+    // scope. Tried before the generic delegation, which would otherwise map the
+    // third-person anaphor to the controller (see helper doc).
+    if let Some(qty) = parse_target_relative_life_change_this_turn(qty_text) {
+        return Some(qty);
+    }
+    if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
+        return Some(qty);
+    }
+    if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+    let source = bare_card_source?;
+    let (rest, qty) =
+        nom_quantity::parse_contextual_bare_card_aggregate_ref(qty_text, source).ok()?;
+    rest.trim().is_empty().then_some(QuantityExpr::Ref { qty })
+}
+
 /// CR 119.3 + CR 102.1: "gain 1 life for each player" (a/an/1) → the count of
 /// every player in the game (`PlayerFilter::All`). Narrow to the one-life-per
 /// form, the only shape that occurs (Benediction of Moons); other multipliers
@@ -981,7 +1060,19 @@ pub(super) fn is_life_noun(noun: &str) -> bool {
 fn parse_numeric_imperative_ast_with_context(
     text: &str,
     lower: &str,
+    // Upstream evolution (true-upstream rebase): `ctx` is threaded mutably
+    // (declared-slot registry); this reader only copies the `Copy`
+    // `bare_card_aggregate_source` leaf, so the wider parameter is free.
     ctx: &mut ParseContext,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx.bare_card_aggregate_source)
+}
+
+fn parse_numeric_imperative_ast_with_bare_card_source(
+    text: &str,
+    lower: &str,
+    bare_card_source: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
+>>>>>>> 5bbe052e3 (fix(engine): aggregate over chosen targets via TargetedObjects, Song of Inspiration + Command the Dreadhorde (Phase 2 PR C))
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
         .or_else(|| {
@@ -14920,7 +15011,8 @@ pub(super) fn parse_imperative_family_ast(
                 // None for count == 1 so "roll a d6" / "roll one d6" falls through.
                 Some(ast)
             } else {
-                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                try_parse_roll_die_with_modifier(lower, ctx.bare_card_aggregate_source).map(
+                    |(sides, modifier)| {
                     ImperativeFamilyAst::RollDie {
                         count: QuantityExpr::Fixed { value: 1 },
                         sides,
@@ -16083,6 +16175,7 @@ fn parse_reassemble_contraption_imperative(
 /// remainder must shape as a recognized add/subtract clause.
 pub(crate) fn try_parse_roll_die_with_modifier(
     lower: &str,
+    bare_card: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
 ) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
     let (sides, rest) = try_parse_roll_die_sides_with_rest(lower)?;
     let rest = rest.trim_end_matches(['.', ',', ';']).trim();
@@ -16099,7 +16192,21 @@ pub(crate) fn try_parse_roll_die_with_modifier(
     ))
     .parse(after_and)
     .ok()?;
-    let (_, value) = nom_quantity::parse_quantity_ref_complete(modifier_text).ok()?;
+    // CR 608.2c + CR 115.1: the generic quantity grammar cannot see a bare
+    // "those cards" aggregate (intentionally unavailable context-free), so when
+    // the chain established a bare-card binding, try it before refusing. The
+    // contextual parse must consume fully — a prefix-only match refuses the
+    // whole header honestly rather than silently narrowing the modifier.
+    let value = nom_quantity::parse_quantity_ref_complete(modifier_text)
+        .ok()
+        .map(|(_, qty)| qty)
+        .or_else(|| {
+            let binding = bare_card?;
+            let (rest, qty) =
+                nom_quantity::parse_contextual_bare_card_aggregate_ref(modifier_text, binding)
+                    .ok()?;
+            rest.trim().is_empty().then_some(qty)
+        })?;
     let modifier = if sign {
         crate::types::ability::DieRollModifier::Add {
             value: crate::types::ability::QuantityExpr::Ref { qty: value },

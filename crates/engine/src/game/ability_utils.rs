@@ -7481,6 +7481,13 @@ fn characteristic_source_target_slot_filter(
             CardTypeSetSource::TrackedSet { filter, .. } => {
                 filter.as_ref().and_then(filter_target_slot_filter)
             }
+            // CR 608.2c + CR 115.1: a targeted-objects population IS a target
+            // slot, so it wires the canonical filter for its own slot axis
+            // via the single `targeted_objects_filter` authority rather than
+            // re-deriving the mapping here.
+            CardTypeSetSource::TargetedObjects { slot } => {
+                Some(CardTypeSetSource::targeted_objects_filter(slot))
+            }
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::AnyOf { .. } => None,

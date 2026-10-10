@@ -2041,9 +2041,17 @@ fn characteristic_source_uses_filter_prop(
                 CardTypeSetSource::TrackedSet { filter, .. } => filter
                     .as_ref()
                     .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                // CR 608.2c + CR 115.1: the prop query runs against the canonical
+                // slot filter via the single `targeted_objects_filter`
+                // authority — a targeted-objects population matches exactly
+                // when its slot filter does, never a hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_uses_filter_prop(
+                    &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
+                    pred,
+                ),
             };
         });
     // A truncated walk claims the prop: this feeds parse-time capability

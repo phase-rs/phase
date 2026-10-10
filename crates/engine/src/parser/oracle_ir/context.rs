@@ -244,6 +244,18 @@ impl TriggerZoneChangeProvenance {
     pub(crate) fn as_pair(&self) -> Option<(Zone, Zone)> {
         self.0
     }
+
+/// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
+/// demonstrative "those cards" shape) binds to in this chunk — either a
+/// chain-set cause or the ability's own chosen targets. A typed two-leaf
+/// binding rather than a bare `TrackedAnaphorSource`, which under-expresses
+/// the referent axis (a target-set referent is not a chain-set cause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BareCardAggregateBinding {
+    /// A chain-set cause (mill, discard, sacrifice, …).
+    ChainSet(crate::types::ability::TrackedAnaphorSource),
+    /// The ability's own chosen targets (`TargetedObjects { slot: None }`).
+    AbilityTargets,
 }
 
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
@@ -330,7 +342,10 @@ pub(crate) struct ParseContext {
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
-    pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    /// A two-leaf binding (never a bare `TrackedAnaphorSource`, which
+    /// under-expresses the referent axis): a chain-set cause or the ability's
+    /// own targets (CR 608.2c + CR 115.1).
+    pub bare_card_aggregate_source: Option<BareCardAggregateBinding>,
     /// CR 611.2a: the durational scope the clause currently being lowered stated
     /// at a printed position the clause BODY can no longer see, because the
     /// positional strip seams peel it before the body parser runs.

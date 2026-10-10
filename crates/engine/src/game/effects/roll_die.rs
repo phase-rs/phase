@@ -55,12 +55,18 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
 /// The result is clamped to a u8-representable non-negative integer so a large
 /// subtract doesn't wrap; branches with `min`/`max` already in u8 simply won't
 /// match when the actual result is 0.
+///
+/// CR 608.2c: the modifier resolves in the resolving ability's context, so a
+/// later instruction can name what an earlier target-selection clause chose
+/// (the ability's chosen targets). Suspension-resume paths have no ability in
+/// scope and pass `None`, keeping the established ability-blind read there.
 fn apply_modifier(
     state: &mut GameState,
     natural: u8,
     modifier: Option<&DieRollModifier>,
     controller: PlayerId,
     source_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
 ) -> u8 {
     let Some(m) = modifier else {
         return natural;
@@ -68,13 +74,18 @@ fn apply_modifier(
     // Carry the sign as the saturating operation rather than negating the
     // resolved delta: `-resolve_quantity(..)` would panic in debug builds (and
     // wrap in release) when the quantity resolves to `i32::MIN`.
-    let combined =
-        match m {
-            DieRollModifier::Add { value } => (natural as i32)
-                .saturating_add(resolve_quantity(state, value, controller, source_id)),
-            DieRollModifier::Subtract { value } => (natural as i32)
-                .saturating_sub(resolve_quantity(state, value, controller, source_id)),
-        };
+    let resolve = |state: &GameState, value: &crate::types::ability::QuantityExpr| match ability {
+        Some(ability) => {
+            crate::game::quantity::resolve_quantity_with_targets(state, value, ability)
+        }
+        None => resolve_quantity(state, value, controller, source_id),
+    };
+    let combined = match m {
+        DieRollModifier::Add { value } => (natural as i32).saturating_add(resolve(state, value)),
+        DieRollModifier::Subtract { value } => {
+            (natural as i32).saturating_sub(resolve(state, value))
+        }
+    };
     combined.clamp(0, u8::MAX as i32) as u8
 }
 
@@ -256,7 +267,7 @@ pub(crate) fn resolve_step(
         .take()
         .expect("the just-proposed die instruction remains parked until execution");
 
-    execute_roll(state, instruction, sides, proposal, events)
+    execute_roll(state, instruction, sides, proposal, events, Some(ability))
 }
 
 /// CR 706.1 + CR 706.6: Carry out a die-roll instruction once its replacement
@@ -274,6 +285,7 @@ fn execute_roll(
     sides: u8,
     proposal: RollProposal,
     events: &mut Vec<GameEvent>,
+    ability: Option<&ResolvedAbility>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 706.1: a die roll is defined by its kind ("roll a d20"); a zero-sided
     // die names no distribution, so there is nothing to roll. This is not a
@@ -372,7 +384,7 @@ fn execute_roll(
     // replacement in play), "a unique lowest per rule", and the stacked-Lowest
     // run whose N lowest rolls are distinct.
     if !outcome.needs_choice() {
-        return resume_after_ignore(state, pending, outcome.forced, events);
+        return resume_after_ignore(state, pending, outcome.forced, events, ability);
     }
 
     // CR 706.6, 2nd sentence: "if multiple results are tied for the lowest, the
@@ -456,7 +468,7 @@ pub(crate) fn resume_roll_dice_after_replacement(
         .as_ref()
         .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = instruction.die_result;
-    let result = execute_roll(state, *instruction, sides, proposal, events);
+    let result = execute_roll(state, *instruction, sides, proposal, events, None);
     let exit_die = if result.is_ok() {
         state.die_result_this_resolution
     } else {
@@ -525,7 +537,7 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
         .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = pending.die_result;
     let ignore_indices = pending.forced_ignored.clone();
-    match resume_after_ignore(state, pending, ignore_indices, events) {
+    match resume_after_ignore(state, pending, ignore_indices, events, None) {
         // Re-suspended on yet another branch choice: the frame re-parked itself
         // with the cursor advanced, so leave the restored context in place for
         // that continuation to read.
@@ -574,6 +586,7 @@ pub(crate) fn resume_after_ignore(
     pending: PendingDieRoll,
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
+    ability: Option<&ResolvedAbility>,
 ) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
         source_id,
@@ -633,7 +646,14 @@ pub(crate) fn resume_after_ignore(
         }
 
         // CR 706.2: apply the modifier to produce this die's actual result.
-        let actual = apply_modifier(state, natural, modifier.as_ref(), controller, source_id);
+        let actual = apply_modifier(
+            state,
+            natural,
+            modifier.as_ref(),
+            controller,
+            source_id,
+            ability,
+        );
 
         // CR 706.2 + CR 706.6: emit the authoritative die-roll event ONCE, with
         // the post-modifier value already resolved, and only for a surviving
@@ -1611,7 +1631,7 @@ mod tests {
             trigger_context: None,
         };
         let mut events = Vec::new();
-        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();
+        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();
         assert_eq!(
             waiting,
             ResolutionProgress::Complete,

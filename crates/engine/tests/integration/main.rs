@@ -1966,6 +1966,7 @@ mod silumgar_scavenger_exploit_haste;
 mod skullspore_nexus_dynamic_pt;
 mod slime_molding_x_token_pt;
 mod solitude_up_to_one_exile_lifegain_rider;
+mod song_of_inspiration_target_set_aggregate;
 mod speed_maxspeed_recursion;
 mod squirrel_perf_probe;
 mod stargaze_dynamic_keep;

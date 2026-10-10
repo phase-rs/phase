@@ -6173,7 +6173,14 @@ fn substitute_another_in_aggregate_source(source: &CardTypeSetSource) -> CardTyp
             caused_by: *caused_by,
             filter: filter.as_ref().map(substitute_another_in_filter),
         },
-        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => source.clone(),
+        // CR 608.2c + CR 115.1: the slot axis carries no `Another` — the
+        // substitution above only rewrites `Typed`/`Not`/`And`/`Or` shapes, so
+        // a targeted-objects population passes through unchanged, provably
+        // (no shape exists that `substitute_another_in_filter` could alter
+        // into a different slot).
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TargetedObjects { .. } => source.clone(),
     }
 }
 

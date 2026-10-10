@@ -4452,9 +4452,16 @@ fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
                 CardTypeSetSource::TrackedSet { filter, .. } => {
                     filter.as_ref().is_some_and(target_filter_reads_life_total)
                 }
+                // CR 608.2c + CR 115.1: a targeted-objects population reads a
+                // life total exactly when its canonical slot filter does — via
+                // the single `targeted_objects_filter` authority, never a
+                // hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_life_total(
+                    &CardTypeSetSource::targeted_objects_filter(slot),
+                ),
             };
         });
     // A truncated walk claims the read: one redundant recompute beats a stale

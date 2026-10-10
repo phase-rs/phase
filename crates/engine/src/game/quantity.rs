@@ -642,6 +642,34 @@ fn visit_characteristic_leaf<'s>(
                 }
             }
         },
+        // CR 608.2c + CR 115.1: the resolving ability's chosen object targets,
+        // addressed by identity (announcement-bound, zone-independent). Reads
+        // live objects with an `lki_cache` fallback, exactly as the
+        // `TrackedSet` arm above. Slot selection reuses the target-slot
+        // authority `referenced_targets_for_filter` rather than re-deriving
+        // it; with no resolving ability in scope (detection-time reads) the
+        // population is empty — fail-closed, never a census.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            let selector = match slot {
+                None => TargetFilter::ParentTarget,
+                Some(index) => TargetFilter::ParentTargetSlot { index: *index },
+            };
+            for target in
+                crate::game::filter::referenced_targets_for_filter(&selector, filter_ctx.ability)
+            {
+                let TargetRef::Object(oid) = target else {
+                    continue;
+                };
+                let view = state
+                    .objects
+                    .get(oid)
+                    .map(CharacteristicView::Object)
+                    .or_else(|| state.lki_cache.get(oid).map(CharacteristicView::Lki));
+                if let Some(view) = view {
+                    visit(CharacteristicMember::Object(*oid), view, false);
+                }
+            }
+        }
         // CR 109.2: unions are unrolled by `try_for_each_member` before this is
         // called, so a union never reaches the leaf walk. Deduplication remains
         // automatic because every caller tallies into one `HashSet` — which is
@@ -3077,9 +3105,16 @@ fn characteristic_leaf_reads_at(source: &CardTypeSetSource, depth: u32) -> Chara
             .map_or(CharacteristicKinds::EMPTY, |filter| {
                 target_filter_characteristic_reads_at(filter, depth)
             }),
+        // CR 608.2c + CR 115.1: a targeted-objects population reads exactly
+        // what its canonical slot filter reads, via the single
+        // `targeted_objects_filter` authority — never a hardcoded constant.
         CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
             CharacteristicKinds::EMPTY
         }
+        CardTypeSetSource::TargetedObjects { slot } => target_filter_characteristic_reads_at(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            depth,
+        ),
     }
 }
 
@@ -3378,6 +3413,17 @@ fn characteristic_leaf_perturbed_by_entry(
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. }
         | CardTypeSetSource::TurnJournal { .. } => false,
+        // CR 608.2c + CR 115.1: the entered object perturbs the aggregate
+        // exactly when it matches the canonical slot filter — including the
+        // case where the entrant IS one of the ability's targets (identity
+        // match through `FilterContext.ability`), which a hardcoded `false`
+        // would miss. Delegated, never asserted.
+        CardTypeSetSource::TargetedObjects { slot } => matches_target_filter(
+            state,
+            entered.id,
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            ctx,
+        ),
     }
 }
 
@@ -26003,6 +26049,7 @@ mod tests {
             pending,
             Vec::new(),
             &mut events,
+            None,
         )
         .expect("resuming the die-roll loop must not error");
 
