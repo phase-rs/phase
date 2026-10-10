@@ -39,6 +39,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::effects::prepare::prepare_object;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
     AbilityDefinition, ActivationRestriction, Effect, EffectKind, EffectScope, FilterProp,
@@ -51,6 +52,7 @@ use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const SKYCOACH_WAYPOINT: &str = "{T}: Add {C}.\n{3}, {T}: Target creature becomes prepared. (Only creatures with prepare spells can become prepared.)";
 
@@ -1120,6 +1122,72 @@ fn become_prepared_event_referent_unseeded_event_prepares_the_tapped_creature() 
         "the trigger's source is not the event referent"
     );
     assert!(!is_prepared(&runner, bystander));
+}
+
+/// CR 400.7 + CR 608.2k + CR 722.3a: the tap trigger is left on the stack and
+/// the tapped creature is blinked (battlefield -> exile -> battlefield, as
+/// Momentary Blink does) before it resolves. The returned creature is a new
+/// object with no relation to the one that became tapped, so the stale trigger
+/// does not prepare it. Paired positive: without the blink the tapped creature
+/// is prepared (`..._unseeded_event_prepares_the_tapped_creature`).
+///
+/// DISCRIMINATION: with the incarnation check reverted the event referent
+/// resolves by bare `ObjectId` and the returned creature becomes prepared.
+#[test]
+fn become_prepared_event_referent_ignores_a_blinked_tapped_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Tapped Watcher", 2, 2, TAPPED_THAT_CREATURE)
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacking Scholar", 2, 2).id();
+    let mut runner = scenario.build();
+    for id in [watcher, attacker] {
+        give_prepare_face(&mut runner, id);
+    }
+
+    runner.pass_both_players();
+    let mut events = runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers must be accepted")
+        .events;
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: the tap trigger is on the stack"
+    );
+    let incarnation = runner.state().objects[&attacker].incarnation;
+
+    // The blink: leave and re-enter at the same ObjectId.
+    for zone in [Zone::Exile, Zone::Battlefield] {
+        assert!(
+            !move_object_for_test(
+                runner.state_mut(),
+                ZoneMoveRequest::effect(attacker, zone, watcher),
+                &mut events,
+            ),
+            "the blink must complete without a replacement choice"
+        );
+    }
+    assert!(
+        runner.state().objects[&attacker].incarnation > incarnation,
+        "reach guard: the creature returned as a new object"
+    );
+    give_prepare_face(&mut runner, attacker);
+
+    pass_until_stack_empty(&mut runner, &mut events);
+
+    assert!(
+        effect_resolved(&events, EffectKind::BecomePrepared),
+        "reach guard: the stale trigger still resolved"
+    );
+    assert!(
+        !is_prepared(&runner, attacker),
+        "the new incarnation is not the object that became tapped"
+    );
+    assert!(!is_prepared(&runner, watcher));
 }
 
 /// CR 608.2c + CR 115.1d: when the chain declared a matching target, "That

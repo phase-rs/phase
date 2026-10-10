@@ -1487,6 +1487,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copied_room_halves: Option<crate::types::ability::RoomCopiableHalves>,
 
+    /// CR 722.2b + CR 707.2 + CR 613.1a: the prepare spell the winning Layer-1a
+    /// copy effect carried (`CopiableValues::prepare_face`). Layer-derived: set
+    /// by `apply_copiable_values`, cleared by the Step-1 seed so it expires with
+    /// the copy effect. Read only through
+    /// `printed_cards::effective_prepare_face`, which prefers it over the
+    /// object's own stored `back_face` while a copy effect applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_prepare_face: Option<Arc<BackFaceData>>,
+
     /// CR 707.9b: where the LAST Layer-1 copy naming of this object came
     /// from this pass — `None` when no copy effect named it. An `Exception`
     /// ("except its name is X") is the copy's final copiable name, so the
@@ -1841,6 +1850,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         case_state: _,
         room_unlocks: _,
         copied_room_halves: _,
+        copied_prepare_face: _,
         layer1_name_origin: _,
         granted_abilities_from: _,
         layer1_copy_effect: _,
@@ -3064,6 +3074,7 @@ impl GameObject {
             case_state: None,
             room_unlocks: None,
             copied_room_halves: None,
+            copied_prepare_face: None,
             layer1_name_origin: None,
             granted_abilities_from: None,
             layer1_copy_effect: None,
@@ -3400,6 +3411,7 @@ impl GameObject {
         self.abilities = Arc::clone(&self.base_abilities);
         self.granted_abilities_from = None;
         self.layer1_copy_effect = None;
+        self.copied_prepare_face = None;
         self.materialize_base_trigger_definitions();
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();

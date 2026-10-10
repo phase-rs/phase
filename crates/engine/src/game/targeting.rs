@@ -852,6 +852,84 @@ pub fn resolve_event_context_targets(
         .collect()
 }
 
+/// CR 400.7 + CR 608.2k: whether the live permanent `obj` is the very object the
+/// trigger `event` named, as opposed to a later incarnation that came back under
+/// the same `ObjectId` (a blink). An event that recorded the incarnation it
+/// concerns is the authority; an event that did not (legacy or non-object
+/// events) cannot discriminate and so names the live object.
+///
+/// - `PermanentTapped` records the incarnation that became tapped.
+/// - `ZoneChanged` into the battlefield records the entrant's incarnation; a
+///   `ZoneChanged` out of the battlefield (or to any other zone) names an object
+///   that no longer exists as such — any permanent now at that id is a new one.
+fn event_names_live_incarnation(
+    event: &GameEvent,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    match event {
+        GameEvent::PermanentTapped {
+            incarnation: Some(incarnation),
+            ..
+        } => obj.incarnation == *incarnation,
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => record
+            .entered_incarnation
+            .is_none_or(|incarnation| obj.incarnation == incarnation),
+        GameEvent::ZoneChanged { .. } => false,
+        _ => true,
+    }
+}
+
+/// CR 608.2k + CR 400.7: the objects a pure event-context reference ("that
+/// creature", "it") names, resolved from the published trigger event(s) and
+/// kept only while each is still the incarnation the event recorded. A referent
+/// that left and returned before the trigger resolved is a new object with no
+/// relation to the one the event concerned (CR 400.7), so it is dropped.
+/// Callers that mutate the referent (rather than read its characteristics, which
+/// CR 608.2k lets follow the same object) use this instead of
+/// [`resolve_event_context_targets`].
+pub(crate) fn resolve_event_referent_objects(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let batch: Vec<&GameEvent> = if state.current_trigger_events.is_empty() {
+        state.current_trigger_event.iter().collect()
+    } else {
+        state.current_trigger_events.iter().collect()
+    };
+    if batch.is_empty() {
+        return resolve_event_context_targets(state, filter, source_id)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+    let mut seen = HashSet::new();
+    batch
+        .into_iter()
+        .filter_map(|event| {
+            let TargetRef::Object(id) = resolve_event_context_target_for_event_or_state(
+                state,
+                filter,
+                source_id,
+                Some(event),
+            )?
+            else {
+                return None;
+            };
+            let live = state.objects.get(&id)?;
+            event_names_live_incarnation(event, live).then_some(id)
+        })
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
 /// CR 608.2c + CR 603.10a: Resolve the effective targets for a resolving
 /// ability across the three Oracle-text target sources, in priority order:
 ///

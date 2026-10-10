@@ -2,7 +2,6 @@ use crate::types::ability::{
     CastingPermission, Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TargetFilter,
     TargetRef,
 };
-use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CopyTargetSlot, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -13,7 +12,7 @@ use crate::game::ability_utils::build_target_slots;
 use crate::game::casting;
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::game_object::{GameObject, PhaseStatus, PreparedState};
-use crate::game::printed_cards::apply_back_face_to_object;
+use crate::game::printed_cards::{apply_back_face_to_object, effective_prepare_face};
 
 /// An engine-authored prepared-copy announcement for the Priority preflight.
 /// The source identity remains private to the Prepare authority until the
@@ -122,16 +121,14 @@ fn resolve_single_object_targets(
     // attached-host rule of the `TriggeringSource` arm (CR 301.5a + CR 303.4b),
     // which applies only when a published event names no object.
     if crate::game::targeting::is_pure_event_context_filter(filter) {
-        return crate::game::targeting::resolve_event_context_targets(
+        // CR 400.7: only the incarnation the event recorded — a referent that
+        // blinked since the trigger was put on the stack is a new object.
+        return crate::game::targeting::resolve_event_referent_objects(
             state,
             filter,
             ability.source_id,
         )
         .into_iter()
-        .filter_map(|target| match target {
-            TargetRef::Object(id) => Some(id),
-            TargetRef::Player(_) => None,
-        })
         .filter(|&id| is_phased_in_battlefield_permanent(state, id))
         .collect();
     }
@@ -169,9 +166,9 @@ fn has_prepare_face(state: &GameState, object_id: ObjectId) -> bool {
     // `LayoutKind::Prepare` for cards whose printed `CardLayout::Prepare(_, _)`
     // supplies the prepare-spell face. Biblioplex-style "target creature
     // becomes prepared" no-ops on creatures lacking this face.
-    obj.back_face
-        .as_ref()
-        .is_some_and(|b| matches!(b.layout_kind, Some(LayoutKind::Prepare)))
+    // CR 722.2b + CR 707.2: read through the effective-face authority so a
+    // Layer-1 copy of a preparation creature has the prepare spell too.
+    effective_prepare_face(obj).is_some()
 }
 
 /// CR 722.3a-c: Prepare — resolver for `Effect::BecomePrepared`.
@@ -532,6 +529,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.layer1_copy_effect = None;
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;
+    copy.copied_prepare_face = None;
     copy.base_name_origin = None;
 
     // CR 707.2: the choices made while casting are copied only from an object
@@ -574,12 +572,9 @@ fn synthesize_prepared_copy_object(
         }
         (src_obj.clone(), src_obj.card_id)
     };
-    let Some(back) = src_clone.back_face.clone() else {
+    let Some(back) = effective_prepare_face(&src_clone).cloned() else {
         return Err("source has no prepare face".to_string());
     };
-    if !matches!(back.layout_kind, Some(LayoutKind::Prepare)) {
-        return Err("source back_face is not a Prepare face".to_string());
-    }
 
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -788,6 +783,7 @@ mod tests {
         TargetFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
@@ -1137,6 +1133,43 @@ mod tests {
         prepare_object(&mut state, id, &mut events2);
         assert!(events2.is_empty());
         assert_eq!(linked_prepared_copy_id(&state, id), Some(copy_id));
+    }
+
+    /// CR 722.2b + CR 707.2: a permanent that is a Layer-1 copy of a preparation
+    /// creature has the prepare spell (gate and linked copy come from the
+    /// copied face); a preparation creature copying something else has none.
+    #[test]
+    fn layer1_copy_of_a_preparation_creature_can_become_prepared() {
+        let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 9,
+            modification_index: 0,
+        };
+        let mut state = GameState::new_two_player(42);
+        let clone = setup_creature(&mut state);
+        {
+            let obj = state.objects.get_mut(&clone).unwrap();
+            obj.layer1_copy_effect = Some(copy_effect);
+            obj.copied_prepare_face = Some(std::sync::Arc::new(BackFaceForTest::prepare()));
+        }
+        let mut events = Vec::new();
+        prepare_object(&mut state, clone, &mut events);
+        assert!(state.objects[&clone].prepared.is_some());
+        let copy_id = linked_prepared_copy_id(&state, clone)
+            .expect("CR 722.3c: the copy's linked prepare-face copy exists");
+        assert_eq!(state.objects[&copy_id].zone, Zone::Exile);
+
+        let loses = setup_creature(&mut state);
+        {
+            let obj = state.objects.get_mut(&loses).unwrap();
+            obj.back_face = Some(BackFaceForTest::prepare());
+            obj.layer1_copy_effect = Some(copy_effect);
+        }
+        let mut events = Vec::new();
+        prepare_object(&mut state, loses, &mut events);
+        assert!(
+            state.objects[&loses].prepared.is_none(),
+            "a copy of a creature with no prepare spell has none, whatever it printed"
+        );
     }
 
     #[test]
@@ -2462,6 +2495,103 @@ mod tests {
         resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
         assert!(became_prepared(&events).is_empty(), "{events:?}");
         assert!(state.objects[&departed].prepared.is_none());
+    }
+
+    /// The tap event a "becomes tapped" trigger carries, stamped with the
+    /// incarnation of the permanent that is on the battlefield now.
+    fn tapped_event_for(state: &GameState, object_id: ObjectId) -> GameEvent {
+        GameEvent::permanent_tapped(state, object_id, None)
+    }
+
+    /// CR 400.7: blink `id` (battlefield -> exile -> battlefield) so it returns as
+    /// a new object at the same `ObjectId`, re-equipped with its prepare face.
+    fn blink(state: &mut GameState, id: ObjectId) {
+        let before = state.objects[&id].incarnation;
+        crate::game::zones::move_to_zone(state, id, Zone::Exile, &mut Vec::new());
+        crate::game::zones::move_to_zone(state, id, Zone::Battlefield, &mut Vec::new());
+        let obj = state.objects.get_mut(&id).unwrap();
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "fixture reach guard: it returned"
+        );
+        assert!(
+            obj.incarnation > before,
+            "fixture reach guard: a blink is a new incarnation at the same id"
+        );
+        obj.back_face = Some(BackFaceForTest::prepare());
+    }
+
+    /// CR 400.7 + CR 608.2k + CR 722.3a: the trigger event names the incarnation
+    /// that became tapped. Paired with the same-incarnation positive, a referent
+    /// that blinked before the trigger resolved is a new object and is not
+    /// prepared; the new object is not related to the old one.
+    #[test]
+    fn become_prepared_event_referent_ignores_a_blinked_new_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let tapped = add_prepare_creature(&mut state, PlayerId(0), "Tapped", true);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+
+        let event = tapped_event_for(&state, tapped);
+        state.current_trigger_event = Some(event.clone());
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            became_prepared(&events),
+            vec![tapped],
+            "same incarnation: positive control"
+        );
+        state.objects.get_mut(&tapped).unwrap().prepared = None;
+
+        blink(&mut state, tapped);
+        state.current_trigger_event = Some(event);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_prepared(&events).is_empty(), "{events:?}");
+        assert!(state.objects[&tapped].prepared.is_none());
+
+        // The same blink does not stop a fresh event for the new incarnation.
+        let fresh = tapped_event_for(&state, tapped);
+        state.current_trigger_event = Some(fresh);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![tapped]);
+    }
+
+    /// CR 400.7 + CR 608.2k: the unprepare twin — a blinked, since-prepared new
+    /// incarnation keeps its designation against the stale event.
+    #[test]
+    fn become_unprepared_event_referent_ignores_a_blinked_new_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let tapped = add_prepare_creature(&mut state, PlayerId(0), "Tapped", true);
+        prepare_object(&mut state, tapped, &mut Vec::new());
+        let ability = ResolvedAbility::new(event_referent_unprepare(), vec![], source, PlayerId(0));
+
+        let stale = tapped_event_for(&state, tapped);
+        blink(&mut state, tapped);
+        prepare_object(&mut state, tapped, &mut Vec::new());
+        assert!(
+            state.objects[&tapped].prepared.is_some(),
+            "fixture reach guard"
+        );
+
+        state.current_trigger_event = Some(stale);
+        let mut events = Vec::new();
+        resolve_become_unprepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_unprepared(&events).is_empty(), "{events:?}");
+        assert!(state.objects[&tapped].prepared.is_some());
+
+        let fresh = tapped_event_for(&state, tapped);
+        state.current_trigger_event = Some(fresh);
+        let mut events = Vec::new();
+        resolve_become_unprepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            became_unprepared(&events),
+            vec![tapped],
+            "same incarnation: positive control"
+        );
     }
 
     /// CR 702.26b: a phased-out event referent is treated as though it does not

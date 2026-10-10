@@ -23,7 +23,9 @@ use crate::game::effects::token::resolve_token_owner;
 use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
 use crate::game::game_object::DisplaySource;
-use crate::game::printed_cards::{copiable_values_from_face, printed_ref_from_face};
+use crate::game::printed_cards::{
+    copiable_values_from_face, printed_prepare_face, printed_ref_from_face,
+};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Comparator, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card::CardFace;
@@ -113,9 +115,10 @@ pub fn resolve(
         }
     };
 
-    // 6. CR 707.2: Build copiable values directly from the face (no battlefield
-    // source object exists for a pool pick).
-    let values = copiable_values_from_face(&face);
+    // 6. CR 707.2 + CR 722.2b: Build copiable values directly from the face (no
+    // battlefield source object exists for a pool pick); a preparation creature's
+    // prepare spell comes from the database's sibling face.
+    let values = copiable_values_from_face(&face, printed_prepare_face(&db, &face));
     let printed_ref = printed_ref_from_face(&face);
 
     // 7. CR 109.4 + CR 111.2: Resolve the token's creator/owner and

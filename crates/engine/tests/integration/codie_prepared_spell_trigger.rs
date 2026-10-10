@@ -3278,3 +3278,77 @@ fn copiable_prepare_face_token_ignores_transform_effect() {
     assert_eq!(face(runner.state(), token), token_before);
     assert_eq!(face(runner.state(), aviator), aviator_before);
 }
+
+/// CR 722.2b + CR 707.2 + CR 613.1a: the prepare spell is a copiable value, so a
+/// permanent that is a Layer-1 copy (a Clone) of Encouraging Aviator has it and
+/// Codie's activation prepares it (CR 722.3a), with a linked copy named Jump
+/// (CR 722.3c). Paired controls on the same board: the uncopied Aviator is
+/// prepared too, and an Aviator that is itself a copy of a creature with no
+/// prepare spell has none and stays unprepared.
+#[test]
+fn layer1_copy_of_a_preparation_creature_is_prepared_by_codie() {
+    let db = db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let codie = scenario
+        .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
+        .id();
+    let aviator = scenario.add_real_card(P0, "Encouraging Aviator", Zone::Battlefield, db);
+    let aviator_copying_plain =
+        scenario.add_real_card(P0, "Encouraging Aviator", Zone::Battlefield, db);
+    let clone = scenario.add_creature(P0, "Clone", 0, 0).id();
+    let plain = scenario.add_creature(P0, "Plain Donor", 2, 2).id();
+    scenario.with_mana_pool(P0, mana(WUBRG));
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert!(runner.state().objects[&aviator].back_face.is_some());
+    assert!(runner.state().objects[&clone].back_face.is_none());
+
+    let become_copy = |runner: &mut GameRunner, recipient: ObjectId, donor: ObjectId| {
+        let ability = engine::types::ability::ResolvedAbility::new(
+            engine::types::ability::Effect::BecomeCopy {
+                recipient: engine::types::ability::CopyRecipient::Source,
+                target: engine::types::ability::TargetFilter::Any,
+                duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+            vec![TargetRef::Object(donor)],
+            recipient,
+            P0,
+        );
+        engine::game::effects::become_copy::resolve(runner.state_mut(), &ability, &mut Vec::new())
+            .expect("the Layer-1 copy effect installs");
+        engine::game::layers::evaluate_layers(runner.state_mut());
+    };
+    become_copy(&mut runner, clone, aviator);
+    become_copy(&mut runner, aviator_copying_plain, plain);
+    assert_eq!(runner.state().objects[&clone].name, "Encouraging Aviator");
+    assert_eq!(
+        runner.state().objects[&aviator_copying_plain].name,
+        "Plain Donor"
+    );
+    assert!(runner.state().objects[&clone].back_face.is_none());
+
+    let visited = drive_activation(&mut runner, codie, 0);
+    assert!(!visited.contains(&"TargetSelection"));
+    pass_twice(&mut runner);
+    assert!(runner.state().stack.is_empty());
+
+    let state = runner.state();
+    assert!(
+        state.objects[&aviator].prepared.is_some(),
+        "positive control"
+    );
+    assert!(
+        state.objects[&clone].prepared.is_some(),
+        "CR 722.2b: the Clone's copied prepare spell makes it eligible"
+    );
+    exact_linked_copy(state, clone, P0, "Jump");
+    assert!(
+        state.objects[&aviator_copying_plain].prepared.is_none(),
+        "CR 722.2b: a copy of a creature with no prepare spell has none"
+    );
+    assert!(linked_copies(state, aviator_copying_plain).is_empty());
+}

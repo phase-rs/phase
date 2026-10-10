@@ -2795,6 +2795,8 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // (The door-gated Room NAME is derived at layer-1 exit, in
     // `derive_room_battlefield_names`, from the post-copy effective form.)
     obj.copied_room_halves = None;
+    // CR 722.2b + CR 613.1a: likewise the copied prepare spell.
+    obj.copied_prepare_face = None;
     // CR 707.9b: restore the persistent base origin (materialized exception
     // names); a Layer-1 copy application overwrites it within the pass.
     obj.layer1_name_origin = obj.base_name_origin;
