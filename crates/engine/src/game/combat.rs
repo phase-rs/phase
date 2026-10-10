@@ -7921,7 +7921,11 @@ pub(crate) fn attacked_player_for_attacker(
 ///   `is_attacker_in_play` rejects an attacker still listed after it left the
 ///   battlefield or phased out.
 /// - The controller is read live from the attacking object, not from the
-///   declaration ledger.
+///   declaration ledger. CR 506.4 also removes a permanent from combat when its
+///   controller changes, which the Layer 2 settlement in
+///   `layers::finish_layer_evaluation` enforces, so a listed attacker's live
+///   controller is always the player that controlled it when it became an
+///   attacking creature.
 pub(crate) fn player_is_attacking_player(
     state: &GameState,
     attacker_controller: PlayerId,

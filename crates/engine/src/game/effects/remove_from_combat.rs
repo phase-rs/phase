@@ -102,14 +102,24 @@ pub fn resolve(
 
 /// CR 506.4: Remove a single object from all combat data structures.
 /// Reusable building block for any code that needs to remove a permanent from combat
-/// (regeneration, effect resolution, controller change, etc.).
-pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::identifiers::ObjectId) {
+/// (regeneration, effect resolution, phasing out, leaving the battlefield, and
+/// "if its controller ... changes" via the Layer 2 settlement in
+/// `layers::finish_layer_evaluation`).
+///
+/// Returns whether `oid` was an attacking creature that this call removed —
+/// the only case that marks layers dirty, because only it can change a Layer 6
+/// `FilterProp::Attacking` grant. An object holding no combat role prunes
+/// nothing, records nothing, and returns `false`.
+pub fn remove_object_from_combat(
+    state: &mut GameState,
+    oid: crate::types::identifiers::ObjectId,
+) -> bool {
     // CR 733: read the exact roles being pruned BEFORE the prune, so the journal
     // records what this removal actually did. An object holding no combat role
     // prunes nothing and is not recorded.
     let participation = CombatParticipation::capture(state, oid);
     if participation.is_empty() {
-        return;
+        return false;
     }
     let reference = state
         .objects
@@ -130,6 +140,7 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
     if let Some(reference) = reference {
         record_combat_membership_removal(state, reference, participation);
     }
+    attacker_removed
 }
 
 /// CR 733: Journals one settled CR 506.4 removal through its owning family.
@@ -382,6 +393,77 @@ mod tests {
             !state.layers_dirty.is_dirty(),
             "removing a pure blocker must not dirty layers - no FilterProp::Attacking {{ defender: None }} change"
         );
+    }
+
+    /// CR 506.4: the return value reports exactly whether an attacking creature
+    /// was removed — `true` for an attacker, `false` for a pure blocker and for
+    /// an object holding no combat role. The Layer 2 controller-change
+    /// settlement keys its re-derivation on this value.
+    #[test]
+    fn remove_object_from_combat_reports_attacker_removal() {
+        let mut state = GameState::new_two_player(42);
+        let attacker_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker_id,
+                defending_player: PlayerId(0),
+                attack_target: AttackTarget::Player(PlayerId(0)),
+                blocked: true,
+                band_id: None,
+            }],
+            ..Default::default()
+        };
+        combat
+            .blocker_assignments
+            .insert(attacker_id, vec![blocker_id]);
+        combat
+            .blocker_to_attacker
+            .insert(blocker_id, vec![attacker_id]);
+        state.combat = Some(combat);
+
+        assert!(
+            !remove_object_from_combat(&mut state, bystander_id),
+            "an object with no combat role removes nothing"
+        );
+        assert!(
+            !remove_object_from_combat(&mut state, blocker_id),
+            "a pure blocker is not an attacking creature"
+        );
+        assert!(
+            !state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .contains_key(&blocker_id),
+            "reach guard: the blocker really was removed"
+        );
+        assert!(
+            remove_object_from_combat(&mut state, attacker_id),
+            "removing an attacking creature reports true"
+        );
+        assert!(state.combat.as_ref().unwrap().attackers.is_empty());
     }
 
     #[test]

@@ -30,15 +30,17 @@
 use engine::game::combat::AttackerInfo;
 use engine::game::effects::attach::attach_to_player;
 use engine::game::effects::remove_from_combat::remove_object_from_combat;
+use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{AbilityCost, AbilityKind, Effect, ManaProduction};
+use engine::types::ability::{AbilityCost, AbilityKind, Effect, ManaProduction, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -74,6 +76,9 @@ const CURSE_OF_VERBOSITY_ORACLE: &str = "Enchant player\n\
 const CURSE_OF_VITALITY_ORACLE: &str = "Enchant player\n\
      Whenever enchanted player is attacked, you gain 2 life. \
      Each opponent attacking that player gains 2 life.";
+
+/// Verbatim Oracle text (Scryfall), same constant as `derived_target_carriers.rs`.
+const ACT_OF_AGGRESSION_ORACLE: &str = "({R/P} can be paid with either {R} or 2 life.)\nGain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn.";
 
 /// The genuine "does the same" phrasing (Curse of Vitality's printed rider) —
 /// exercises the `try_parse_scoped_does_the_same` fan-out path this PR fixes,
@@ -392,6 +397,15 @@ fn opulence_table(
     enchanted: PlayerId,
     creatures: &[PlayerId],
 ) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let (scenario, curse_id, creature_ids) = opulence_scenario(n, creatures);
+    let runner = finish_opulence(scenario, curse_id, enchanted);
+    (runner, curse_id, creature_ids)
+}
+
+/// The unbuilt half of [`opulence_table`]: the scenario with the curse (not yet
+/// attached), the creatures and library padding, so a caller can still add
+/// cards before building.
+fn opulence_scenario(n: u8, creatures: &[PlayerId]) -> (GameScenario, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new_n_player(n, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -414,12 +428,17 @@ fn opulence_table(
         }
     }
 
+    (scenario, curse_id, creature_ids)
+}
+
+/// The built half of [`opulence_table`]: build, attach the curse to
+/// `enchanted` (CR 303.4b) and index its trigger.
+fn finish_opulence(scenario: GameScenario, curse_id: ObjectId, enchanted: PlayerId) -> GameRunner {
     let mut runner = scenario.build();
     attach_to_player(runner.state_mut(), curse_id, enchanted);
     evaluate_layers(runner.state_mut());
     reindex_object_triggers(runner.state_mut(), curse_id);
-
-    (runner, curse_id, creature_ids)
+    runner
 }
 
 /// CR 508.6 + CR 506.4: an opponent whose attacker is removed from combat
@@ -688,8 +707,48 @@ fn curse_of_opulence_resolves_after_curse_leaves_battlefield() {
         "curse must trigger when the enchanted player P1 is attacked"
     );
 
+    // Reach guard: the live curse enchants P1 before it leaves.
+    assert_eq!(
+        runner.state().objects[&curse_id].attached_to,
+        Some(AttachTarget::Player(P1)),
+        "before the move the curse is attached to the enchanted player P1"
+    );
+
     let mut events = Vec::new();
     move_to_zone(runner.state_mut(), curse_id, Zone::Graveyard, &mut events);
+
+    // The live attachment is severed on leaving the battlefield, so "that
+    // player" can only come from last known information: the zone-change
+    // record keeps the enchanted player, and that record is the anchor the
+    // resolution reads (`zone_changes_this_turn`).
+    let curse = &runner.state().objects[&curse_id];
+    assert_eq!(curse.zone, Zone::Graveyard);
+    assert!(
+        curse.attached_to.is_none(),
+        "the curse in the graveyard is no longer attached to anything"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, record, .. }
+                if *object_id == curse_id
+                    && record.attached_to == Some(AttachTarget::Player(P1))
+        )),
+        "the curse's zone-change event records the enchanted player P1"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|record| record.object_id == curse_id
+                && record.from_zone == Some(Zone::Battlefield))
+            .and_then(|record| record.attached_to),
+        Some(AttachTarget::Player(P1)),
+        "the last-known-information record names the enchanted player P1"
+    );
+
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -710,6 +769,348 @@ fn curse_of_opulence_resolves_after_curse_leaves_battlefield() {
         gold_tokens(&runner, P3).is_empty(),
         "non-attacking P3 gets no Gold"
     );
+}
+
+// ─── Curse of Opulence: control change removes from combat (CR 506.4) ────────
+
+/// The 4-player Opulence table (curse controlled by P0, enchanting P1) with a
+/// free Act of Aggression in P3's hand. Returns `(runner, curse_id,
+/// creature_ids, act_id)`.
+fn opulence_table_with_act(
+    creatures: &[PlayerId],
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+    let (mut scenario, curse_id, creature_ids) = opulence_scenario(4, creatures);
+    let act = scenario
+        .add_spell_to_hand_from_oracle(P3, "Act of Aggression", true, ACT_OF_AGGRESSION_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let runner = finish_opulence(scenario, curse_id, P1);
+    (runner, curse_id, creature_ids, act)
+}
+
+/// Pass priority until `player` holds it.
+fn pass_priority_to(runner: &mut GameRunner, player: PlayerId) {
+    for _ in 0..8 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { player: p } if p == player) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority toward the caster");
+    }
+    panic!("{player:?} never received priority");
+}
+
+/// `caster` casts Act of Aggression targeting `target` through the real cast
+/// pipeline, then every player passes until the spell (and only it) resolves.
+fn cast_act_of_aggression(
+    runner: &mut GameRunner,
+    act: ObjectId,
+    caster: PlayerId,
+    target: ObjectId,
+) {
+    pass_priority_to(runner, caster);
+    runner
+        .act(GameAction::CastSpell {
+            object_id: act,
+            card_id: runner.state().objects[&act].card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("cast Act of Aggression");
+    // With several legal targets the caster chooses; with exactly one the
+    // engine announces it directly. Either way the stack entry is checked below.
+    if let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for {
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(target)),
+            "the creature is a legal Act of Aggression target"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("choose the Act of Aggression target");
+    }
+    let announced = runner
+        .state()
+        .stack
+        .last()
+        .and_then(|entry| entry.ability())
+        .expect("reach guard: Act of Aggression is on the stack");
+    assert_eq!(announced.source_id, act, "reach guard: Act is on top");
+    assert_eq!(
+        announced.targets,
+        vec![TargetRef::Object(target)],
+        "reach guard: Act of Aggression targets the intended creature"
+    );
+
+    let depth = runner.state().stack.len();
+    for _ in 0..8 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve Act of Aggression");
+        if runner.state().stack.len() < depth {
+            return;
+        }
+    }
+    panic!("Act of Aggression never resolved");
+}
+
+/// The attack target of `creature` while it is an attacking creature.
+fn attack_target_of(runner: &GameRunner, creature: ObjectId) -> Option<AttackTarget> {
+    runner.state().combat.as_ref().and_then(|combat| {
+        combat
+            .attackers
+            .iter()
+            .find(|info| info.object_id == creature)
+            .map(|info| info.attack_target)
+    })
+}
+
+/// CR 506.4 + CR 508.6: P2 attacks the enchanted player P1 and the curse
+/// triggers; P3 responds with Act of Aggression on the attacker. When the
+/// spell resolves the creature's controller changes, so it is removed from
+/// combat: when the curse trigger then resolves neither P2 (controls no
+/// attacking creature) nor P3 (controls the creature, but it is not attacking)
+/// is attacking P1. Only the controller P0 gets Gold.
+///
+/// Revert-failing: without the CR 506.4 control-change removal the creature
+/// stays listed as attacking P1 under its new controller P3, who gets a Gold.
+#[test]
+fn curse_of_opulence_attacker_stolen_by_responder_is_not_attacking() {
+    let (mut runner, curse_id, creatures, act) = opulence_table_with_act(&[P2]);
+    let stolen = creatures[0];
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[(stolen, AttackTarget::Player(P1))])
+        .expect("P2 declares an attacker against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "reach guard: the curse triggers when the enchanted player P1 is attacked"
+    );
+    assert_eq!(
+        attack_target_of(&runner, stolen),
+        Some(AttackTarget::Player(P1)),
+        "reach guard: the creature is attacking P1"
+    );
+    assert_eq!(runner.state().objects[&stolen].controller, P2);
+
+    cast_act_of_aggression(&mut runner, act, P3, stolen);
+
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "reach guard: Act resolved above the still-waiting curse trigger"
+    );
+    let creature = &runner.state().objects[&stolen];
+    assert_eq!(creature.zone, Zone::Battlefield);
+    assert_eq!(
+        creature.controller, P3,
+        "Act of Aggression transferred control"
+    );
+    assert_eq!(creature.owner, P2);
+    assert_eq!(
+        attack_target_of(&runner, stolen),
+        None,
+        "CR 506.4: a creature whose controller changes is removed from combat"
+    );
+    // CR 508.6: "has attacked" is declaration history and is unaffected.
+    assert!(runner.state().player_attacked_player_this_combat(P2, P1));
+    assert!(!runner.state().player_attacked_player_this_combat(P3, P1));
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P0).len(),
+        1,
+        "controller P0 gets exactly one Gold (the trigger resolved)"
+    );
+    assert!(
+        gold_tokens(&runner, P3).is_empty(),
+        "P3 controls the creature, but it is not attacking: no Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P2).is_empty(),
+        "P2 no longer controls an attacking creature: no Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P1).is_empty(),
+        "enchanted P1 gets no Gold"
+    );
+}
+
+/// CR 506.4 removes only the permanent whose controller changed. P3 steals
+/// P2's creature that is NOT attacking; P2's attacker stays in combat and P2
+/// still gets its Gold.
+///
+/// Paired control (not revert-failing): unchanged control of the attacker
+/// prunes nothing.
+#[test]
+fn curse_of_opulence_stealing_a_non_attacker_leaves_the_attack_intact() {
+    let (mut runner, curse_id, creatures, act) = opulence_table_with_act(&[P2, P2]);
+    let (attacker, idle) = (creatures[0], creatures[1]);
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("P2 declares one attacker against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "reach guard: the curse triggers"
+    );
+
+    cast_act_of_aggression(&mut runner, act, P3, idle);
+
+    assert_eq!(
+        runner.state().objects[&idle].controller,
+        P3,
+        "reach guard: the control change happened"
+    );
+    assert_eq!(attack_target_of(&runner, idle), None);
+    assert_eq!(
+        attack_target_of(&runner, attacker),
+        Some(AttackTarget::Player(P1)),
+        "P2's attacker keeps attacking P1"
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P2).len(),
+        1,
+        "P2 is still attacking P1 and gets exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P3).is_empty(),
+        "P3's stolen creature never attacked: no Gold"
+    );
+    assert_eq!(gold_tokens(&runner, P0).len(), 1, "controller gets Gold");
+}
+
+/// CR 506.4: P2 attacks P1 with two creatures and P3 steals one of them. The
+/// stolen one leaves combat; the other keeps attacking, so P2 still gets
+/// exactly one Gold and P3 gets none.
+///
+/// Revert-failing: without the removal P3 gets a Gold for the stolen creature.
+#[test]
+fn curse_of_opulence_other_attacker_survives_when_sibling_is_stolen() {
+    let (mut runner, curse_id, creatures, act) = opulence_table_with_act(&[P2, P2]);
+    let (stolen, survivor) = (creatures[0], creatures[1]);
+
+    hand_turn_to(&mut runner, P2);
+    runner
+        .declare_attackers(&[
+            (stolen, AttackTarget::Player(P1)),
+            (survivor, AttackTarget::Player(P1)),
+        ])
+        .expect("P2 declares two attackers against the enchanted player P1");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "reach guard: the curse triggers"
+    );
+    let survivor_before = runner
+        .state()
+        .combat
+        .as_ref()
+        .and_then(|combat| {
+            combat
+                .attackers
+                .iter()
+                .find(|info| info.object_id == survivor)
+                .cloned()
+        })
+        .expect("reach guard: the survivor is attacking");
+
+    cast_act_of_aggression(&mut runner, act, P3, stolen);
+
+    assert_eq!(
+        runner.state().objects[&stolen].controller,
+        P3,
+        "reach guard: the control change happened"
+    );
+    assert_eq!(
+        attack_target_of(&runner, stolen),
+        None,
+        "CR 506.4: the stolen creature is removed from combat"
+    );
+    assert_eq!(
+        runner.state().combat.as_ref().and_then(|combat| combat
+            .attackers
+            .iter()
+            .find(|info| info.object_id == survivor)
+            .cloned()),
+        Some(survivor_before),
+        "the sibling attacker's combat entry is untouched"
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        gold_tokens(&runner, P2).len(),
+        1,
+        "P2 is still attacking P1 with the survivor: exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P3).is_empty(),
+        "P3's stolen creature is not attacking: no Gold"
+    );
+    assert_eq!(gold_tokens(&runner, P0).len(), 1, "controller gets Gold");
+}
+
+/// CR 506.4 removes a creature only when its controller changes while it is
+/// in combat. P3 steals P2's creature in its main phase (Act grants haste) and
+/// then attacks P1 with it: the creature joins combat under P3, later layer
+/// passes see no control change, and P3 is the opponent attacking P1.
+///
+/// Paired positive control: the live-controller read still attributes a
+/// stolen creature that attacks for its new controller.
+#[test]
+fn curse_of_opulence_creature_stolen_before_attack_attacks_for_new_controller() {
+    let (mut runner, curse_id, creatures, act) = opulence_table_with_act(&[P2]);
+    let stolen = creatures[0];
+
+    {
+        let state = runner.state_mut();
+        state.active_player = P3;
+        state.priority_player = P3;
+        state.waiting_for = WaitingFor::Priority { player: P3 };
+    }
+    cast_act_of_aggression(&mut runner, act, P3, stolen);
+    assert_eq!(
+        runner.state().objects[&stolen].controller,
+        P3,
+        "reach guard: P3 controls the creature before attacking"
+    );
+
+    hand_turn_to(&mut runner, P3);
+    runner
+        .declare_attackers(&[(stolen, AttackTarget::Player(P1))])
+        .expect("P3 attacks P1 with the hasty stolen creature");
+    assert!(
+        stack_triggers_from(&runner, curse_id) >= 1,
+        "reach guard: the curse triggers"
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        attack_target_of(&runner, stolen),
+        Some(AttackTarget::Player(P1)),
+        "the creature is still attacking P1 after the trigger resolved"
+    );
+    assert_eq!(runner.state().objects[&stolen].controller, P3);
+    assert_eq!(
+        gold_tokens(&runner, P3).len(),
+        1,
+        "P3 is attacking P1 and gets exactly one Gold"
+    );
+    assert!(
+        gold_tokens(&runner, P2).is_empty(),
+        "P2 owns the creature but is not attacking: no Gold"
+    );
+    assert_eq!(gold_tokens(&runner, P0).len(), 1, "controller gets Gold");
 }
 
 // ─── Curse of Bounty ─────────────────────────────────────────────────────────
