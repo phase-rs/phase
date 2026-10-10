@@ -302,7 +302,7 @@ describe("PermanentCard", () => {
       tapRotation: "classic",
     });
     vi.mocked(dispatchAction).mockClear();
-    vi.mocked(dispatchInteraction).mockResolvedValue();
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
   });
 
   afterEach(() => {
