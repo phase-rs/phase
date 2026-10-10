@@ -29917,8 +29917,8 @@ fn parse_exile_link_host(input: &str) -> OracleResult<'_, &str> {
 /// CR 607.2a: the whole cast object is "a[n] <type phrase> card exiled with
 /// ~" (Summon: Esper Valigarmanda: "cast an instant or sorcery card exiled
 /// with this Saga"; Raphael, Most Attitude: "play a card exiled with
-/// Raphael").
-fn names_a_card_exiled_with_self(rest: &str) -> bool {
+/// Raphael"). Returns the type phrase's filter.
+fn card_exiled_with_self_type(rest: &str) -> Option<TargetFilter> {
     (
         opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
         super::oracle_nom::target::parse_type_phrase,
@@ -29928,7 +29928,8 @@ fn names_a_card_exiled_with_self(rest: &str) -> bool {
         eof,
     )
         .parse(rest)
-        .is_ok()
+        .ok()
+        .map(|(_, (_, filter, ..))| filter)
 }
 
 /// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
@@ -30999,20 +31000,25 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
     // with ~" (Summon: Esper Valigarmanda) names ONE card of the source's
     // linked exile, cast as the ability resolves ("You can't wait to cast it
-    // later in the turn"). The type list keeps the link here (Branch 2's
-    // `parse_cast_type_list` reader would drop it), and the `DuringResolution`
-    // driver makes the resolver offer one card of that pool at its printed
-    // cost instead of a lingering permission over every exiled card.
-    if names_a_card_exiled_with_self(rest) {
-        if let Some(mut typed_filter) = parse_cast_type_list(rest) {
-            // CR 305.1: a land is played, never cast, so a "play" of this
-            // shape has no resolution-time cast; it stays a gap.
-            if mode != CardPlayMode::Cast {
+    // later in the turn"). The type list (or a single type: "an instant card")
+    // keeps the link here (Branch 2's `parse_cast_type_list` reader would drop
+    // it), and the `DuringResolution` driver makes the resolver offer one card
+    // of that pool at its printed cost instead of a lingering permission over
+    // every exiled card.
+    if let Some(single_type) = card_exiled_with_self_type(rest) {
+        let type_list = parse_cast_type_list(rest);
+        // CR 305.1: a land is played, never cast, so a "play" of the type-list
+        // shape has no resolution-time cast; it stays a gap. A single-type
+        // "play" (Raphael, Most Attitude) keeps Branch 2's linked permission.
+        if mode != CardPlayMode::Cast {
+            if type_list.is_some() {
                 return Some(Effect::unimplemented(
                     LINKED_EXILE_RESOLUTION_CAST_GAP,
                     rest,
                 ));
             }
+        } else {
+            let mut typed_filter = type_list.unwrap_or(single_type);
             ensure_exile_zone_on_cast_target(&mut typed_filter);
             return Some(Effect::CastFromZone {
                 target: TargetFilter::And {

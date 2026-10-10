@@ -2881,13 +2881,20 @@ fn parse_subject_application_for(
     // "each" with an interposed "of" that parse_target doesn't handle directly.
     // Must check before "each " to avoid the generic "each" path swallowing "each of".
     if let Ok((remainder, _)) = tag::<_, _, OracleError<'_>>("each of ").parse(lower.as_str()) {
-        if alt((
+        if let Ok((after_opponents, _)) = alt((
             tag::<_, _, OracleError<'_>>("your opponents"),
             tag("your opponent"),
         ))
         .parse(remainder)
-        .is_ok()
         {
+            // CR 608.2c: an unmodelled "who …" restriction stays unbound, as
+            // in the "each <player> who" arm below.
+            if tag::<_, _, OracleError<'_>>(" who ")
+                .parse(after_opponents)
+                .is_ok()
+            {
+                return None;
+            }
             return subject_filter_application(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 false,

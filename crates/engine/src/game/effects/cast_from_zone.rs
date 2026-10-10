@@ -499,12 +499,14 @@ fn open_linked_exile_cast_selection(
         .into_iter()
         .filter(|id| resolution_cast_is_possible(&projection, &stash, *id))
         .collect();
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::CastFromZone,
-        source_id: ability.source_id,
-        subject: None,
-    });
+    // The instruction completes once, at its outcome: here when nothing is
+    // castable; otherwise the selected cast or the decline handler reports it.
     if pool.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CastFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
         return Ok(());
     }
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));

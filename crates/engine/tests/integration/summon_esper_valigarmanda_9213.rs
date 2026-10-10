@@ -19,8 +19,10 @@
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::ability::EffectKind;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -56,17 +58,19 @@ fn to_next_p0_precombat_main(runner: &mut GameRunner) {
 
 /// Pass priority until the stack is empty or a non-priority prompt opens,
 /// answering trigger-order prompts. Chapter I's per-card choices are answered
-/// by `choose_chapter_one`.
-fn settle(runner: &mut GameRunner) {
+/// by `choose_chapter_one`. Returns the events of the passes it made.
+fn settle(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for _ in 0..64 {
         match &runner.state().waiting_for {
             WaitingFor::OrderTriggers { .. } => {
                 drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                let result = runner.act(GameAction::PassPriority).expect("pass priority");
+                events.extend(result.events);
             }
-            _ => return,
+            _ => return events,
         }
     }
     panic!("stack did not settle: {:?}", runner.state().waiting_for);
@@ -119,6 +123,8 @@ struct Board {
     /// An instant already in exile, not linked to the Saga.
     unlinked: ObjectId,
     saga: ObjectId,
+    /// Events from the passes that resolved chapter II up to its pick.
+    chapter_two_events: Vec<GameEvent>,
 }
 
 /// The Saga with no lore counter, an instant (`instant_text`) in P0's
@@ -162,13 +168,14 @@ fn reach_chapter_two(instant_text: &str, sorcery_text: &str) -> Board {
     // Chapter II.
     to_next_p0_precombat_main(&mut runner);
     assert_eq!(lore(&runner, saga), 2);
-    settle(&mut runner);
+    let chapter_two_events = settle(&mut runner);
     Board {
         runner,
         sorcery,
         instant,
         unlinked,
         saga,
+        chapter_two_events,
     }
 }
 
@@ -223,6 +230,23 @@ fn lore(runner: &GameRunner, saga: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
+/// How many times the Saga's cast instruction reported completion.
+fn cast_completions(events: &[GameEvent], saga: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CastFromZone,
+                    source_id,
+                    ..
+                } if *source_id == saga
+            )
+        })
+        .count()
+}
+
 fn pool_of(runner: &GameRunner) -> Vec<ObjectId> {
     match &runner.state().waiting_for {
         WaitingFor::EffectZoneChoice {
@@ -239,7 +263,8 @@ fn pool_of(runner: &GameRunner) -> Vec<ObjectId> {
 /// CR 607.2a + CR 608.2g + CR 609.4b: chapter II offers exactly the two linked
 /// cards, not the unlinked exiled instant; the chosen `{1}{W}` sorcery is cast
 /// while the chapter resolves and is paid with the chapter's {R}{R}. Chapter
-/// III then offers only the linked card still in exile.
+/// III then offers only the linked card still in exile. The instruction
+/// reports completion once, when the cast is made, not when the pick opens.
 #[test]
 fn chapter_two_casts_a_linked_card_paid_with_its_red_mana() {
     let Board {
@@ -248,7 +273,13 @@ fn chapter_two_casts_a_linked_card_paid_with_its_red_mana() {
         instant,
         unlinked,
         saga,
+        chapter_two_events: mut events,
     } = reach_chapter_two(GAIN_ONE, GAIN_THREE);
+    assert_eq!(
+        cast_completions(&events, saga),
+        0,
+        "no completion while the pick is open"
+    );
     let mut pool = pool_of(&runner);
     pool.sort();
     let mut expected = vec![sorcery, instant];
@@ -256,18 +287,20 @@ fn chapter_two_casts_a_linked_card_paid_with_its_red_mana() {
     assert_eq!(pool, expected, "the linked pool, without {unlinked:?}");
 
     let life_before = runner.life(P0);
-    runner
+    let picked = runner
         .act(GameAction::SelectCards {
             cards: vec![sorcery],
         })
         .expect("pick the linked sorcery");
+    events.extend(picked.events);
     for _ in 0..8 {
         if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
             break;
         }
-        runner
+        let paid = runner
             .act(GameAction::PassPriority)
             .expect("pay {1}{W} from the pool");
+        events.extend(paid.events);
     }
     assert_eq!(
         runner.state().objects[&sorcery].zone,
@@ -280,6 +313,7 @@ fn chapter_two_casts_a_linked_card_paid_with_its_red_mana() {
         0,
         "{{R}}{{R}} paid {{1}}{{W}} through the any-type rider"
     );
+    assert_eq!(cast_completions(&events, saga), 1, "one completion");
     runner.advance_until_stack_empty();
     assert_eq!(runner.life(P0), life_before + 3, "the sorcery resolved");
     assert_eq!(runner.state().objects[&instant].zone, Zone::Exile);
@@ -306,13 +340,15 @@ fn an_uncastable_linked_card_is_not_offered() {
 }
 
 /// CR 608.2d: with no castable linked card, the chapter offers nothing and
-/// leaves no permission behind.
+/// leaves no permission behind; the instruction still completes once.
 #[test]
 fn no_castable_linked_card_opens_no_pick() {
     let Board {
         runner,
         sorcery,
         instant,
+        saga,
+        chapter_two_events,
         ..
     } = reach_chapter_two(COUNTERSPELL, COUNTERSPELL);
     assert!(
@@ -320,6 +356,11 @@ fn no_castable_linked_card_opens_no_pick() {
             && runner.state().stack.is_empty(),
         "chapter II resolved without a pick: {:?}",
         runner.state().waiting_for
+    );
+    assert_eq!(
+        cast_completions(&chapter_two_events, saga),
+        1,
+        "one completion"
     );
     let castable = spell_objects_available_to_cast(runner.state(), P0);
     for card in [sorcery, instant] {
@@ -329,19 +370,24 @@ fn no_castable_linked_card_opens_no_pick() {
 }
 
 /// CR 608.2g: picking nothing casts nothing, and no permission lingers — the
-/// linked cards cannot be cast later in the turn.
+/// linked cards cannot be cast later in the turn. The decline completes the
+/// instruction once.
 #[test]
 fn declining_the_pick_leaves_no_later_permission() {
     let Board {
         mut runner,
         sorcery,
         instant,
+        saga,
+        chapter_two_events: mut events,
         ..
     } = reach_chapter_two(GAIN_ONE, GAIN_THREE);
     assert_eq!(pool_of(&runner).len(), 2, "reach guard: the pick opened");
-    runner
+    let declined = runner
         .act(GameAction::SelectCards { cards: vec![] })
         .expect("pick nothing");
+    events.extend(declined.events);
+    assert_eq!(cast_completions(&events, saga), 1, "one completion");
     runner.advance_until_stack_empty();
     for card in [sorcery, instant] {
         assert_eq!(runner.state().objects[&card].zone, Zone::Exile);

@@ -75527,8 +75527,9 @@ fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
 /// with ~" (Summon: Esper Valigarmanda) casts one card of the source's linked
 /// exile as the ability resolves, at its printed cost. The type list keeps the
 /// link (`ExiledBySource`), the driver is `DuringResolution`, and the any-type
-/// rider rides the cast. The single-type form keeps its link and its
-/// lingering permission (Raphael, Most Attitude), and a "play" of the
+/// rider rides the cast. A single type is the same resolution cast; with a
+/// duration it is a lingering permission. A single-type "play" keeps its link
+/// and its lingering permission (Raphael, Most Attitude), and a "play" of the
 /// type-list shape stays a gap (CR 305.1).
 #[test]
 fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_pool() {
@@ -75569,6 +75570,41 @@ fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_poo
             .properties
             .contains(&FilterProp::InZone { zone: Zone::Exile }),
         "the type leg is in exile: {typed:?}"
+    );
+
+    let single = parse_effect_chain(
+        "You may cast an instant card exiled with ~.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*single.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::And { filters },
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                duration: None,
+                ..
+            } if filters.contains(&TargetFilter::ExiledBySource)
+        ),
+        "{:?}",
+        single.effect
+    );
+    let lingering = parse_effect_chain(
+        "Until end of turn, you may cast an instant card exiled with ~.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*lingering.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::And { filters },
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                duration: Some(_),
+                ..
+            } if filters.contains(&TargetFilter::ExiledBySource)
+        ),
+        "{:?}",
+        lingering.effect
     );
 
     let play = parse_effect_chain(
@@ -81519,7 +81555,8 @@ fn a_mana_rider_conjunct_must_end_its_sentence() {
 /// each [opponent's] graveyard" is one card from EVERY graveyard of the
 /// population: a per-player `ChooseFromZone { Each(..) }` chosen by the
 /// controller (or at random), then `ChangeZoneAll { TrackedSet }` to exile.
-/// A targeted or mass form, or a clause that continues, is not this shape.
+/// A targeted or mass form keeps the generic exile; a qualifier this reader
+/// doesn't model fails closed instead of exiling one card in total.
 #[test]
 fn exile_a_card_from_each_graveyard_chooses_one_per_graveyard() {
     fn per_graveyard(
@@ -81574,12 +81611,58 @@ fn exile_a_card_from_each_graveyard_chooses_one_per_graveyard() {
     assert_eq!(filter, None, "any card");
     assert!(exile_those(&exile), "{exile:?}");
 
+    let graveyard_card = |target: &TargetFilter| {
+        matches!(
+            target,
+            TargetFilter::Typed(TypedFilter { type_filters, controller: None, properties })
+                if type_filters == &vec![TypeFilter::Card]
+                    && properties.contains(&FilterProp::InZone { zone: Zone::Graveyard })
+        )
+    };
+    let targeted = parse_effect_chain("Exile target card from each graveyard.", AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*targeted.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target,
+                ..
+            } if graveyard_card(target)
+        ),
+        "{:?}",
+        targeted.effect
+    );
+    let mass = parse_effect_chain("Exile all cards from each graveyard.", AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*mass.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target,
+                ..
+            } if graveyard_card(target)
+        ),
+        "{:?}",
+        mass.effect
+    );
     for text in [
-        "Exile target card from each graveyard.",
-        "Exile all cards from each graveyard.",
-        "Exile a card from each graveyard you control.",
+        "Exile a creature card from each graveyard with the greatest mana value.",
+        "Exile a card from each graveyard face down.",
+        "Exile a creature card with mana value 3 or less from each graveyard.",
+        "Exile a 2/2 card from each graveyard.",
     ] {
-        assert!(per_graveyard(text).is_none(), "{text}");
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*chain.effect,
+                Effect::Unimplemented { name, .. }
+                    if name == super::imperative::PER_GRAVEYARD_EXILE_QUALIFIER_GAP
+            ),
+            "{text}: {:?}",
+            chain.effect
+        );
     }
 }
 
@@ -81665,5 +81748,38 @@ fn an_unmodelled_player_relative_clause_is_an_unbound_subject() {
         matches!(&*everyone.effect, Effect::LoseLife { .. }),
         "{:?}",
         everyone.effect
+    );
+
+    // The "each of your opponents" arm: a "who" restriction is unbound, the
+    // bare subject stays the opponents.
+    let each_of_who = parse_effect_chain(
+        "Each of your opponents who lost life this turn sacrifices a creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*each_of_who.effect,
+            Effect::Unimplemented { name, .. } if name == "unbound_subject"
+        ),
+        "{:?}",
+        each_of_who.effect
+    );
+    let each_of = parse_effect_chain(
+        "Each of your opponents sacrifices a creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*each_of.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        each_of.effect
     );
 }

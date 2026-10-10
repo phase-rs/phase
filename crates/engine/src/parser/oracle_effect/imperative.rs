@@ -5883,6 +5883,10 @@ pub(super) fn parse_for_each_player_exile_controlled(
     Some(clause)
 }
 
+/// CR 608.2c: an "exile a card from each graveyard" sentence with a qualifier
+/// [`parse_exile_one_card_from_each_graveyard`] doesn't model.
+pub(super) const PER_GRAVEYARD_EXILE_QUALIFIER_GAP: &str = "per_graveyard_exile_qualifier";
+
 /// CR 101.4c + CR 404.1 + CR 608.2c: "exile a[n] `<type>` card [at random] from
 /// each [opponent's] graveyard" — one card from EVERY graveyard of the named
 /// population, chosen by the controller as the ability resolves (Summon: Esper
@@ -5892,7 +5896,9 @@ pub(super) fn parse_for_each_player_exile_controlled(
 /// Each(..) }` that accumulates one pick per player into the chain's tracked
 /// set, then `ChangeZoneAll { TrackedSet }` exiles them all. Without the
 /// per-player choice "from each graveyard" read as one card from any graveyard.
-/// Nothing may follow the graveyard phrase.
+/// A qualifier this reader doesn't model (before or after "from each
+/// graveyard") fails closed as [`PER_GRAVEYARD_EXILE_QUALIFIER_GAP`] instead of
+/// falling back to that one-card reading.
 pub(super) fn parse_exile_one_card_from_each_graveyard(
     lower: &str,
     ctx: &mut ParseContext,
@@ -5920,20 +5926,47 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         )
             .parse(i)
     };
-    let (head, tail) = nom_primitives::scan_split_at_phrase(after_article, tail_parser)?;
+    let qualifier_gap = || {
+        Some(parsed_clause(Effect::unimplemented(
+            PER_GRAVEYARD_EXILE_QUALIFIER_GAP,
+            lower,
+        )))
+    };
+    let Some((head, tail)) = nom_primitives::scan_split_at_phrase(after_article, tail_parser)
+    else {
+        // A qualifier between "card" and "from each graveyard" ("a creature
+        // card with mana value 3 or less from each graveyard").
+        let names_each_graveyard = nom_primitives::scan_split_at_phrase(after_article, |i| {
+            (
+                tag::<_, _, E>("from each "),
+                alt((tag::<_, _, E>("opponent's graveyard"), tag("graveyard"))),
+            )
+                .parse(i)
+        })
+        .is_some();
+        return if names_each_graveyard {
+            qualifier_gap()
+        } else {
+            None
+        };
+    };
     let (after_scope, (_, random, scope)) = tail_parser(tail).ok()?;
     let type_phrase = head.trim_end();
     if !terminal_punctuation_only(after_scope) {
-        return None;
+        return qualifier_gap();
     }
     let filter = if type_phrase.is_empty() {
         None
     } else {
-        let filter = super::search::parse_search_filter(type_phrase, ctx);
-        if matches!(filter, TargetFilter::Any) {
-            return None;
+        // The whole phrase must be a type phrase: anything else ("2/2") is a
+        // qualifier the filter reader would silently drop.
+        if (super::super::oracle_nom::target::parse_type_phrase, eof)
+            .parse(type_phrase)
+            .is_err()
+        {
+            return qualifier_gap();
         }
-        Some(filter)
+        Some(super::search::parse_search_filter(type_phrase, ctx))
     };
 
     let choose = Effect::ChooseFromZone {
