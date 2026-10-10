@@ -870,8 +870,8 @@ fn quantity_reads_only_memo_safe_state(q: &QuantityExpr) -> bool {
     }
 }
 
-/// SAFE-allowlist classifier (default POISON) over all 83 `FilterProp`
-/// variants — NO wildcard, so a new prop forces a classification decision
+/// SAFE-allowlist classifier (default POISON) over every `FilterProp`
+/// variant — NO wildcard, so a new prop forces a classification decision
 /// (E0004). SAFE = reads only the candidate object's own fingerprint fields or
 /// apply()-constant state. POISON = reads another object by id, an
 /// object-id-keyed side-table, board-global continuous-effect resolution with
@@ -975,6 +975,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasSingleTarget
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 722.3d: the prepare-spell marker (`prepared_copy_source`) is not part
+        // of the candidate fingerprint, so two objects differing only by it would
+        // share a memo key; memoizing it is unsound.
+        | FilterProp::PrepareSpell
         // CR 715.2: Adventure identity reads the stored alternate face, which
         // is not part of the candidate fingerprint; memoizing it is unsound.
         | FilterProp::HasAdventure
@@ -2613,6 +2617,9 @@ mod tests {
             &FilterProp::AttackedThisTurn { defender: None }
         ));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::WasKicked));
+        assert!(!filterprop_reads_only_candidate_fp(
+            &FilterProp::PrepareSpell
+        ));
         assert!(!filterprop_reads_only_candidate_fp(
             &FilterProp::HasXInActivationCost
         ));

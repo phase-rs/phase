@@ -2795,6 +2795,8 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // (The door-gated Room NAME is derived at layer-1 exit, in
     // `derive_room_battlefield_names`, from the post-copy effective form.)
     obj.copied_room_halves = None;
+    // CR 722.2b + CR 613.1a: likewise the copied prepare spell.
+    obj.copied_prepare_face = None;
     // CR 707.9b: restore the persistent base origin (materialized exception
     // names); a Layer-1 copy application overwrites it within the pass.
     obj.layer1_name_origin = obj.base_name_origin;
@@ -4335,6 +4337,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
+        | FilterProp::PrepareSpell
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -4653,7 +4656,9 @@ fn flush_layers_with_retirement_owner(
                 flush_lapsed_durations(state, retirement_owner);
                 return;
             }
-            if let Some(prepared) = prepare_incremental_flush(state, &ids) {
+            if let Some(prepared) =
+                prepare_incremental_flush(state, &ids, StaticGateTruth::Evaluate)
+            {
                 super::perf_counters::record_layers_incremental();
                 apply_layers_incremental(state, prepared, retirement_owner);
                 // Rebuild the presence index so the incremental arm leaves a PRECISE index
@@ -4744,9 +4749,39 @@ fn reset_recipient_to_base(obj: &mut crate::game::game_object::GameObject) {
     derive_suspected_abilities(obj);
 }
 
+/// How the incremental flush's truth-delta stage answers for a
+/// population-conditioned static that an entrant perturbs (CR 611.3a).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaticGateTruth {
+    /// The flush asks whether THIS entry flipped the gate: it re-evaluates the
+    /// condition and compares it with the truth cached at the last full pass.
+    Evaluate,
+    /// Bulk admission asks whether ANY of a run of identical entries could flip
+    /// it, so a perturbed gate counts as flipped whatever its current value.
+    AssumeChanged,
+}
+
+/// CR 611.3a + CR 613.1: whether entering `entered_ids` could change a layered
+/// value of any object other than the entrants themselves, for a run of
+/// identical entries rather than for this one entry. It is the incremental
+/// flush's own escalation verdict (`prepare_incremental_flush`) with the
+/// truth-delta stage set to [`StaticGateTruth::AssumeChanged`]: a
+/// population-conditioned static the entrant perturbs is treated as flipped,
+/// because a later identical entry can flip a gate this one only moved toward.
+/// Read-only: the verdict is computed on a scratch clone, since the prepare
+/// step resets recipients to base.
+pub(crate) fn entry_perturbs_layer_reads(
+    state: &GameState,
+    entered_ids: &BTreeSet<ObjectId>,
+) -> bool {
+    let mut scratch = state.clone();
+    prepare_incremental_flush(&mut scratch, entered_ids, StaticGateTruth::AssumeChanged).is_none()
+}
+
 fn prepare_incremental_flush(
     state: &mut GameState,
     entered_ids: &BTreeSet<ObjectId>,
+    truth: StaticGateTruth,
 ) -> Option<PreparedIncrementalFlush> {
     for &id in entered_ids {
         let obj = state.objects.get(&id)?;
@@ -4781,7 +4816,7 @@ fn prepare_incremental_flush(
             entered_ids,
             &active_effects,
         )
-        || any_active_static_condition_perturbed_by_entry(state, entered_ids)
+        || any_active_static_condition_perturbed_by_entry(state, entered_ids, truth)
         // CR 613.1 + CR 613.1b: the incremental arm re-derives only BATTLEFIELD recipients
         // (`incremental_recipient_ids`), so a continuous effect naming a STACK object as a
         // recipient would leave that object's controller at whatever the last full pass wrote
@@ -4899,7 +4934,7 @@ pub(crate) fn incremental_flush_must_escalate(
     entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     let mut scratch = state.clone();
-    prepare_incremental_flush(&mut scratch, entered_ids).is_none()
+    prepare_incremental_flush(&mut scratch, entered_ids, StaticGateTruth::Evaluate).is_none()
 }
 
 /// The two population-read channels of a single effect, computed once:
@@ -5568,6 +5603,7 @@ fn active_effects_force_incremental_escalation(
 fn any_active_static_condition_perturbed_by_entry(
     state: &GameState,
     entered_ids: &BTreeSet<ObjectId>,
+    truth: StaticGateTruth,
 ) -> bool {
     let mut found = false;
     for_each_static_effect_source(state, |state, obj| {
@@ -5616,6 +5652,9 @@ fn any_active_static_condition_perturbed_by_entry(
                     Some(&b) => b,
                     None => return true,
                 };
+                if truth == StaticGateTruth::AssumeChanged {
+                    return true;
+                }
                 let after = source_condition_gate_passes(state, condition, obj.controller, obj.id);
                 before != after
             })
@@ -6431,11 +6470,6 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .into_iter()
         .filter(|effect| effect.layer == layer)
         .collect()
-}
-
-#[cfg(test)]
-pub(crate) fn has_active_copy_layer_effects(state: &GameState) -> bool {
-    !gather_active_effects_for_layer(state, Layer::Copy).is_empty()
 }
 
 /// CR 718.3b: A prototyped spell and the permanent it becomes have only their
@@ -25947,6 +25981,7 @@ mod tests {
             replacement_definitions: Default::default(),
             static_definitions: Default::default(),
             room_halves: None,
+            prepare_face: None,
             name_origin: Default::default(),
         };
         let _ = state
@@ -28817,6 +28852,7 @@ mod tests {
                     replacement_definitions: Arc::new(Vec::new()),
                     static_definitions: Arc::new(Vec::new()),
                     room_halves: None,
+                    prepare_face: None,
                     name_origin: Default::default(),
                 }),
                 display_source: Default::default(),

@@ -34,7 +34,7 @@ pub fn resolve(
         _ => (None, None, [].as_slice(), [].as_slice(), [].as_slice()),
     };
 
-    let targets = resolve_animate_targets(ability);
+    let targets = resolve_animate_targets(state, ability);
 
     let duration = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
@@ -148,10 +148,15 @@ fn set_pt_modification(
     }
 }
 
-fn resolve_animate_targets(ability: &ResolvedAbility) -> Vec<crate::types::identifiers::ObjectId> {
+fn resolve_animate_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<crate::types::identifiers::ObjectId> {
     if let Effect::Animate { target, .. } = &ability.effect {
+        // CR 400.7: "this land becomes …" binds the source only while it is
+        // still the object that activated the ability.
         if matches!(target, TargetFilter::None) {
-            return vec![ability.source_id];
+            return ability.self_ref_binding(state).into_iter().collect();
         }
     }
     ability

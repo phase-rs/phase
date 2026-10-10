@@ -487,7 +487,7 @@ fn register_transient_effect(
         let source_is_current = if ability.trigger_source.is_some() {
             ability.self_ref_is_current(state)
         } else {
-            ability.source_is_current(state)
+            ability.self_ref_binding(state).is_some()
         };
         if !source_is_current {
             // CR 113.7a: only this definition loses its source recipient; the

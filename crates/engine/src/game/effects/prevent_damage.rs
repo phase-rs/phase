@@ -735,6 +735,19 @@ pub fn resolve(
         // CR 115.6: "up to" a number of targets with zero chosen leaves nothing to
         // affect, so no shield is installed (an untargeted shield here would
         // prevent damage to every matching object).
+    } else if ability.self_ref_binding(state).is_none()
+        && [
+            shield.valid_card.as_ref(),
+            shield.damage_source_filter.as_ref(),
+        ]
+        .into_iter()
+        .any(|filter| matches!(filter, Some(TargetFilter::SelfRef)))
+    {
+        // CR 400.7 + CR 615: the shield names "~" — as the damaged object (Gideon
+        // Jura) or the damage source (Mercenaries) — and the source left and
+        // returned before resolution. The returned permanent is a new object;
+        // latching it as the host below would protect it with an ability of the
+        // departed one. The shield has no referent and is not installed.
     } else {
         // CR 113.7a + CR 611.2a + CR 615.3: Untargeted (SOURCE-scoped) prevention.
         // This branch used to fork on storage -- object-hosted when

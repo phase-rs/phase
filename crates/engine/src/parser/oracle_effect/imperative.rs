@@ -13315,11 +13315,12 @@ pub(super) fn parse_imperative_family_ast(
                 parse_where_x_quantity_expression(&expr)
                     .unwrap_or(QuantityExpr::Fixed { value: 0 })
             } else {
-                let count = nom_primitives::parse_number_or_x
+                // CR 107.3a + CR 701.63a: Endure X uses the activation's
+                // announced amount; literals remain fixed quantities.
+                nom_quantity::parse_quantity_expr_number
                     .parse(rest.trim())
-                    .map(|(_, n)| n as i32)
-                    .unwrap_or(1);
-                QuantityExpr::Fixed { value: count }
+                    .map(|(_, amount)| amount)
+                    .unwrap_or(QuantityExpr::Fixed { value: 1 })
             };
             // CR 608.2k: subject-shifted "it endures" in a trigger names the
             // event object (the entering creature), not the ability source.

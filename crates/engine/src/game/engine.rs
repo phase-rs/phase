@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityCondition, DurationEvent, EffectKind, KeywordAction, TargetRef,
+    AbilityCondition, DurationEvent, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -18,10 +18,10 @@ use crate::types::game_state::{
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
     PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
-    PriorityPassingMode, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
+    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+    StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -1068,9 +1068,10 @@ pub fn apply_interaction_with_rejection(
 /// session; ordinary `PassPriority` remains an ordinary player pass.
 ///
 /// The retained session is intentionally stack-local: it fences the stack as
-/// it exists now and may reuse only the verified representative's own pass at
-/// later priority windows. It never infers a pass for an unverified
-/// representative and never authorizes a new stack entry.
+/// it exists now and may reuse the verified representative's own pass at later
+/// priority windows. A representative without a verified pass is passed only on
+/// its standing pass over the window's top (`priority::standing_priority_pass`);
+/// the session never authorizes a new stack entry.
 /// The priority player for whom `action` is a verified AI stack-continuation
 /// pass, or `None` when it is not one.
 ///
@@ -1168,7 +1169,8 @@ pub fn apply_verified_ai_priority_pass(
             .insert(representative)
     } else {
         // The shared session is installed before the ordinary action boundary
-        // so its explicit-pass seam can enforce the one-entry limit. A rejected
+        // so its explicit-pass seam applies the session's skipped-window authority
+        // (`stack_resolution_session_authorized_limit`). A rejected
         // action boundary intentionally preserves its ownerless-replacement
         // repair, so roll back only the newly installed private overlay rather
         // than restoring the entire pre-boundary game state.
@@ -8984,11 +8986,8 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
     // including one another player installed, which is what reaches this loop
     // without ever consulting the frontend. Checked BEFORE the no-session `Exit`
     // arm because `Exit` itself falls through to a pass when someone else holds
-    // a live `UntilStackEmpty` session. Preference ownership follows the
-    // authorized submitter, as it does in `auto_pass_recommended`.
-    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
-        == PriorityPassingMode::FullControl
-    {
+    // a live `UntilStackEmpty` session.
+    if priority::holds_full_control(state, player) {
         // `Finish` also drops a stale session this player owns; both variants
         // break the loop, so either way the window is theirs.
         return if state.auto_pass.contains_key(&player) {
@@ -9014,9 +9013,12 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // CR 117.3d: An opponent-controlled top-of-stack normally ends the
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
-            // the session keeps auto-passing through it.
+            // the session keeps auto-passing through it. The standing rungs are
+            // `priority::standing_priority_pass`'s; Full Control already returned
+            // above, so `Withheld` cannot reach this arm.
             let opponent_on_stack = state.stack.last().is_some_and(|top| {
-                top.controller != player && !state.is_priority_yielded(player, top)
+                priority::standing_priority_pass(state, player, Some(top))
+                    == priority::StandingPriorityPass::Undecided
             });
             if opponent_on_stack {
                 AutoPassDecision::Break
@@ -9422,9 +9424,10 @@ pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> A
 
 #[derive(Clone, Copy)]
 enum StackResolutionSessionPassKind {
-    /// The session runner is considering an implicit pass. A rechecking AI
-    /// session may reuse only a representative who already supplied a verified
-    /// pass within this fenced stack cohort.
+    /// The session runner is considering an implicit pass. A rechecking session
+    /// passes a representative only with its verified pass within this fenced
+    /// cohort or its standing pass over the window's top
+    /// (`priority::standing_priority_pass`).
     Automatic,
     /// A player explicitly submitted `PassPriority`. That choice is itself the
     /// fresh decision, so it may consume the session's next authorized entry.
@@ -9434,7 +9437,8 @@ enum StackResolutionSessionPassKind {
 enum StackResolutionSessionPriorityDecision {
     NotActive,
     Pause,
-    /// A rechecking AI session is waiting on an unverified representative.
+    /// A rechecking session is waiting on a representative with neither a
+    /// verified nor a standing pass for this window.
     /// Keep it intact so that representative's explicit decision can continue
     /// its fenced cohort.
     PauseRetained,
@@ -9456,95 +9460,41 @@ fn stack_resolution_session_priority_decision(
         // CR 117.1: a Full Control holder is never auto-passed by a session —
         // theirs or anyone else's. Scoped to `Automatic`: an EXPLICIT
         // PassPriority is that player's own deliberate decision and still drives
-        // the session. This is the only gate covering a session REPRESENTATIVE,
-        // whose windows are otherwise passed without even the meaningful-action
-        // check below. (The no-session case is handled one layer out, by
-        // `priority_auto_pass_decision`.)
+        // the session. This gate covers the live window;
+        // `stack_resolution_session_participant_authorizes_pass` gives the same
+        // answer for every window a multi-entry boundary skips. (The no-session
+        // case is handled one layer out, by `priority_auto_pass_decision`.)
         if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
-            && state
-                .priority_passing_mode(turn_control::authorized_submitter_for_player(state, holder))
-                == PriorityPassingMode::FullControl
+            && priority::holds_full_control(state, holder)
         {
             return StackResolutionSessionPriorityDecision::Pause;
         }
 
-        let current_representatives = super::topology::canonical_priority_representatives(
-            state,
-            session.representatives.iter().copied(),
-        );
-        let live_representatives = super::topology::priority_pass_participants(state)
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        if current_representatives != session.representatives
-            || !session
-                .representatives
-                .iter()
-                .all(|representative| live_representatives.contains(representative))
-            || session.cursor == session.entries.len()
-            || state.stack.is_empty()
-        {
-            None
-        } else {
-            let remaining_budget = match session.budget.max_resolutions() {
-                Some(maximum) => {
-                    maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX))
-                }
-                None => u32::MAX,
-            };
-            let top_matches = session
-                .entries
-                .get(session.cursor)
-                .is_some_and(|top_fence| {
-                    state
-                        .stack
-                        .back()
-                        .is_some_and(|entry| top_fence.matches_captured_entry(entry))
-                });
-            if remaining_budget == 0 || !top_matches {
-                None
-            } else {
-                let rechecks =
-                    session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
-                let holder_is_representative = session.representatives.contains(&canonical_holder);
-                if matches!(pass_kind, StackResolutionSessionPassKind::Automatic) {
-                    if rechecks {
-                        return if holder_is_representative
-                            && session
-                                .verified_pass_representatives
-                                .contains(&canonical_holder)
-                        {
-                            StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
-                        } else {
-                            StackResolutionSessionPriorityDecision::PauseRetained
-                        };
+        let limit = stack_resolution_session_authorized_limit(state);
+        if limit.is_some() && matches!(pass_kind, StackResolutionSessionPassKind::Automatic) {
+            match session.policy {
+                StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+                    if !state.stack.back().is_some_and(|window_top| {
+                        stack_resolution_session_participant_authorizes_pass(
+                            state,
+                            session,
+                            canonical_holder,
+                            window_top,
+                        )
+                    }) {
+                        return StackResolutionSessionPriorityDecision::PauseRetained;
                     }
-                    if !holder_is_representative && priority_player_has_meaningful_action(state) {
+                }
+                StackResolutionPolicy::Committed => {
+                    if !session.representatives.contains(&canonical_holder)
+                        && priority_player_has_meaningful_action(state)
+                    {
                         return StackResolutionSessionPriorityDecision::Pause;
                     }
                 }
-                let matching_prefix = state
-                    .stack
-                    .iter()
-                    .rev()
-                    .zip(session.entries.iter().skip(session.cursor))
-                    .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
-                    .count();
-                let limit = matching_prefix
-                    .min(remaining_budget as usize)
-                    .min(u32::MAX as usize) as u32;
-                // A verified representative may reuse its own pass only
-                // inside this exact fenced session. Each all-pass boundary
-                // still resolves one entry so a changed stack topology tears
-                // the session down before a pass can escape its cohort.
-                let limit =
-                    if session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction {
-                        limit.min(1)
-                    } else {
-                        limit
-                    };
-                (limit != 0).then_some(limit)
             }
         }
+        limit
     };
 
     match decision {
@@ -9554,6 +9504,111 @@ fn stack_resolution_session_priority_decision(
             StackResolutionSessionPriorityDecision::Pause
         }
     }
+}
+
+/// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
+/// authorized this stack-resolution session to pass its priority window over
+/// `window_top` inside the fenced cohort without a fresh decision. The single
+/// per-participant authority for both the live window
+/// (`stack_resolution_session_priority_decision`) and every window a
+/// multi-entry boundary skips (`stack_resolution_session_authorized_limit`).
+fn stack_resolution_session_participant_authorizes_pass(
+    state: &GameState,
+    session: &StackResolutionSession,
+    participant: PlayerId,
+    window_top: &StackEntry,
+) -> bool {
+    let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
+    {
+        // CR 117.1: Full Control is a standing refusal to give up any window —
+        // the session's own representative's included.
+        priority::StandingPriorityPass::Withheld => return false,
+        priority::StandingPriorityPass::Granted => true,
+        priority::StandingPriorityPass::Undecided => false,
+    };
+    match session.policy {
+        // A verified AI pass authorizes later windows in this exact fenced
+        // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
+        // this window's top authorizes this window.
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+            session.representatives.contains(&participant)
+                && (standing_pass || session.verified_pass_representatives.contains(&participant))
+        }
+        // A representative consented to the session. A non-representative's
+        // skipped windows are not rechecked for a meaningful action (only its
+        // live window is, in `stack_resolution_session_priority_decision`);
+        // Full Control was enforced above.
+        StackResolutionPolicy::Committed => true,
+    }
+}
+
+/// CR 117.3b + CR 117.4 + CR 608.1: how many fenced stack entries one all-pass
+/// boundary may consume. Consuming K > 1 entries skips every participant's
+/// priority window after each of the first K − 1 resolutions, so each extra
+/// entry needs every participant's authorization of the window over it
+/// (CR 117.3d + CR 732.2b); the boundary stops before the first window someone
+/// has not authorized. `None` when the session no longer authorizes the current
+/// top: changed or departed representatives, an exhausted cursor or budget, an
+/// empty stack, or a top entry outside the fence.
+pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Option<u32> {
+    let session = state.stack_resolution_session.as_ref()?;
+    let participants = super::topology::priority_pass_participants(state);
+    let current_representatives = super::topology::canonical_priority_representatives(
+        state,
+        session.representatives.iter().copied(),
+    );
+    if current_representatives != session.representatives
+        || !session
+            .representatives
+            .iter()
+            .all(|representative| participants.contains(representative))
+        || session.cursor == session.entries.len()
+        || state.stack.is_empty()
+    {
+        return None;
+    }
+    let remaining_budget = session
+        .budget
+        .max_resolutions()
+        .map_or(u32::MAX, |maximum| {
+            maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX))
+        });
+    if remaining_budget == 0 {
+        return None;
+    }
+    // CR 405.5 + CR 608.1: the boundary resolves from the top down, so the
+    // authorized run is the prefix of the stack (top first) still matching the
+    // session's captured entries from the cursor on. K never exceeds that
+    // fenced prefix, and the stack resolver's batch proof refuses any member
+    // whose checkpoint adds a stack entry; the next window's fence check then
+    // tears the session down, so a multi-entry boundary cannot leave its cohort.
+    let mut fenced_prefix = state
+        .stack
+        .iter()
+        .rev()
+        .zip(session.entries.iter().skip(session.cursor))
+        .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
+        .map(|(entry, _)| entry);
+    // `None` when the top entry is outside the fence.
+    fenced_prefix.next()?;
+    // CR 117.3b + CR 117.4: resolving K entries skips every participant's
+    // window over each of the next K − 1 entries, each with its own top; the
+    // boundary ends before the first window a participant has not authorized
+    // (CR 732.2b), so K = 1 + the authorized prefix of those windows.
+    let authorized_skipped_windows = fenced_prefix
+        .take_while(|window_top| {
+            participants.iter().all(|&participant| {
+                stack_resolution_session_participant_authorizes_pass(
+                    state,
+                    session,
+                    participant,
+                    window_top,
+                )
+            })
+        })
+        .count();
+    let limit = u32::try_from(1 + authorized_skipped_windows).unwrap_or(u32::MAX);
+    Some(limit.min(remaining_budget))
 }
 
 fn advance_stack_resolution_session_after_priority_pass(
@@ -11327,6 +11382,18 @@ fn apply_non_priority_pass_action(
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
+            }
+            // CR 722.3c + CR 601.2i: the linked prepare-spell copy is cast only
+            // through `CastPreparedCopy`, which unprepares its permanent as the
+            // spell becomes cast; a generic cast of it would skip that.
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(effects::prepare::is_linked_prepared_copy)
+            {
+                return Err(EngineError::InvalidAction(
+                    "A prepared copy is cast only through its prepared permanent".to_string(),
+                ));
             }
             casting::handle_cast_spell_with_payment_mode(
                 state,
@@ -14505,6 +14572,14 @@ fn apply_non_priority_pass_action(
                     "Card has no back face".to_string(),
                 ));
             }
+            // CR 701.27c + CR 701.27d: reject what the preflight never offers —
+            // the shared `can_transform` authority — rather than accepting an
+            // action whose transform would do nothing.
+            if !super::transform::can_transform(state, object_id) {
+                return Err(EngineError::InvalidAction(
+                    "This permanent can't transform".to_string(),
+                ));
+            }
             super::transform::transform_permanent(state, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -15599,8 +15674,8 @@ fn apply_non_priority_pass_action(
                 // while being put on the stack. The chosen per-target amounts
                 // are resolution data on the resolved ability. The entry is
                 // already on the stack (pushed at distribute-among pause time);
-                // mutate its ability with the distribution and clear
-                // `pending_trigger_entry` so the resolver may now fire it.
+                // mutate its ability with the distribution and release the
+                // construction cursors so the resolver may now fire it.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
                 let produced = if !triggers::finalize_pending_trigger_entry(
@@ -16455,17 +16530,16 @@ fn apply_retarget(
 /// drop that clears the trigger but leaks the batch therefore leaves a dead
 /// event latched in state, where it (a) poisons the event context of every
 /// later trigger that pauses for a choice, and (b) permanently fails the
-/// `inert_trigger_batch_state_is_settled` gate that lets contiguous inert
-/// trigger runs skip priority. Mirrors `triggers::abandon_ceased_pending_trigger`,
-/// which already releases all four cursors on the error-recovery path.
+/// `stack::priority_checkpoint_is_settled` gate that lets contiguous inert
+/// trigger runs skip priority. Releases every cursor through
+/// `triggers::release_pending_trigger_construction`, the same authority
+/// `triggers::abandon_ceased_pending_trigger` uses on the error-recovery path.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
     super::stack::pop_uncommitted_pending_trigger_entry(
         state,
         super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
     );
-    state.pending_trigger = None;
-    state.pending_trigger_firing = None;
-    state.pending_trigger_event_batch.clear();
+    super::triggers::release_pending_trigger_construction(state);
 }
 
 /// Clear optionality after the controller accepts a "you may choose N" gate so
@@ -18761,159 +18835,159 @@ pub(crate) fn duration_event_matches(
     }
 }
 
+/// The CR 610.3 "until" events a held triggered ability can latch.
+const LATCHABLE_DURATION_EVENTS: [DurationEvent; 2] = [
+    DurationEvent::SourceLeftBattlefield,
+    DurationEvent::OpponentBecameMonarch,
+];
+
+/// CR 610.3b: the specified "until" events in `events` that occurred after a
+/// held triggered ability triggered, in event order. The holder's
+/// `trigger_event` is located once: when it is in `events`, only later events
+/// count; when it is absent (it occurred in an earlier action) or the holder
+/// has none, every event counts. A holder whose ability bounds no zone change
+/// is never searched.
+fn duration_events_after_trigger(
+    state: &GameState,
+    events: &[GameEvent],
+    ability: &ResolvedAbility,
+    source_id: ObjectId,
+    controller: PlayerId,
+    trigger_event: Option<&GameEvent>,
+) -> Vec<DurationEvent> {
+    let bounded: Vec<DurationEvent> = LATCHABLE_DURATION_EVENTS
+        .into_iter()
+        .filter(|duration_event| ability.contains_duration_event(*duration_event))
+        .collect();
+    if bounded.is_empty() {
+        return Vec::new();
+    }
+    let first_following = trigger_event.map_or(0, |trigger| {
+        #[cfg(feature = "test-support")]
+        super::perf_counters::record_exile_return_trigger_origin_lookup();
+        events
+            .iter()
+            .position(|candidate| candidate == trigger)
+            .map_or(0, |index| index + 1)
+    });
+    let source_incarnation = ability
+        .trigger_source
+        .as_ref()
+        .map(|source| source.identity.reference);
+    events[first_following..]
+        .iter()
+        .flat_map(|event| {
+            bounded.iter().copied().filter(move |duration_event| {
+                duration_event_matches(
+                    state,
+                    source_id,
+                    source_incarnation,
+                    controller,
+                    *duration_event,
+                    event,
+                )
+            })
+        })
+        .collect()
+}
+
+/// CR 610.3 + CR 610.3b: latch specified "until" events onto held triggered
+/// abilities, then return linked exiled cards whose duration ended. Each
+/// duration-bearing holder's trigger event is located once per pass.
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
-    let mut stack_latches = Vec::new();
-    let mut resolving_latches = Vec::new();
-    let mut deferred_latches = Vec::new();
-    let mut ordered_latches = Vec::new();
+    let holders: &GameState = state;
+    let scanned: &[GameEvent] = events;
 
-    for (event_index, event) in events.iter().enumerate() {
-        for entry in &state.stack {
-            let StackEntryKind::TriggeredAbility {
+    let stack_latches: Vec<(ObjectId, DurationEvent)> = holders
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
                 ability,
                 trigger_event,
                 ..
-            } = &entry.kind
-            else {
-                continue;
-            };
-            let event_follows_trigger = trigger_event
-                .as_ref()
-                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
-                .is_none_or(|trigger_index| event_index > trigger_index);
-            if !event_follows_trigger {
-                continue;
-            }
-            for duration_event in [
-                DurationEvent::SourceLeftBattlefield,
-                DurationEvent::OpponentBecameMonarch,
-            ] {
-                if ability.contains_duration_event(duration_event)
-                    && duration_event_matches(
-                        state,
-                        entry.source_id,
-                        ability
-                            .trigger_source
-                            .as_ref()
-                            .map(|source| source.identity.reference),
-                        entry.controller,
-                        duration_event,
-                        event,
+            } => Some((entry, ability, trigger_event)),
+            _ => None,
+        })
+        .flat_map(|(entry, ability, trigger_event)| {
+            duration_events_after_trigger(
+                holders,
+                scanned,
+                ability,
+                entry.source_id,
+                entry.controller,
+                trigger_event.as_ref(),
+            )
+            .into_iter()
+            .map(move |duration_event| (entry.id, duration_event))
+        })
+        .collect();
+
+    // CR 610.3b: a resolving entry's trigger event is never in this pass's
+    // buffer (it triggered in an earlier priority pass), so the resolving holder
+    // scans the whole buffer, as its resolver does (`until_event_already_occurred`).
+    let resolving_latches: Vec<DurationEvent> = holders
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .and_then(|entry| {
+            entry.ability().map(|ability| {
+                duration_events_after_trigger(
+                    holders,
+                    scanned,
+                    ability,
+                    entry.source_id,
+                    entry.controller,
+                    None,
+                )
+            })
+        })
+        .unwrap_or_default();
+
+    let deferred_latches: Vec<(usize, DurationEvent)> = holders
+        .deferred_triggers
+        .iter()
+        .enumerate()
+        .flat_map(|(index, context)| {
+            let pending = &context.pending;
+            duration_events_after_trigger(
+                holders,
+                scanned,
+                &pending.ability,
+                pending.source_id,
+                pending.controller,
+                pending.trigger_event.as_ref(),
+            )
+            .into_iter()
+            .map(move |duration_event| (index, duration_event))
+        })
+        .collect();
+
+    let ordered_latches: Vec<(usize, usize, DurationEvent)> = holders
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter().enumerate())
+        .flat_map(|(group_index, group)| {
+            group
+                .triggers
+                .iter()
+                .enumerate()
+                .flat_map(move |(trigger_index, context)| {
+                    let pending = &context.pending;
+                    duration_events_after_trigger(
+                        holders,
+                        scanned,
+                        &pending.ability,
+                        pending.source_id,
+                        pending.controller,
+                        pending.trigger_event.as_ref(),
                     )
-                {
-                    stack_latches.push((entry.id, duration_event));
-                }
-            }
-        }
-
-        if let Some(entry) = state.resolving_stack_entry.as_ref() {
-            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
-                if let Some(ability) = entry.ability() {
-                    for duration_event in [
-                        DurationEvent::SourceLeftBattlefield,
-                        DurationEvent::OpponentBecameMonarch,
-                    ] {
-                        if ability.contains_duration_event(duration_event)
-                            && duration_event_matches(
-                                state,
-                                entry.source_id,
-                                ability
-                                    .trigger_source
-                                    .as_ref()
-                                    .map(|source| source.identity.reference),
-                                entry.controller,
-                                duration_event,
-                                event,
-                            )
-                        {
-                            resolving_latches.push(duration_event);
-                        }
-                    }
-                }
-            }
-        }
-
-        for (index, context) in state.deferred_triggers.iter().enumerate() {
-            let event_follows_trigger = context
-                .pending
-                .trigger_event
-                .as_ref()
-                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
-                .is_none_or(|trigger_index| event_index > trigger_index);
-            if !event_follows_trigger {
-                continue;
-            }
-            for duration_event in [
-                DurationEvent::SourceLeftBattlefield,
-                DurationEvent::OpponentBecameMonarch,
-            ] {
-                if context
-                    .pending
-                    .ability
-                    .contains_duration_event(duration_event)
-                    && duration_event_matches(
-                        state,
-                        context.pending.source_id,
-                        context
-                            .pending
-                            .ability
-                            .trigger_source
-                            .as_ref()
-                            .map(|source| source.identity.reference),
-                        context.pending.controller,
-                        duration_event,
-                        event,
-                    )
-                {
-                    deferred_latches.push((index, duration_event));
-                }
-            }
-        }
-
-        if let Some(order) = state.pending_trigger_order.as_ref() {
-            for (group_index, group) in order.groups.iter().enumerate() {
-                for (trigger_index, context) in group.triggers.iter().enumerate() {
-                    let event_follows_trigger = context
-                        .pending
-                        .trigger_event
-                        .as_ref()
-                        .and_then(|trigger| {
-                            events.iter().position(|candidate| candidate == trigger)
-                        })
-                        .is_none_or(|origin_index| event_index > origin_index);
-                    if !event_follows_trigger {
-                        continue;
-                    }
-                    for duration_event in [
-                        DurationEvent::SourceLeftBattlefield,
-                        DurationEvent::OpponentBecameMonarch,
-                    ] {
-                        if context
-                            .pending
-                            .ability
-                            .contains_duration_event(duration_event)
-                            && duration_event_matches(
-                                state,
-                                context.pending.source_id,
-                                context
-                                    .pending
-                                    .ability
-                                    .trigger_source
-                                    .as_ref()
-                                    .map(|source| source.identity.reference),
-                                context.pending.controller,
-                                duration_event,
-                                event,
-                            )
-                        {
-                            ordered_latches.push((group_index, trigger_index, duration_event));
-                        }
-                    }
-                }
-            }
-        }
-    }
+                    .into_iter()
+                    .map(move |duration_event| (group_index, trigger_index, duration_event))
+                })
+        })
+        .collect();
 
     for (entry_id, duration_event) in stack_latches {
         if let Some(ability) = state

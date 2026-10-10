@@ -8,13 +8,10 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-#[cfg(test)]
-use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
     GameState, MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
-    WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -716,10 +713,10 @@ pub fn apply_resolved_stack_removal(
 /// when another path already removed it, and popping unconditionally would then
 /// discard an unrelated stack object.
 ///
-/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
-/// piece of construction state owned by
-/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
-/// clears it.
+/// Note this deliberately does NOT clear `pending_trigger`; the remaining
+/// construction cursors are released by
+/// `triggers::release_pending_trigger_construction`, which
+/// `engine::drop_mid_construction_pending_trigger` calls after this.
 pub(super) fn pop_uncommitted_pending_trigger_entry(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
@@ -1669,9 +1666,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     "stale pending trigger must transfer its firing to the live stack entry"
                 );
             }
-            state.pending_trigger_entry = None;
-            state.pending_trigger = None;
-            state.pending_trigger_event_batch.clear();
+            super::triggers::release_pending_trigger_construction(state);
         }
     }
 
@@ -3527,17 +3522,16 @@ fn resolve_keyword_action(
     }
 }
 
-// ── Session-authorized sequential batch proof ────────────────────────────
+// ── Session-authorized multi-entry resolution ────────────────────────────
 //
-// `resolve_next` normally resolves exactly one stack object. A committed
-// session may authorize a fenced prefix; it is proved by resolving each exact
-// member through `resolve_top` and the normal post-action pipeline on a clone.
-
-/// Sentinel object id used only to build Layer C probe events. `keys_from_event`
-/// reads only `record.core_types`/`to` (ETB keys) and the `TokenCreated` variant
-/// tag — never the `object_id` — so a sentinel is sound (§2.3 PROBE_ID note).
-#[cfg(test)]
-const PROBE_ID: ObjectId = ObjectId(u64::MAX);
+// `resolve_next` normally resolves exactly one stack object. A live
+// stack-resolution session may authorize a fenced prefix through
+// `engine::stack_resolution_session_authorized_limit`. Every member of an
+// authorized run resolves through `resolve_top` on a clone: the bulk token
+// executor (`resolve_bulk_token_run`) runs member 1's full post-action
+// checkpoint and elides the later ones its admission proves inert, and the
+// sequential proof (`resolve_proven_inert_trigger_batch`) runs the normal
+// post-action pipeline after every member.
 
 /// CR 608.2: Resolve the next stack object, collapsing a batch-safe run when
 /// one begins at the top. Returns the number of stack entries consumed
@@ -3552,10 +3546,12 @@ pub fn resolve_next_with_limit(
     max_consumed: Option<u32>,
 ) -> u32 {
     // A caller supplied cap is not itself permission to consume several stack
-    // entries.  The only multi-entry authority is a live committed session whose
-    // cursor still fences the actual top entry.  Keeping this check at the
-    // resolver boundary prevents a transport or future caller from turning a
-    // harmless `Some(n)` into an unauthorized shortcut.
+    // entries.  The only multi-entry authority is
+    // `engine::stack_resolution_session_authorized_limit`: a live session whose
+    // fence covers the top and whose every participant authorized the skipped
+    // windows.  Keeping this check at the resolver boundary prevents a
+    // transport or future caller from turning a harmless `Some(n)` into an
+    // unauthorized shortcut.
     let max_consumed = authorized_batch_limit(state, max_consumed);
     // CR 603.3c/d: never collapse while the top entry is mid-construction.
     let pending_top = state
@@ -3608,10 +3604,14 @@ pub fn resolve_next_with_limit(
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
                 crate::game::perf_counters::record_stack_batch_candidate();
-                // The batch proof executes the ordinary resolver and full
-                // post-resolution checkpoint once per captured entry on a clone.
-                // Token/copy handlers therefore remain single-entry authorities;
-                // no bulk token creation is permitted here.
+                // CR 117.4 + CR 608.2: bulk first, then the sequential proof,
+                // then a single entry. Both multi-entry paths consume at most the
+                // session-authorized `run_len` and resolve every member through
+                // `resolve_top`; bulk also elides the checkpoints between members
+                // that its admission proves inert.
+                if let Some(consumed) = resolve_bulk_token_run(state, events, run_len) {
+                    return consumed;
+                }
                 if let Some(consumed) =
                     resolve_proven_inert_trigger_batch(state, events, run_len, None)
                 {
@@ -3624,40 +3624,326 @@ pub fn resolve_next_with_limit(
     1
 }
 
+fn created_token_ids(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 111.1 + CR 614.1a: an event a bulk member's resolution may emit, without
+/// its object ids: a token's creation and battlefield entry, a replacement
+/// applied to that creation, and the completion of the token effect and of the
+/// stack object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenEntryEvent {
+    Created,
+    Entered,
+    ReplacementApplied,
+    Resolved(EffectKind),
+    StackResolved,
+}
+
+/// A member's resolution events as `TokenEntryEvent`s, in order. `None` when
+/// any event is something else (a later instruction's damage, life change or
+/// zone move), which no inert checkpoint of member 1 vetted.
+fn token_entry_events(events: &[GameEvent]) -> Option<Vec<TokenEntryEvent>> {
+    let created = created_token_ids(events);
+    events
+        .iter()
+        .map(|event| match event {
+            GameEvent::TokenCreated { .. } => Some(TokenEntryEvent::Created),
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } if created.contains(object_id) => Some(TokenEntryEvent::Entered),
+            GameEvent::ReplacementApplied { .. } => Some(TokenEntryEvent::ReplacementApplied),
+            GameEvent::EffectResolved {
+                kind: kind @ (EffectKind::Token | EffectKind::CopyTokenOf),
+                ..
+            } => Some(TokenEntryEvent::Resolved(*kind)),
+            GameEvent::StackResolved { .. } => Some(TokenEntryEvent::StackResolved),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a reader between two bulk members can see of a produced token: its
+/// event-object snapshot (every characteristic the trigger-subject grammar
+/// interrogates) plus its functioning trigger and static definitions.
+type TokenReaderView = (
+    crate::types::events::EventObjectSnapshot,
+    Vec<crate::types::ability::TriggerDefinition>,
+    Vec<crate::types::ability::StaticDefinition>,
+);
+
+fn token_reader_views(state: &GameState, tokens: &[ObjectId]) -> Vec<Option<TokenReaderView>> {
+    tokens
+        .iter()
+        .map(|&id| {
+            let obj = state.objects.get(&id)?;
+            Some((
+                state.capture_event_object_snapshot(id)?,
+                super::functioning_abilities::active_trigger_definitions(state, obj)
+                    .map(|active| active.definition.clone())
+                    .collect(),
+                super::functioning_abilities::active_static_definitions(state, obj)
+                    .cloned()
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
+/// CR 603.7 + CR 610.3 + CR 702.50a: the conservative run-start gates. With
+/// no delayed trigger, epic effect or exile link, the elided checkpoints'
+/// delayed-trigger check and exile-return pass have nothing to act on.
+fn bulk_checkpoint_carriers_are_empty(state: &GameState) -> bool {
+    state.delayed_triggers.is_empty()
+        && state.epic_effects.is_empty()
+        && state.exile_links.is_empty()
+}
+
+/// The outcome of resolving a captured bulk run on a clone.
+enum BulkMemberRun {
+    /// Every member resolved. `last_member_start` is the index in `events`
+    /// where the last member's events begin; that member's checkpoint is the
+    /// caller's ordinary post-action pass.
+    Complete {
+        state: Box<GameState>,
+        events: Vec<GameEvent>,
+        last_member_start: usize,
+    },
+    /// CR 603.3b: the production collector found a trigger on the events of
+    /// member `index` (zero-based). That trigger must go on the stack before
+    /// the next member resolves, so the run ends at that member.
+    StoppedAt { index: usize },
+}
+
+/// CR 117.4 + CR 117.5 + CR 608.2 + CR 704.3: Resolve the captured run on a
+/// clone. Member 1 resolves and takes the full post-action checkpoint, exactly
+/// as the sequential proof does; it must be inert, and the run's remaining
+/// checkpoints are elided only on what member 1's shows: every produced token
+/// is a fixed point of that checkpoint's layer pass and is neither legendary
+/// nor world once layered (CR 704.5j, CR 704.5k), the entry perturbs no
+/// other object's layered values (`layers::entry_perturbs_layer_reads`), and
+/// no state trigger (CR 603.8), delayed trigger (CR 603.7), epic effect or
+/// exile link exists. Member 1's checkpoint speaks for an elided one only if
+/// that member did what member 1 did: member 1 must create a token and emit
+/// nothing but its token entry (`token_entry_events`), and each of members
+/// 2..N must emit exactly member 1's token-entry events, or the whole run is
+/// refused. A `ForAsLongAs` duration the elided layer flushes would retire
+/// (CR 611.2b) is not re-checked between members; every member emits only its
+/// token entry, which no parsed duration condition reads. Members
+/// 2..N each resolve through `resolve_top` with their own captured entry (no
+/// representative replay), and members 2..N−1
+/// keep the production event-trigger collection (CR 603.2) over their own
+/// events; the last member's checkpoint is the caller's.
+fn resolve_bulk_members(
+    state: &GameState,
+    members: &[CapturedBatchMember],
+) -> Option<BulkMemberRun> {
+    let mut bulk = state.clone();
+    let mut bulk_events = Vec::new();
+    let default_wf = WaitingFor::Priority {
+        player: bulk.active_player,
+    };
+
+    // Member 1: exact resolution plus the full checkpoint.
+    let first = members.first()?;
+    if !top_matches_captured_member(&bulk, first) {
+        return None;
+    }
+    let stack_before = bulk.stack.len();
+    resolve_top(&mut bulk, &mut bulk_events);
+    if stack_before.saturating_sub(bulk.stack.len()) != 1
+        || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
+    {
+        return None;
+    }
+    let produced = created_token_ids(&bulk_events);
+    // CR 117.5 + CR 704.3: the elided checkpoints are vetted on member 1's
+    // alone, so member 1 must have created a token and done nothing else; each
+    // later member is held to these events below.
+    let run_events = token_entry_events(&bulk_events).filter(|_| !produced.is_empty())?;
+    let views_before = token_reader_views(&bulk, &produced);
+    let events_after_resolution = bulk_events.len();
+    let stack_after_resolution = bulk.stack.len();
+    let wf = super::engine_priority::run_post_action_pipeline_from(
+        &mut bulk,
+        &mut bulk_events,
+        0,
+        &default_wf,
+        false,
+        false,
+    )
+    .ok()?;
+    if !matches!(wf, WaitingFor::Priority { .. })
+        || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
+        || bulk_events.len() != events_after_resolution
+        || bulk.stack.len() != stack_after_resolution
+        || !priority_checkpoint_is_settled(&bulk)
+    {
+        return None;
+    }
+    // CR 613.1: the layer pass of member 1's checkpoint is what every elided
+    // checkpoint would have applied to its member's token; a reader between
+    // members sees the token unflushed, so the pass must not change it.
+    if token_reader_views(&bulk, &produced) != views_before {
+        return None;
+    }
+    // CR 613.1d + CR 704.5j + CR 704.5k: a continuous effect can make the
+    // token legendary or world in layer 4 though its printed spec is neither.
+    // Member 1's token alone trips neither rule, but member 2's identical
+    // token would at member 2's checkpoint. With the fixed point above and
+    // `entry_perturbs_layer_reads` below, every later member's token gets the
+    // layered supertypes member 1's has.
+    if produced.iter().any(|id| {
+        bulk.objects.get(id).is_some_and(|obj| {
+            effects::token::has_pairwise_sba_supertype(&obj.card_types.supertypes)
+        })
+    }) {
+        return None;
+    }
+    let entrants: std::collections::BTreeSet<ObjectId> = produced.iter().copied().collect();
+    if super::layers::entry_perturbs_layer_reads(&bulk, &entrants) {
+        return None;
+    }
+    if super::triggers::has_active_state_triggers(&bulk) {
+        return None;
+    }
+    if !bulk_checkpoint_carriers_are_empty(&bulk) {
+        return None;
+    }
+
+    let collection = super::triggers::BulkMemberTriggerCollection::prepare(&bulk);
+    let mut last_member_start = 0;
+    for (index, member) in members.iter().enumerate().skip(1) {
+        if !top_matches_captured_member(&bulk, member) {
+            return None;
+        }
+        let member_start = bulk_events.len();
+        let stack_before = bulk.stack.len();
+        resolve_top(&mut bulk, &mut bulk_events);
+        // CR 117.5 + CR 704.3: this member's elided checkpoint is member 1's
+        // only if the member created member 1's tokens through the same events
+        // and did nothing else.
+        if stack_before.saturating_sub(bulk.stack.len()) != 1
+            || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
+            || !priority_checkpoint_is_settled(&bulk)
+            || token_entry_events(&bulk_events[member_start..]).as_ref() != Some(&run_events)
+        {
+            return None;
+        }
+        // The elided layer pass would have indexed the new token's triggers.
+        for id in created_token_ids(&bulk_events[member_start..]) {
+            super::trigger_index::reindex_object_triggers(&mut bulk, id);
+        }
+        last_member_start = member_start;
+        if index + 1 < members.len() {
+            let member_events = bulk_events[member_start..].to_vec();
+            if !collection.collect(&mut bulk, &member_events).is_empty() {
+                return Some(BulkMemberRun::StoppedAt { index });
+            }
+        }
+    }
+    Some(BulkMemberRun::Complete {
+        state: Box::new(bulk),
+        events: bulk_events,
+        last_member_start,
+    })
+}
+
+/// The abilities of the top `run_len` entries, top-down. A member whose effect
+/// copies "this creature" copies its own source (CR 707.2), so the bulk
+/// admission reads each member. `None` when an entry carries no ability.
+fn run_member_abilities(state: &GameState, run_len: u32) -> Option<Vec<&ResolvedAbility>> {
+    state
+        .stack
+        .iter()
+        .rev()
+        .take(run_len as usize)
+        .map(StackEntry::ability)
+        .collect()
+}
+
+/// CR 117.4 + CR 608.2: the bulk token executor. Resolves the top `run_len`
+/// entries (already clamped to the session-authorized limit) when Layer B
+/// admits the run (`effects::admits_bulk_token_run`) and its member-1
+/// checkpoint proves the elided checkpoints inert (`resolve_bulk_members`).
+/// When the production collector finds a trigger on member k's events, the
+/// run ends at member k (CR 603.3b): the clone, whose collection ledgers that
+/// collection already wrote, is discarded and members 1..k are resolved again,
+/// so member k's checkpoint is the caller's ordinary pass. Any refusal returns
+/// `None` and the caller falls back to the sequential proof.
+fn resolve_bulk_token_run(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+) -> Option<u32> {
+    if !priority_checkpoint_is_settled(state) {
+        return None;
+    }
+    // Activation-local trigger collection lives in `state.pending_cast` or in a
+    // cast prompt's `WaitingFor`; with no pending cast at the run start and
+    // `WaitingFor::Priority` after every member, the elided checkpoints'
+    // activation staging has nothing to stage.
+    if state.pending_cast.is_some() || !bulk_checkpoint_carriers_are_empty(state) {
+        return None;
+    }
+    let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack.back()?.kind else {
+        return None;
+    };
+    let run_members = run_member_abilities(state, run_len)?;
+    if !effects::admits_bulk_token_run(state, ability, &run_members) {
+        return None;
+    }
+    let mut members = capture_batch_members(state, run_len);
+    if members.len() < 2 {
+        return None;
+    }
+    let (bulk, bulk_events, last_member_start) = match resolve_bulk_members(state, &members)? {
+        BulkMemberRun::Complete {
+            state,
+            events,
+            last_member_start,
+        } => (state, events, last_member_start),
+        BulkMemberRun::StoppedAt { index } => {
+            members.truncate(index + 1);
+            match resolve_bulk_members(state, &members)? {
+                BulkMemberRun::Complete {
+                    state,
+                    events,
+                    last_member_start,
+                } => (state, events, last_member_start),
+                BulkMemberRun::StoppedAt { .. } => return None,
+            }
+        }
+    };
+    let consumed = members.len() as u32;
+    *state = *bulk;
+    // CR 603.2c: members 1..N−1's events were collected on the clone; only the
+    // last member's events reach the caller's checkpoint.
+    state.consumed_before_priority_trigger_events =
+        consumed_trigger_event_occurrences(&bulk_events[..last_member_start]);
+    events.extend(bulk_events);
+    crate::game::perf_counters::record_stack_batch_plan();
+    crate::game::perf_counters::record_stack_batched_entries(consumed);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_stack_bulk_entries(consumed);
+    Some(consumed)
+}
+
 fn authorized_batch_limit(state: &GameState, requested: Option<u32>) -> u32 {
     let Some(requested) = requested.filter(|limit| *limit > 1) else {
         return 1;
     };
-    let Some(session) = state.stack_resolution_session.as_ref() else {
-        return 1;
-    };
-    if session.policy != StackResolutionPolicy::Committed {
-        return 1;
-    }
-    let Some(top_fence) = session.entries.get(session.cursor) else {
-        return 1;
-    };
-    if !state
-        .stack
-        .back()
-        .is_some_and(|entry| top_fence.matches_captured_entry(entry))
-    {
-        return 1;
-    }
-    let budget = session
-        .budget
-        .max_resolutions()
-        .map(|maximum| maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX)))
-        .unwrap_or(u32::MAX);
-    let fenced_prefix = state
-        .stack
-        .iter()
-        .rev()
-        .zip(session.entries.iter().skip(session.cursor))
-        .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    requested.min(budget).min(fenced_prefix).max(1)
+    super::engine::stack_resolution_session_authorized_limit(state)
+        .map_or(1, |authorized| requested.min(authorized))
 }
 
 /// Optional post-resolution invariant checked after each `resolve_top` and the
@@ -4574,118 +4860,6 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && parent_target_missing_reason.is_none()
 }
 
-/// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
-/// observer-order-invariance gate. A batched run is order-invariant iff NO
-/// battlefield trigger fans out on the token-ETB events the batch will emit.
-/// Build the REAL `ZoneChanged` + `TokenCreated` events one produced token
-/// emits (from the resolved spec's true characteristics) and route each through
-/// the public `candidates_for_event` — the same `keys_from_event` path the real
-/// events take downstream, with NO hand-picked key set. If ANY observer is
-/// registered for those events — including one on the run's own source (HIGH-2:
-/// a source carrying a second observer trigger keyed on the produced token's
-/// ETB/TokenCreated must NOT be excluded; doing so would skip the per-trigger
-/// priority interleaving CR 603.3 requires) — sequential resolution interleaves
-/// it per-token (CR 603.3 topmost-on-stack), so the batch ("all tokens, then
-/// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
-/// emits-exactly gate makes this two-event probe complete by construction for
-/// ALL observer axes.
-#[cfg(test)]
-fn observers_are_batch_safe(state: &mut GameState, plan: &effects::BatchPlan) -> bool {
-    for (spec, mana_value) in plan
-        .produced_token_specs()
-        .into_iter()
-        .zip(plan.produced_token_mana_values())
-    {
-        let record = zone_change_record_from_spec(spec, mana_value);
-        let zc = GameEvent::ZoneChanged {
-            object_id: PROBE_ID,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(record),
-        };
-        let tc = GameEvent::TokenCreated {
-            object_id: PROBE_ID,
-            name: spec.characteristics.display_name.clone(),
-            // Synthetic batch-safety probe; the creating source is irrelevant to the
-            // observer-shape check, so reuse the probe sentinel id.
-            source_id: PROBE_ID,
-        };
-        for ev in [&zc, &tc] {
-            // unclassified ∪ buckets matching keys_from_event(ev). The
-            // unclassified bucket (Always/Immediate/dynamic/synthetic-keyword)
-            // is unconditionally included → any catch-all observer forces refuse.
-            // CR 603.3: any registered observer (including the run's own source)
-            // forces sequential resolution so priority interleaves per-token.
-            let candidates = crate::game::trigger_index::candidates_for_event(state, ev);
-            if !candidates.is_empty() && !observer_candidates_are_inert(state, ev, &candidates) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-fn observer_candidates_are_inert(
-    state: &mut GameState,
-    event: &GameEvent,
-    candidates: &[ObjectId],
-) -> bool {
-    let event_keys = crate::game::trigger_index::keys_from_event(event, state);
-    for candidate in candidates {
-        let Some(source_obj) = state.objects.get(candidate) else {
-            continue;
-        };
-        let source_context = super::triggers::trigger_source_context_for_latch(state, source_obj);
-        let controller = source_context.lki.controller;
-        let source = source_context.identity.reference;
-        let triggers = source_context
-            .trigger_entries
-            .iter()
-            .cloned()
-            .enumerate()
-            .collect::<Vec<_>>();
-
-        for (trigger_index, entry) in triggers {
-            let definition_ref = crate::types::ability::TriggerDefinitionRef {
-                source,
-                occurrence: entry.occurrence.clone(),
-            };
-            let trigger = entry.definition;
-            let (trigger_keys, unclassified) =
-                crate::game::trigger_index::keys_from_trigger_def(&trigger);
-            if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
-                continue;
-            }
-            if trigger.condition.as_ref().is_some_and(|condition| {
-                !super::triggers::check_trigger_condition_with_source(
-                    state,
-                    condition,
-                    controller,
-                    Some(&source_context),
-                    Some(&definition_ref),
-                    Some(event),
-                )
-            }) {
-                continue;
-            }
-
-            let mut ability = super::triggers::build_triggered_ability_from_context(
-                state,
-                &trigger,
-                &source_context,
-                Some(&definition_ref),
-            );
-            ability.ability_index = Some(trigger_index);
-            ability.may_trigger_origin = Some(MayTriggerOrigin::Definition { definition_ref });
-            if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 fn optional_ability_is_inert_under_auto_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -4773,58 +4947,15 @@ fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool 
     optional_ability_is_inert_under_auto_choice(state, ability, trigger_event.as_ref())
 }
 
-/// CR 603.6a + CR 603.10: Build the faithful `ZoneChangeRecord` a produced
-/// token emits, from the resolved `TokenSpec` characteristics. `keys_from_event`
-/// reads only `core_types`/`to` for ETB keys, so the record's `core_types`
-/// drives the entire probe key set (mirrors `snapshot_for_zone_change`).
-#[cfg(test)]
-fn zone_change_record_from_spec(
-    spec: &crate::types::proposed_event::TokenSpec,
-    mana_value: u32,
-) -> crate::types::game_state::ZoneChangeRecord {
-    let ch = &spec.characteristics;
-    crate::types::game_state::ZoneChangeRecord {
-        object_id: PROBE_ID,
-        name: ch.display_name.clone(),
-        core_types: ch.core_types.clone(),
-        subtypes: ch.subtypes.clone(),
-        supertypes: ch.supertypes.clone(),
-        keywords: ch.keywords.clone(),
-        trigger_definitions: Vec::new(),
-        trigger_source_context: None,
-        power: ch.power,
-        toughness: ch.toughness,
-        base_power: ch.power,
-        base_toughness: ch.toughness,
-        colors: ch.colors.clone(),
-        mana_value,
-        controller: spec.controller,
-        owner: spec.controller,
-        from_zone: None,
-        cast_from_zone: None,
-        played_from_zone: None,
-        to_zone: Zone::Battlefield,
-        attachments: Vec::new(),
-        linked_exile_snapshot: Vec::new(),
-        is_token: true,
-        combat_status: Default::default(),
-        co_departed: Vec::new(),
-        attached_to: None,
-        entered_incarnation: None,
-        turn_zone_change_index: 0,
-        recorded_turn_number: 0,
-        // A freshly created token is never suspected (CR 701.60b).
-        is_suspected: false,
-    }
-}
-
 /// CR 111.2 + CR 109.4: The run-identity axis along the source dimension. A
-/// base token's characteristics and controller are fixed at creation and do not
-/// read the creating source, so triggers from DISTINCT sources are
-/// resolution-identical and collapse under `SourceIndependent`. Any
-/// source-relative effect (a copy that reads its own `SelfRef` source, an
-/// attacking/attached token, a source-relative count) keeps a per-source
-/// boundary via `Source(id)` so two sources never collapse incorrectly.
+/// base token whose top-level effect passes
+/// `token::token_effect_is_source_independent` (controller-owned, `Fixed`
+/// count, not attacking, not attached) groups triggers from DISTINCT sources
+/// under `SourceIndependent`; any other effect keeps a per-source boundary via
+/// `Source(id)`. Grouping is not interchangeability: a member's spec or
+/// `ConditionInstead` sub-ability can still read its own source, so every
+/// member resolves through `resolve_top` and the bulk admission
+/// (`token::admits_bulk_run`) compares members before eliding checkpoints.
 #[derive(PartialEq)]
 enum BatchSourceAxis {
     SourceIndependent,
@@ -4849,9 +4980,10 @@ struct BatchRunKey<'a> {
 /// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
 /// else abilities embed their own), so a derived `PartialEq` would treat two
 /// otherwise-identical abilities from distinct sources as unequal — defeating
-/// the `SourceIndependent` collapse. When both keys are `SourceIndependent` the
-/// effect provably reads nothing from the source, so abilities are compared
-/// with `source_id` canonicalized away (recursively, on the chain). When either
+/// the `SourceIndependent` collapse. When both keys are `SourceIndependent`,
+/// abilities are compared with `source_id` canonicalized away (recursively, on
+/// the chain); what each member still reads from its own source is compared by
+/// the bulk admission (`token::admits_bulk_run`). When either
 /// key is `Source(id)`, the per-source boundary already differs, so the regular
 /// deep equality (including `source_id`) applies.
 impl PartialEq for BatchRunKey<'_> {
@@ -4876,9 +5008,10 @@ impl PartialEq for BatchRunKey<'_> {
 
 /// Compare two resolved abilities for batch-run identity while ignoring the
 /// source-object id at every level of the sub/else chain. Cheap clone+normalize
-/// only runs on the batch-eligible path. The classifier guarantees the effect
-/// reads nothing else from the source, so source-id is the only field allowed
-/// to differ across a `SourceIndependent` run.
+/// only runs on the batch-eligible path. Source-id is the only field allowed to
+/// differ across a `SourceIndependent` run; equal abilities can still read
+/// different values from their sources, which the bulk admission compares per
+/// member (`token::admits_bulk_run`).
 fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> bool {
     normalize_ability_source(a) == normalize_ability_source(b)
 }
@@ -5199,16 +5332,17 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ///   during resolution. Not in key by design.
 /// - `subject_match_count` — RESOLUTION-RELEVANT but PROVABLY EQUAL across a
 ///   run: it is the CR 603.2c filtered subject count from the firing event
-///   batch. `resolve_batched` lifts it into resolution scope from the run's top
-///   entry (stack.rs:1135-1145), and `trigger_event` (which carries the firing
-///   event) is already in the key — two entries with equal `trigger_event` and
-///   equal deep `ability` carry the same batched subject count. It is therefore
-///   redundant to key on (would never break a run the other fields kept
-///   together) and is correctly applied from the top entry in the batch path.
+///   batch, and `trigger_event` (which carries the firing event) is already in
+///   the key — two entries with equal `trigger_event` and equal deep `ability`
+///   carry the same batched subject count. It is therefore redundant to key on
+///   (would never break a run the other fields kept together). Each member
+///   still resolves its own entry through `resolve_top`, whose
+///   `bind_resolution_scope` lifts that entry's count into resolution scope.
 /// - `die_result` — EXCLUDED for the same reason as `subject_match_count`: it
-///   is CR 706.2 resolution data (the carried die-roll result re-stamped from
-///   the run's top entry in `resolve_batched`), not run identity. Keying on it
-///   would needlessly split runs without changing correctness.
+///   is CR 706.2 resolution data (the carried die-roll result that
+///   `bind_resolution_scope` re-stamps from each member's own entry), not run
+///   identity. Keying on it would needlessly split runs without changing
+///   correctness.
 fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id,
@@ -8637,13 +8771,14 @@ mod tests {
         // Driver internals under test (the stack module).
         use super::super::{
             batch_run_len, effects, fixed_controller_gain_life_run_len,
-            fixed_opponent_effect_run_len, observers_are_batch_safe,
-            priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit,
-            resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, self_counter_run_len,
+            fixed_opponent_effect_run_len, priority_checkpoint_is_settled, resolve_next,
+            resolve_next_with_limit, resolve_proven_inert_trigger_batch_with_proof_hook,
+            resolve_top, run_member_abilities, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
         use crate::game::triggers;
+        use crate::game::turn_control::authorized_submitter_for_player;
         use crate::game::zones::create_object;
         use crate::types::ability::{
             AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, FilterProp,
@@ -8654,8 +8789,9 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
-            PendingLiminalEntryResume, PendingResolutionCompletion, PendingTokenBattlefieldEntry,
+            ActivePlayerControl, AutoMayChoice, GameState, MayTriggerAutoChoiceKey,
+            MayTriggerOrigin, MeldSelection, PendingLiminalEntryResume,
+            PendingResolutionCompletion, PendingTokenBattlefieldEntry, PriorityPassingMode,
             StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
             StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
             StackResolutionSession,
@@ -8797,8 +8933,8 @@ mod tests {
 
         /// Create a plain creature permanent (no triggers/replacements) under
         /// player 0 with the given P/T and a single subtype, and return its id.
-        /// Copy sources for the batch-copy path must be observer-free so the
-        /// copy token inherits no ETB-keyed trigger (§2.3a). `name` doubles as
+        /// Copy sources for the batch-copy path are observer-free so the copy
+        /// token inherits no trigger that sees its siblings. `name` doubles as
         /// the subtype so distinct names yield distinct copiable values.
         fn add_plain_creature_source(
             state: &mut GameState,
@@ -8869,7 +9005,7 @@ mod tests {
         /// trigger. `name` doubles as the subtype so distinct names yield
         /// distinct copiable values. Unlike `add_plain_creature_source`, the copy
         /// token is NOT observer-free — but its Land-keyed trigger does not
-        /// observe its Creature siblings, so the refined §2.3a gate batches it.
+        /// observe its Creature siblings, so the run still batches.
         fn add_landfall_creature_source(
             state: &mut GameState,
             name: &str,
@@ -8922,8 +9058,8 @@ mod tests {
         /// Create a copy source whose copied token would OBSERVE its in-batch
         /// siblings: a Creature carrying a "whenever a creature you control
         /// enters" trigger registered under `EnterBattlefield(Some(Creature))`.
-        /// A CR 707.2 copy inherits it, and the copy's Creature emission DOES
-        /// intersect the Creature ETB key, so the refined §2.3a gate must refuse.
+        /// A CR 707.2 copy inherits it, and it sees each Creature copy enter,
+        /// so the run must never take a bulk boundary.
         fn add_creature_observer_source(
             state: &mut GameState,
             name: &str,
@@ -9294,22 +9430,13 @@ mod tests {
             all_events
         }
 
-        /// Test shim: gather the top `run_len` run source ids and invoke the
-        /// real `effects::try_resolve_batch`. Mirrors the gather `resolve_next`
-        /// performs at the live call site so tests exercise the true signature.
-        fn try_batch(
-            state: &GameState,
-            ability: &ResolvedAbility,
-            run_len: u32,
-        ) -> Option<effects::BatchPlan> {
-            let run_source_ids: Vec<ObjectId> = state
-                .stack
-                .iter()
-                .rev()
-                .take(run_len as usize)
-                .map(|e| e.source_id)
-                .collect();
-            effects::try_resolve_batch(state, ability, run_len, &run_source_ids)
+        /// Test shim over the production bulk admission verdict for the run on
+        /// top of the stack, with the call site's per-member source gather.
+        fn admits(state: &GameState, ability: &ResolvedAbility) -> bool {
+            let run_len = batch_run_len(state).expect("a batch run is on top");
+            let run_members =
+                run_member_abilities(state, run_len).expect("every member is an ability");
+            effects::admits_bulk_token_run(state, ability, &run_members)
         }
 
         fn token_ids(state: &GameState) -> Vec<ObjectId> {
@@ -9351,7 +9478,7 @@ mod tests {
         }
 
         #[test]
-        fn resolve_next_with_limit_requires_a_committed_session() {
+        fn resolve_next_with_limit_requires_a_session_authority() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -9385,7 +9512,7 @@ mod tests {
         }
 
         #[test]
-        fn recheck_session_cannot_authorize_a_multi_entry_resolution() {
+        fn recheck_session_without_a_verified_or_standing_pass_resolves_one_entry() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -9400,6 +9527,95 @@ mod tests {
                 1
             );
             assert_eq!(state.stack.len(), 2);
+        }
+
+        /// CR 117.3b + CR 117.4 + CR 732.2b: once every participant is a
+        /// representative with a verified pass, the Recheck session authorizes
+        /// the whole fenced prefix in one boundary.
+        #[test]
+        fn fully_verified_recheck_session_authorizes_the_fenced_prefix() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            arm_committed_session(&mut state);
+            {
+                let session = state.stack_resolution_session.as_mut().unwrap();
+                session.policy = StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
+                session.representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+                session.verified_pass_representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+            }
+
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_with_limit(&mut state, &mut events, Some(u32::MAX)),
+                3
+            );
+            assert!(state.stack.is_empty());
+            assert_eq!(token_ids(&state).len(), 3);
+        }
+
+        /// CR 117.1: a Full Control participant never authorizes a skipped
+        /// window, so a committed session resolves one entry per boundary.
+        #[test]
+        fn full_control_participant_limits_a_committed_session_to_one_entry() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            state
+                .priority_passing_modes
+                .insert(PlayerId(1), PriorityPassingMode::FullControl);
+
+            let mut events = Vec::new();
+            assert_eq!(resolve_next_committed(&mut state, &mut events), 1);
+            assert_eq!(state.stack.len(), 2);
+            assert_eq!(token_ids(&state).len(), 1);
+        }
+
+        /// CR 723.5: the Full Control preference that refuses a skipped window
+        /// belongs to the player making the seat's decisions, so a
+        /// turn-controlled seat follows its controller's mode, not its own.
+        #[test]
+        fn turn_controlled_seat_full_control_follows_its_controller() {
+            let build = |full_control: PlayerId| {
+                let mut state = setup();
+                add_lands(&mut state, 3);
+                let src = add_scute_source(&mut state);
+                push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+                state.active_player = PlayerId(0);
+                state.active_full_turn_control = Some(ActivePlayerControl {
+                    controller: PlayerId(1),
+                    timestamp: 1,
+                });
+                state.turn_decision_controller = Some(PlayerId(1));
+                state.turn_decision_control_timestamp = Some(1);
+                state
+                    .priority_passing_modes
+                    .insert(full_control, PriorityPassingMode::FullControl);
+                state
+            };
+
+            let mut controlled_seat_full_control = build(PlayerId(0));
+            assert_eq!(
+                authorized_submitter_for_player(&controlled_seat_full_control, PlayerId(0)),
+                PlayerId(1),
+                "reach guard: the turn-control latch routes P0's decisions to P1"
+            );
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_committed(&mut controlled_seat_full_control, &mut events),
+                3
+            );
+            assert!(controlled_seat_full_control.stack.is_empty());
+
+            let mut controller_full_control = build(PlayerId(1));
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_committed(&mut controller_full_control, &mut events),
+                1
+            );
+            assert_eq!(controller_full_control.stack.len(), 2);
         }
 
         #[test]
@@ -10127,20 +10343,6 @@ mod tests {
             );
         }
 
-        // §9.2 — Layer C reports safe on an observer-free board.
-        #[test]
-        fn observers_are_batch_safe_true_without_observers() {
-            let mut state = setup();
-            add_lands(&mut state, 3);
-            let src = add_scute_source(&mut state);
-            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
-            let run_len = batch_run_len(&state).unwrap();
-            assert_eq!(run_len, 5);
-            let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
-            assert!(observers_are_batch_safe(&mut state, &plan));
-        }
-
         // §9.4a — Cathars'-class creature-ETB observer forces refusal + the
         // sequential fall-back produces the DESCENDING per-token distribution.
         #[test]
@@ -10186,14 +10388,13 @@ mod tests {
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
-            // Layer C refuses.
+            // Reach guard: the shape gate admits the run, so the refusal below
+            // is member 1's priority checkpoint collecting the observer.
             {
-                let run_len = batch_run_len(&state).unwrap();
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
-                let plan = try_batch(&state, &ability, run_len).unwrap();
                 assert!(
-                    !observers_are_batch_safe(&mut state, &plan),
-                    "creature-ETB observer must force refusal"
+                    admits(&state, &ability),
+                    "reach: the observer-free token shape must pass admission"
                 );
             }
 
@@ -10228,8 +10429,8 @@ mod tests {
         }
 
         // §9.5 — entering +1/+1 counter + live CounterAdded observer: the §2.2a
-        // gate refuses BEFORE Layer C is consulted (try_resolve_batch == None),
-        // and the sequential fall-back produces the descending distribution.
+        // gate refuses the run at admission, and the sequential fall-back
+        // produces the descending distribution.
         #[test]
         fn entering_counter_with_counteradded_observer_refuses_and_falls_back() {
             let mut state = setup();
@@ -10286,13 +10487,13 @@ mod tests {
             }
             push_token_triggers(&mut state, src, saproling, None, 5);
 
-            // §2.2a: spec_emits_only_etb_pair == false ⇒ try_resolve_batch == None.
+            // §2.2a: spec_emits_only_etb_pair == false ⇒ admission refuses.
             {
-                let run_len = batch_run_len(&state).unwrap();
+                assert_eq!(batch_run_len(&state), Some(5));
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 assert!(
-                    try_batch(&state, &ability, run_len).is_none(),
-                    "entering-counter spec must fail the §2.2a gate before Layer C"
+                    !admits(&state, &ability),
+                    "entering-counter spec must fail the §2.2a gate"
                 );
             }
 
@@ -10343,9 +10544,9 @@ mod tests {
                 };
             }
             push_token_triggers(&mut state, src, effect, None, 5);
-            let run_len = batch_run_len(&state).unwrap();
+            assert_eq!(batch_run_len(&state), Some(5));
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(try_batch(&state, &ability, run_len).is_none());
+            assert!(!admits(&state, &ability));
         }
 
         #[test]
@@ -10487,13 +10688,14 @@ mod tests {
         }
 
         // §2.2 + CR 707.2 — ConditionInstead MET copy branch: a single
-        // (identical-value) source's met copy-instead swap now BATCHES along the
-        // value-equal prefix (whole run), consuming `run_len` entries.
+        // (identical-value) source's met copy-instead swap is admitted by the
+        // production verdict, and the bulk executor consumes the whole run in
+        // one boundary.
         #[test]
-        fn condition_instead_met_copy_branch_refuses() {
+        fn condition_instead_met_copy_branch_is_admitted() {
             let mut state = setup();
             add_lands(&mut state, 6); // 6 lands → "if you control 6+ lands" is met.
-                                      // Observer-free source so the copy token passes the §2.3a gate.
+                                      // Observer-free source, so member 1's checkpoint stays inert.
             let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
             let sub = copy_instead_sub(src, 6);
 
@@ -10504,17 +10706,18 @@ mod tests {
                 Some(Box::new(sub)),
                 5,
             );
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The single source's
-            // 5 entries share identical copiable values (CR 707.2), so the copy
-            // prefix collapses the whole run into one batch.
-            let plan = try_batch(&state, &ability, run_len)
-                .expect("met copy-instead with identical values must batch");
+            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The single
+            // source's 5 entries share identical copiable values (CR 707.2).
+            assert!(
+                admits(&state, &ability),
+                "met copy-instead with identical values must be admitted"
+            );
+            crate::game::perf_counters::reset();
+            assert_eq!(resolve_to_empty_batched(&mut state), vec![5]);
             assert_eq!(
-                plan.consumed(),
-                run_len,
-                "identical-source copy prefix must consume the full run"
+                crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                5
             );
         }
 
@@ -10562,7 +10765,8 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // Land count invariant (token is a Creature, condition counts Lands) ⇒
             // base branch is provably stable ⇒ batchable.
-            assert!(try_batch(&state, &ability, run_len).is_some());
+            assert_eq!(run_len, 5);
+            assert!(admits(&state, &ability));
         }
 
         // §3.4 — mandatory Doubling-Season-class replacement still batches and
@@ -10602,11 +10806,11 @@ mod tests {
         }
 
         // §3.4 + CR 614.1a + CR 707.2 (issue #1511): a mandatory token-count
-        // doubler applies to a `CopyTokenOf` swap collapsed into the copy-prefix
-        // batch — each of the 5 self-copy resolutions creates one copy doubled
-        // to two, for 10 copy tokens. Locks in that routing copy-token creation
-        // through the `CreateToken` replacement pipeline doubles uniformly on
-        // the batched copy path without double-counting.
+        // doubler applies to a `CopyTokenOf` swap inside a bulk copy run — each
+        // of the 5 self-copy resolutions creates one copy doubled to two, for
+        // 10 copy tokens. Locks in that routing copy-token creation through the
+        // `CreateToken` replacement pipeline doubles uniformly on the batched
+        // copy path without double-counting.
         #[test]
         fn mandatory_token_doubling_batches_and_doubles_copy_prefix() {
             let mut state = setup();
@@ -10746,90 +10950,9 @@ mod tests {
             );
         }
 
-        // §9.5 HIGH-2 — produced-token-non-observer gate (direct, discriminating):
-        // the gate is the INTERSECTION of a trigger's registered keys with the
-        // produced token's CR 603.6a emission. A Creature produced token emits
-        // exactly {EnterBattlefield(None), EnterBattlefield(Some(Creature)),
-        // TokenCreated}. A creature-ETB observer intersects (refused); the real
-        // Scute-shape landfall trigger (EnterBattlefield(Some(Land))) does NOT
-        // intersect a creature emission and is batch-SAFE (the HIGH fix — the old
-        // coarse wildcard gate refused this and the headline repro never batched).
-        #[test]
-        fn produced_token_non_observer_gate_discriminates() {
-            use super::super::effects::token::produced_token_is_non_observer;
-            // The produced (copied) token is a Creature: emission =
-            // {None, Some(Creature), TokenCreated}.
-            let produced_creature = [CoreType::Creature];
-
-            // A creature-ETB observer trigger registers under Some(Creature) ⇒
-            // intersects the creature emission ⇒ must fail the gate.
-            let etb_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Creature],
-                    ..Default::default()
-                }));
-            assert!(
-                !produced_token_is_non_observer(
-                    std::slice::from_ref(&etb_observer),
-                    &produced_creature
-                ),
-                "a creature-ETB-observing produced token must fail the gate"
-            );
-
-            // The HEADLINE fix: a landfall trigger registers under
-            // EnterBattlefield(Some(Land)). A Creature copy emits no Land key, so
-            // the intersection is EMPTY ⇒ the Scute-shape copy is batch-SAFE. The
-            // old coarse gate (any EnterBattlefield(_)) refused this and the named
-            // repro never collapsed.
-            let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Land],
-                    ..Default::default()
-                }));
-            assert!(
-                produced_token_is_non_observer(std::slice::from_ref(&landfall), &produced_creature),
-                "a Land-keyed landfall trigger on a Creature copy does not observe \
-                 its creature siblings ⇒ batch-safe (the HIGH fix)"
-            );
-
-            // Over-permit guard: a broad permanent-ETB observer registers under
-            // the broad EnterBattlefield(None) key, which is in EVERY token's
-            // emission ⇒ must still be refused.
-            let broad_etb = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Permanent],
-                    ..Default::default()
-                }));
-            assert!(
-                !produced_token_is_non_observer(
-                    std::slice::from_ref(&broad_etb),
-                    &produced_creature
-                ),
-                "a broad permanent-ETB observer (None key) intersects every emission ⇒ refused"
-            );
-
-            // Symmetry check: the SAME landfall trigger on a LAND copy (emission
-            // includes Some(Land)) DOES intersect ⇒ refused. Proves the gate keys
-            // off the produced token's real core types, not a fixed assumption.
-            assert!(
-                !produced_token_is_non_observer(std::slice::from_ref(&landfall), &[CoreType::Land]),
-                "a landfall trigger on a Land copy observes its land siblings ⇒ refused"
-            );
-
-            // No triggers ⇒ passes (the bare Insect/Servo go-wide case).
-            assert!(
-                produced_token_is_non_observer(&[], &produced_creature),
-                "a trigger-free produced token passes the gate"
-            );
-        }
-
-        // §9.5 HIGH-2 — produced-token-non-observer gate: a CopyTokenOf run whose
-        // copy SOURCE carries an ETB observer trigger must refuse. (The copy
-        // branch falls back wholesale in v1 — see B5 — so this confirms a
-        // copy-source observer never reaches a batched resolution.)
+        // A CopyTokenOf run whose copy SOURCE carries an ETB observer trigger
+        // must refuse. Its copy target is a specific object, not `SelfRef`, so
+        // the copy arm's shape gate refuses it.
         #[test]
         fn copy_source_with_etb_observer_refuses_to_batch() {
             let mut state = setup();
@@ -10868,8 +10991,8 @@ mod tests {
             let src = add_scute_source(&mut state);
 
             // sub: CopyTokenOf gated by a MET ConditionInstead (lands >= 1) so the
-            // copy branch is selected, then assert refusal (copy path falls back
-            // wholesale in v1 — so a copy-source observer never batches).
+            // copy branch is selected, then assert refusal: the copy target is a
+            // specific object, not `SelfRef`, so the copy arm's shape gate refuses.
             let copy_effect = Effect::CopyTokenOf {
                 target: TargetFilter::SpecificObject { id: copy_source },
                 owner: TargetFilter::Controller,
@@ -10903,14 +11026,13 @@ mod tests {
                 Some(Box::new(sub)),
                 5,
             );
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // The instead-swap fires (>= 1 land) ⇒ copy branch ⇒ not batchable in
-            // v1 (the copy path produces no TokenSpec and falls back). The gate
-            // therefore refuses regardless — confirming a copy-source observer
-            // never reaches a batched resolution.
+            // The instead-swap fires (>= 1 land) ⇒ copy branch. Its copy target
+            // is a specific object, not `SelfRef`, so the copy arm's shape gate
+            // refuses — a copy-source observer never reaches a batched
+            // resolution.
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "copy branch (and any copy-source observer) must refuse to batch"
             );
         }
@@ -10943,12 +11065,12 @@ mod tests {
             crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
-            let run_len = batch_run_len(&state).unwrap();
+            assert_eq!(batch_run_len(&state), Some(5));
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // The optional replacement could pause for a NeedsChoice prompt
             // mid-batch ⇒ Layer B refuses.
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "optional replacement must force fall-back"
             );
         }
@@ -10959,13 +11081,10 @@ mod tests {
         // creature enters, draw a card."). Under CR 603.3 each token-creation and
         // each observer firing goes on the stack one at a time, with priority in
         // between, so batching ("all tokens, then all observers") would skip the
-        // priority interleaving and let a player act between resolutions. Layer C
-        // MUST refuse. This test would have FALSELY PASSED (batch wrongly allowed)
-        // when `observers_are_batch_safe` excluded the run's own source IDs: the
-        // creature-ETB candidate == the run source, so the old `run_source_ids`
-        // exclusion filtered it out and reported the run batch-safe. With the
-        // exclusion removed, any registered observer — including the source's own
-        // second trigger — forces sequential resolution.
+        // priority interleaving and let a player act between resolutions. Member
+        // 1's priority checkpoint runs the production collector, which sees the
+        // source's own second trigger exactly as sequential resolution would, so
+        // the run resolves one entry at a time.
         #[test]
         fn source_with_own_token_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -10999,16 +11118,10 @@ mod tests {
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
-            let run_len = batch_run_len(&state).unwrap();
+            // Reach guard: admission passes, so the refusal below is member 1's
+            // checkpoint collecting the source's own creature-ETB trigger.
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
-            // The creature-ETB candidate IS the run source `src`. Pre-fix, the
-            // exclusion dropped it and this assertion would FAIL (batch allowed);
-            // post-fix it must hold (refuse to batch).
-            assert!(
-                !observers_are_batch_safe(&mut state, &plan),
-                "run source's own token-ETB observer must force sequential resolution (CR 603.3)"
-            );
+            assert!(admits(&state, &ability));
 
             // End-to-end: the batch driver must fall back to one entry at a time.
             let steps = resolve_to_empty_batched(&mut state);
@@ -11020,8 +11133,8 @@ mod tests {
 
         // §9.4a HIGH-1 regression — a live non-run battlefield observer keyed on a
         // NARROW non-Creature ETB subtype (artifact creature) that the produced
-        // token matches must force Layer C to refuse. A round-2-style fixed
-        // `Some(Creature)` probe would have MISSED the `Some(Artifact)` bucket.
+        // token matches must force refusal. Member 1's checkpoint collects it
+        // through the production collector, whatever bucket it registers under.
         #[test]
         fn narrow_artifact_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -11059,8 +11172,7 @@ mod tests {
             crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
             // The produced token is an ARTIFACT CREATURE (core_types = [Artifact,
-            // Creature]) — so the Layer C probe builds a record whose core_types
-            // include Artifact and hits the narrow observer's bucket.
+            // Creature]), so its entry matches the narrow observer.
             let mut servo = insect_token_effect();
             if let Effect::Token { name, types, .. } = &mut servo {
                 *name = "Servo".to_string();
@@ -11068,17 +11180,17 @@ mod tests {
             }
             push_token_triggers(&mut state, src, servo, None, 5);
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
+            assert!(admits(&state, &ability), "reach: admission passes");
+            let steps = resolve_to_empty_batched(&mut state);
             assert!(
-                !observers_are_batch_safe(&mut state, &plan),
-                "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
+                steps.iter().all(|&c| c == 1),
+                "narrow artifact-ETB observer must force refusal, got {steps:?}"
             );
         }
 
         // §9.4a — a meaningful broad-ETB observer (valid_card = Permanent) keyed
-        // under EnterBattlefield(None) must still force Layer C to refuse.
+        // under EnterBattlefield(None) must still force refusal.
         #[test]
         fn kodama_broad_permanent_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -11118,28 +11230,25 @@ mod tests {
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
+            assert!(admits(&state, &ability), "reach: admission passes");
+            let steps = resolve_to_empty_batched(&mut state);
             assert!(
-                !observers_are_batch_safe(&mut state, &plan),
-                "meaningful broad permanent-ETB observer must force Layer C refusal"
+                steps.iter().all(|&c| c == 1),
+                "meaningful broad permanent-ETB observer must force refusal, got {steps:?}"
             );
         }
 
-        // CR 113.6 + CR 603.3 — the third production consumer of the
-        // `candidates_for_event` seam. `observers_are_batch_safe` is the
-        // batch-safety gate, so the live-zone guard changes a BATCHING decision
-        // here, not only trigger firing: a stale off-battlefield observer used
-        // to make `candidates` non-empty and force the conservative sequential
-        // path. Dropping it cannot turn a safe batch unsafe, because an
-        // observer that cannot legally trigger under CR 113.6 cannot make a
-        // batch order-sensitive.
+        // CR 113.6 + CR 603.3 — a stale off-battlefield observer reaches the
+        // bulk executor only through member 1's checkpoint, which runs the
+        // production collector and its `candidates_for_event` live-zone guard.
+        // An observer that cannot legally trigger under CR 113.6 cannot make
+        // the run order-sensitive, so the bulk outcome must equal sequential.
         #[test]
         fn stale_off_battlefield_observer_does_not_force_batch_refusal() {
             // Same broad permanent-ETB observer shape as
             // `kodama_broad_permanent_etb_observer_forces_refusal`.
-            let build = || -> (GameState, ObjectId, effects::BatchPlan) {
+            let build = || -> (GameState, ObjectId) {
                 let mut state = setup();
                 add_lands(&mut state, 3);
                 let src = add_scute_source(&mut state);
@@ -11171,51 +11280,37 @@ mod tests {
                     obj.trigger_definitions.push(trig);
                 }
                 // Register while the observer is legitimately on the
-                // battlefield. No rebuild can intervene later:
-                // `observers_are_batch_safe` consults `candidates_for_event`
-                // directly and never calls `ensure_ready`.
+                // battlefield.
                 crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
                 push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
-
-                let run_len = batch_run_len(&state).unwrap();
-                let ability = state.stack.back().unwrap().ability().unwrap().clone();
-                let plan = try_batch(&state, &ability, run_len).unwrap();
-                (state, observer_id, plan)
+                (state, observer_id)
             };
 
-            // 1. Positive reach-guard: this observer really is a shape the gate
-            //    reacts to. Without it the negative below could be satisfied
-            //    vacuously by an observer that never registered under any key.
+            // 1. Positive reach-guard: this observer really is a shape member
+            //    1's checkpoint reacts to while it is on the battlefield.
             {
-                let (mut state, _observer_id, plan) = build();
+                let (mut state, _observer_id) = build();
+                let steps = resolve_to_empty_batched(&mut state);
                 assert!(
-                    !observers_are_batch_safe(&mut state, &plan),
+                    steps.iter().all(|&c| c == 1),
                     "reach-guard: an on-battlefield broad permanent-ETB observer \
-                     must force refusal"
+                     must force refusal, got {steps:?}"
                 );
             }
 
             // 2. The delta. Induce the desync AFTER the rebuild, leaving
             //    `state.battlefield` and the index stale.
             let stale = {
-                let (mut state, observer_id, plan) = build();
+                let (mut state, observer_id) = build();
                 state.objects.get_mut(&observer_id).unwrap().zone = Zone::Hand;
-                let mut probe = state.clone();
-                assert!(
-                    observers_are_batch_safe(&mut probe, &plan),
-                    "CR 113.6: a stale off-battlefield observer must not force \
-                     batch refusal"
-                );
                 state
             };
 
-            // 3. Outcome identity: the batch the guard newly permits resolves
-            //    exactly as the sequential path would. This is what pins "the
-            //    batching delta is observationally inert" instead of asserting
-            //    it. Deliberately NOT asserting the step shape — that would flip
-            //    red without the guard and silently promote this into a
-            //    falsification vehicle, which it is not.
+            // 3. Outcome identity: the stale board resolves exactly as the
+            //    sequential path would. Deliberately NOT asserting the step
+            //    shape, which would promote this into a falsification vehicle
+            //    for the zone guard, which it is not.
             let mut batched = stale.clone();
             let mut sequential = stale;
             resolve_to_empty_batched(&mut batched);
@@ -11233,7 +11328,7 @@ mod tests {
         }
 
         // §9.4b / §9.2 — ConditionInstead DIFFERENTIAL harness: run BOTH the
-        // not-met (batches) and met (falls back) cases through the real pipeline
+        // not-met (base arm) and met (copy arm) cases through the real pipeline
         // and assert each produces the correct final state vs the sequential path.
         #[test]
         fn condition_instead_differential_not_met_and_met() {
@@ -11243,8 +11338,8 @@ mod tests {
                 let mut state = setup();
                 add_lands(&mut state, lands);
                 // Observer-free copy source so the met-copy branch can batch
-                // (a copy inherits the source's triggers; an ETB-keyed trigger
-                // would fail the §2.3a non-observer gate).
+                // (a copy inherits the source's triggers; one that sees its
+                // siblings would stop the run at member 1's checkpoint).
                 let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
                 let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
@@ -11280,9 +11375,9 @@ mod tests {
                 assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
             }
 
-            // MET (6 lands): copy-instead fires ⇒ Layer B copy-prefix batches.
+            // MET (6 lands): copy-instead fires ⇒ the copy arm decides.
             // The single source's 5 entries share identical copiable values
-            // (CR 707.2), and the observer-free copy token passes §2.3a, so the
+            // (CR 707.2), and the observer-free copy token sees no sibling, so the
             // whole run collapses into ONE batched step producing 5 copies —
             // equal to the sequential path.
             {
@@ -11343,9 +11438,10 @@ mod tests {
         }
 
         // CR 707.2 — cross-source copy collapse: K distinct sources with
-        // IDENTICAL copiable values each fire a met copy-instead self-copy. The
-        // value-equal prefix spans the whole run, so all K collapse into one
-        // batch producing K copies. Result equals the sequential path.
+        // IDENTICAL copiable values each fire a met copy-instead self-copy.
+        // Every member shares the top member's copiable values, so all K
+        // collapse into one batch producing K copies. Result equals the
+        // sequential path.
         #[test]
         fn cross_source_copy_identical_values_forms_one_batch() {
             let mut base = setup();
@@ -11404,10 +11500,9 @@ mod tests {
                 3,
             );
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "copy-token batch must refuse values that emit intrinsic CounterAdded events"
             );
         }
@@ -11416,12 +11511,9 @@ mod tests {
         // K distinct copy sources are real Scute-Swarm-shape creatures, each
         // carrying a landfall trigger keyed EnterBattlefield(Some(Land)). The
         // copied tokens are CREATURES that inherit the landfall trigger (CR
-        // 707.2/707.5). A Creature copy emits {None, Some(Creature), TokenCreated}
-        // — the Land-keyed landfall does NOT intersect it, so the §2.3a gate is
-        // safe and the whole run STILL collapses into ONE batch. This is
-        // DISCRIMINATING: under the OLD coarse gate (any EnterBattlefield(_)
-        // rejected) try_resolve_copy_batch returned None and the run resolved
-        // one-at-a-time — the named perf bug was never fixed for its own card.
+        // 707.2/707.5). A land trigger never sees a Creature copy enter, so
+        // member 1's checkpoint and the per-member collection find nothing and
+        // the whole run STILL collapses into ONE batch.
         #[test]
         fn cross_source_copy_with_landfall_trigger_still_batches() {
             let mut base = setup();
@@ -11477,22 +11569,22 @@ mod tests {
             );
         }
 
-        // CR 603.6a (over-permit guard) — a SelfRef copy whose copied token DOES
-        // observe its in-batch siblings must STILL refuse. The copy source is a
-        // Creature carrying a "whenever a creature you control enters" trigger
-        // (EnterBattlefield(Some(Creature))); the Creature copy's emission
-        // includes Some(Creature), so the intersection is non-empty ⇒ refused.
-        // Proves the refined gate did not become unsafe.
+        // CR 603.2 + CR 603.6a (over-permit guard) — a SelfRef copy run whose
+        // copy sources carry a "whenever a creature you control enters" trigger,
+        // which each copy inherits (CR 707.2), must never take a bulk boundary.
+        // Admission does not decide observers (D5.4): member 1's checkpoint
+        // collects the live sources' triggers on member 1's copy, so the run
+        // refuses there and resolves as the sequential path does.
         #[test]
         fn cross_source_copy_with_creature_etb_observer_refuses_batch() {
-            let mut state = setup();
-            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+            let mut base = setup();
+            add_lands(&mut base, 6); // met ⇒ copy branch fires.
 
             for _ in 0..5 {
-                let src = add_creature_observer_source(&mut state, "Watcher", 2, 2);
+                let src = add_creature_observer_source(&mut base, "Watcher", 2, 2);
                 let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
-                    &mut state,
+                    &mut base,
                     src,
                     insect_token_effect(),
                     Some(Box::new(sub)),
@@ -11500,18 +11592,27 @@ mod tests {
                 );
             }
 
-            let run_len = batch_run_len(&state).unwrap();
-            let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // The copied token observes creature ETB (its siblings) ⇒ the §2.3a
-            // intersection is non-empty ⇒ must refuse to batch.
-            assert!(
-                try_batch(&state, &ability, run_len).is_none(),
-                "a copy whose token observes creature-ETB siblings must refuse to batch"
+            // Reach guard: admission passes, so the refusal below is member 1's
+            // checkpoint collecting the sources' creature-ETB triggers.
+            let ability = base.stack.back().unwrap().ability().unwrap().clone();
+            assert!(admits(&base, &ability), "reach: admission passes");
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+            crate::game::perf_counters::reset();
+            let (_, batched_events) = resolve_to_empty_batched_with_events(&mut batched);
+            assert_eq!(
+                crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                0,
+                "a copy whose token observes creature-ETB siblings must never take a bulk boundary"
             );
+            let sequential_events = resolve_to_empty_sequential_with_events(&mut sequential);
+            assert_eq!(token_ids(&batched).len(), token_ids(&sequential).len());
+            assert_eq!(batched_events, sequential_events);
         }
 
-        // CR 707.2 — divergent-tail prefix batching: K cross-source copies where
-        // a middle source diverges in copiable values. Clone proof proves that the
+        // CR 707.2 — divergent member: K cross-source copies where a middle
+        // source diverges in copiable values. Clone proof proves that the
         // entire run is equivalent to sequential resolution, so all five entries
         // collapse into one batch despite the divergent source values.
         #[test]
@@ -11525,7 +11626,8 @@ mod tests {
             //
             // Build: 2 identical "Alpha" sources, then 1 "Beta" (divergent P/T),
             // then 2 more "Alpha". Pushed bottom→top. Resolution order (top→down):
-            // Alpha, Alpha, Beta, Alpha, Alpha. The prefix is the top 2 Alphas.
+            // Alpha, Alpha, Beta, Alpha, Alpha. The copy arm refuses the run
+            // (Beta's copiable values diverge), so the clone proof takes it.
             let specs: [(&str, i32, i32); 5] = [
                 ("Alpha", 2, 2),
                 ("Alpha", 2, 2),
@@ -11608,12 +11710,11 @@ mod tests {
                 5,
             );
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // The copy creates Lands; the condition counts Lands ⇒ each created
             // Land flips the count ⇒ order-sensitive ⇒ must refuse.
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "a met copy creating Lands gated on a Land count must refuse to batch"
             );
         }

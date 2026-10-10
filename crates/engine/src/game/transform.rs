@@ -54,6 +54,48 @@ fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool
         // transform; `is_flip_permanent` is the canonical discriminator.
         || object.flipped
         || crate::game::flip::is_flip_permanent(object)
+        || !other_face_is_transform_destination(object)
+}
+
+/// CR 701.27c + CR 701.27d: Whether the face stored in `back_face` is one this
+/// permanent can transform into. An absent `back_face` is left to the callers'
+/// own "no back face" handling and so is not judged here.
+///
+/// The stored-face layout is the typed discriminator: Split (CR 709), Flip
+/// (CR 710), Adventurer (CR 715), Omen (CR 720) and preparation (CR 722) cards
+/// keep alternative characteristics in the same `back_face` slot, but they are
+/// single-faced cards, and a token copy of one carries those characteristics as
+/// copiable values (CR 722.2b) without becoming double-faced. A transformed
+/// double-faced permanent stores its front face with an erased layout, and
+/// test-built double-faced fixtures often carry no layout at all, so only the
+/// known single-faced layouts are excluded. Independently of layout, a face that
+/// is an instant or sorcery is never a transform destination.
+fn other_face_is_transform_destination(object: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card::LayoutKind;
+    use crate::types::card_type::CoreType;
+    let Some(face) = object.back_face.as_ref() else {
+        return true;
+    };
+    // CR 701.27c: a permanent that isn't represented by a double-faced token or
+    // a double-faced card can't transform.
+    let single_faced_layout = match face.layout_kind {
+        Some(
+            LayoutKind::Split
+            | LayoutKind::Flip
+            | LayoutKind::Adventure
+            | LayoutKind::Omen
+            | LayoutKind::Prepare,
+        ) => true,
+        Some(LayoutKind::Single | LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
+        | None => false,
+    };
+    // CR 701.27d: transforming into an instant or sorcery face does nothing.
+    let instant_or_sorcery_face = face
+        .card_types
+        .core_types
+        .iter()
+        .any(|core| matches!(core, CoreType::Instant | CoreType::Sorcery));
+    !single_faced_layout && !instant_or_sorcery_face
 }
 
 /// Enumerates controlled transformable battlefield permanents as Priority

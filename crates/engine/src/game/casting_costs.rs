@@ -7038,6 +7038,19 @@ fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
                 value: chosen_x as i32,
             },
         },
+        // CR 107.3a + CR 107.3k: bare X belongs to this activation's announcement.
+        // CR 602.2b + CR 601.2h + CR 119.4: bind it before the authoritative
+        // residual cost payer deducts life, without replacing derived quantities.
+        AbilityCost::PayLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name },
+                },
+        } if name == "X" => AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed {
+                value: chosen_x as i32,
+            },
+        },
         AbilityCost::Composite { costs } => AbilityCost::Composite {
             costs: costs
                 .iter()
@@ -16764,6 +16777,86 @@ mod tests {
     use rand::RngCore;
 
     use super::*;
+
+    // CR 107.3a + CR 107.3k: bind this activation's bare X, without replacing
+    // fixed, other-variable, source-derived, or compound life quantities.
+    #[test]
+    fn concretize_chosen_x_pay_life_binds_only_the_bare_variable() {
+        let x = AbilityCost::PayLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        };
+        for chosen_x in [0, 2] {
+            assert_eq!(
+                concretize_chosen_x_cost(&x, chosen_x),
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed {
+                        value: chosen_x as i32
+                    },
+                }
+            );
+        }
+        let fixed = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+        };
+        let nested = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Composite {
+                    costs: vec![fixed.clone(), x.clone()],
+                },
+            ],
+        };
+        assert_eq!(
+            concretize_chosen_x_cost(&nested, 2),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Composite {
+                        costs: vec![
+                            fixed.clone(),
+                            AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 2 }
+                            },
+                        ]
+                    }
+                ],
+            }
+        );
+        for cost in [
+            fixed,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "Y".to_string(),
+                    },
+                },
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: crate::types::ability::ObjectScope::Source,
+                        counter_type: None,
+                    },
+                },
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    offset: 1,
+                },
+            },
+        ] {
+            assert_eq!(concretize_chosen_x_cost(&cost, 2), cost);
+        }
+    }
 
     /// CR 601.2a + CR 118.9a: `begin_required_cost_before_targets` starts paying
     /// a cast's costs without passing through

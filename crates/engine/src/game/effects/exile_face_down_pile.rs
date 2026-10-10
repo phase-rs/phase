@@ -82,7 +82,8 @@ fn resolve_pile_object(
     object: &TargetFilter,
 ) -> Option<ObjectId> {
     match object {
-        TargetFilter::SelfRef | TargetFilter::TriggeringSource => Some(ability.source_id),
+        TargetFilter::SelfRef => ability.self_ref_binding(state),
+        TargetFilter::TriggeringSource => Some(ability.source_id),
         _ => crate::game::effects::effect_object_targets(object, &ability.targets)
             .into_iter()
             .find(|id| state.objects.contains_key(id)),

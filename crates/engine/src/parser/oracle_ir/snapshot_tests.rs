@@ -12,10 +12,11 @@ use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::parser::{parse_oracle_text, parse_oracle_text_traced};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, TargetChoiceTiming,
-    TargetFilter, TriggerCondition, TypedFilter,
+    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, QuantityExpr,
+    QuantityRef, TargetChoiceTiming, TargetFilter, TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::DistributionUnit;
+use crate::types::mana::{ManaCost, ManaCostShard};
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
@@ -3305,4 +3306,50 @@ fn druid_of_the_emerald_grove_trigger_owns_all_three_printed_rows() {
          lower bound 0, because CR 706.2 selects on the post-modifier result and \
          `apply_modifier` clamps it to 0) and the open-ended \"20+\" (u8::MAX)"
     );
+}
+
+// SHAPE: CR 107.3a + CR 602.5d + CR 701.63a: the full printed activation
+// keeps the same X in mana, life payment and Endure, with sorcery timing.
+#[test]
+fn krumar_initiate_preserves_full_activation_in_both_layers() {
+    let (ir, lowered) = parse_two_layer(
+        "{X}{B}, {T}, Pay X life: This creature endures X. Activate only as a sorcery. (Put X +1/+1 counters on it or create an X/X white Spirit creature token.)",
+        "Krumar Initiate", &["Creature"], &["Human", "Cleric"],
+    );
+    assert_eq!(ir.items.len(), 1);
+    assert_eq!(lowered.abilities.len(), 1);
+    let def = &lowered.abilities[0];
+    assert!(matches!(def.effect.as_ref(), Effect::Endure {
+        amount: QuantityExpr::Ref { qty: QuantityRef::Variable { name } }, subject: TargetFilter::SelfRef,
+    } if name == "X"));
+    assert_eq!(
+        def.cost,
+        Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X, ManaCostShard::Black],
+                        generic: 0
+                    }
+                },
+                AbilityCost::Tap,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    }
+                },
+            ]
+        })
+    );
+    assert_eq!(
+        def.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert!(!ability_has_unimplemented(def));
+    assert!(def.sub_ability.is_none());
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("krumar_initiate_ir", &ir);
+    insta::assert_json_snapshot!("krumar_initiate_lowered", &lowered);
 }

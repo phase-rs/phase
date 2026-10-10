@@ -169,7 +169,11 @@ fn resolve_effect_recipients(
     // `DealDamage { target: SelfRef }` sub-abilities don't inherit the parent's
     // targets via chain propagation (issue #323 class).
     if matches!(target_filter, TargetFilter::SelfRef) {
-        return vec![TargetRef::Object(ability.source_id)];
+        return ability
+            .self_ref_binding(state)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
     }
     // CR 615.5 + CR 120.1: the prevented event's damage source object (Comeuppance
     // reflecting to "that creature"). An OBJECT context ref — resolved here (not

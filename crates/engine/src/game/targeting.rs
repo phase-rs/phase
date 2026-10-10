@@ -393,10 +393,12 @@ fn find_legal_targets_with_context(
                         }
                     }
                 }
+                // CR 108.2 + CR 109.1: an exile-zone target is a card in
+                // exile; the CR 722.3c retained prepare copy is not one.
                 Zone::Exile => add_zone_targets(
                     state,
                     Zone::Exile,
-                    state.exile.iter().copied(),
+                    zone_card_ids(state, Zone::Exile),
                     filter,
                     target_ctx,
                     false,
@@ -851,6 +853,165 @@ pub fn resolve_event_context_targets(
             resolve_event_context_target_for_event_or_state(state, filter, source_id, Some(event))
         })
         .filter(|target| seen.insert(target.clone()))
+        .collect()
+}
+
+/// CR 400.7 + CR 608.2k: whether the live permanent `obj` is the very object the
+/// trigger `event` named, as opposed to a later incarnation that came back under
+/// the same `ObjectId` (a blink). An event that recorded the incarnation it
+/// concerns is the authority; an event that did not (legacy or non-object
+/// events) cannot discriminate and so names the live object.
+///
+/// - `PermanentTapped` records the incarnation that became tapped;
+///   `DamageDealt` the incarnation that dealt the damage; `AttackersDeclared`
+///   stamps each attacker's incarnation on its declaration record.
+/// - `ZoneChanged` into the battlefield records the entrant's incarnation; a
+///   `ZoneChanged` out of the battlefield (or to any other zone) names an object
+///   that no longer exists as such — any permanent now at that id is a new one.
+fn event_source_is_live_incarnation(
+    event: &GameEvent,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    match event {
+        GameEvent::PermanentTapped {
+            incarnation: Some(incarnation),
+            ..
+        }
+        | GameEvent::DamageDealt {
+            source_incarnation: Some(incarnation),
+            ..
+        } => obj.incarnation == *incarnation,
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => record
+            .entered_incarnation
+            .is_none_or(|incarnation| obj.incarnation == incarnation),
+        GameEvent::ZoneChanged { .. } => false,
+        // CR 508.1a: the attack declaration stamps each attacker's incarnation.
+        GameEvent::AttackersDeclared {
+            declaration_records,
+            ..
+        } => declaration_records
+            .iter()
+            .find(|record| record.object_id == obj.id)
+            .and_then(|record| record.incarnation)
+            .is_none_or(|incarnation| obj.incarnation == incarnation),
+        // Events that record no incarnation cannot discriminate.
+        _ => true,
+    }
+}
+
+/// CR 400.7 + CR 120.1: whether the live permanent `obj` is the very object a
+/// damage event dealt damage to (the recipient role, `EventTarget`), as opposed
+/// to a later incarnation at the same `ObjectId`. The event itself stamps only
+/// the dealer, so the recipient's own incarnation is read from the damage ledger
+/// entry for this very instance (`DamageRecord::target_incarnation`): the
+/// records matching the event's dealer incarnation, recipient, amount and
+/// combat-ness. When no record exists (legacy state, a synthetic event) or none
+/// stamped a recipient, identity cannot be established and the live object is
+/// accepted, exactly as for any event that records no incarnation. A recipient
+/// that left and returned matches no stamped record and is rejected.
+fn event_recipient_is_live_incarnation(
+    state: &GameState,
+    event: &GameEvent,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    let GameEvent::DamageDealt {
+        source_id,
+        target: TargetRef::Object(target_id),
+        amount,
+        is_combat,
+        source_incarnation,
+        ..
+    } = event
+    else {
+        return true;
+    };
+    if *target_id != obj.id {
+        return true;
+    }
+    let mut stamped = state
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|record| {
+            record.source_id == *source_id
+                && record.source_incarnation == *source_incarnation
+                && record.target == TargetRef::Object(*target_id)
+                && record.amount == *amount
+                && record.is_combat == *is_combat
+        })
+        .filter_map(|record| record.target_incarnation)
+        .peekable();
+    stamped.peek().is_none() || stamped.any(|incarnation| incarnation == obj.incarnation)
+}
+
+/// CR 608.2k + CR 400.7: the objects a pure event-context reference ("that
+/// creature", "it") names, resolved from the published trigger event(s) and
+/// kept only while each is still the incarnation the event recorded. A referent
+/// that left and returned before the trigger resolved is a new object with no
+/// relation to the one the event concerned (CR 400.7), so it is dropped.
+/// Callers that mutate the referent (rather than read its characteristics, which
+/// CR 608.2k lets follow the same object) use this instead of
+/// [`resolve_event_context_targets`].
+pub(crate) fn resolve_event_referent_objects(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    // The two roles of a trigger event are validated against their own recorded
+    // identity and never against each other's: `TriggeringSource` (the tapped /
+    // entered / damaging / attacking object) against the event's source stamp,
+    // `EventTarget` (the damaged object) against its own ledger stamp. Bound
+    // references (`SpecificObject`, `LastCreated`, ...) and every other
+    // pure-event filter keep the shared resolver unchanged.
+    let recipient = matches!(filter, TargetFilter::EventTarget);
+    if !recipient && !matches!(filter, TargetFilter::TriggeringSource) {
+        return resolve_event_context_targets(state, filter, source_id)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+    let batch: Vec<&GameEvent> = if state.current_trigger_events.is_empty() {
+        state.current_trigger_event.iter().collect()
+    } else {
+        state.current_trigger_events.iter().collect()
+    };
+    if batch.is_empty() {
+        return resolve_event_context_targets(state, filter, source_id)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+    let mut seen = HashSet::new();
+    batch
+        .into_iter()
+        .filter_map(|event| {
+            let TargetRef::Object(id) = resolve_event_context_target_for_event_or_state(
+                state,
+                filter,
+                source_id,
+                Some(event),
+            )?
+            else {
+                return None;
+            };
+            let live = state.objects.get(&id)?;
+            let is_live = if recipient {
+                event_recipient_is_live_incarnation(state, event, live)
+            } else {
+                event_source_is_live_incarnation(event, live)
+            };
+            is_live.then_some(id)
+        })
+        .filter(|id| seen.insert(*id))
         .collect()
 }
 
@@ -3373,6 +3534,40 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
+/// CR 108.2 + CR 109.1: Returns the ids of the CARDS in the given zone — the
+/// population that "cards in <zone>" queries, card choices and card moves
+/// range over. Card-level counterpart of [`zone_object_ids`], filtered through
+/// the single card-population authority
+/// [`GameObject::is_card_population_member`](crate::game::game_object::GameObject::is_card_population_member).
+///
+/// Only `Zone::Exile` is filtered: CR 722.3c keeps a prepared permanent's copy
+/// there as an exception to CR 704.5e, and that copy is not a card. Every
+/// other zone returns exactly `zone_object_ids`, including stack entries for
+/// activated and triggered abilities, which have no `state.objects` entry.
+///
+/// Object-level consumers — casting from exile, layers, trigger reconcile and
+/// the CR 800.4a leave-the-game sweep — keep using `zone_object_ids`.
+pub(crate) fn zone_card_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
+    let ids = zone_object_ids(state, zone);
+    match zone {
+        Zone::Exile => ids
+            .into_iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.is_card_population_member())
+            })
+            .collect(),
+        Zone::Library
+        | Zone::Hand
+        | Zone::Battlefield
+        | Zone::Graveyard
+        | Zone::Stack
+        | Zone::Command => ids,
+    }
+}
+
 /// Extract all explicit zone restrictions from a target filter, recursing through combinators.
 pub(crate) fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
@@ -3890,6 +4085,157 @@ mod tests {
 
     fn creature_filter() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature())
+    }
+
+    /// One real Instant card, one non-card copy of a card (the CR 722.3c
+    /// retained prepare copy's shape: `is_copy`, not a token, an Instant) and
+    /// one Instant token, all owned by P0 in exile; P0 also controls a
+    /// creature token on the battlefield. Returns `(state, card, copy, token,
+    /// battlefield_token)`.
+    fn exile_population_board() -> (GameState, ObjectId, ObjectId, ObjectId, ObjectId) {
+        fn exiled(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Exile,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            id
+        }
+        let mut state = GameState::new_two_player(42);
+        let card = exiled(&mut state, 10, "Exiled Instant");
+        let copy = exiled(&mut state, 11, "Retained Prepare Copy");
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+        let token = exiled(&mut state, 12, "Exiled Instant Token");
+        state.objects.get_mut(&token).unwrap().is_token = true;
+        let battlefield_token = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Battlefield Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battlefield_token).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+        (state, card, copy, token, battlefield_token)
+    }
+
+    fn sorted_ids(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: `zone_card_ids` is the card-level
+    /// listing — in exile it drops the non-card copy and the token — while
+    /// `zone_object_ids` stays object-level (casting, layers and the CR 800.4a
+    /// sweep read every object). Every other zone lists the same ids as
+    /// `zone_object_ids`, including a battlefield token (CR 111.1) and an
+    /// activated-ability stack entry, whose id has no `state.objects` entry.
+    #[test]
+    fn exile_card_population_zone_card_ids_vs_zone_object_ids() {
+        let (mut state, card, copy, token, battlefield_token) = exile_population_board();
+        for (card_num, zone) in [
+            (20, Zone::Graveyard),
+            (21, Zone::Hand),
+            (22, Zone::Library),
+            (23, Zone::Command),
+        ] {
+            create_object(
+                &mut state,
+                CardId(card_num),
+                PlayerId(0),
+                format!("{zone:?} Object"),
+                zone,
+            );
+        }
+        let ability_id = ObjectId(9_000);
+        state.stack.push_back(StackEntry {
+            id: ability_id,
+            source_id: battlefield_token,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: battlefield_token,
+                ability: Box::new(ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![],
+                    battlefield_token,
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert!(
+            !state.objects.contains_key(&ability_id),
+            "the ability entry has no object: the Stack equality is not vacuous"
+        );
+
+        // The object-level listing still sees every object in exile.
+        assert_eq!(
+            sorted_ids(zone_object_ids(&state, Zone::Exile)),
+            sorted_ids(vec![card, copy, token])
+        );
+        // The card-level listing sees only the card.
+        assert_eq!(zone_card_ids(&state, Zone::Exile), vec![card]);
+
+        for zone in [
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Graveyard,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Command,
+        ] {
+            let objects = zone_object_ids(&state, zone);
+            assert!(!objects.is_empty(), "{zone:?}: fixture populates the zone");
+            assert_eq!(zone_card_ids(&state, zone), objects, "{zone:?}");
+        }
+        assert_eq!(
+            zone_card_ids(&state, Zone::Battlefield),
+            vec![battlefield_token]
+        );
+        assert_eq!(zone_card_ids(&state, Zone::Stack), vec![ability_id]);
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: an exile-zone target ("target instant
+    /// card you own in exile") is a card; the non-card copy and the token are
+    /// not offered while the real card is. The battlefield search is untouched:
+    /// a battlefield token is a permanent (CR 110.1, CR 111.1) and is offered.
+    #[test]
+    fn exile_card_population_target_search_offers_only_cards() {
+        let (state, card, copy, token, battlefield_token) = exile_population_board();
+        let exile_filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone { zone: Zone::Exile },
+            ]));
+        let offered = find_legal_targets(&state, &exile_filter, PlayerId(0), battlefield_token);
+        assert_eq!(offered, vec![TargetRef::Object(card)]);
+        assert!(!offered.contains(&TargetRef::Object(copy)));
+        assert!(!offered.contains(&TargetRef::Object(token)));
+
+        let battlefield_filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]));
+        assert_eq!(
+            find_legal_targets(&state, &battlefield_filter, PlayerId(0), card),
+            vec![TargetRef::Object(battlefield_token)]
+        );
     }
 
     // CR 120.1 (#5615): Red Guardian, Super-Soldier — "destroy target creature an

@@ -53,7 +53,7 @@ pub fn resolve(
             additional_modifications: vec![],
         };
         let copy_ability =
-            ResolvedAbility::new(copy_effect, vec![], ability.source_id, ability.controller);
+            crate::game::effects::token_copy::own_source_copy_ability(copy_effect, ability);
         crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
 
         let token_ids = state.last_created_token_ids.clone();

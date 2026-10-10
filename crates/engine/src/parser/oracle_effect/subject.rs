@@ -4327,6 +4327,59 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
     }
 }
 
+/// CR 115.10a + CR 722.3a + CR 722.3b: the `(target, scope)` of "<subject>
+/// becomes (un)prepared", read from the shape of the already-parsed subject.
+///
+/// Like `BecomeSaddled`, the effect's `target` IS the selection slot, and a
+/// designation of one object is [`EffectScope::Single`]:
+/// - CR 115.1c/115.1d + CR 601.2c/602.2b: a DECLARED target ("target creature
+///   becomes prepared" — Skycoach Waypoint, Biblioplex Tomekeeper; "target
+///   creature that attacked this turn" — Hexhaven Dueling Arena) keeps its
+///   typed filter, so `build_target_slots` surfaces a slot chosen at
+///   announcement and the filter's restrictions are enforced.
+/// - A context-ref `target` keeps its own referent, because it already names
+///   an antecedent: `TriggeringSource` for "that creature" in a triggered
+///   ability (CR 608.2k: the object the trigger condition referred to, read
+///   from the trigger event at resolution), `ParentTarget` for "the other
+///   creature". Being context refs, neither builds a target slot (CR 115.10a).
+/// - `ParentTarget` is used only for an `inherits_parent` subject with no
+///   target of its own ("it becomes unprepared" after a prior instruction's
+///   object, CR 608.2c).
+/// - An untargeted subject that is a context reference (`SelfRef` for "this
+///   creature" — Stensian Sanguinist, `TriggeringSource`, `LastCreated`, ...)
+///   uses the subject's own `affected` filter and names one object.
+/// - An untargeted noun phrase that names an enumerable population ("each
+///   creature you control") is not a target (CR 115.10a), so the filter is
+///   kept and read at resolution under `All`.
+///
+/// The `All` reading is positive and fail-closed: it requires
+/// [`TargetFilter::names_enumerable_population`], because `Any` and a
+/// contentless `Typed` match every object and an `All` sweep over them would
+/// (un)prepare both players' battlefields. A subject that is neither a context
+/// reference nor an enumerable population keeps its filter under `Single`.
+pub(super) fn prepared_designation_subject(
+    application: &SubjectApplication,
+) -> (TargetFilter, EffectScope) {
+    match application.target.as_ref() {
+        // The subject carries its own referent: a declared selection slot (typed
+        // filter), or a context ref that already names an antecedent
+        // (`TriggeringSource` for "that creature" in a trigger, `ParentTarget`
+        // for "the other creature"). Keep it verbatim.
+        Some(target) => return (target.clone(), EffectScope::Single),
+        None if application.inherits_parent => {
+            return (TargetFilter::ParentTarget, EffectScope::Single);
+        }
+        None => {}
+    }
+    let affected = &application.affected;
+    let scope = if !affected.is_context_ref() && affected.names_enumerable_population() {
+        EffectScope::All
+    } else {
+        EffectScope::Single
+    };
+    (affected.clone(), scope)
+}
+
 /// CR 707.2 + CR 115.1 + CR 611.2c: map a parsed "<subject> become[s] a copy /
 /// copies of …" subject onto [`CopyRecipient`] — WHO becomes the copy.
 ///
@@ -5572,13 +5625,13 @@ fn build_become_clause(
         });
     }
 
-    // CR 702.xxx: Prepare (Strixhaven) — "becomes prepared" / "becomes
-    // unprepared" toggles the PreparedState on the target creature. Must
+    // CR 722.3a + CR 722.3b: Prepare — "becomes prepared" / "becomes
+    // unprepared" gives or removes the prepared designation. Must
     // intercept before parse_animation_spec which would try to classify
     // "prepared" / "unprepared" as a subtype. `all_consuming` enforces that
     // the matched tag covers the full `become_text` trailer; longer-match
     // alternative is listed first so "unprepared" doesn't get shadowed by
-    // "prepared". Assign when WotC publishes SOS CR update.
+    // "prepared".
     #[derive(Clone, Copy)]
     enum PreparedKind {
         Prepared,
@@ -5593,32 +5646,17 @@ fn build_become_clause(
     )))
     .parse(become_lower.as_str())
     {
-        // CR 722.3a + CR 722.3b: Resolve the prepare/unprepare target from the
-        // subject. Like `BecomeSaddled` below, the effect's `target` IS the
-        // selection slot:
-        // - CR 115.1c/115.1d + CR 601.2c/602.2b: a DECLARED target ("target
-        //   creature becomes prepared" — Skycoach Waypoint, Biblioplex
-        //   Tomekeeper; "target creature that attacked this turn" — Hexhaven
-        //   Dueling Arena) keeps its typed filter, so `build_target_slots`
-        //   surfaces a slot chosen at announcement and the filter's
-        //   restrictions are enforced.
-        // - A context-ref `target` (anaphor markers `ParentTarget` /
-        //   `TriggeringSource`) or an `inherits_parent` subject ("it becomes
-        //   unprepared") keeps the established `ParentTarget` binding.
-        // - A self-referential or untargeted subject ("this creature becomes
-        //   prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`)
-        //   uses the subject's own `affected` filter.
-        let target = match application.target.as_ref() {
-            Some(declared) if !declared.is_context_ref() => declared.clone(),
-            Some(_) => crate::types::ability::TargetFilter::ParentTarget,
-            None if application.inherits_parent => {
-                crate::types::ability::TargetFilter::ParentTarget
-            }
-            None => application.affected.clone(),
-        };
+        // CR 722.3a + CR 722.3b: Resolve the prepare/unprepare target and its
+        // scope from the subject (`prepared_designation_subject`). Like
+        // `BecomeSaddled` below, a declared target keeps its typed filter as
+        // the selection slot; an anaphor, self reference, or untargeted
+        // population keeps its own filter, and only an untargeted enumerable
+        // population ("each creature you control" — Codie, Ravenous Codex) is
+        // `All`.
+        let (target, scope) = prepared_designation_subject(&application);
         let effect = match kind {
-            PreparedKind::Prepared => Effect::BecomePrepared { target },
-            PreparedKind::Unprepared => Effect::BecomeUnprepared { target },
+            PreparedKind::Prepared => Effect::BecomePrepared { target, scope },
+            PreparedKind::Unprepared => Effect::BecomeUnprepared { target, scope },
         };
         return Some(super::parsed_clause(effect));
     }

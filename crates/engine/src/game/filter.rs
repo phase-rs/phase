@@ -329,6 +329,8 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // CR 700.2: modality reads the object's own printed characteristic, not
         // the board population.
         | FilterProp::Modal
+        // CR 722.3d: the prepare-spell marker is the candidate's own designation.
+        | FilterProp::PrepareSpell
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -780,6 +782,8 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
+        // CR 722.3d: zone plus the prepare-spell marker; neither is layer-writable.
+        | FilterProp::PrepareSpell
         | FilterProp::FaceDown
         | FilterProp::Transformed
         // CR 903.3: commander designation is set at deck construction.
@@ -1006,6 +1010,8 @@ fn entered_object_perturbs_filter_prop(
         // CR 700.2: modality is candidate-local (the object's own printed
         // characteristic), so a board entry cannot perturb it.
         | FilterProp::Modal
+        // CR 722.3d: the prepare-spell marker is candidate-local as well.
+        | FilterProp::PrepareSpell
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -1948,6 +1954,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
+        | FilterProp::PrepareSpell
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -2197,6 +2204,7 @@ fn filter_prop_contains_filter_prop(
             | FilterProp::MatchesLastChosenCardPredicate
             | FilterProp::HasSingleTarget
             | FilterProp::Modal
+            | FilterProp::PrepareSpell
             | FilterProp::NotColor { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Suspected
@@ -2707,6 +2715,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::PrepareSpell
         | FilterProp::Other { .. } => None,
     }
 }
@@ -3103,6 +3112,7 @@ fn rewrite_filter_prop(
         | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
+        | FilterProp::PrepareSpell
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -6978,6 +6988,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // SpellCastRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
         FilterProp::Modal => false,
+        // CR 722.3d: the record captured the spell's prepare-spell designation
+        // as it became cast (CR 601.2i), so the positive answer and its
+        // `FilterProp::Not` / `TargetFilter::Not` inversion are both exact.
+        FilterProp::PrepareSpell => record.prepared_copy_source.is_some(),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         // CR 607 (by analogy): the controller's per-player anchor label is a
         // live-game read, not a cast-time snapshot property — fail closed.
@@ -8620,6 +8634,15 @@ fn matches_filter_prop(
         // from the static printed characteristic populated at object creation,
         // available at SpellCast-trigger match time (Riku, of Many Paths).
         FilterProp::Modal => obj.modal.is_some(),
+        // CR 722.3c + CR 722.3d: a spell cast as a prepare spell, or a copy of
+        // one, carries the `prepared_copy_source` marker on the stack. The zone
+        // conjunct is load-bearing: the linked copy waiting in exile carries the
+        // same marker and is not a spell (CR 112.1; a copy of a spell is a spell
+        // only on the stack, CR 112.1a). The CR 722.3a permanent designation
+        // (`obj.prepared`) is deliberately not read. Cast-history and live
+        // cast-candidate filters read the same marker from the record captured by
+        // `restrictions::spell_cast_record_for` (`spell_record_matches_property`).
+        FilterProp::PrepareSpell => obj.zone == Zone::Stack && obj.prepared_copy_source.is_some(),
         // CR 115.9c: Stack entry's targets all match the inner filter — permissive at
         // per-object level, validated by trigger matchers and retarget effects against the
         // stack entry's actual targets.
@@ -9187,6 +9210,16 @@ fn zone_change_record_matches_property(
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
+        // CR 722.3d: ZoneChangeRecord carries no prepare marker, so this arm fails
+        // closed. Producer boundary: `FilterProp::PrepareSpell` is produced only by
+        // `parse_spell_designation_adjective`, which is private to
+        // `oracle_trigger.rs` and called only while building `TriggerMode::SpellCast`
+        // `valid_card` filters; those filters are evaluated against the live stack
+        // object (the live matcher), never against a ZoneChangeRecord. `Not` /
+        // `AnyOf` over this prop on a zone-change record is therefore unreachable
+        // from parsed text; a producer that reaches it must capture the marker on
+        // ZoneChangeRecord first.
+        | FilterProp::PrepareSpell
         | FilterProp::Renowned
         // CR 701.15b/c: goad is not snapshotted onto the zone-change record
         // (unlike Suspected's `record.is_suspected`). Fail closed.
@@ -12059,6 +12092,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -12175,6 +12209,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -12259,6 +12294,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -18092,6 +18128,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }
         };
 
@@ -18645,6 +18682,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");
@@ -19767,6 +19805,119 @@ mod tests {
             "the copied green face must NOT leak into entry matching (CR 708.10)"
         );
     }
+
+    fn prepare_spell_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::PrepareSpell]))
+    }
+
+    fn add_object_in(state: &mut GameState, name: &str, zone: Zone) -> ObjectId {
+        create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            zone,
+        )
+    }
+
+    /// CR 722.3c + CR 722.3d: `PrepareSpell` matches only a Stack-zone object
+    /// carrying the prepare-spell marker. Each negative is paired with the
+    /// positive asserted first in the same test.
+    #[test]
+    fn prepared_spell_prop_matches_only_marked_stack_object() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Codie");
+        let filter = prepare_spell_filter();
+
+        let prepared_spell = add_object_in(&mut state, "Prepared Spell", Zone::Stack);
+        state
+            .objects
+            .get_mut(&prepared_spell)
+            .unwrap()
+            .prepared_copy_source = Some(ObjectId(900));
+        assert!(
+            matches_target_filter(&state, prepared_spell, &filter, source),
+            "a marked stack spell is a spell cast as a prepare spell"
+        );
+
+        // CR 722.3c: the linked copy waiting in exile carries the marker but is
+        // not a spell (CR 112.1).
+        let exile_copy = add_object_in(&mut state, "Linked Exile Copy", Zone::Exile);
+        {
+            let obj = state.objects.get_mut(&exile_copy).unwrap();
+            obj.prepared_copy_source = Some(ObjectId(900));
+            obj.is_copy = true;
+        }
+        assert!(!matches_target_filter(&state, exile_copy, &filter, source));
+
+        let plain_spell = add_object_in(&mut state, "Plain Spell", Zone::Stack);
+        assert!(!matches_target_filter(&state, plain_spell, &filter, source));
+
+        // CR 722.3a: the permanent designation is not the spell-side reading.
+        let prepared_permanent = add_creature(&mut state, PlayerId(0), "Prepared Permanent");
+        state.objects.get_mut(&prepared_permanent).unwrap().prepared =
+            Some(crate::game::game_object::PreparedState);
+        assert!(!matches_target_filter(
+            &state,
+            prepared_permanent,
+            &filter,
+            source
+        ));
+
+        let marked_permanent = add_creature(&mut state, PlayerId(0), "Marked Permanent");
+        state
+            .objects
+            .get_mut(&marked_permanent)
+            .unwrap()
+            .prepared_copy_source = Some(ObjectId(900));
+        assert!(
+            !matches_target_filter(&state, marked_permanent, &filter, source),
+            "the zone gate rejects a marked battlefield object"
+        );
+    }
+
+    /// `Not { PrepareSpell }` is the exact complement on stack spells.
+    #[test]
+    fn prepared_spell_prop_negation_is_exact_complement() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Codie");
+        let not_prepared = TargetFilter::Not {
+            filter: Box::new(prepare_spell_filter()),
+        };
+
+        let prepared_spell = add_object_in(&mut state, "Prepared Spell", Zone::Stack);
+        state
+            .objects
+            .get_mut(&prepared_spell)
+            .unwrap()
+            .prepared_copy_source = Some(ObjectId(900));
+        let plain_spell = add_object_in(&mut state, "Plain Spell", Zone::Stack);
+
+        assert!(matches_target_filter(
+            &state,
+            prepared_spell,
+            &prepare_spell_filter(),
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            prepared_spell,
+            &not_prepared,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            plain_spell,
+            &prepare_spell_filter(),
+            source
+        ));
+        assert!(matches_target_filter(
+            &state,
+            plain_spell,
+            &not_prepared,
+            source
+        ));
+    }
 }
 
 /// Building-block coverage for the characteristic-dependence classifier
@@ -19865,6 +20016,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::MatchesLastChosenCardPredicate
             | FilterProp::HasSingleTarget
             | FilterProp::Modal
+            | FilterProp::PrepareSpell
             | FilterProp::NotColor { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Suspected

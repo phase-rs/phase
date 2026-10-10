@@ -57,11 +57,17 @@ pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &Ga
 /// (CR 707.10f makes a permanent copy a token there) and may change zones freely
 /// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
 /// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
+/// CR 722.3c: except the linked prepare-spell copy in exile, which remains for as
+/// long as its prepared permanent remains on the battlefield and has the prepared
+/// designation ("This is an exception to rule 704.5e").
 pub(super) fn copy_of_card_outside_battlefield_and_stack(
     state: &GameState,
     obj: &GameObject,
 ) -> bool {
-    obj.is_copy && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
+    obj.is_copy
+        && obj.zone != Zone::Battlefield
+        && !object_has_stack_residency(state, obj)
+        && !crate::game::effects::prepare::is_retained_linked_prepared_copy(state, obj)
 }
 
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
@@ -288,6 +294,11 @@ pub(crate) fn apply_zone_exit_cleanup(
                 .insert(incarnation, lki);
         }
         if let Some(values) = lki_copiable_values {
+            state
+                .lki_copiable_values_by_incarnation
+                .entry(object_id)
+                .or_default()
+                .insert(occurrence.incarnation, values.clone());
             state.lki_copiable_values.insert(object_id, values);
         }
     }
@@ -822,6 +833,11 @@ pub(crate) fn record_resolution_source_relatch(
     // A faithful READ of the resolving ability's captured source identity. The
     // clone is disconnected from the local resolving borrow, so it cannot be the
     // carrier — the record on `state` is (consumed inside `source_is_current`).
+    // A triggered ability's stamp is its trigger provenance; any other stack
+    // ability's is the `source_incarnation` captured when it was put on the
+    // stack. CR 400.7j: an activated ability that moves its own source (Unearth,
+    // "return this card from your graveyard to the battlefield. It gains haste")
+    // can still find the moved object for the rest of its effect.
     let Some((source_id, Some(captured), successor_start)) = state
         .resolving_stack_entry
         .as_ref()

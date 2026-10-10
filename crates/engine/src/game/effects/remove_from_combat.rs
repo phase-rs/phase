@@ -19,9 +19,7 @@ pub fn resolve(
     let targets: Vec<_> = match &ability.effect {
         Effect::RemoveFromCombat {
             target: TargetFilter::SelfRef,
-        } => {
-            vec![ability.source_id]
-        }
+        } => ability.self_ref_binding(state).into_iter().collect(),
         // CR 400.7 + CR 603.7c: a delayed combat-removal whose pinned referent
         // became a new object removes nothing. This read is RAW — the file
         // makes no `resolved_targets` call, so the targeting chokepoint never
@@ -84,7 +82,7 @@ pub fn resolve(
     // If no explicit targets, apply to source (e.g., "remove it from combat"
     // where "it" refers to the ability source).
     let targets = if targets.is_empty() {
-        vec![ability.source_id]
+        ability.self_ref_binding(state).into_iter().collect()
     } else {
         targets
     };

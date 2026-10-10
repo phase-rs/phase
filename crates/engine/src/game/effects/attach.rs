@@ -1626,9 +1626,10 @@ fn resolve_object_filter<'a>(
             Some(source) if source.identity.reference.object_id != ability.source_id => {
                 Some(ability.source_id)
             }
-            _ => ability
+            Some(_) => ability
                 .source_is_current(state)
                 .then_some(ability.source_id),
+            None => ability.self_ref_binding(state),
         },
         TargetFilter::LastCreated => target_slots
             .find_map(|target| match target {

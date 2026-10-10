@@ -1396,12 +1396,22 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::SolveCase => Axes::NONE,
-        Effect::BecomePrepared { target } => {
+        Effect::BecomePrepared {
+            target,
+            // A static single-vs-mass discriminant (CR 115.10a) — no event,
+            // sibling, or projected-resource axis; the filter it selects between
+            // is classified by `effect_target_ctx`.
+            scope: _,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::BecomeUnprepared { target } => {
+        Effect::BecomeUnprepared {
+            target,
+            // Same static discriminant as `BecomePrepared` above.
+            scope: _,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -4500,6 +4510,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
+        | FilterProp::PrepareSpell
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -6148,14 +6159,24 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         // CR 701.60a: Suspect/Unsuspect scope:All is a mass-population battlefield
-        // read (`target_filter()`==None; `suspect.rs` enumerates `state.battlefield`,
-        // "like DestroyAll") ⇒ census — its read SCALES with the growing class. scope:Single
+        // read (`target_filter()`==None; `suspect.rs` enumerates the phased-in battlefield
+        // through `resolved_battlefield_population_ids`, "like DestroyAll") ⇒ census — its
+        // read SCALES with the growing class. scope:Single
         // is a single announced target (a2), relaxed in the single-object group below. The
         // two scopes are exhaustive for Suspect/Unsuspect (EffectScope = {Single, All}).
         // Fail-CLOSED: over-vetoes the Absolving Lammasu mass-unsuspect shortcut OFFER
         // (missed offer, never a false certificate).
         | Effect::Suspect { scope: EffectScope::All, .. }
         | Effect::Unsuspect { scope: EffectScope::All, .. }
+        // CR 722.3a/b + CR 115.10a: BecomePrepared/BecomeUnprepared scope:All ("each
+        // creature you control becomes prepared", Codie) is a mass-population battlefield
+        // read (`target_filter()`==None; `prepare.rs` enumerates the phased-in battlefield
+        // through `resolved_battlefield_population_ids`) ⇒ census. NOT the state-convergent
+        // SetTapState exception below: each newly prepared permanent also creates a linked
+        // exile copy, a NEW object (CR 722.3c). scope:Single relaxes in the single-object
+        // group below. Exhaustive over EffectScope = {Single, All}.
+        | Effect::BecomePrepared { scope: EffectScope::All, .. }
+        | Effect::BecomeUnprepared { scope: EffectScope::All, .. }
         // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans", scope:All)
         // is a non-targeting battlefield-population read (`target_filter()`==None;
         // `transform_effect::resolve_all` enumerates `state.battlefield`, like
@@ -6349,8 +6370,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ForceBlock { .. }
         | Effect::ForceAttack { .. }
         | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
+        // CR 722.3a/b: only the scope:Single prepare/unprepare relaxes — a single
+        // announced, anaphoric or self target. scope:All is census-tagged above.
+        | Effect::BecomePrepared { scope: EffectScope::Single, .. }
+        | Effect::BecomeUnprepared { scope: EffectScope::Single, .. }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
@@ -6544,6 +6567,17 @@ fn effect_census_role(e: &Effect) -> CensusRole {
             ..
         }
         | Effect::Unsuspect {
+            scope: EffectScope::All,
+            ..
+        }
+        // CR 722.3a/b + CR 115.10a: mass prepare/unprepare (scope:All) enumerates the
+        // battlefield population and creates linked exile copies (CR 722.3c) — a true
+        // census, parity with the effect_target_ctx LiveBoardCensus member.
+        | Effect::BecomePrepared {
+            scope: EffectScope::All,
+            ..
+        }
+        | Effect::BecomeUnprepared {
             scope: EffectScope::All,
             ..
         }
@@ -6742,8 +6776,16 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ForceBlock { .. }
         | Effect::ForceAttack { .. }
         | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
+        // CR 722.3a/b: scope:Single prepare/unprepare reads only its single
+        // announced, anaphoric or self target. scope:All is census-tagged above.
+        | Effect::BecomePrepared {
+            scope: EffectScope::Single,
+            ..
+        }
+        | Effect::BecomeUnprepared {
+            scope: EffectScope::Single,
+            ..
+        }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
@@ -8453,8 +8495,16 @@ mod tests {
             "GoadAll",
             "PumpAll",
             "PutCounterAll",
+            // CR 722.3a/b + CR 115.10a: BecomePrepared/BecomeUnprepared scope:All ("each
+            // creature you control becomes prepared") enumerate the battlefield population
+            // (`prepare.rs` via `resolved_battlefield_population_ids`). Scope-gated on
+            // `EffectScope::All` in the census `|`-chain; the scope:Single arms sit past the
+            // census terminator in the relax group and are NOT scanned here.
+            "BecomePrepared",
+            "BecomeUnprepared",
             // Suspect/Unsuspect scope:All are mass-population battlefield reads
-            // (`suspect.rs` enumerates `state.battlefield`, `target_filter()`==None).
+            // (`suspect.rs` enumerates the phased-in battlefield through
+            // `resolved_battlefield_population_ids`, `target_filter()`==None).
             // Their `Effect::` name appears in the census `|`-chain scope-gated on
             // `EffectScope::All`; the scope:Single arms live in the relax group below and
             // are NOT scanned here (they sit past the census terminator).
@@ -8485,7 +8535,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 32, "exactly 32 mass-population census tags");
+        assert_eq!(got.len(), 34, "exactly 34 mass-population census tags");
     }
 
     /// With `SnapshotOrEvent` the DEFAULT, the obligation-(ii)-PROVEN census-role
@@ -8543,8 +8593,8 @@ mod tests {
 
     /// CR 701.60a: Suspect/Unsuspect census classification is SCOPE-SENSITIVE,
     /// mirroring `target_filter()` (Some for scope:Single, None for scope:All).
-    /// scope:All is a mass battlefield population read (`suspect.rs` enumerates
-    /// `state.battlefield`) => `LiveBoardCensus`; scope:Single is a single announced
+    /// scope:All is a mass battlefield population read (`suspect.rs` enumerates the
+    /// phased-in battlefield) => `LiveBoardCensus`; scope:Single is a single announced
     /// target => `SnapshotOrEvent`. DISCRIMINATING: reverting the scope:All arm back
     /// into the relax group flips the `LiveBoardCensus` assertions to `SnapshotOrEvent`
     /// (a false-certificate relax), turning this RED.
@@ -8585,6 +8635,55 @@ mod tests {
                 effect_target_ctx(&single, LoopFirewall),
                 FilterReadContext::SnapshotOrEvent,
                 "scope:Single is a single announced target => relax"
+            );
+        }
+    }
+
+    /// CR 722.3a/b + CR 115.10a: BecomePrepared/BecomeUnprepared census
+    /// classification is SCOPE-SENSITIVE, mirroring `target_filter()` (Some for
+    /// scope:Single, None for scope:All). scope:All ("each creature you control
+    /// becomes prepared") is a mass battlefield population read that also creates a
+    /// linked exile copy per newly prepared permanent (CR 722.3c) => `LiveBoardCensus`;
+    /// scope:Single is a single announced, anaphoric or self target =>
+    /// `SnapshotOrEvent`. DISCRIMINATING: moving the scope:All arm back into the relax
+    /// group flips the `LiveBoardCensus` assertions, turning this RED.
+    #[test]
+    fn become_prepared_unprepared_census_is_scope_sensitive() {
+        use crate::types::ability::EffectScope;
+        use ScanMode::LoopFirewall;
+        let f = || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let cases = [
+            (
+                Effect::BecomePrepared {
+                    target: f(),
+                    scope: EffectScope::All,
+                },
+                Effect::BecomePrepared {
+                    target: f(),
+                    scope: EffectScope::Single,
+                },
+            ),
+            (
+                Effect::BecomeUnprepared {
+                    target: f(),
+                    scope: EffectScope::All,
+                },
+                Effect::BecomeUnprepared {
+                    target: f(),
+                    scope: EffectScope::Single,
+                },
+            ),
+        ];
+        for (all, single) in cases {
+            assert_eq!(
+                effect_target_ctx(&all, LoopFirewall),
+                FilterReadContext::LiveBoardCensus,
+                "scope:All is a mass battlefield read => census (fail-closed): {all:?}"
+            );
+            assert_eq!(
+                effect_target_ctx(&single, LoopFirewall),
+                FilterReadContext::SnapshotOrEvent,
+                "scope:Single is a single announced target => relax: {single:?}"
             );
         }
     }
@@ -8632,7 +8731,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 32, "exactly 32 census members");
+        assert_eq!(ecr_census.len(), 34, "exactly 34 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -8674,6 +8773,36 @@ mod tests {
         );
         census(
             &Effect::Unsuspect {
+                target: f(),
+                scope: EffectScope::Single,
+            },
+            false,
+        );
+        // CR 722.3a/b + CR 115.10a: mass prepare/unprepare census in BOTH oracles;
+        // the single scope relaxes in both.
+        census(
+            &Effect::BecomePrepared {
+                target: f(),
+                scope: EffectScope::All,
+            },
+            true,
+        );
+        census(
+            &Effect::BecomeUnprepared {
+                target: f(),
+                scope: EffectScope::All,
+            },
+            true,
+        );
+        census(
+            &Effect::BecomePrepared {
+                target: f(),
+                scope: EffectScope::Single,
+            },
+            false,
+        );
+        census(
+            &Effect::BecomeUnprepared {
                 target: f(),
                 scope: EffectScope::Single,
             },
@@ -8920,8 +9049,10 @@ mod tests {
                 "mod.rs",
                 true,
                 "shared-helper HOME: defines resolved_battlefield_object_ids (prefer \
-                 explicit chosen targets, else battlefield mass scan); consumers \
-                 turn_face_up/down census",
+                 explicit chosen targets, else battlefield mass scan; consumers \
+                 turn_face_up/down census) and resolved_battlefield_population_ids \
+                 (untargeted population scan; consumers the EffectScope::All arms of \
+                 suspect.rs and prepare.rs, census via their scope-gated tags)",
             ),
             (
                 "phase_out.rs",
@@ -8971,11 +9102,6 @@ mod tests {
                 false,
                 "zone-disjoint: mass ApplyPerpetual path only over non-battlefield/hand \
                  zones (CR 601.2f); battlefield path is source/ParentTarget-bounded",
-            ),
-            (
-                "search_outside_game.rs",
-                false,
-                "zone-disjoint: outside-the-game pool, not the battlefield growth class",
             ),
             (
                 "token_copy.rs",

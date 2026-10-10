@@ -117,8 +117,12 @@ pub fn resolve(
                 target_filter,
                 TargetFilter::None | TargetFilter::ParentTarget
             ));
+    // `resolved_targets` already returns EMPTY for a stale non-triggered
+    // `SelfRef` (`ResolvedAbility::self_ref_is_current`); the `[source]` shape is
+    // the triggered and `None`/`ParentTarget` fallbacks.
     if resolves_to_source
-        && effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)]
+        && (effective_targets.is_empty()
+            || effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)])
         && !source_is_current
     {
         events.push(GameEvent::EffectResolved {

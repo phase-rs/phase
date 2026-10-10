@@ -48,6 +48,7 @@ fn spell_record(name: &str) -> SpellCastRecord {
         cast_variant: engine::types::game_state::CastingVariant::Normal,
         was_kicked: false,
         spell_object_id: None,
+        prepared_copy_source: None,
     }
 }
 

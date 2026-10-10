@@ -33,7 +33,7 @@ use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::filter::FilterContext;
-use crate::game::game_object::DisplaySource;
+use crate::game::game_object::{BackFaceData, DisplaySource};
 use crate::types::events::{ClashResult, PlayerActionKind};
 
 // ---------------------------------------------------------------------------
@@ -6921,6 +6921,14 @@ pub enum FilterProp {
     /// stack object's static printed modality (`obj.modal.is_some()`), a printed
     /// characteristic present from object creation.
     Modal,
+    /// CR 722.3d + CR 722.2a: Matches a spell cast as a prepare spell (the
+    /// prepare-spell copy cast from exile under CR 722.3c) and any copy of it
+    /// (CR 722.3d). Live stack-object read: the `prepared_copy_source` marker on
+    /// a Stack-zone object, which survives the exile-to-stack cast and is
+    /// inherited by spell copies. This is the spell-side reading only: it is not
+    /// the CR 722.3a permanent designation, so a prepared permanent on the
+    /// battlefield never matches.
+    PrepareSpell,
     /// CR 105.2: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
@@ -18897,22 +18905,35 @@ pub enum Effect {
     },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
-    /// CR 702.xxx: Prepare (Strixhaven) — mark the target creature as prepared.
-    /// The target must be a creature with a prepare face (CardLayout::Prepare);
-    /// on targets without a prepare face (e.g. Biblioplex Tomekeeper's Oracle
-    /// "Target creature becomes prepared. (Only creatures with prepare spells
-    /// can become prepared.)") the resolver is a no-op. Idempotent: if already
-    /// prepared, no event fires. Assign when WotC publishes SOS CR update.
+    /// CR 722.3a: Prepare — give a permanent the prepared designation. A
+    /// permanent can't gain the designation unless it has a prepare spell
+    /// (CardLayout::Prepare), so on one without a prepare face (e.g.
+    /// Biblioplex Tomekeeper's Oracle "Target creature becomes prepared. (Only
+    /// creatures with prepare spells can become prepared.)") the resolver is a
+    /// no-op. Idempotent: if already prepared, no event fires.
+    ///
+    /// `scope` is the single-vs-mass axis, exactly as on [`Effect::Suspect`]:
+    /// `EffectScope::Single` (the default) is an anaphor/self-reference
+    /// (`SelfRef`, `LastCreated`, `ParentTarget`, any context ref) or a
+    /// declared target ("Target creature becomes prepared"), which keeps its
+    /// typed filter so a target slot is chosen at announcement;
+    /// `EffectScope::All` is an untargeted filter that names an enumerable
+    /// population ("Each creature you control becomes prepared"), enumerated
+    /// over the battlefield at resolution (CR 115.10a: it is not a target).
     BecomePrepared {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
-    /// CR 702.xxx: Prepare (Strixhaven) — clear the prepared state on the
-    /// target creature. Idempotent: if not prepared, no event fires. Assign
-    /// when WotC publishes SOS CR update.
+    /// CR 722.3b: Prepare — remove the prepared designation from a permanent.
+    /// Idempotent: if not prepared, no event fires. `scope` mirrors
+    /// [`Effect::BecomePrepared`].
     BecomeUnprepared {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
     /// CR 702.171b: the target permanent becomes saddled until end of turn.
     /// Distinct from the Saddle keyword's activated ability (CR 702.171a,
@@ -22312,8 +22333,6 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
-            | Effect::BecomePrepared { target, .. }
-            | Effect::BecomeUnprepared { target, .. }
             | Effect::BecomeSaddled { target, .. }
             | Effect::CastFromZone { target, .. }
             | Effect::Exploit { target, .. }
@@ -22593,6 +22612,27 @@ impl Effect {
                 ..
             }
             | Effect::Unsuspect {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 722.3a/b + CR 115.10a: `BecomePrepared`/`BecomeUnprepared`
+            // expose a target slot only for the single scope. The `All` scope
+            // ("Each creature you control becomes prepared") names no target, so
+            // its population filter is read at resolution and builds no slot.
+            Effect::BecomePrepared {
+                scope: EffectScope::Single,
+                target,
+            }
+            | Effect::BecomeUnprepared {
+                scope: EffectScope::Single,
+                target,
+            } => Some(target),
+            Effect::BecomePrepared {
+                scope: EffectScope::All,
+                ..
+            }
+            | Effect::BecomeUnprepared {
                 scope: EffectScope::All,
                 ..
             } => None,
@@ -25411,9 +25451,9 @@ pub enum EffectKind {
     ForceBlock,
     ForceAttack,
     SolveCase,
-    /// CR 702.xxx: Prepare (Strixhaven) — mark target creature as prepared.
+    /// CR 722.3a: Prepare — give a permanent the prepared designation.
     BecomePrepared,
-    /// CR 702.xxx: Prepare (Strixhaven) — clear prepared state on target.
+    /// CR 722.3b: Prepare — remove the prepared designation from a permanent.
     BecomeUnprepared,
     /// CR 702.171b: mark the target permanent as saddled until end of turn.
     BecomeSaddled,
@@ -32575,6 +32615,15 @@ pub struct CopiableValues {
     /// serialized snapshots, via the serde default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_halves: Option<RoomCopiableHalves>,
+    /// CR 722.2a + CR 722.2b: the copied object's prepare spell — "the
+    /// existence and values of these alternative characteristics are part of
+    /// the object's copiable values". Present iff the copied object has a
+    /// prepare spell (its stored face has `LayoutKind::Prepare`); never a
+    /// Transform/Modal back face, because a copy of a double-faced permanent
+    /// takes only the face currently up (CR 707.8). `None` for every other
+    /// source (and in pre-existing serialized snapshots, via the serde default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_face: Option<Arc<BackFaceData>>,
     /// CR 707.9b: where `name` came from — a folded copy-effect name
     /// EXCEPTION ("except its name is X") stays the copy's final name: a
     /// later copy of this copy keeps X (CR 707.3), and the Room door gate
@@ -35239,6 +35288,36 @@ impl ResolvedAbility {
         )
     }
 
+    /// CR 400.7 + CR 608.2c: The object an untargeted self-reference ("~", "this
+    /// creature", or an implicit source subject) binds to at resolution, or
+    /// `None` when there is none. The single authority for effect resolvers
+    /// that bind `SelfRef` (or an implicit-source filter) without going through
+    /// `targeting::resolved_object_ids_for_filter`.
+    ///
+    /// A non-triggered ability follows `self_ref_is_current`: a source that
+    /// left and returned before resolution is a new object, so the instruction
+    /// has no referent (Carrion Feeder sacrificed to its own ability and
+    /// returned by Supernatural Stamina; a creature blinked in response to its
+    /// own activation). A self-move made by the ability's own resolution stays
+    /// bound through `resolution_source_relatch`. A cost that moves the source
+    /// (Suspend, Plot) is paid before the incarnation is captured, which is CR
+    /// 400.7j: the ability's effects can find an object its own cost moved to a
+    /// public zone — and only that object, not what it becomes after moving
+    /// again (Carrion Feeder's graveyard card, once Supernatural Stamina
+    /// returns it to the battlefield).
+    ///
+    /// A triggered source keeps the raw source binding here. Its provenance
+    /// rules live in `self_ref_is_current`, and they do not yet follow every
+    /// self-move a trigger makes during its own resolution: Bogardan Phoenix's
+    /// dies trigger returns the card from the graveyard and then puts the death
+    /// counter "on it", which these resolvers must keep reaching.
+    pub fn self_ref_binding(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectId> {
+        (self.trigger_source.is_some() || self.self_ref_is_current(state)).then_some(self.source_id)
+    }
+
     /// Returns whether a self-reference can resolve to the source's current
     /// object. A normal triggered source must still be its exact captured
     /// incarnation. The one exception is the immediate successor of the
@@ -35266,8 +35345,13 @@ impl ResolvedAbility {
             }
             return true;
         }
+        // CR 400.7: without trigger provenance the captured `source_incarnation`
+        // is the whole identity, and `source_is_current` already said it is
+        // stale (the relatch for a self-move during this resolution is read
+        // there). The source left and returned — or never came back — so "~"
+        // names an object that no longer exists.
         let Some(_source) = self.trigger_source.as_ref() else {
-            return true;
+            return false;
         };
         self.self_ref_own_departure_successor(state)
             || self.self_ref_post_sba_graveyard_return(state)

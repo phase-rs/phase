@@ -125,6 +125,30 @@ pub struct CompletionWalkWork {
     pub per_op: [u32; crate::game::ability_utils::WalkOp::COUNT],
 }
 
+/// Test-only work counter for the CR 610.3b latch pass in
+/// `engine::check_exile_returns`. Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets above: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExileReturnLatchCounters {
+    /// Searches of the pass's event buffer for a holder's trigger event.
+    pub trigger_origin_lookups: u64,
+}
+
+/// Test-only counters for the stack's bulk token executor
+/// (`stack::resolve_bulk_token_run`) and the post-action pipeline it elides.
+/// Kept out of [`PerfCounterSnapshot`] for the same reason as the counter sets
+/// above: that struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackBulkCounters {
+    /// Stack entries consumed by a committed bulk token run.
+    pub bulk_entries: u64,
+    /// Entries into `engine_priority::run_post_action_pipeline_from_with_policy`.
+    pub post_action_pipeline_passes: u64,
+}
+
 /// Test-only counters for the CR 508.1d attack-declaration solver
 /// (`combat::selectable_targets_by_attacker` and the strict validator it
 /// drives). Kept out of [`PerfCounterSnapshot`] for the same reason the two
@@ -266,6 +290,19 @@ thread_local! {
     static COMPLETION_WALK_WORK: Cell<CompletionWalkWork> = const {
         Cell::new(CompletionWalkWork {
             per_op: [0; crate::game::ability_utils::WalkOp::COUNT],
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static EXILE_RETURN_LATCH_COUNTERS: Cell<ExileReturnLatchCounters> = const {
+        Cell::new(ExileReturnLatchCounters {
+            trigger_origin_lookups: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static STACK_BULK_COUNTERS: Cell<StackBulkCounters> = const {
+        Cell::new(StackBulkCounters {
+            bulk_entries: 0,
+            post_action_pipeline_passes: 0,
         })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
@@ -726,6 +763,21 @@ pub fn completion_walk_work_snapshot() -> CompletionWalkWork {
     COMPLETION_WALK_WORK.with(Cell::get)
 }
 
+/// CR 610.3b: one search of the latch pass's event buffer for a holder's trigger event.
+#[cfg(feature = "test-support")]
+pub fn record_exile_return_trigger_origin_lookup() {
+    EXILE_RETURN_LATCH_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.trigger_origin_lookups += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn exile_return_latch_snapshot() -> ExileReturnLatchCounters {
+    EXILE_RETURN_LATCH_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
@@ -747,4 +799,33 @@ pub fn reset() {
         .with(|counters| counters.set(ActivationCostRouteCounters::default()));
     #[cfg(feature = "test-support")]
     COMPLETION_WALK_WORK.with(|counters| counters.set(CompletionWalkWork::default()));
+    #[cfg(feature = "test-support")]
+    EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
+    #[cfg(feature = "test-support")]
+    STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
+}
+
+/// One committed bulk token run resolved `n` stack entries.
+#[cfg(feature = "test-support")]
+pub fn record_stack_bulk_entries(n: u32) {
+    STACK_BULK_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.bulk_entries += u64::from(n);
+        cell.set(c);
+    });
+}
+
+/// One post-action pipeline pass (one priority checkpoint).
+#[cfg(feature = "test-support")]
+pub fn record_post_action_pipeline_pass() {
+    STACK_BULK_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.post_action_pipeline_passes += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn stack_bulk_snapshot() -> StackBulkCounters {
+    STACK_BULK_COUNTERS.with(Cell::get)
 }

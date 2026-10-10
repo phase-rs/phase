@@ -1667,9 +1667,16 @@ fn ready_two_seat_state() -> GameState {
 }
 
 fn restored_session_state(max_resolutions: u32) -> GameState {
+    restored_session_state_with_top_controller(max_resolutions, P1)
+}
+
+fn restored_session_state_with_top_controller(
+    max_resolutions: u32,
+    top_controller: PlayerId,
+) -> GameState {
     let mut state = GameState::new_two_player(0xA11CE);
     state.stack.push_back(no_op_entry(1, P0));
-    state.stack.push_back(no_op_entry(2, P1));
+    state.stack.push_back(no_op_entry(2, top_controller));
     let baseline: BTreeMap<_, _> = BTreeSet::from([P0])
         .into_iter()
         .map(|player| {
@@ -1783,7 +1790,9 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
 
 #[test]
 fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
-    let mut state = restored_session_state(1);
+    // P0's own top: P1 has no standing pass over it
+    // (`priority::standing_priority_pass`), so its window needs a decision.
+    let mut state = restored_session_state_with_top_controller(1, P0);
     {
         let session = state
             .stack_resolution_session

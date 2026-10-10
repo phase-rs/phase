@@ -1,6 +1,8 @@
 use crate::game::engine::EngineError;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
+use crate::types::game_state::{
+    AutoPassMode, GameState, PriorityPassingMode, StackEntry, WaitingFor,
+};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
@@ -315,6 +317,53 @@ pub fn pass_priority_structurally_legal(state: &GameState, player: PlayerId) -> 
         return false;
     }
     pass_priority_legality(state, player).is_ok()
+}
+
+/// CR 117.1 + CR 723.5: whether `player` has set Full Control, a standing
+/// refusal to have any priority window passed for them. Preference ownership
+/// follows the authorized submitter, as it does in `auto_pass_recommended`, so
+/// a controlled seat answers with its controller's preference.
+pub(crate) fn holds_full_control(state: &GameState, player: PlayerId) -> bool {
+    state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
+        == PriorityPassingMode::FullControl
+}
+
+/// The Standard ladder's standing answer for `player`'s priority window while
+/// `window_top` is the top of the stack (CR 117.1 + CR 117.3d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandingPriorityPass {
+    /// CR 117.1: Full Control refuses to have any window passed for this player.
+    Withheld,
+    /// CR 117.3d: the player stands committed to pass this window — a yield to
+    /// the top triggered ability, or the player's own object on top.
+    Granted,
+    /// No standing answer; the window needs a fresh decision.
+    Undecided,
+}
+
+/// CR 117.1 + CR 117.3d: the single authority for the Standard ladder's
+/// standing rungs, shared by `ai_support::auto_pass_recommended` (a
+/// recommendation the client submits as `PassPriority`) and the
+/// stack-resolution session, which executes it for every window it passes
+/// (`engine::stack_resolution_session_participant_authorizes_pass`), and by
+/// the turn-boundary auto-pass interrupt (`engine::priority_auto_pass_decision`).
+pub(crate) fn standing_priority_pass(
+    state: &GameState,
+    player: PlayerId,
+    window_top: Option<&StackEntry>,
+) -> StandingPriorityPass {
+    if holds_full_control(state, player) {
+        return StandingPriorityPass::Withheld;
+    }
+    match window_top {
+        // CR 117.3d: a yield is a pre-committed pass; an own object on top is
+        // the ladder's MTGA-parity standing pass (it outranks castability, see
+        // `auto_pass_recommended`).
+        Some(top) if state.is_priority_yielded(player, top) || top.controller == player => {
+            StandingPriorityPass::Granted
+        }
+        Some(_) | None => StandingPriorityPass::Undecided,
+    }
 }
 
 /// Determine the next player to receive priority, using APNAP order (CR 101.4).
@@ -885,6 +934,122 @@ mod tests {
             matches!(result, WaitingFor::RevealChoice { .. }),
             "Expected RevealChoice, got {:?}",
             result
+        );
+    }
+
+    fn spell_entry(id: u64, controller: PlayerId, card_id: CardId) -> StackEntry {
+        StackEntry {
+            id: ObjectId(id),
+            source_id: ObjectId(id),
+            controller,
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        }
+    }
+
+    /// A triggered ability whose latched source card is `card_id`.
+    fn trigger_entry(id: u64, controller: PlayerId, card_id: CardId) -> StackEntry {
+        let source_id = ObjectId(id);
+        let mut ability = ResolvedAbility::new(
+            crate::types::ability::Effect::NoOp,
+            vec![],
+            source_id,
+            controller,
+        );
+        ability.set_test_trigger_source_recursive(2, card_id);
+        StackEntry {
+            id: source_id,
+            source_id,
+            controller,
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    fn yield_all_copies(state: &mut GameState, card_id: CardId) {
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id,
+                trigger_description: None,
+            },
+        );
+    }
+
+    #[test]
+    fn standing_pass_is_withheld_under_full_control() {
+        let mut state = setup();
+        state
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::FullControl);
+        let own_top = spell_entry(1, PlayerId(0), CardId(1));
+
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), Some(&own_top)),
+            StandingPriorityPass::Withheld
+        );
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), None),
+            StandingPriorityPass::Withheld
+        );
+    }
+
+    #[test]
+    fn standing_pass_is_granted_for_an_own_object_or_a_yielded_trigger() {
+        let mut state = setup();
+        let own_top = spell_entry(1, PlayerId(0), CardId(1));
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), Some(&own_top)),
+            StandingPriorityPass::Granted
+        );
+
+        let yielded_top = trigger_entry(2, PlayerId(1), CardId(77));
+        yield_all_copies(&mut state, CardId(77));
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), Some(&yielded_top)),
+            StandingPriorityPass::Granted
+        );
+    }
+
+    #[test]
+    fn standing_pass_is_undecided_without_a_standing_rung() {
+        let mut state = setup();
+        let opponent_top = trigger_entry(1, PlayerId(1), CardId(77));
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), Some(&opponent_top)),
+            StandingPriorityPass::Undecided
+        );
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), None),
+            StandingPriorityPass::Undecided
+        );
+
+        // Reach guard: P1 controls this trigger, so only the yield rung can
+        // grant it, and the stored yield does.
+        yield_all_copies(&mut state, CardId(77));
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), Some(&opponent_top)),
+            StandingPriorityPass::Granted
+        );
+        // Yields match only triggered abilities (`GameState::is_priority_yielded`),
+        // so the same stored yield does not cover a spell from that card.
+        let opponent_spell = spell_entry(2, PlayerId(1), CardId(77));
+        assert_eq!(
+            standing_priority_pass(&state, PlayerId(0), Some(&opponent_spell)),
+            StandingPriorityPass::Undecided
         );
     }
 }

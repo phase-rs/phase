@@ -1305,6 +1305,21 @@ pub struct SpellCastRecord {
     /// for records built by Default / legacy deserialization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spell_object_id: Option<ObjectId>,
+    /// CR 722.3d: the prepared permanent this spell was cast as a prepare spell
+    /// from (the `GameObject::prepared_copy_source` marker at cast time; CR 722.3c
+    /// and CR 601.2i). `Some` is the cast-time answer to `FilterProp::PrepareSpell`,
+    /// so a negated history query (`FilterProp::Not` / `TargetFilter::Not`) inverts
+    /// the real designation rather than an unknown. `None` for every other spell,
+    /// including Paradigm and cast-a-copy-of-a-card casts (CR 707.12), and for
+    /// legacy payloads. A copy of a prepare spell is a prepare spell (CR 722.3d)
+    /// but is not cast (CR 707.10), so a copy made by a spell never reaches this
+    /// ledger; a copy that is itself cast (the `CopySpell` + `CastFromZone` route)
+    /// keeps the marker, which is correct per CR 722.3d. A live
+    /// candidate projection of the linked copy still waiting in exile also carries
+    /// the marker: that object can only be cast as a prepare spell (CR 722.3c), so
+    /// pre-cast probes and the recorded cast agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_copy_source: Option<ObjectId>,
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -1339,6 +1354,7 @@ impl Default for SpellCastRecord {
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         }
     }
 }
@@ -1877,6 +1893,12 @@ pub struct ZoneChangeCombatStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttackDeclarationRecord {
     pub object_id: ObjectId,
+    /// CR 400.7: the incarnation that was declared as an attacker. An attack
+    /// trigger that resolves after the attacker left and returned (a blink)
+    /// names this object, not the new one at the same `ObjectId`. `None` on
+    /// legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
     pub lki: LKISnapshot,
     /// CR 111.1: Token identity at declaration time.
     #[serde(default)]
@@ -17980,8 +18002,9 @@ pub enum AutoPassRequest {
 /// `Committed` is the historical `UntilStackEmpty` meaning: once a player has
 /// armed it, the engine keeps passing until the stack empties or grows beyond
 /// the captured baseline. `RecheckNoMeaningfulPriorityAction` is reserved for
-/// an AI continuation that reuses a representative's own verified pass while
-/// the exact fenced stack cohort remains active. This is an AI policy choice,
+/// an AI continuation that passes a representative on its own verified pass, or
+/// on its standing pass for the window (`priority::standing_priority_pass`),
+/// while the exact fenced stack cohort remains active. This is an AI policy choice,
 /// not an inference that the player lacks another legal action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StackResolutionPolicy {
@@ -18221,7 +18244,9 @@ pub struct StackResolutionSession {
     pub representatives: BTreeSet<PlayerId>,
     /// AI representatives whose verified pass is a policy authorization for
     /// later priority windows in this exact fenced cohort. Absence is
-    /// conservative: that representative must receive an explicit decision.
+    /// conservative: that representative must receive an explicit decision
+    /// unless its standing pass covers the window
+    /// (`priority::standing_priority_pass`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub verified_pass_representatives: BTreeSet<PlayerId>,
     #[serde(default)]
@@ -18272,7 +18297,12 @@ pub enum AutoPassMode {
 ///   never reach a client, which is why `FullControl` has to live in engine
 ///   state rather than in a frontend toggle: an auto-pass session installed by
 ///   another player (Resolve All, CR 117.3d) drives this loop, and a
-///   client-only preference is invisible to it.
+///   client-only preference is invisible to it. Inside a rechecking
+///   (`RecheckNoMeaningfulPriorityAction`) stack-resolution session that loop
+///   also executes the ladder's standing rungs (Full Control, yields, own
+///   object on top) through `priority::standing_priority_pass`, the same
+///   authority the recommendation uses; a Committed session consults only its
+///   Full Control rung.
 ///
 /// `Standard` is the meaningful-action-aware ladder. `SkipLowUseWindows` adds a
 /// narrow fast path for the active player's empty-stack Upkeep, Draw, and End
@@ -20592,7 +20622,9 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_trigger_firing: Option<TriggerFiring>,
     /// Sidecar for `pending_trigger`: full simultaneous event set for batched
-    /// trigger context, consumed when the pending trigger is put on the stack.
+    /// trigger context; construction carrier for `pending_trigger`; released with
+    /// every other construction cursor when construction ends
+    /// (`triggers::release_pending_trigger_construction`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_trigger_event_batch: Vec<GameEvent>,
     /// CR 603.3c + CR 603.3d: ObjectId of the stack entry currently being
@@ -22448,6 +22480,18 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub lki_by_incarnation: im::HashMap<ObjectId, im::HashMap<u64, LKISnapshot>>,
+    /// CR 400.7 + CR 608.2h + CR 707.2: `lki_copiable_values` keyed by exact
+    /// object incarnation, as `lki_by_incarnation` is to `lki_cache`, written on
+    /// every departure that writes `lki_copiable_values` (from the battlefield,
+    /// exile or the stack). A copy effect bound to one incarnation of its copy
+    /// source reads that incarnation's last-known copiable values
+    /// (`token_copy::copy_source`), so a later object under the same storage id
+    /// (a flickered or returned card) can neither supply nor overwrite them.
+    /// Cleared with `lki_by_incarnation` on step transitions.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub lki_copiable_values_by_incarnation:
+        im::HashMap<ObjectId, im::HashMap<u64, CopiableValues>>,
 
     /// CR 608.2h + CR 707.2: A spell's stack entry and object as they last
     /// existed on the stack (`stack::record_departed_stack_spell`) — keyed by storage id,
@@ -26435,18 +26479,6 @@ impl GameState {
                 })
             })
             .collect();
-        let zone_changes_this_turn = self
-            .zone_changes_this_turn
-            .iter()
-            .filter(|record| {
-                record
-                    .trigger_source_context
-                    .as_ref()
-                    .is_some_and(|context| context.identity.reference == identity)
-            })
-            .map(|record| (record.from_zone, record.to_zone))
-            .collect();
-
         Some(ConniveSubject {
             snapshot: EventObjectSnapshot {
                 identity,
@@ -26490,24 +26522,10 @@ impl GameState {
                     defending_player: attacker.map(|attacker| attacker.defending_player),
                     related_objects,
                 },
-                history: EventObjectHistorySnapshot {
-                    was_dealt_damage_this_turn: self.damage_dealt_this_turn.iter().any(|damage| {
-                        matches!(damage.target, TargetRef::Object(target) if target == object_id)
-                            && damage.target_incarnation == Some(identity.incarnation)
-                    }),
-                    entered_this_turn: object.entered_battlefield_turn == Some(self.turn_number),
-                    attacked_defenders_this_turn: self
-                        .creature_attacked_defenders_this_turn
-                        .get(&object_id)
-                        .map(|players| players.iter().copied().collect())
-                        .unwrap_or_default(),
-                    blocked_this_turn: self.creatures_blocked_this_turn.contains(&object_id),
-                    zone_changes_this_turn,
-                    // Counter records predating exact-incarnation support carry
-                    // only an ObjectId. Do not turn that ambiguous history into
-                    // evidence about this subject.
-                    counters_put_on_this_turn: Vec::new(),
-                },
+                history: self.connive_subject_history(
+                    identity,
+                    object.entered_battlefield_turn == Some(self.turn_number),
+                ),
                 relations: EventObjectRelationSnapshot {
                     saddled_sources: object
                         .saddled_by
@@ -26530,6 +26548,146 @@ impl GameState {
                 },
             },
         })
+    }
+
+    /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
+    /// battlefield, for a connive whose performer left before the action ran
+    /// (and may have returned as a new object at the same storage id).
+    ///
+    /// The evidence is the departure record of that exact incarnation: its
+    /// `lki_by_incarnation` entry (controller, owner, characteristics, counters,
+    /// tap status, attachments as of zone exit) and the turn's zone-change
+    /// record for that departure (token/face-down/transformed/renowned/saddled
+    /// status). It never reads the object currently stored under the id, and
+    /// never the broad `lki_cache`, which may already describe a later
+    /// incarnation. Facts the departure evidence does not carry are recorded
+    /// as absent rather than copied from the returned object: the departed
+    /// permanent is in no combat, has no protector and no live saddle/convoke
+    /// relations. `None` when no departure was recorded for the incarnation,
+    /// so the caller fails closed instead of guessing a controller.
+    pub fn capture_departed_connive_subject(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<ConniveSubject> {
+        let object_id = identity.object_id;
+        let lki = self
+            .lki_by_incarnation
+            .get(&object_id)
+            .and_then(|history| history.get(&identity.incarnation))?;
+        let departure = self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == object_id
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity)
+        });
+        let context = departure.and_then(|record| record.trigger_source_context.as_ref());
+        let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
+            record.object_id == object_id
+                && record.to_zone == Zone::Battlefield
+                && record.entered_incarnation == Some(identity.incarnation)
+        });
+        Some(ConniveSubject {
+            snapshot: EventObjectSnapshot {
+                identity,
+                controller: lki.controller,
+                owner: lki.owner,
+                zone: departure
+                    .and_then(|record| record.from_zone)
+                    .unwrap_or(Zone::Battlefield),
+                name: lki.name.clone(),
+                core_types: lki.card_types.clone(),
+                subtypes: lki.subtypes.clone(),
+                supertypes: lki.supertypes.clone(),
+                colors: lki.colors.clone(),
+                keywords: lki.keywords.clone(),
+                power: lki.power,
+                toughness: lki.toughness,
+                base_power: lki.base_power,
+                base_toughness: lki.base_toughness,
+                mana_value: lki.mana_value,
+                counters: lki.counters.clone(),
+                is_token: context.is_some_and(|context| context.is_token),
+                // CR 903.3: commander status is a property of the card, but the
+                // departure evidence does not record it; absent, not inferred.
+                is_commander: false,
+                tapped: lki.tapped,
+                face_down: context.is_some_and(|context| context.face_down),
+                transformed: context.is_some_and(|context| context.transformed),
+                is_suspected: lki.is_suspected,
+                is_renowned: context.is_some_and(|context| context.is_renowned),
+                is_saddled: context.is_some_and(|context| context.is_saddled),
+                // The departed permanent is the source of the connive ability it
+                // performed, so it had at least that ability.
+                has_no_abilities: false,
+                attachments: lki
+                    .attachments
+                    .iter()
+                    .filter_map(|attachment| {
+                        Some(EventAttachmentSnapshot {
+                            identity: attachment.identity?,
+                            controller: attachment.controller,
+                            kind: attachment.kind.clone(),
+                        })
+                    })
+                    .collect(),
+                protector: None,
+                combat: EventCombatSnapshot {
+                    attacking: false,
+                    blocking: false,
+                    blocked: false,
+                    attacking_alone: false,
+                    blocking_alone: false,
+                    defending_player: None,
+                    related_objects: Vec::new(),
+                },
+                history: self.connive_subject_history(identity, entered_this_turn),
+                relations: EventObjectRelationSnapshot {
+                    saddled_sources: Vec::new(),
+                    convoked_sources: Vec::new(),
+                    tracked_sets: Vec::new(),
+                },
+            },
+        })
+    }
+
+    /// CR 400.7: the turn history a connive subject carries, read for one exact
+    /// incarnation. Shared by the live capture and the departed-LKI capture so
+    /// the two subjects answer history predicates the same way.
+    fn connive_subject_history(
+        &self,
+        identity: ObjectIncarnationRef,
+        entered_this_turn: bool,
+    ) -> EventObjectHistorySnapshot {
+        let object_id = identity.object_id;
+        EventObjectHistorySnapshot {
+            was_dealt_damage_this_turn: self.damage_dealt_this_turn.iter().any(|damage| {
+                matches!(damage.target, TargetRef::Object(target) if target == object_id)
+                    && damage.target_incarnation == Some(identity.incarnation)
+            }),
+            entered_this_turn,
+            attacked_defenders_this_turn: self
+                .creature_attacked_defenders_this_turn
+                .get(&object_id)
+                .map(|players| players.iter().copied().collect())
+                .unwrap_or_default(),
+            blocked_this_turn: self.creatures_blocked_this_turn.contains(&object_id),
+            zone_changes_this_turn: self
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_some_and(|context| context.identity.reference == identity)
+                })
+                .map(|record| (record.from_zone, record.to_zone))
+                .collect(),
+            // Counter records predating exact-incarnation support carry
+            // only an ObjectId. Do not turn that ambiguous history into
+            // evidence about this subject.
+            counters_put_on_this_turn: Vec::new(),
+        }
     }
 
     /// CR 400.7: Capture the exact incarnation-bound snapshot of an object, for
@@ -28196,6 +28354,7 @@ impl GameState {
             lki_cache: im::HashMap::new(),
             lki_copiable_values: HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
+            lki_copiable_values_by_incarnation: im::HashMap::new(),
             departed_stack_spells: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
@@ -29463,6 +29622,59 @@ impl GameState {
             }
         }
 
+        // CR 104.4b + CR 608.2h: which `lki_copiable_values_by_incarnation`
+        // entries an ability can still read as its own copy source. Read BEFORE
+        // the carrier loops below erase each ability's captured source identity
+        // (`clear_trigger_identity_recursive`), the only key to those entries,
+        // over every carrier that erase touches.
+        let mut retained_copy_sources: HashSet<ObjectIncarnationRef> = HashSet::new();
+        {
+            let mut collect = |ability: &ResolvedAbility| {
+                crate::game::effects::token_copy::collect_own_copy_sources(
+                    ability,
+                    &mut retained_copy_sources,
+                );
+            };
+            for entry in clone.stack.iter().chain(clone.resolving_stack_entry.iter()) {
+                if let Some(ability) = entry.ability() {
+                    collect(ability);
+                }
+            }
+            for pending in clone
+                .pending_trigger
+                .as_deref()
+                .into_iter()
+                .chain(clone.deferred_triggers.iter().map(|ctx| &ctx.pending))
+                .chain(
+                    clone
+                        .pending_trigger_order
+                        .iter()
+                        .flat_map(|order| order.groups.iter())
+                        .flat_map(|group| group.triggers.iter())
+                        .map(|ctx| &ctx.pending),
+                )
+            {
+                collect(&pending.ability);
+            }
+            for trigger in &clone.delayed_triggers {
+                collect(&trigger.ability);
+            }
+            if let Some(resume) = clone.pending_triggered_mana_resume.as_ref() {
+                collect(&resume.current.pending.ability);
+                for ctx in resume.accepted_tail.iter().chain(
+                    resume
+                        .collected_batches
+                        .iter()
+                        .flat_map(|batch| batch.contexts.iter()),
+                ) {
+                    collect(&ctx.pending.ability);
+                }
+            }
+            for epic in &clone.epic_effects {
+                collect(&epic.spell);
+            }
+        }
+
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
@@ -29602,6 +29814,20 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+        // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
+        // read as its own copy source are history, not position — pruned against
+        // the set captured above, before the identities were erased.
+        clone.lki_copiable_values_by_incarnation =
+            std::mem::take(&mut clone.lki_copiable_values_by_incarnation)
+                .into_iter()
+                .filter_map(|(object_id, mut history)| {
+                    history.retain(|incarnation, _| {
+                        retained_copy_sources
+                            .contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                    });
+                    (!history.is_empty()).then_some((object_id, history))
+                })
+                .collect();
         // CR 104.4b + CR 601.2a: a spell's announcement is monotonic identity,
         // not position. Renumber every announcement by its rank among those
         // the position carries, on the spell objects, the departure records,
@@ -29618,10 +29844,11 @@ impl GameState {
     }
 
     /// See `normalize_for_loop`. Per object, rank-based over the retained
-    /// `lki_by_incarnation` keys and the incarnations trigger events name
-    /// (`ZoneChanged` entries and stamped `PermanentTapped` taps), so two
-    /// positions minted at different times compare equal while which
-    /// incarnation each event names — and its snapshot — is preserved.
+    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys and
+    /// the incarnations trigger events name (`ZoneChanged` entries and stamped
+    /// `PermanentTapped` taps), so two positions minted at different times
+    /// compare equal while which incarnation each event names — and its
+    /// snapshot — is preserved.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
         fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
             match event {
@@ -29787,6 +30014,12 @@ impl GameState {
                 .or_default()
                 .extend(history.keys().copied());
         }
+        for (object_id, history) in self.lki_copiable_values_by_incarnation.iter() {
+            present
+                .entry(*object_id)
+                .or_default()
+                .extend(history.keys().copied());
+        }
         self.for_each_trigger_event_carrier_mut(&mut |event| {
             if let Some((object_id, incarnation)) = named_incarnation(event) {
                 present.entry(object_id).or_default().push(*incarnation);
@@ -29812,6 +30045,17 @@ impl GameState {
                 (object_id, history)
             })
             .collect();
+        self.lki_copiable_values_by_incarnation =
+            std::mem::take(&mut self.lki_copiable_values_by_incarnation)
+                .into_iter()
+                .map(|(object_id, history)| {
+                    let history = history
+                        .into_iter()
+                        .map(|(incarnation, values)| (canonical(object_id, incarnation), values))
+                        .collect();
+                    (object_id, history)
+                })
+                .collect();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
             if let Some((object_id, incarnation)) = named_incarnation(event) {
                 *incarnation = canonical(object_id, *incarnation);
@@ -31124,6 +31368,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_cache: _,
         lki_copiable_values: _,
         lki_by_incarnation: _,
+        lki_copiable_values_by_incarnation: _,
         departed_stack_spells: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
@@ -31470,6 +31715,8 @@ impl PartialEq for GameState {
             && self.lki_cache == other.lki_cache
             && self.lki_copiable_values == other.lki_copiable_values
             && self.lki_by_incarnation == other.lki_by_incarnation
+            && self.lki_copiable_values_by_incarnation
+                == other.lki_copiable_values_by_incarnation
             && self.departed_stack_spells == other.departed_stack_spells
             && self.city_blessing == other.city_blessing
             && self.enduring_story == other.enduring_story
@@ -38807,6 +39054,142 @@ mod tests {
         );
     }
 
+    /// N1 (P5b-1, C5b1.4): CR 104.4b + CR 608.2h: `normalize_for_loop` keeps
+    /// the last-known copiable values an ability can still read as its own copy
+    /// source, captured before the ability's identity is erased, and prunes
+    /// every other incarnation's entry. An ability that does not copy its own
+    /// source retains nothing.
+    #[test]
+    fn normalize_for_loop_keeps_only_the_own_copy_source_values_an_ability_can_read() {
+        let source = ObjectId(5);
+        let captured = 7;
+        let mut a = GameState::new_two_player(7);
+        let values_object = crate::game::zones::create_object(
+            &mut a,
+            CardId(90),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Exile,
+        );
+        let values = |name: &str| {
+            let mut values =
+                crate::game::printed_cards::intrinsic_copiable_values(&a.objects[&values_object]);
+            values.name = name.to_string();
+            values
+        };
+        let (departed, later, other) = (values("Departed"), values("Later"), values("Other"));
+        let entry_at = |id: u64, effect: Effect, incarnation: u64| {
+            let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+            ability.source_incarnation = Some(incarnation);
+            StackEntry {
+                id: ObjectId(id),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            }
+        };
+        let entry = |id: u64, effect: Effect| entry_at(id, effect, captured);
+        let copy_effect = Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        };
+        a.stack.push_back(entry(20, copy_effect.clone()));
+        a.lki_copiable_values_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(captured, departed.clone());
+        a.lki_copiable_values_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(8, later.clone());
+
+        let mut b = a.clone();
+        b.lki_copiable_values_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(9, later.clone());
+        assert_ne!(a, b, "fixture differs by irrelevant accumulated values");
+        let normalized_a = a.normalize_for_loop();
+        assert!(
+            loop_states_equal(&normalized_a, &b.normalize_for_loop()),
+            "unreachable incarnation history must not block loop recurrence"
+        );
+        assert_eq!(
+            normalized_a.lki_copiable_values_by_incarnation[&source]
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![departed.clone()],
+            "the captured own-source incarnation remains available"
+        );
+
+        // CR 104.4b + CR 400.7: the captured incarnation is monotonic identity,
+        // not position. The same position minted with incarnation 91 instead
+        // of 7 confirms as a repeat; different values under it do not.
+        let minted_later = |values: CopiableValues| {
+            let mut later_state = a.clone();
+            later_state.stack.clear();
+            later_state
+                .stack
+                .push_back(entry_at(20, copy_effect.clone(), 91));
+            later_state.lki_copiable_values_by_incarnation =
+                im::HashMap::from_iter([(source, im::HashMap::from_iter([(91, values)]))]);
+            later_state.normalize_for_loop()
+        };
+        assert!(
+            loop_states_equal(&normalized_a, &minted_later(departed.clone())),
+            "a renumbered captured incarnation with equal values is the same position"
+        );
+        assert!(
+            !loop_states_equal(&normalized_a, &minted_later(other.clone())),
+            "a renumbered captured incarnation with different values is not"
+        );
+
+        let mut changed = a.clone();
+        changed
+            .lki_copiable_values_by_incarnation
+            .get_mut(&source)
+            .unwrap()
+            .insert(captured, other);
+        assert!(
+            !loop_states_equal(&normalized_a, &changed.normalize_for_loop()),
+            "different values for a still-readable incarnation remain meaningful"
+        );
+
+        let mut not_a_copy = a;
+        not_a_copy.stack.clear();
+        not_a_copy.stack.push_back(entry(
+            20,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        assert!(
+            not_a_copy
+                .normalize_for_loop()
+                .lki_copiable_values_by_incarnation
+                .is_empty(),
+            "an ability that does not copy its own source retains nothing"
+        );
+    }
+
     /// Pre-push review R3. CR 104.4b + CR 400.7 + CR 608.2h: a Royal Decree
     /// trigger on the stack names the tapped Pyromancer's departed incarnation,
     /// whose snapshot records its last controller. Two positions that differ
@@ -39627,6 +40010,7 @@ mod tests {
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
             room_halves: None,
+            prepare_face: None,
             name_origin: Default::default(),
         })
     }
@@ -44439,6 +44823,38 @@ mod tests {
         assert!(!none_json.contains("spell_object_id"));
     }
 
+    /// CR 722.3d: the cast-time prepare-spell designation survives a serde round
+    /// trip when present, is omitted when `None` (so every non-prepare record
+    /// serializes byte-identically to the pre-field shape), and a legacy payload
+    /// without the field reads `None`.
+    #[test]
+    fn spell_cast_record_prepared_copy_source_round_trips() {
+        let prepared = SpellCastRecord {
+            spell_object_id: Some(ObjectId(7)),
+            prepared_copy_source: Some(ObjectId(42)),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&prepared).unwrap();
+        assert_eq!(json["prepared_copy_source"], serde_json::json!(42));
+        let round_tripped: SpellCastRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, prepared);
+
+        // `None` is omitted from an ordinary (non-prepare) record's JSON.
+        let ordinary = SpellCastRecord {
+            spell_object_id: Some(ObjectId(7)),
+            ..Default::default()
+        };
+        let ordinary_json = serde_json::to_value(&ordinary).unwrap();
+        assert!(ordinary_json.get("prepared_copy_source").is_none());
+
+        // Legacy payload (field absent) deserializes to `None`.
+        let legacy: SpellCastRecord = serde_json::from_str(
+            r#"{"core_types":["Instant"],"supertypes":[],"subtypes":[],"keywords":[],"colors":[],"mana_value":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.prepared_copy_source, None);
+    }
+
     #[test]
     fn legacy_stack_object_and_resolved_ability_default_cast_occurrence_to_none() {
         let object = crate::game::game_object::GameObject::new(
@@ -44511,6 +44927,7 @@ mod tests {
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

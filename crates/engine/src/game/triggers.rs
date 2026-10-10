@@ -346,6 +346,7 @@ struct MatchedTrigger {
     constraint: Option<crate::types::ability::TriggerConstraint>,
 }
 
+#[derive(Clone)]
 struct OffZoneTriggerSourceCache {
     zone: Zone,
     source_ids: Vec<ObjectIncarnationRef>,
@@ -569,6 +570,12 @@ enum TriggerCollectionOperation {
     PrepareEventBatch {
         events: Vec<GameEvent>,
     },
+    /// The per-event observation ledgers of `PrepareEventBatch` without its
+    /// layer flush and off-zone keyword reconcile, for a bulk-run member whose
+    /// run start already proved both inert (`BulkMemberTriggerCollection`).
+    ObserveEventBatch {
+        events: Vec<GameEvent>,
+    },
     RecordTriggerFired {
         constraint: Option<TriggerConstraint>,
         source_context: Box<Option<TriggerSourceContext>>,
@@ -602,6 +609,10 @@ struct TriggerCollectionSession {
     /// How many matched triggers this session admitted (`record_match`),
     /// counted before any context is pruned as an auto-inert no-op.
     admitted_matches: usize,
+    /// Off-zone trigger sources hoisted to a bulk run's start. When set, this
+    /// session prepares each event batch with `ObserveEventBatch` and reads
+    /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
+    bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
 }
 
 impl TriggerCollectionSession {
@@ -610,6 +621,7 @@ impl TriggerCollectionSession {
             overlay,
             operation_journal: None,
             admitted_matches: 0,
+            bulk_member_sources: None,
         }
     }
 
@@ -622,16 +634,21 @@ impl TriggerCollectionSession {
             overlay,
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
+            bulk_member_sources: None,
         }
     }
 
     fn prepare(&mut self, state: &mut GameState, events: &[GameEvent]) {
-        let _ = self.apply(
-            state,
+        let operation = if self.bulk_member_sources.is_some() {
+            TriggerCollectionOperation::ObserveEventBatch {
+                events: events.to_vec(),
+            }
+        } else {
             TriggerCollectionOperation::PrepareEventBatch {
                 events: events.to_vec(),
-            },
-        );
+            }
+        };
+        let _ = self.apply(state, operation);
     }
 
     /// Atomically admits one already-matched trigger candidate to collection.
@@ -763,6 +780,12 @@ impl TriggerCollectionSession {
             TriggerCollectionOperation::PrepareEventBatch { events } => {
                 super::layers::flush_layers(state);
                 reconcile_off_zone_keyword_triggers(state);
+                observe_object_taps(state, &events);
+                observe_object_counter_placements(state, &events);
+                observe_creatures_exploited(state, &events);
+                None
+            }
+            TriggerCollectionOperation::ObserveEventBatch { events } => {
                 observe_object_taps(state, &events);
                 observe_object_counter_placements(state, &events);
                 observe_creatures_exploited(state, &events);
@@ -4544,6 +4567,88 @@ fn collect_latched_batched_zone_triggers(
     Ok(())
 }
 
+/// The non-battlefield zones whose objects can source triggers, with each
+/// zone's current trigger sources (graveyard, exile, stack and command zone).
+fn off_zone_trigger_source_caches(state: &GameState) -> Vec<OffZoneTriggerSourceCache> {
+    [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
+        .into_iter()
+        .map(|zone| {
+            let source_ids = trigger_source_ids_for_zone(state, zone);
+            let source_ids = source_ids
+                .into_iter()
+                .filter_map(|object_id| {
+                    state
+                        .objects
+                        .get(&object_id)
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect();
+            OffZoneTriggerSourceCache { zone, source_ids }
+        })
+        .collect()
+}
+
+/// CR 603.2 + CR 603.3b: the production event-trigger collector run over one
+/// bulk-run member's events, with its run-invariant preparation hoisted to the
+/// run start. Matching, suppression, ledgers and auto-inert pruning are the
+/// ordinary `collect_pending_triggers_with_collection`; only two preparation
+/// steps are hoisted, each proved invariant across the run by its caller
+/// (`stack::resolve_bulk_token_run`): the layer flush (member 1's checkpoint is
+/// a fixed point and no entry perturbs another object's layered values) and
+/// the off-zone source scan with its keyword reconcile (members move no object
+/// between the graveyard, exile, stack and command zones).
+pub(crate) struct BulkMemberTriggerCollection {
+    off_zone: Vec<OffZoneTriggerSourceCache>,
+}
+
+impl BulkMemberTriggerCollection {
+    pub(crate) fn prepare(state: &GameState) -> Self {
+        Self {
+            off_zone: off_zone_trigger_source_caches(state),
+        }
+    }
+
+    pub(crate) fn collect(
+        &self,
+        state: &mut GameState,
+        events: &[GameEvent],
+    ) -> Vec<PendingTriggerContext> {
+        let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+        session.bulk_member_sources = Some(self.off_zone.clone());
+        collect_pending_triggers_with_collection(
+            state,
+            events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut session,
+        )
+    }
+}
+
+/// CR 603.8: the state-trigger definitions functioning on `obj`. The single
+/// authority shared by `check_state_triggers` and `has_active_state_triggers`.
+fn active_state_trigger_definitions<'a>(
+    state: &'a GameState,
+    obj: &'a GameObject,
+) -> impl Iterator<Item = super::functioning_abilities::ActiveTriggerDefinition<'a>> + 'a {
+    super::functioning_abilities::active_trigger_definitions(state, obj)
+        .filter(|active| active.definition.mode == TriggerMode::StateCondition)
+}
+
+/// CR 603.8: whether any battlefield permanent has a functioning state trigger,
+/// i.e. whether `check_state_triggers` has anything to check.
+pub(crate) fn has_active_state_triggers(state: &GameState) -> bool {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.zone == Zone::Battlefield)
+        .any(|obj| {
+            active_state_trigger_definitions(state, obj)
+                .next()
+                .is_some()
+        })
+}
+
 fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
@@ -4582,23 +4687,10 @@ fn collect_pending_triggers_with_collection(
     let mut initiative_stolen_this_pass: HashSet<PlayerId> = HashSet::new();
     let off_zone_trigger_sources = if events.is_empty() {
         Vec::new()
+    } else if let Some(sources) = &session.bulk_member_sources {
+        sources.clone()
     } else {
-        [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
-            .into_iter()
-            .map(|zone| {
-                let source_ids = trigger_source_ids_for_zone(state, zone);
-                let source_ids = source_ids
-                    .into_iter()
-                    .filter_map(|object_id| {
-                        state
-                            .objects
-                            .get(&object_id)
-                            .map(ObjectIncarnationRef::from_object)
-                    })
-                    .collect();
-                OffZoneTriggerSourceCache { zone, source_ids }
-            })
-            .collect::<Vec<_>>()
+        off_zone_trigger_source_caches(state)
     };
     let active_suppress_triggers = if events.is_empty() {
         Vec::new()
@@ -8865,6 +8957,20 @@ pub(crate) fn is_pending_trigger_construction_active(state: &GameState) -> bool 
     state.pending_trigger_entry.is_some()
 }
 
+/// CR 603.3c + CR 603.3d: A triggered ability's mode, target and division
+/// choices are made while it is put on the stack. When construction ends —
+/// completed, dropped, or abandoned — every construction cursor is released
+/// together; from then on the live stack entry's own event row
+/// (`trigger_event` + `stack_trigger_event_batches`) is the event authority.
+/// Callers settle `pending_trigger_firing` (transfer or terminal record)
+/// before calling this.
+pub(crate) fn release_pending_trigger_construction(state: &mut GameState) {
+    state.pending_trigger = None;
+    state.pending_trigger_firing = None;
+    state.pending_trigger_entry = None;
+    state.pending_trigger_event_batch.clear();
+}
+
 /// Abandon a push-first triggered ability whose in-construction stack entry
 /// vanished before mode/target/division selection completed — the construction
 /// cursor `pending_trigger_entry` is left dangling.
@@ -8872,8 +8978,9 @@ pub(crate) fn is_pending_trigger_construction_active(state: &GameState) -> bool 
 /// This should be UNREACHABLE: mode/target/division are chosen while the ability
 /// is put on the stack (CR 603.3c + CR 603.3d), before any player has priority, so it cannot
 /// be countered/removed mid-construction; and a controller leaving the game is
-/// already handled upstream (`elimination::do_eliminate` clears all three
-/// pending-trigger fields when the tracked entry is retained off the stack). If
+/// already handled upstream (`elimination::do_eliminate` releases every
+/// construction cursor through `release_pending_trigger_construction` when the
+/// tracked entry is retained off the stack). If
 /// this fires, the entry left the stack via an UNEXPECTED / UNIDENTIFIED
 /// state-coherence defect, not a known rules-legal cause. The CR below is cited
 /// only as the rules basis for the RECOVERY SEMANTICS, not the cause:
@@ -8930,10 +9037,7 @@ pub(crate) fn abandon_ceased_pending_trigger(
             }
         }
     }
-    state.pending_trigger = None;
-    state.pending_trigger_firing = None;
-    state.pending_trigger_entry = None;
-    state.pending_trigger_event_batch.clear();
+    release_pending_trigger_construction(state);
 }
 
 /// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
@@ -8959,8 +9063,9 @@ pub(crate) fn mutate_pending_trigger_entry(
 }
 
 /// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
-/// ability with `source_ability` AND clear `pending_trigger_entry` —
-/// construction is complete, so the resolver is now free to fire this entry.
+/// ability with `source_ability` AND release every construction cursor
+/// (`release_pending_trigger_construction`) — construction is complete, so the
+/// resolver is now free to fire this entry.
 ///
 /// Returns `false` if the entry is no longer on the stack — an unexpected
 /// dangling-cursor state (see [`abandon_ceased_pending_trigger`]); callers must
@@ -8996,7 +9101,7 @@ pub(crate) fn finalize_pending_trigger_entry(
             pending_firing, stack_firing,
             "pending trigger transfer must preserve its exact firing"
         );
-        state.pending_trigger_entry = None;
+        release_pending_trigger_construction(state);
         true
     } else {
         // Leave the cursor set; `abandon_ceased_pending_trigger` reads it.
@@ -9662,10 +9767,18 @@ fn dispatch_pending_trigger_context_core(
                         state.waiting_for = waiting_for;
                         return TriggerDispatchDisposition::Paused;
                     }
-                    // CR 603.3c: No mode could be chosen — trigger already
-                    // dropped and stack entry removed inside the resolver.
-                    Ok(None) => return TriggerDispatchDisposition::DroppedNoLegalMode,
-                    Err(_) => return TriggerDispatchDisposition::DroppedNoLegalMode,
+                    Ok(None) | Err(_) => {
+                        // CR 603.3c: `Ok(None)` — no mode can be chosen, so the
+                        // ability is removed from the stack.
+                        // `Err(_)`: construction cannot complete. CR 603.3d (an
+                        // ability with no legal choice is removed from the stack)
+                        // is cited only as the basis for the recovery semantics:
+                        // the pushed entry is removed rather than left suspended.
+                        // The entry was pushed above, so the drop must actually
+                        // remove it and release every construction cursor.
+                        super::engine::drop_mid_construction_pending_trigger(state);
+                        return TriggerDispatchDisposition::DroppedNoLegalMode;
+                    }
                 }
             }
 
@@ -11274,8 +11387,7 @@ pub fn check_state_triggers(state: &mut GameState) {
             (
                 obj.controller,
                 obj.entered_battlefield_turn.unwrap_or(0),
-                super::functioning_abilities::active_trigger_definitions(state, obj)
-                    .filter(|active| active.definition.mode == TriggerMode::StateCondition)
+                active_state_trigger_definitions(state, obj)
                     .map(|active| (active.definition_ref, active.definition.clone()))
                     .collect(),
             )
@@ -12681,6 +12793,9 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
+        // CR 722.3d: live per-object prepare-spell marker plus zone, scanned
+        // identically on both legs.
+        | FilterProp::PrepareSpell
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
@@ -21746,6 +21861,7 @@ pub mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -21761,6 +21877,7 @@ pub mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -27878,6 +27995,102 @@ pub mod tests {
         );
     }
 
+    /// CR 603.3c + CR 603.3d: a random-modal trigger whose construction fails
+    /// AFTER its entry was pushed (the dispatch `Err(_)` arm) must leave no
+    /// suspended entry and no construction cursor behind — it drops through
+    /// `engine::drop_mid_construction_pending_trigger`, the same authority as
+    /// the no-mode (`Ok(None)`) arm.
+    ///
+    /// Structural/synthetic row: no card in card-data has `mode_count >
+    /// mode_abilities.len()`. Here `mode_count: 2` with one mode definition
+    /// ("destroy target creature") on a board with no creature makes mode 0
+    /// unavailable, so the random draw must take mode 1, which has no
+    /// definition, and `build_chained_resolved` returns `Err` after the push.
+    /// The modal has no target constraints, so the pre-push assignment limit
+    /// cannot short-circuit before the `StackPushed` reach guard.
+    #[test]
+    fn random_modal_dispatch_error_after_push_drops_through_the_authority() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C03),
+            controller,
+            "Malformed Random Modal".to_string(),
+            Zone::Battlefield,
+        );
+        let pending = PendingTrigger {
+            source_id: source,
+            controller,
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::unimplemented("modal_placeholder", "synthetic random modal"),
+                vec![],
+                source,
+                controller,
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::SpellCast {
+                controller,
+                object_id: source,
+                card_id: CardId(0x98),
+                cast_mana_value: None,
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                selection: TargetSelectionMode::Random,
+                ..Default::default()
+            }),
+            mode_abilities: vec![AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ),
+                    cant_regenerate: false,
+                },
+            )],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        };
+        let stack_before = state.stack.len();
+        let mut events_out = Vec::new();
+
+        let disposition = dispatch_pending_trigger_context(
+            &mut state,
+            PendingTriggerContext::single(pending),
+            &mut events_out,
+        );
+
+        // Reach guard: the entry was pushed before construction failed.
+        assert!(
+            events_out
+                .iter()
+                .any(|event| matches!(event, GameEvent::StackPushed { .. })),
+            "the random-modal arm is reached only after the entry is pushed"
+        );
+        assert!(
+            matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "construction failure after the push must drop, got {disposition:?}"
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_before,
+            "the pushed entry must be removed, not left suspended"
+        );
+        assert!(state.pending_trigger_entry.is_none());
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_firing.is_none());
+        assert!(state.pending_trigger_event_batch.is_empty());
+    }
+
     #[test]
     fn keeper_of_the_accord_creature_intervening_if_false_when_tied() {
         let def = crate::parser::oracle_trigger::parse_trigger_line(
@@ -29725,6 +29938,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -29740,6 +29954,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );
@@ -35668,6 +35883,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }]),
         );
         assert!(
@@ -35692,6 +35908,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }]),
         );
         assert!(
@@ -35717,6 +35934,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -35732,6 +35950,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );
@@ -35760,6 +35979,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -35775,6 +35995,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );
@@ -35801,6 +36022,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -35816,6 +36038,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -35831,6 +36054,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );
@@ -35857,6 +36081,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }
         }
 

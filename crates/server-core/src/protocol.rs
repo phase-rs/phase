@@ -3347,11 +3347,18 @@ mod tests {
     }
 
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
-    /// (CR 608.2c + CR 115.1a); a v122 peer cannot deserialize it, so it must be
-    /// refused before it receives v123 state. `SpellContext` also gains
+    /// (CR 608.2c + CR 115.1a); a v123 peer cannot deserialize it, so it must be
+    /// refused before it receives v124 state. `SpellContext` also gains
     /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
+    /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
+    /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
+    /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
+    /// and `GameObject::copied_prepare_face` are new in serialized full-game
+    /// state; a v122 peer cannot parse the new `FilterProp` tag and would read a
+    /// mass prepare as a single-target one, so it must be refused before it
+    /// receives v123 state.
     /// `PermissionGrantee` gains `TriggeringSourceController` (a cast grant bound to
     /// the triggering object's controller, CR 603.2 + CR 109.4), and damage events
     /// carry the source incarnation (CR 400.7); a v121 peer cannot deserialize
@@ -3478,8 +3485,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_123_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 123);
+    fn protocol_version_is_124_for_declared_player_reference() {
+        assert_eq!(PROTOCOL_VERSION, 124);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3490,7 +3497,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_123_for_declared_player_reference` stays
+    /// `protocol_version_is_124_for_declared_player_reference` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

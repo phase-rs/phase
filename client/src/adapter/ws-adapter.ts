@@ -210,13 +210,22 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 123 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
- *      player a later clause names after a declared target player. A v122 peer
+ * 124 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v123 peer
  *      cannot deserialize it; the exact-match handshake refuses the pairing.
  *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
  *      delayed ability's creating chain named by group, omitted when empty;
- *      amended in place, not bumped. P2P moves in lockstep (wire 105); lobby
+ *      amended in place, not bumped. P2P moves in lockstep (wire 106); lobby
  *      messages are unchanged.
+ * 123 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
+ *      CR 722.3d), scope on Effect BecomePrepared / BecomeUnprepared (mass
+ *      "each creature you control becomes prepared", CR 722.3a + CR 115.10a),
+ *      prepared_copy_source on SpellCastRecord, and prepare_face on
+ *      CopiableValues and GameObject.copied_prepare_face (a copy of a
+ *      preparation creature keeps its prepare spell, CR 722.2b). A v122 peer
+ *      cannot parse the new FilterProp tag and would read a mass scope as a
+ *      single-target prepare; the exact-match handshake refuses the pairing.
+ *      P2P moves in lockstep (wire 105); lobby messages are unchanged.
  * 122 — PermissionGrantee gains TriggeringSourceController (a cast grant bound to the
  *      controller of the object that caused the trigger, CR 603.2 + CR 109.4),
  *      serialized in the ability definitions of GameState; damage events carry
@@ -767,7 +776,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 123;
+export const PROTOCOL_VERSION = 124;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
