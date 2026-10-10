@@ -1621,7 +1621,23 @@ fn apply_action_boundary_core(
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     let scan_from = result.events.len();
-    if effects::token::realize_settled_token_battlefield_entry(state, &mut result.events) {
+    let realized_token_entry =
+        effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+    // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+    // completed on a route that never reached the pipeline (a spell cast during
+    // a resolution, CR 608.2g, finishes its announcement here): the resolving
+    // instant or sorcery still owes its final part — leaving the stack — and the
+    // pipeline's settlement step runs it, then scans the move for triggers.
+    // The handler's result already names the Priority window; the state's copy
+    // is only synchronized at `finish_action_boundary`, and the settlement
+    // reads it, so synchronize it first.
+    let owes_spell_final_part = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && super::stack::resolving_spell_owes_final_part(state);
+    if owes_spell_final_part {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    let owes_spell_final_part = owes_spell_final_part && resolving_stack_entry_can_settle(state);
+    if realized_token_entry || owes_spell_final_part {
         let wf = match engine_priority::run_post_action_pipeline_from(
             state,
             &mut result.events,
@@ -1678,7 +1694,10 @@ fn recover_orphaned_devour_completion_at_priority_boundary(state: &mut GameState
     let cleared = recovered.clear_completed_active_devour_snapshot();
     debug_assert!(cleared, "the guarded Devour frame must be consumable");
     recovered.remove_empty_active_post_replacement_frame();
-    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    settle_resolving_stack_entry_after_continuation_resume(
+        &mut recovered,
+        &mut recovered_rest_scratch_events(state),
+    );
     if recovered.resolving_stack_entry.is_some() {
         return false;
     }
@@ -1708,7 +1727,10 @@ fn recover_orphaned_spell_resolution_at_priority_boundary(state: &mut GameState)
         recovered.resolving_stack_entry.as_ref(),
         Some(crate::types::game_state::StackEntry { id, .. }) if *id == pending.object_id
     ));
-    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    settle_resolving_stack_entry_after_continuation_resume(
+        &mut recovered,
+        &mut recovered_rest_scratch_events(state),
+    );
     if recovered.resolving_stack_entry.is_some() {
         return false;
     }
@@ -1836,6 +1858,19 @@ fn sweep_and_recover_priority_boundary_rest(state: &mut GameState) -> bool {
         )
 }
 
+/// The event sink for settling a recovered terminal rest on a clone. Each
+/// recovery above guards that the carrier it retires is a permanent spell's or
+/// one whose spell has already left the stack, so the CR 608.2n final part
+/// (`stack::finish_deferred_spell_resolution`) is not owed and emits nothing
+/// into it; the debug assertion pins that nothing is discarded.
+fn recovered_rest_scratch_events(state: &GameState) -> Vec<GameEvent> {
+    debug_assert!(
+        !super::stack::resolving_spell_owes_final_part(state),
+        "a recovered terminal rest never owes a spell's CR 608.2n final part"
+    );
+    Vec::new()
+}
+
 /// An ownerless post-replacement dispatch proves that its continuation already
 /// returned, but pre-v0.65 persistence could retain the resolving carrier after
 /// the now-empty drain frame is removed. Settle only that carrier completion; a
@@ -1851,12 +1886,18 @@ fn recover_ownerless_post_replacement_completion_at_priority_boundary(
         || state.pending_cast.is_some()
         || state.pending_resolution_completion.is_some()
         || state.resolving_stack_entry.is_none()
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the ordinary drain, not a stale rest.
+        || super::stack::resolving_spell_owes_final_part(state)
     {
         return false;
     }
 
     let mut recovered = state.clone();
-    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    settle_resolving_stack_entry_after_continuation_resume(
+        &mut recovered,
+        &mut recovered_rest_scratch_events(state),
+    );
     if recovered.resolving_stack_entry.is_some() {
         return false;
     }
@@ -8723,15 +8764,7 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
         }
     }
-    // CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
-    // window is put into its zone as the final part of its resolution, now
-    // that the window and everything parked behind it are done.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && resolution_instructions_are_done(state)
-    {
-        super::stack::deliver_deferred_spell(state, events);
-    }
-    settle_resolving_stack_entry_after_continuation_resume(state);
+    settle_resolving_stack_entry_after_continuation_resume(state, events);
     Ok(())
 }
 
@@ -8739,24 +8772,41 @@ pub(super) fn resume_pending_continuation_if_priority(
 /// its continuation and every typed resolution frame have drained. Once this
 /// priority boundary proves that completion, settle the exact carrier before
 /// any deferred trigger can start its own resolution.
-pub(super) fn settle_resolving_stack_entry_after_continuation_resume(state: &mut GameState) {
+///
+/// `events` receives the final part a deferred spell resolution still owes
+/// (CR 608.2n — see `settle_finished_resolving_stack_entry`).
+pub(super) fn settle_resolving_stack_entry_after_continuation_resume(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. })
         || !resolving_stack_entry_can_settle(state)
     {
         return;
     }
-    settle_finished_resolving_stack_entry(state);
+    settle_finished_resolving_stack_entry(state, events);
 }
 
 /// CR 608.2c: Once a resolution has completed, its carrier must settle before
 /// a trigger-selection prompt created by that resolution can construct a new
 /// stack object. Unlike the priority-boundary wrapper above, this is called at
 /// the exact completion point when the prompt has already replaced Priority.
-pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut GameState) {
-    if !resolving_stack_entry_can_settle(state) {
+///
+/// CR 608.2n: a spell whose final part is still owed is not retired here. That
+/// part runs at the next priority boundary — at the latest when `resolve_top`
+/// next begins, so it still precedes the selected trigger's resolution — where
+/// a CR 616.1 ordering prompt it may raise cannot compete with the trigger's
+/// own prompt for the one waiting state.
+pub(super) fn settle_resolving_stack_entry_before_trigger_selection(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if !resolving_stack_entry_can_settle(state)
+        || super::stack::resolving_spell_owes_final_part(state)
+    {
         return;
     }
-    settle_finished_resolving_stack_entry(state);
+    settle_finished_resolving_stack_entry(state, events);
 }
 
 /// CR 608.2c + CR 608.2m: An object that has left the stack keeps resolving
@@ -8771,16 +8821,7 @@ pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut 
 /// exists to clear it. Carrier/firing parity is a separate question, answered
 /// by `resolving_carrier_parity_is_coherent` and reported on the settle path
 /// rather than gating it.
-fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
-    resolution_instructions_are_done(state) && state.deferred_spell_delivery.is_none()
-}
-
-/// CR 608.2c + CR 608.2n: whether the carrier's resolution has followed all of
-/// its instructions. Its carrier still may not settle while a spell paused on
-/// its own free-cast window owes its final move (`deferred_spell_delivery`):
-/// only a site that can deliver that move (`stack::deliver_deferred_spell`,
-/// which needs the event stream) may do so first.
-pub(super) fn resolution_instructions_are_done(state: &GameState) -> bool {
+pub(super) fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
         && state.active_ability_continuation().is_none()
         && state.active_spell_resolution().is_none()
@@ -8807,7 +8848,7 @@ fn resolving_carrier_parity_is_coherent(state: &GameState) -> bool {
     state.resolving_trigger_firing.is_some() == resolving_carrier_is_triggered(state)
 }
 
-fn settle_finished_resolving_stack_entry(state: &mut GameState) {
+fn settle_finished_resolving_stack_entry(state: &mut GameState, events: &mut Vec<GameEvent>) {
     debug_assert!(
         resolving_stack_entry_can_settle(state),
         "only a fully completed resolution carrier may settle"
@@ -8831,6 +8872,25 @@ fn settle_finished_resolving_stack_entry(state: &mut GameState) {
             resolving_carrier_is_triggered(state),
             state.resolving_trigger_firing.is_some()
         );
+    }
+    retire_completed_resolution_carrier(state, events);
+}
+
+/// CR 608.2c + CR 608.2n: the moment a resolution is proven complete is the
+/// moment an instant or sorcery whose instructions paused owes its final part
+/// — leaving the stack for its owner's graveyard (or wherever a keyword or
+/// alternative cost sends it instead). Run it, then retire the carrier. If
+/// that final part raised a question of its own (a CR 616.1 ordering choice
+/// on the move, a cipher encode offer), the carrier stays installed until the
+/// prompt's resume path completes the move and settles again.
+pub(super) fn retire_completed_resolution_carrier(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if super::stack::finish_deferred_spell_resolution(state, events)
+        == super::stack::DeferredFinalPart::Parked
+    {
+        return;
     }
     super::stack::finish_resolving_stack_entry(
         state,
@@ -11170,10 +11230,16 @@ pub(super) fn settle_deferred_phase_transition(
     // CR 608.2g + CR 502.4: retire a completed resolution-cast marker and its
     // carrier, as the pipeline's settlement step would, but leave the triggers
     // it parked held for the next time a player would receive priority.
-    engine_priority::settle_pending_resolution_completion(state);
+    engine_priority::settle_pending_resolution_completion(state, events);
     // CR 608.2c: a carrier whose resolution has finished settles before the
     // transition is retried.
-    settle_resolving_stack_entry_after_continuation_resume(state);
+    settle_resolving_stack_entry_after_continuation_resume(state, events);
+    // CR 608.2n + CR 616.1: the settling spell's final part may itself have
+    // asked a question; that prompt, not the provisional window, now owns the
+    // waiting state.
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return state.waiting_for.clone();
+    }
     if state.stack.is_empty() && !turns::phase_transition_requires_settlement(state) {
         // CR 514.1 + CR 514.2: a transition deferred as the cleanup step began
         // came before the step's actions, so the interpreter resumes the step.
@@ -25981,7 +26047,7 @@ mod resolving_carrier_settle_tests {
             "fixture must actually be the incoherent pairing under test"
         );
 
-        settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        settle_resolving_stack_entry_after_continuation_resume(&mut state, &mut Vec::new());
 
         assert!(
             state.resolving_stack_entry.is_none(),
@@ -26025,7 +26091,7 @@ mod resolving_carrier_settle_tests {
                 "a suspended resolution is not finished ({firing:?})"
             );
 
-            settle_resolving_stack_entry_after_continuation_resume(&mut state);
+            settle_resolving_stack_entry_after_continuation_resume(&mut state, &mut Vec::new());
 
             assert!(
                 state.resolving_stack_entry.is_some(),

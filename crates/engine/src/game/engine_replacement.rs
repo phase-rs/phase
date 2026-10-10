@@ -2606,7 +2606,7 @@ fn finish_copy_target_choice_entry(
             // completion. Retire its exact top dispatch before asking the
             // carrier predicate whether the source resolution can settle.
             state.finish_active_paused_post_replacement_dispatch();
-            super::engine::settle_resolving_stack_entry_before_trigger_selection(state);
+            super::engine::settle_resolving_stack_entry_before_trigger_selection(state, events);
             return Ok(Some(waiting_for));
         }
         state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);

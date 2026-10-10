@@ -851,7 +851,7 @@ pub(crate) fn defer_observer_triggers_for_paused_choice(
 /// observers fire twice.
 fn collect_search_observer_triggers(
     state: &mut GameState,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
     events_before_drain: usize,
 ) -> ResolutionChoiceOutcome {
     let uncollected_events = super::triggers::filter_already_collected_trigger_events_from(
@@ -870,7 +870,7 @@ fn collect_search_observer_triggers(
     // A search continuation can park another typed resolution frame. Let the
     // shared carrier authority prove that every such frame has drained before
     // retiring the parent and releasing its CR 400.7j self-move link.
-    super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+    super::engine::settle_resolving_stack_entry_after_continuation_resume(state, events);
     ResolutionChoiceOutcome::WaitingForWithInlineTriggers(state.waiting_for.clone())
 }
 
@@ -5872,7 +5872,7 @@ pub(super) fn handle_resolution_choice(
             // to cross Cleanup -> Untap; an unfinished carrier remains visible
             // and the guarded transition below leaves the Priority window in
             // place for the owner pipeline to resume it.
-            super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+            super::engine::settle_resolving_stack_entry_after_continuation_resume(state, events);
 
             if matches!(state.waiting_for, WaitingFor::Priority { .. })
                 && state.stack.is_empty()
@@ -6526,7 +6526,9 @@ pub(super) fn handle_resolution_choice(
                     subject: None,
                 });
                 set_priority(state, player);
-                super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+                super::engine::settle_resolving_stack_entry_after_continuation_resume(
+                    state, events,
+                );
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));

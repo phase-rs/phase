@@ -1545,6 +1545,25 @@ mod tests {
                         .act(GameAction::OrderTriggers { order: vec![0] })
                         .ok();
                 }
+                // CR 608.2c + CR 608.2n: the spell is still resolving (and not
+                // yet in the graveyard) while any of its own instructions waits
+                // on an answer, even with the stack empty. Answer whatever it
+                // is asking with the first legal action, without pinning the
+                // prompt's shape: "put the rest on the bottom of your library
+                // in a random order" currently asks an `EffectZoneChoice`,
+                // which it should not: the card fixes a random order, so
+                // nobody arranges the cards (the CR 401.4 owner-arranges
+                // default does not apply) — a separate defect this test must
+                // not bake in.
+                _ if runner.state().resolving_stack_entry.is_some() => {
+                    let answer = crate::ai_support::legal_actions(runner.state())
+                        .into_iter()
+                        .next()
+                        .expect("a paused resolution offers a legal answer");
+                    runner
+                        .act(answer)
+                        .expect("answer the resolution's outstanding question");
+                }
                 _ if runner.state().stack.is_empty() => return,
                 _ => {
                     runner.act(GameAction::PassPriority).ok();

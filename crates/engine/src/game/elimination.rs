@@ -264,6 +264,16 @@ pub fn eliminate_players_simultaneously(
             events,
         );
 
+    // CR 800.4a + CR 608.2n: the instant or sorcery paused mid-resolution, and
+    // who controls it as the departures begin — captured before the sweeps
+    // below move it off the stack.
+    let paused_spell = super::stack::spell_awaiting_final_part(state).map(|entry| {
+        (
+            entry.id,
+            super::stack::stack_object_controller(state, entry),
+        )
+    });
+
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
         .is_none()
@@ -560,6 +570,36 @@ pub fn eliminate_players_simultaneously(
             }
         }
 
+        // CR 800.4a + CR 608.2n: a paused spell that the departure sweeps took
+        // off the stack while its controller left will never have its
+        // instructions finished — its resolution leaves with that player — and
+        // it has no final part left to run. Once the departed player's
+        // question is gone and nothing of the resolution is still live, retire
+        // its carrier as eliminated. (A spell whose controller stays keeps
+        // resolving for that player, CR 608.2m; one that reverted to a
+        // surviving owner stays on the stack, and its final part puts it into
+        // that owner's graveyard once the resolution completes — at once when
+        // the departed player's question was its last instruction.)
+        if let Some((spell, controller)) = paused_spell {
+            if leaving_set.contains(&controller)
+                && state
+                    .resolving_stack_entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.id == spell)
+                && state
+                    .objects
+                    .get(&spell)
+                    .is_none_or(|object| object.zone != Zone::Stack)
+                && super::engine::resolving_stack_entry_can_settle(state)
+            {
+                super::stack::finish_resolving_stack_entry(
+                    state,
+                    super::lifecycle::DelayedTerminalDisposition::Eliminated,
+                );
+                state.resolution_source_relatch = None;
+            }
+        }
+
         // CR 800.4a: A live trigger-construction batch can carry a priority
         // recipient who is not the prompt's controller, so neither cursor-
         // clearing site above fires when that recipient alone leaves. Priority
@@ -795,6 +835,13 @@ fn exile_owned_objects_on_player_left_game(
         Zone::Command,
         Zone::Stack,
     ];
+    // CR 608.2n: an instant or sorcery paused mid-resolution is still an
+    // object on the stack until its deferred final part runs, but the engine
+    // popped it from `state.stack` as it began resolving, so
+    // `zone_object_ids(Zone::Stack)` does not list it. Exiling it here leaves its
+    // controller's remaining instructions to finish (CR 608.2m) with nothing
+    // left to put into a graveyard.
+    let resolving_spell = super::stack::spell_awaiting_final_part(state).map(|entry| entry.id);
     let mut to_exile: Vec<_> = state
         .battlefield
         .iter()
@@ -804,6 +851,7 @@ fn exile_owned_objects_on_player_left_game(
                 .into_iter()
                 .flat_map(|zone| super::targeting::zone_object_ids(state, zone)),
         )
+        .chain(resolving_spell)
         .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
         .collect();
     to_exile.sort_by_key(|id| id.0);
@@ -1058,6 +1106,17 @@ fn remove_stack_objects_controlled_by_leaving_players(
             {
                 move_object_for_player_left_game(state, id, player, events);
             }
+        }
+
+        // CR 800.4a fourth step + CR 608.2n: the instant or sorcery paused
+        // mid-resolution is a card-represented object on the stack too (popped
+        // from `state.stack`, so the sweep above cannot reach it). If the
+        // leaver still controls it, it is exiled.
+        if let Some(resolving_spell) = super::stack::spell_awaiting_final_part(state)
+            .filter(|entry| super::stack::stack_object_controller(state, entry) == player)
+            .map(|entry| entry.id)
+        {
+            move_object_for_player_left_game(state, resolving_spell, player, events);
         }
 
         state.active_rules_execution_node = enclosing_node;
