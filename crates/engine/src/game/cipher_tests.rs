@@ -311,6 +311,7 @@ fn combat_damage_collects_optional_recast_trigger_for_encoded_card() {
         player_id: PlayerId(1),
         source_amounts: vec![(host, 2)],
         total_damage: 2,
+        source_incarnations: vec![],
     };
     let mut pending = Vec::new();
     collect_combat_damage_recast_triggers(&state, std::slice::from_ref(&event), &mut pending);
@@ -348,6 +349,7 @@ fn combat_damage_no_trigger_without_encode() {
         player_id: PlayerId(1),
         source_amounts: vec![(host, 3)],
         total_damage: 3,
+        source_incarnations: vec![],
     };
     let mut pending = Vec::new();
     collect_combat_damage_recast_triggers(&state, std::slice::from_ref(&event), &mut pending);
@@ -396,6 +398,7 @@ fn recast_trigger_resolves_into_a_cast_copy_from_exile() {
             player_id: PlayerId(1),
             source_amounts: vec![(host, 2)],
             total_damage: 2,
+            source_incarnations: vec![],
         }],
     );
     assert!(
@@ -468,6 +471,7 @@ fn recast_copy_is_not_offered_to_encode() {
             player_id: PlayerId(1),
             source_amounts: vec![(host, 2)],
             total_damage: 2,
+            source_incarnations: vec![],
         }],
     );
     resolve_top(&mut state, &mut Vec::new()); // optional recast trigger pauses
@@ -600,6 +604,7 @@ fn recast_fires_when_encoded_creature_dies_in_combat() {
             player_id: PlayerId(1),
             source_amounts: vec![(host, 1)],
             total_damage: 1,
+            source_incarnations: vec![],
         }],
     );
     assert!(

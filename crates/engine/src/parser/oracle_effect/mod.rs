@@ -8636,7 +8636,30 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     //
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
+    // CR 603.2 + CR 109.4: the shell would peel "that creature's controller may "
+    // as an optional-player slot this clause cannot carry, dropping the grantee;
+    // read the grant with its grantee before peeling.
+    if ctx.in_trigger {
+        let lower = text.trim().to_lowercase();
+        let tp = TextPair::new(text.trim(), &lower);
+        if parses_triggering_creature_controller_grant(tp.lower) {
+            if let Some(clause) = try_parse_per_grantee_play_grant(tp, true) {
+                return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+            }
+        }
+    }
     let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
+    // CR 608.2c + CR 109.5: a peeled player subject ("target opponent may",
+    // "that creature's controller may", "each opponent …") names who acts, and
+    // this clause has no slot to carry it — the chunk loop is where those
+    // scopes are applied. Lowering the body alone would make the ability's
+    // controller act instead, so fail closed (see `UNBOUND_SUBJECT_GAP`).
+    if peel_ctx.may_implicit_player_scope.is_some()
+        || peel_ctx.opponent_may_scope.is_some()
+        || peel_ctx.player_scope.is_some()
+    {
+        return parsed_clause(Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, text));
+    }
     // CR 601.2 + CR 608.2c: the shell peels with a context-free condition parse, so a
     // cast-time snapshot gate would be accepted here even inside a trigger, where the
     // snapshot is never stamped and the gate could never open. Fail closed rather
@@ -15595,6 +15618,24 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
     Ok((i, mode))
 }
 
+/// CR 603.2 + CR 109.4: "that creature's controller may play|cast that card|it"
+/// as a whole clause inside a trigger, where "that creature" is the object that
+/// caused the trigger (Curse of Hospitality: "Whenever a creature deals combat
+/// damage to enchanted player, … that creature's controller may play that
+/// card"). Read whole — the mana rider that may follow is cut off as its own
+/// conjunct first — so a longer predicate is not silently shortened.
+fn parses_triggering_creature_controller_grant(lower: &str) -> bool {
+    (
+        tag::<_, _, OracleError<'_>>("that creature's controller may "),
+        alt((tag("play "), tag("cast "))),
+        alt((tag("that card"), tag("it"))),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(lower.trim_end())
+        .is_ok()
+}
+
 /// CR 611.2a + CR 108.3: Parse per-grantee grant clauses that follow a
 /// compound-exile effect. These clauses bind the resulting `PlayFromExile`
 /// permission to a player OTHER than the ability's controller — the exiled
@@ -15610,7 +15651,10 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
 /// - `they may play those cards [until the end of their next turn]`
 ///   → [`PermissionGrantee::ParentTargetController`] (Expedited Inheritance).
 ///   The pronoun "they" refers to the parent effect's player target.
-fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+fn try_parse_per_grantee_play_grant(
+    tp: TextPair<'_>,
+    in_trigger: bool,
+) -> Option<ParsedEffectClause> {
     let lower = tp.lower;
 
     let per_owner_mode = parse_per_owner_exiled_this_way(lower)
@@ -15668,6 +15712,8 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     .is_ok()
     {
         crate::types::ability::PermissionGrantee::ParentTargetController
+    } else if in_trigger && parses_triggering_creature_controller_grant(lower) {
+        crate::types::ability::PermissionGrantee::TriggeringSourceController
     } else {
         return None;
     };
@@ -15683,6 +15729,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             tag("they may cast them"),
             tag("they may cast that card"),
             tag("they may cast that spell"),
+            tag("that creature's controller may cast "),
         ))
         .parse(lower)
         .is_ok()
@@ -15880,7 +15927,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // Theme D's `granted_to` field, resolved per-iteration by
     // `grant_permission::resolve`. The target is `TrackedSet` — the most
     // recently published set (the exiled cards from the parent effect).
-    if let Some(clause) = try_parse_per_grantee_play_grant(tp) {
+    if let Some(clause) = try_parse_per_grantee_play_grant(tp, ctx.in_trigger) {
         return Some(clause);
     }
     // CR 400.7i + CR 609.4b: Persistent duration-scoped variant —
@@ -31599,7 +31646,13 @@ pub(crate) fn parse_mana_spend_rider(input: &str) -> OracleResult<'_, ManaSpendR
     )))
     .parse(input)?;
     let (input, rider) = alt((
-        preceded(opt(tag("you may ")), parse_spend_as_though_any_mana),
+        // "they may" — the grantee named by the grant the rider follows
+        // (Curse of Hospitality: "that creature's controller may play that
+        // card and they may spend mana as though …").
+        preceded(
+            opt(alt((tag("you may "), tag("they may ")))),
+            parse_spend_as_though_any_mana,
+        ),
         parse_any_mana_can_be_spent,
     ))
     .parse(input)?;

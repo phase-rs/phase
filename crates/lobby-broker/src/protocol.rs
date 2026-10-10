@@ -60,16 +60,18 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 122 — `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
+/// 123 — `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
 ///      CR 722.3d), `scope` on `Effect::BecomePrepared` /
 ///      `BecomeUnprepared` (mass "each creature you control becomes
 ///      prepared", CR 722.3a + CR 115.10a), `prepared_copy_source` on
-///      `SpellCastRecord`, and `prepare_face` on `CopiableValues` (a token
-///      copy of a preparation creature keeps its prepare spell). A v121 peer
-///      cannot parse the new `FilterProp` tag and would read a mass scope as a
-///      single-target prepare because serde ignores the unknown field.
-///      Full-game peers and P2P move in lockstep (wire 104); lobby carriers
-///      hold no `GameState` and are unchanged.
+///      `SpellCastRecord`, and `prepare_face` on `CopiableValues` and
+///      `GameObject::copied_prepare_face` (a copy of a preparation creature
+///      keeps its prepare spell, CR 722.2b). A v122 peer cannot parse the new
+///      `FilterProp` tag and would read a mass scope as a single-target
+///      prepare because serde ignores the unknown field. Full-game peers and
+///      P2P move in lockstep (wire 105); lobby carriers hold no `GameState`
+///      and are unchanged.
+/// 122 — `PermissionGrantee` gains `TriggeringSourceController` (CR 603.2 + CR 109.4: a cast grant bound to the controller of the object that caused the trigger — Curse of Hospitality), serialized in the ability definitions of `GameState`, and `GameEvent::DamageDealt.source_incarnation` / `GameEvent::CombatDamageDealtToPlayer.source_incarnations` (CR 400.7) are carried in pending triggers. A v121 peer cannot deserialize the tag. Full-game peers and P2P move in lockstep (wire 104); no lobby carrier names it.
 /// 121 — `GameState::triggered_abilities_added_mana_this_turn` records
 ///       (trigger definition, receiving player), so copied triggers check
 ///       their own controller's successful mana history. A v120 peer cannot
@@ -929,7 +931,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 122;
+pub const PROTOCOL_VERSION: u32 = 123;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2186,12 +2188,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 122);
+        assert_eq!(PROTOCOL_VERSION, 123);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 121);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 122);
     }
 
     #[test]

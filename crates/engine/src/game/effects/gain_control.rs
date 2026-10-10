@@ -1460,6 +1460,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
         let ability = ResolvedAbility::new(
             Effect::GiveControl {
@@ -1538,6 +1539,7 @@ then lose that much life.";
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let resolved = build_resolved_from_def(execute, kain, PlayerId(0));

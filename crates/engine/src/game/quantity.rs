@@ -12779,6 +12779,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -16210,21 +16211,25 @@ mod tests {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(11), 4)],
                 total_damage: 4,
+                source_incarnations: vec![],
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(2),
                 source_amounts: vec![(ObjectId(12), 9)],
                 total_damage: 9,
+                source_incarnations: vec![],
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(13), 2)],
                 total_damage: 2,
+                source_incarnations: vec![],
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(0),
                 source_amounts: vec![(ObjectId(14), 7)],
                 total_damage: 7,
+                source_incarnations: vec![],
             },
         ];
 
@@ -20111,6 +20116,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20195,6 +20201,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20216,6 +20223,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20250,6 +20258,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20272,6 +20281,7 @@ mod tests {
             amount: 6,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20295,6 +20305,7 @@ mod tests {
             amount: 6,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20415,6 +20426,7 @@ mod tests {
             amount: 4,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::Power {
@@ -20633,6 +20645,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let mut ability = ResolvedAbility::new(
@@ -20719,6 +20732,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
 
         let mut ability = ResolvedAbility::new(
@@ -23924,6 +23938,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         // No targets: an untargeted damage trigger, which is exactly the shape

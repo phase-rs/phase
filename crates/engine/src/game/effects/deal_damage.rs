@@ -877,6 +877,9 @@ pub(crate) fn apply_damage_after_replacement(
         amount: primary_amount,
         is_combat,
         excess: primary_excess,
+        // CR 400.7: the incarnation captured with the damage context, as the
+        // damage record below uses.
+        source_incarnation: ctx.source_incarnation,
     });
 
     // CR 120.1: Record damage for "was dealt damage by" condition queries.
@@ -7244,6 +7247,7 @@ mod tests {
             amount: 5,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let ability = ResolvedAbility::new(

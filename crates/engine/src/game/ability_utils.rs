@@ -13586,6 +13586,7 @@ mod tests {
             player_id: PlayerId(0),
             source_amounts: vec![],
             total_damage: 11,
+            source_incarnations: vec![],
         }];
 
         let mut ability = ResolvedAbility::new(

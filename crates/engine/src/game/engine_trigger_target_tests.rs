@@ -947,6 +947,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
         amount: 3,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     };
     // CR 603.3c + CR 603.3d "Push first" contract migration.
     let pending = crate::game::triggers::PendingTrigger {

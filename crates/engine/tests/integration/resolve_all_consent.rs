@@ -249,6 +249,7 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
         amount: 4,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     }];
 
     apply(
@@ -478,6 +479,7 @@ fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
         amount: 4,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     }];
     assert!(state.pending_trigger.is_none());
 

@@ -1375,6 +1375,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
         let ability = make_scoped_sacrifice_ability(ControllerRef::ParentTargetController, vec![]);
         let mut events = Vec::new();

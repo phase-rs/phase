@@ -250,6 +250,7 @@ mod curse_co_departed_enchanted_player_trigger;
 mod curse_misc_triggers;
 mod curse_of_conformity_base_pt_and_lose_types;
 mod curse_of_deaths_hold_continuous_effect;
+mod curse_of_hospitality_9213;
 mod curse_of_predation_attacks_enchanted_player_4744;
 mod curse_of_the_nightly_hunt_must_attack;
 mod curse_of_the_restless_dead_land_enters_trigger;

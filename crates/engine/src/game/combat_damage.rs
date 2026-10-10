@@ -1568,6 +1568,8 @@ pub(crate) fn apply_combat_damage(
     // `(player, [(source_id, amount)], step_total)`.
     type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
     let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
+    // CR 400.7: each source's incarnation as it dealt combat damage this step.
+    let mut source_incarnations: Vec<crate::types::identifiers::ObjectIncarnationRef> = Vec::new();
     // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
     // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
     // per source after the batch so "whenever you gain life" triggers once.
@@ -1687,6 +1689,13 @@ pub(crate) fn apply_combat_damage(
             // CR 510.2: Track per-source amounts for this step. Each source
             // appears at most once per player per step; dedup guards any edge
             // where the same source is re-applied (e.g. split-damage riders).
+            if let Some(incarnation) = entry.ctx.source_incarnation {
+                let source =
+                    crate::types::identifiers::ObjectIncarnationRef::of(source_id, incarnation);
+                if !source_incarnations.contains(&source) {
+                    source_incarnations.push(source);
+                }
+            }
             if let Some((_, sources, total)) = combat_damage_to_players
                 .iter_mut()
                 .find(|(damaged_player, _, _)| *damaged_player == *player_id)
@@ -1731,13 +1740,20 @@ pub(crate) fn apply_combat_damage(
     // ahead of a resumed gain.
     let damage_to_players: Vec<GameEvent> = combat_damage_to_players
         .into_iter()
-        .map(
-            |(player_id, source_amounts, total_damage)| GameEvent::CombatDamageDealtToPlayer {
+        .map(|(player_id, source_amounts, total_damage)| {
+            // CR 400.7: the incarnations of this player's sources.
+            let source_incarnations = source_incarnations
+                .iter()
+                .filter(|source| source_amounts.iter().any(|(id, _)| *id == source.object_id))
+                .copied()
+                .collect();
+            GameEvent::CombatDamageDealtToPlayer {
                 player_id,
                 source_amounts,
                 total_damage,
-            },
-        )
+                source_incarnations,
+            }
+        })
         .collect();
 
     // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own

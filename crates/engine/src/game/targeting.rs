@@ -1706,8 +1706,16 @@ pub(crate) fn event_referent_controller(state: &GameState, event: &GameEvent) ->
     // tapped. If that permanent left and returned (a blink), the returned
     // permanent is a new object; "that permanent's controller" is the departed
     // one's controller as it last existed on the battlefield.
+    //
+    // CR 400.7 + CR 608.2h: a damage event names the incarnation that dealt
+    // the damage, the same way (Curse of Hospitality: "that creature's
+    // controller" after the damage dealer was blinked).
     if let GameEvent::PermanentTapped {
         incarnation: Some(incarnation),
+        ..
+    }
+    | GameEvent::DamageDealt {
+        source_incarnation: Some(incarnation),
         ..
     } = event
     {
@@ -1807,20 +1815,12 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // `TriggeringSpellController`). Contested Game Ball's DamageReceived
         // trigger needs the controller of the creature that dealt combat
         // damage, not the damaged player.
+        //
+        // CR 608.2h: a source that has left the battlefield answers with its
+        // last known controller — its row's live `controller` was reset to the
+        // owner on exit, so the live-first read would name the owner.
         TargetFilter::TriggeringSourceController => {
-            let event = event?;
-            let source_obj_id = extract_source_from_event(event)?;
-            let controller = state
-                .objects
-                .get(&source_obj_id)
-                .map(|obj| obj.controller)
-                .or_else(|| {
-                    state
-                        .lki_cache
-                        .get(&source_obj_id)
-                        .map(|lki| lki.controller)
-                })?;
-            Some(TargetRef::Player(controller))
+            event_referent_controller(state, event?).map(TargetRef::Player)
         }
         // CR 120.1 + CR 109.4 + CR 608.2c: "that creature's controller" on an
         // ACTIVE-voice damage trigger — the controller of the damage RECIPIENT.
@@ -3861,6 +3861,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(ObjectId(1), 7)],
             total_damage: 7,
+            source_incarnations: vec![],
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
     }
@@ -3872,6 +3873,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(ObjectId(1), 3)],
             total_damage: 3,
+            source_incarnations: vec![],
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
@@ -5981,6 +5983,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let result = extract_player_from_event(&event, &state);
         // Should return the damaged player (PlayerId(1)), not the source's controller.
@@ -6004,6 +6007,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));

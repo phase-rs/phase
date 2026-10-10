@@ -210,15 +210,20 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 122 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
+ * 123 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
  *      CR 722.3d), scope on Effect BecomePrepared / BecomeUnprepared (mass
  *      "each creature you control becomes prepared", CR 722.3a + CR 115.10a),
  *      prepared_copy_source on SpellCastRecord, and prepare_face on
- *      CopiableValues (a token copy of a preparation creature keeps its
- *      prepare spell). A v121 peer cannot parse the new FilterProp tag and
- *      would read a mass scope as a single-target prepare; the exact-match
- *      handshake refuses the pairing. P2P moves in lockstep (wire 104);
- *      lobby messages are unchanged.
+ *      CopiableValues and GameObject.copied_prepare_face (a copy of a
+ *      preparation creature keeps its prepare spell, CR 722.2b). A v122 peer
+ *      cannot parse the new FilterProp tag and would read a mass scope as a
+ *      single-target prepare; the exact-match handshake refuses the pairing.
+ *      P2P moves in lockstep (wire 105); lobby messages are unchanged.
+ * 122 — PermissionGrantee gains TriggeringSourceController (a cast grant bound to the
+ *      controller of the object that caused the trigger, CR 603.2 + CR 109.4),
+ *      serialized in the ability definitions of GameState; damage events carry
+ *      the source incarnation. A v121 peer cannot deserialize the tag. Wire 104
+ *      moves with it; no lobby frame names it.
  * 121 — GameState's triggered-ability mana ledger records the actual
  *       receiving player alongside the exact trigger definition. A v120 peer
  *       cannot decode a nonempty pair ledger; the exact-match handshake
@@ -764,7 +769,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 122;
+export const PROTOCOL_VERSION = 123;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
