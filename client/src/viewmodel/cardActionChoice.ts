@@ -85,28 +85,54 @@ export function resolveSingleActionDispatch(
 }
 
 /**
- * Filter `legalActionsByObject` entries for a zone-viewable card to the
- * play-or-cast actions only.
+ * Whether an action belongs to the play-or-cast family.
  *
- * Engine authority — covers Adventure, Foretell, Plot, Suspend, Warp, and any
- * future exile-cast permission (cast-family variants), plus `PlayLand` for
- * Future Sight / Bolas's Citadel / Magus of the Future top-of-library land
- * plays. The frontend renders whatever the engine reports — no per-mechanic
- * permission inspection.
+ * Covers casting from Adventure, Foretell, Suspend, Warp, an already-plotted
+ * card in exile, and any future exile-cast permission (cast-family variants),
+ * plus `PlayLand` for Future Sight / Bolas's Citadel / Magus of the Future
+ * top-of-library land plays. Taking the plot special action itself is an
+ * `ActivateAbility`, not a member of this family.
+ */
+export function isPlayOrCastAction(action: GameAction): boolean {
+  return action.type === "CastSpell"
+    || action.type === "CastSpellForFree"
+    || action.type === "CastSpellAsSneak"
+    || action.type === "CastSpellAsWebSlinging"
+    || action.type === "CastSpellAsMiracle"
+    || action.type === "CastSpellAsMadness"
+    || action.type === "PlayFaceDown"
+    || action.type === "PlayLand";
+}
+
+/**
+ * Filter `legalActionsByObject` entries for a card to the play-or-cast actions
+ * only. Backs the release-to-cast gesture, which must never fire a non-cast
+ * action — zone surfaces use `zoneSurfaceActionsForObject` instead.
  */
 export function playOrCastActionsForObject(
   legalActionsByObject: Record<string, ObjectAction[]> | undefined,
   objectId: ObjectId,
 ): ObjectAction[] {
-  return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
-    a.type === "CastSpell"
-    || a.type === "CastSpellForFree"
-    || a.type === "CastSpellAsSneak"
-    || a.type === "CastSpellAsWebSlinging"
-    || a.type === "CastSpellAsMiracle"
-    || a.type === "CastSpellAsMadness"
-    || a.type === "PlayFaceDown"
-    || a.type === "PlayLand"
+  return collectObjectActions(legalActionsByObject, objectId).filter(isPlayOrCastAction);
+}
+
+/**
+ * The actions a zone surface (library pile, zone viewer, hand-fan graveyard /
+ * exile wings) offers for a card: every engine-reported action except mana
+ * payments (CR 605.1a), which the delve/convoke flow handles instead.
+ *
+ * Engine authority — includes the play-or-cast family and activated abilities
+ * that function from the card's zone, such as Unearth / Scavenge / Encore from
+ * the graveyard and the plot special action on the top of the library (CR
+ * 702.170f, Fblthp, Lost on the Range).
+ */
+export function zoneSurfaceActionsForObject(
+  legalActionsByObject: Record<string, ObjectAction[]> | undefined,
+  object: GameObject | undefined,
+  objectId: ObjectId,
+): ObjectAction[] {
+  return collectObjectActions(legalActionsByObject, objectId).filter(
+    (action) => !isManaObjectAction(action, object),
   );
 }
 

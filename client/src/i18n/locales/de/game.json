@@ -671,6 +671,7 @@
     "libraryCount_one": "Bibliothek ({{count}} Karte)",
     "libraryCount_other": "Bibliothek ({{count}} Karten)",
     "playFromTop": "{{name}} von oben aus der Bibliothek spielen",
+    "activateFromTop": "{{name}} von oben aus der Bibliothek aktivieren",
     "topOfLibrary": "oberste Karte der Bibliothek",
     "indicatorOpponentPrefix": "Geg ",
     "graveyardLower": "Friedhof",
@@ -678,6 +679,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Keine Karten in {{zone}}",
     "castFromZone": "Aus {{zone}} wirken: {{name}}",
+    "activateFromZone": "Aus {{zone}} aktivieren: {{name}}",
     "viewCount": "{{count}} ansehen",
     "castableCount": "{{zone}} — {{count}} wirkbar"
   },
