@@ -303,7 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
 
@@ -345,7 +345,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/4 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
+        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/5 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
