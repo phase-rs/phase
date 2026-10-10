@@ -3,7 +3,7 @@ use crate::types::ability::{
     DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
     PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
-    TriggerCondition,
+    TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1408,6 +1408,9 @@ pub(crate) fn bind_resolution_scope(
             trigger_source: entry
                 .ability()
                 .and_then(|ability| ability.trigger_source.as_ref()),
+            trigger_definition: entry
+                .ability()
+                .and_then(|ability| ability.trigger_definition_ref.as_ref()),
             trigger_event: trigger_event.as_ref(),
             subject_match_count: *subject_match_count,
             die_result: *die_result,
@@ -1431,6 +1434,11 @@ pub(crate) struct TriggeredResolutionScope<'a> {
     pub condition: Option<&'a TriggerCondition>,
     pub controller: PlayerId,
     pub trigger_source: Option<&'a TriggerSourceContext>,
+    /// CR 603.4 + CR 607.1c: the resolving ability's own trigger identity, so the
+    /// recheck of a self-linked leaf reads the same key the fire-time check read
+    /// and the ability's deposits record under. `None` when the resolving
+    /// ability carries no triggered identity.
+    pub trigger_definition: Option<&'a TriggerDefinitionRef>,
     pub trigger_event: Option<&'a GameEvent>,
     pub subject_match_count: Option<u32>,
     pub die_result: Option<i32>,
@@ -1457,6 +1465,7 @@ pub(crate) fn bind_triggered_resolution_scope(
                 condition,
                 scope.controller,
                 scope.trigger_source,
+                scope.trigger_definition,
                 scope.trigger_event,
             ) {
                 return false;
@@ -5734,15 +5743,15 @@ mod tests {
     use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
         CastingPermission, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, Effect,
-        ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter,
+        ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
         WaitingFor,
     };
-    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggerFiring};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -15542,6 +15551,7 @@ mod tests {
                     condition: None,
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
@@ -15567,6 +15577,7 @@ mod tests {
                     condition: None,
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: None,
                     die_result: None,
@@ -15593,6 +15604,7 @@ mod tests {
                     condition: None,
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: None,
                     subject_match_count: Some(2),
                     die_result: None,
@@ -15642,6 +15654,7 @@ mod tests {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 99 }),
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
@@ -15672,6 +15685,7 @@ mod tests {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
@@ -15720,6 +15734,7 @@ mod tests {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(3),
                     die_result: Some(20),
@@ -15743,6 +15758,89 @@ mod tests {
                  not a second binding policy"
             );
         }
+    }
+
+    /// CR 603.4 + CR 607.1c: the resolution recheck of a self-linked guard reads
+    /// the resolving entry's own trigger identity. Driven through the
+    /// entry-shaped adapter, so the scope field's fill is exercised as well as
+    /// the recheck it feeds.
+    #[test]
+    fn resolution_recheck_reads_the_resolving_entrys_trigger_identity() {
+        let source = ObjectId(9201);
+        let definition_ref = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(source, 0),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        let guarded_entry = |definition: Option<&TriggerDefinitionRef>, controller| {
+            let mut ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            ability.trigger_definition_ref = definition.cloned();
+            StackEntry {
+                id: ObjectId(9200),
+                source_id: source,
+                controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: Some(TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+                    }),
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            }
+        };
+
+        // Positive control: the entry's identity, not yet recorded, keeps the
+        // guard true, so the resolution proceeds.
+        let mut state = setup();
+        assert!(bind_resolution_scope(
+            &mut state,
+            &guarded_entry(Some(&definition_ref), PlayerId(0)),
+            None
+        ));
+
+        // The entry's own identity was recorded: the guard is false.
+        let mut state = setup();
+        state
+            .triggered_abilities_added_mana_this_turn
+            .insert((definition_ref.clone(), PlayerId(0)));
+        assert!(!bind_resolution_scope(
+            &mut state,
+            &guarded_entry(Some(&definition_ref), PlayerId(0)),
+            None
+        ));
+
+        // A copied entry controlled by P1 keeps the definition but asks P1's
+        // question; P0's record cannot close that entry's guard.
+        assert!(bind_resolution_scope(
+            &mut state,
+            &guarded_entry(Some(&definition_ref), PlayerId(1)),
+            None
+        ));
+
+        // An entry carrying no identity is unanswerable and fails closed, even
+        // though `Not` would invert a plain false.
+        let mut state = setup();
+        assert!(!bind_resolution_scope(
+            &mut state,
+            &guarded_entry(None, PlayerId(0)),
+            None
+        ));
     }
 
     // -----------------------------------------------------------------------

@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 121 — GameState's triggered-ability mana ledger records the actual
+ *       receiving player alongside the exact trigger definition. A v120 peer
+ *       cannot decode a nonempty pair ledger; the exact-match handshake
+ *       refuses it. P2P moves in lockstep (wire 103).
  * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
  *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
  *      gains the targeter that announced the target. A v119 peer cannot
@@ -751,7 +755,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 120;
+export const PROTOCOL_VERSION = 121;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

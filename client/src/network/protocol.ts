@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  103 — game_setup and state_update carry GameState's successful-mana-history
+ *       ledger as (trigger definition, receiving player) pairs. A v102 peer
+ *       cannot decode a nonempty pair ledger. Bumped with full-game 121.
  *  102 — GameState carries the CR 601.2a spell announcement and the
  *       BecomesTarget targeter. Bumped with full-game protocol 120. (101 is
  *       reserved for the Legends of Jidoor PR.)
@@ -596,7 +599,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 102 as const;
+export const WIRE_PROTOCOL_VERSION = 103 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

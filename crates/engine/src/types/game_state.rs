@@ -21210,6 +21210,20 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
+    /// CR 603.4 + CR 607.1c: Exact triggered-ability occurrences (CR 113.2c:
+    /// per ability; CR 400.7: per object incarnation) that actually added
+    /// mana to a player this turn, whether by the ability's effect or by
+    /// a mana-adding cost of that ability paid while it resolves (CR 118.1 +
+    /// CR 118.12). Written only when at least one unit reached a pool
+    /// (CR 106.4), so a declined "you may" (CR 603.5), a declined cost, a
+    /// zero-count or {0}-reduced payment, or a fully prevented (CR 614.1)
+    /// production records nothing. Non-triggered resolutions carry no
+    /// `trigger_definition_ref` and never write. Cleared in `start_next_turn`;
+    /// cleared, not preserved, by the loop-shortcut resource projection (see
+    /// `project_out_resources`).
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub triggered_abilities_added_mana_this_turn: HashSet<(TriggerDefinitionRef, PlayerId)>,
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
@@ -28053,6 +28067,7 @@ impl GameState {
             trigger_fire_counts_this_turn: HashMap::new(),
             triggers_fired_this_turn_per_opponent: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
+            triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
@@ -31076,6 +31091,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         trigger_fire_counts_this_turn: _,
         triggers_fired_this_turn_per_opponent: _,
         triggers_fired_this_game: _,
+        triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
         crew_activated_this_turn: _,
@@ -31435,6 +31451,8 @@ impl PartialEq for GameState {
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
             && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
             && self.triggers_fired_this_game == other.triggers_fired_this_game
+            && self.triggered_abilities_added_mana_this_turn
+                == other.triggered_abilities_added_mana_this_turn
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn

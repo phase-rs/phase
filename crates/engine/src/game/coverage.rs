@@ -4889,6 +4889,7 @@ fn fmt_trigger_condition(
         } => format!("attackers declared {} {count}", fmt_comparator(comparator)),
         TC::ExceptFirstDrawInDrawStep => "except first draw in draw step".into(),
         TC::PlacedByAbilitySource => "placed by this ability".into(),
+        TC::AddedManaWithThisAbilityThisTurn => "added mana with this ability this turn".into(),
         TC::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))
         }

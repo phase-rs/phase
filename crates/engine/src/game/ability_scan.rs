@@ -4072,6 +4072,17 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::AttackersDeclaredCount { .. } => Axes::CONSERVATIVE,
         TriggerCondition::ExceptFirstDrawInDrawStep => Axes::NONE,
         TriggerCondition::PlacedByAbilitySource => Axes::NONE,
+        // A per-turn per-ability ledger keyed by this occurrence's own identity,
+        // like `AbilityCondition::AbilityUseCountThisTurn`: it reads neither the
+        // triggering event nor a sibling's output. `project_out_resources` clears
+        // the ledger, so this projected classification is what keeps
+        // `fire_time_conditions_read_projected_resource` fail-closed while such a
+        // trigger is live.
+        TriggerCondition::AddedManaWithThisAbilityThisTurn => Axes {
+            event: false,
+            sibling: false,
+            projected: true,
+        },
         TriggerCondition::TriggeringSpellTargetsFilter { filter } => {
             let mut acc = Axes {
                 event: true,
@@ -9291,6 +9302,25 @@ mod tests {
         ));
         // The plain fixed drain reads nothing on any axis.
         assert!(!ability_reads_projected_resource(&fixed_drain()));
+    }
+
+    /// CR 603.4 + CR 607.1c: the self-linked "added mana with this ability this
+    /// turn" guard reads a per-turn ledger that `project_out_resources` clears,
+    /// so its negated form (the shape the parser emits) must classify as a
+    /// projected read. The sibling "with this ability" leaf reads zone-change
+    /// provenance, not a projected ledger, and is the control.
+    #[test]
+    fn added_mana_with_this_ability_guard_is_a_projected_read() {
+        assert!(trigger_condition_reads_projected_resource(
+            &TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+            }
+        ));
+        assert!(!trigger_condition_reads_projected_resource(
+            &TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::PlacedByAbilitySource),
+            }
+        ));
     }
 
     // ---- Axis 1: event-context ----
