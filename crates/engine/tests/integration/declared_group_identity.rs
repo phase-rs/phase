@@ -458,6 +458,9 @@ enum After {
     Hexproof,
     Eliminate,
     ExtraCreature,
+    /// P1's Bear dies.
+    BearDies,
+    BearDiesThenEliminate,
     /// P1's Bear gets a +1/+1 counter and deals 2 damage to P0.
     Records,
     RecordsThenEliminate,
@@ -567,6 +570,19 @@ fn apply(state: &mut GameState, change: After) {
             seed_records(state);
             apply(state, After::Eliminate);
         }
+        After::BearDiesThenEliminate => {
+            apply(state, After::BearDies);
+            apply(state, After::Eliminate);
+        }
+        After::BearDies => {
+            let bear = state
+                .objects
+                .values()
+                .find(|o| o.name == "Bear" && o.controller == P1)
+                .expect("P1's Bear")
+                .id;
+            engine::game::zones::move_to_zone(state, bear, Zone::Graveyard, &mut Vec::new());
+        }
         After::ExtraCreature => {
             let id = engine::game::zones::create_object(
                 state,
@@ -608,9 +624,35 @@ fn run_deciding(
         root,
         picks,
         phases,
-        before_resolve,
-        after_install,
+        Changes {
+            before_resolve,
+            after_install,
+            on_stack: After::Nothing,
+        },
         decide,
+    )
+}
+
+/// [`run`], applying `on_stack` once the delayed ability has triggered and sits on the stack.
+fn run_late(
+    root: AbilityDefinition,
+    picks: &[Pick],
+    phases: &[Phase],
+    before_resolve: After,
+    after_install: After,
+    on_stack: After,
+) -> Out {
+    run_on(
+        Board::Plain,
+        root,
+        picks,
+        phases,
+        Changes {
+            before_resolve,
+            after_install,
+            on_stack,
+        },
+        None,
     )
 }
 
@@ -622,15 +664,27 @@ enum Board {
     CasterBear,
 }
 
+/// When each [`After`] change lands: while the spell is on the stack, once the delayed ability is
+/// installed, and once it has triggered and sits on the stack.
+struct Changes {
+    before_resolve: After,
+    after_install: After,
+    on_stack: After,
+}
+
 fn run_on(
     board: Board,
     root: AbilityDefinition,
     picks: &[Pick],
     phases: &[Phase],
-    before_resolve: After,
-    after_install: After,
+    changes: Changes,
     decide: Option<bool>,
 ) -> Out {
+    let Changes {
+        before_resolve,
+        after_install,
+        on_stack,
+    } = changes;
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let mut bear_owners = vec![P1, P2];
@@ -675,6 +729,7 @@ fn run_on(
     let mut chosen = 0;
     let mut prompts = 0;
     let mut applied_before = false;
+    let mut applied_on_stack = false;
     let mut last_wait = String::new();
     let mut asked: Vec<String> = Vec::new();
     let mut events: Vec<GameEvent> = Vec::new();
@@ -699,6 +754,9 @@ fn run_on(
                     if !applied_before {
                         applied_before = true;
                         apply(runner.state_mut(), before_resolve);
+                    } else if !applied_on_stack && runner.state().phase != Phase::PreCombatMain {
+                        applied_on_stack = true;
+                        apply(runner.state_mut(), on_stack);
                     }
                     events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
                 }
@@ -736,6 +794,10 @@ fn run_on(
         advance_collecting(&mut runner, *phase, &mut events);
         drive(&mut runner, &mut events);
     }
+    assert!(
+        applied_on_stack || matches!(on_stack, After::Nothing),
+        "the delayed ability never reached the stack"
+    );
     let state = runner.state();
     Out {
         life: state.players.iter().map(|p| p.life).collect(),
@@ -1772,6 +1834,59 @@ fn count_check(filter: TypedFilter, comparator: Comparator, n: i32) -> AbilityCo
     }
 }
 
+fn history_check(qty: QuantityRef, comparator: Comparator, n: i32) -> AbilityCondition {
+    AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref { qty },
+        comparator,
+        rhs: QuantityExpr::Fixed { value: n },
+    }
+}
+
+fn zone_changes(comparator: Comparator, n: i32) -> AbilityCondition {
+    history_check(
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: None,
+            to: None,
+            filter: TargetFilter::Typed(creature_of(G)),
+        },
+        comparator,
+        n,
+    )
+}
+
+fn counters_added(comparator: Comparator, n: i32) -> AbilityCondition {
+    history_check(
+        QuantityRef::CounterAddedThisTurn {
+            actor: engine::types::ability::CountScope::All,
+            counters: engine::types::counter::CounterMatch::Any,
+            target: TargetFilter::Typed(creature_of(G)),
+        },
+        comparator,
+        n,
+    )
+}
+
+fn damage_dealt(comparator: Comparator, n: i32) -> AbilityCondition {
+    history_check(
+        QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Typed(creature_of(G))),
+            target: Box::new(TargetFilter::Any),
+            aggregate: engine::types::ability::AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: engine::types::ability::DamageKindFilter::Any,
+            channel: engine::types::ability::DamageChannel::Total,
+        },
+        comparator,
+        n,
+    )
+}
+
+fn negated(condition: AbilityCondition) -> AbilityCondition {
+    AbilityCondition::Not {
+        condition: Box::new(condition),
+    }
+}
+
 fn gated_pushes(condition: Option<AbilityCondition>, after: After) -> usize {
     let mut payload = def(lose(TargetFilter::Controller));
     payload.condition = condition;
@@ -1828,8 +1943,8 @@ fn g1_false_gate_on_a_carried_group_does_not_trigger() {
     }
 }
 
-/// A gate on a carried player who left the game is read at resolution, where it names no one and
-/// does nothing (CR 603.4 + CR 800.4).
+/// A gate on a carried player who left the game names no one at the event as at resolution, and
+/// does nothing (CR 603.4 + CR 800.4a).
 #[test]
 fn g2_gate_on_a_carried_player_who_left_does_nothing() {
     let gated = |after| {
@@ -1860,17 +1975,6 @@ fn g3_gate_on_a_carried_player_who_left_reads_no_one_at_the_event_and_at_resolut
     let not = |c| AbilityCondition::Not {
         condition: Box::new(c),
     };
-    let zone_changes = |comparator, n| AbilityCondition::QuantityCheck {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::ZoneChangeCountThisTurn {
-                from: None,
-                to: None,
-                filter: TargetFilter::Typed(creatures()),
-            },
-        },
-        comparator,
-        rhs: QuantityExpr::Fixed { value: n },
-    };
     let died_power = |comparator, n| AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::ZoneChangeAggregateThisTurn {
@@ -1887,31 +1991,6 @@ fn g3_gate_on_a_carried_player_who_left_reads_no_one_at_the_event_and_at_resolut
     let owned = TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Owned {
         controller: declared(G),
     }]);
-    let counters_added = |comparator, n| AbilityCondition::QuantityCheck {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::CounterAddedThisTurn {
-                actor: engine::types::ability::CountScope::All,
-                counters: engine::types::counter::CounterMatch::Any,
-                target: TargetFilter::Typed(creatures()),
-            },
-        },
-        comparator,
-        rhs: QuantityExpr::Fixed { value: n },
-    };
-    let damage_dealt = |comparator, n| AbilityCondition::QuantityCheck {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::DamageDealtThisTurn {
-                source: Box::new(TargetFilter::Typed(creatures())),
-                target: Box::new(TargetFilter::Any),
-                aggregate: engine::types::ability::AggregateFunction::Sum,
-                group_by: None,
-                damage_kind: engine::types::ability::DamageKindFilter::Any,
-                channel: engine::types::ability::DamageChannel::Total,
-            },
-        },
-        comparator,
-        rhs: QuantityExpr::Fixed { value: n },
-    };
     let gated = |condition: &AbilityCondition, else_ability: bool, after| {
         let mut payload = def(lose(TargetFilter::Controller));
         payload.condition = Some(condition.clone());
@@ -2181,6 +2260,144 @@ fn g5_gate_on_a_group_that_was_never_carried_reads_no_one() {
     assert_eq!(true_gate.life, ungated.life, "true takes effect");
 }
 
+/// A one-shot and a duration-bearing delayed ability whose payload is `payload`.
+fn delayed_forms(payload: AbilityDefinition) -> [AbilityDefinition; 2] {
+    let mut trigger =
+        engine::types::ability::TriggerDefinition::new(engine::types::triggers::TriggerMode::Phase);
+    trigger.phase = Some(Phase::End);
+    [
+        delayed(payload.clone(), Phase::End),
+        def(Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: engine::types::ability::WheneverEventExpiry::EndOfTurn,
+            },
+            effect: Box::new(payload),
+            uses_tracked_set: false,
+        }),
+    ]
+}
+
+/// Runs `payload` with P1 declared, applying `install` once the delayed ability exists and
+/// `on_stack` once it has triggered.
+fn departure_run(payload: &AbilityDefinition, form: usize, install: After, on_stack: After) -> Out {
+    run_late(
+        then(head(), delayed_forms(payload.clone())[form].clone()),
+        &[Pick::Player(P1)],
+        &[Phase::End],
+        After::Nothing,
+        install,
+        on_stack,
+    )
+}
+
+/// CR 603.4 + CR 800.4a: a gate on history of a carried player who leaves after the event, with
+/// the payload on the stack, names no one at resolution: the outcome is that of the same final
+/// state reached with the player gone before the event.
+fn assert_departure_after_the_event_reads_no_one(gate: &AbilityCondition, departure: After) {
+    let mut payload = def(lose(TargetFilter::Controller));
+    payload.condition = Some(gate.clone());
+    for form in 0..2 {
+        let late = departure_run(&payload, form, After::Nothing, departure);
+        let early = departure_run(&payload, form, departure, After::Nothing);
+        assert!(
+            early.life[0] < 20,
+            "form {form}: reach guard: the gate is true of no one and the payload takes effect"
+        );
+        assert_eq!(late.life, early.life, "form {form}");
+    }
+}
+
+#[test]
+fn h1_counter_history_gate_of_a_player_who_leaves_with_the_payload_on_the_stack() {
+    for gate in [
+        counters_added(Comparator::LE, 0),
+        negated(counters_added(Comparator::GE, 1)),
+    ] {
+        assert_departure_after_the_event_reads_no_one(&gate, After::RecordsThenEliminate);
+    }
+}
+
+#[test]
+fn h2_damage_history_gate_of_a_player_who_leaves_with_the_payload_on_the_stack() {
+    for gate in [
+        damage_dealt(Comparator::LE, 0),
+        negated(damage_dealt(Comparator::GE, 1)),
+    ] {
+        assert_departure_after_the_event_reads_no_one(&gate, After::RecordsThenEliminate);
+    }
+}
+
+#[test]
+fn h3_zone_change_history_gate_of_a_player_who_leaves_with_the_payload_on_the_stack() {
+    for gate in [
+        zone_changes(Comparator::LE, 0),
+        negated(zone_changes(Comparator::GE, 1)),
+    ] {
+        assert_departure_after_the_event_reads_no_one(&gate, After::BearDiesThenEliminate);
+    }
+}
+
+/// Presence agrees whether the departed player is read as no one or by identity, because the
+/// player's objects leave with them; the schedule still drives the payload to resolution.
+#[test]
+fn h4_presence_gate_of_a_player_who_leaves_with_the_payload_on_the_stack() {
+    let outcome = |comparator, n| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = Some(count_check(creature_of(G), comparator, n));
+        let late = departure_run(&payload, 0, After::Nothing, After::Eliminate);
+        let early = departure_run(&payload, 0, After::Eliminate, After::Nothing);
+        assert_eq!(late.pushed, 1, "the payload was on the stack at the event");
+        assert_eq!(late.life, early.life);
+        late.life
+    };
+    assert_eq!(outcome(Comparator::LE, 5), vec![17, 20, 20], "reach guard");
+    assert_eq!(outcome(Comparator::GE, 1), vec![20, 20, 20]);
+}
+
+/// CR 603.4 + CR 800.4a: "no counter was put on a creature the declared player controls this
+/// turn", true at the event; a counter lands and the player leaves with the payload on the stack.
+/// With the player still in the game the gate is false and the payload does nothing.
+#[test]
+fn h5_counter_put_while_the_payload_waits_and_the_player_leaves() {
+    let run = |gate: Option<AbilityCondition>, on_stack| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = gate;
+        departure_run(&payload, 0, After::Nothing, on_stack).life
+    };
+    let no_counter = Some(counters_added(Comparator::LE, 0));
+    assert_eq!(run(None, After::Records), vec![17, 20, 20], "ungated");
+    assert_eq!(
+        run(no_counter.clone(), After::Records),
+        vec![20, 20, 20],
+        "the player is still in the game: the gate is false"
+    );
+    assert_eq!(
+        run(no_counter, After::RecordsThenEliminate),
+        vec![17, 20, 20],
+        "the player left: the gate reads no one"
+    );
+}
+
+/// CR 603.4: an intervening "if" that becomes false while the ability waits on the stack makes
+/// the whole ability do nothing, an unconditional second clause included.
+#[test]
+fn h6_gate_false_by_resolution_stops_the_whole_ability() {
+    let run = |on_stack| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = Some(count_check(creature_of(G), Comparator::GE, 1));
+        let mut second = def(lose(TargetFilter::Controller));
+        second.sub_link = SubAbilityLink::SequentialSibling;
+        departure_run(&payload.sub_ability(second), 0, After::Nothing, on_stack).life
+    };
+    assert_eq!(
+        run(After::Nothing),
+        vec![14, 20, 20],
+        "reach guard: both clauses run while the gate holds"
+    );
+    assert_eq!(run(After::BearDies), vec![20, 20, 20]);
+}
+
 /// A declared player who was an illegal target as the creating chain began to resolve names no
 /// one at install, so the payload's slot offers none of their objects.
 #[test]
@@ -2281,8 +2498,11 @@ fn caster_board_run(root: AbilityDefinition, picks: &[Pick], before: After, afte
         root,
         picks,
         &[Phase::End],
-        before,
-        after,
+        Changes {
+            before_resolve: before,
+            after_install: after,
+            on_stack: After::Nothing,
+        },
         None,
     )
 }

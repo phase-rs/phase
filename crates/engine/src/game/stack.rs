@@ -1395,6 +1395,12 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
+    // CR 603.4 + CR 800.4a: a payload carrying declared players is rechecked against a condition
+    // derived now, so a carried player who has since left binds no one.
+    let rederived = entry
+        .ability()
+        .filter(|ability| !ability.context.outer_declared_players.is_empty())
+        .map(|ability| super::triggers::delayed_intervening_if(state, ability));
     let triggered = match &entry.kind {
         StackEntryKind::TriggeredAbility {
             condition,
@@ -1403,7 +1409,7 @@ pub(crate) fn bind_resolution_scope(
             die_result,
             ..
         } => Some(TriggeredResolutionScope {
-            condition: condition.as_ref(),
+            condition: rederived.as_ref().unwrap_or(condition).as_ref(),
             controller: entry.controller,
             trigger_source: entry
                 .ability()

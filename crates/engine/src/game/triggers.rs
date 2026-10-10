@@ -13110,7 +13110,7 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 /// (the controller-scoped `QuantityCheck` populations pinned by
 /// `non_battlefield_presence_gate_declines_the_fire_time_hoist` and its
 /// siblings) — buying nothing and costing CR 603.4's fire-time half.
-fn delayed_intervening_if(
+pub(crate) fn delayed_intervening_if(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<TriggerCondition> {
@@ -13129,8 +13129,7 @@ fn delayed_intervening_if(
         }
         super::targeting::carried_declared_player(state, ability, group)
     });
-    // CR 603.4 + CR 608.2b: an unbound non-local group names no one on both legs (the fire-time
-    // reader has no ability; the resolution lookup finds no live carried player), so a literal
+    // CR 603.4 + CR 608.2b: an unbound non-local group names no one on both legs, so a literal
     // stands in for it in the divergence test alone.
     let mut classified = condition.clone();
     crate::game::filter::rebind_declared_groups_in_condition(&mut classified, &mut |group| {
@@ -13243,7 +13242,8 @@ fn delayed_trigger_to_context(
     // entry so `stack.rs`'s resolution recheck applies to a delayed triggered
     // ability exactly as it does to a printed one. `delayed_intervening_if` is
     // the SAME authority the collection gate below used, so the two halves of
-    // the CR 603.4 pair cannot read different predicates.
+    // the CR 603.4 pair cannot read different predicates; `stack.rs` re-derives it
+    // for a payload carrying declared players, so a departed player binds no one.
     let condition = delayed_intervening_if(state, &trigger.ability);
     // CR 603.2c: a batched ("one or more") delayed trigger reads "that many" as
     // the number of matching subjects in its whole firing group, through the
