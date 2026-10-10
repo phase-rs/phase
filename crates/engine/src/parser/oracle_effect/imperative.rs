@@ -5884,6 +5884,134 @@ pub(super) fn parse_for_each_player_exile_controlled(
     Some(clause)
 }
 
+/// CR 608.2c: an "exile a card from each graveyard" sentence with a qualifier
+/// [`parse_exile_one_card_from_each_graveyard`] doesn't model.
+pub(super) const PER_GRAVEYARD_EXILE_QUALIFIER_GAP: &str = "per_graveyard_exile_qualifier";
+
+/// CR 101.4c + CR 404.1 + CR 608.2c: "exile a[n] `<type>` card [at random] from
+/// each [opponent's] graveyard" — one card from EVERY graveyard of the named
+/// population, chosen by the controller as the ability resolves (Summon: Esper
+/// Valigarmanda, King Narfi's Betrayal) or selected at random (Kefka, Dancing
+/// Mad). The same per-iterated-player choose + mass-exile shape
+/// as Kaya's `parse_for_each_player_exile_controlled`: a `ChooseFromZone {
+/// Each(..) }` that accumulates one pick per player into the chain's tracked
+/// set, then `ChangeZoneAll { TrackedSet }` exiles them all. Without the
+/// per-player choice "from each graveyard" read as one card from any graveyard.
+/// A qualifier this reader doesn't model (before or after "from each
+/// graveyard") fails closed as [`PER_GRAVEYARD_EXILE_QUALIFIER_GAP`] instead of
+/// falling back to that one-card reading.
+pub(super) fn parse_exile_one_card_from_each_graveyard(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+
+    let (after_article, _) = (
+        tag::<_, _, E>("exile "),
+        alt((tag::<_, _, E>("an "), tag("a "))),
+    )
+        .parse(lower)
+        .ok()?;
+    // "<type phrase> card[ at random] from each [opponent's] graveyard"
+    let tail_parser = |i| {
+        (
+            tag::<_, _, E>("card"),
+            opt(value((), tag(" at random"))),
+            preceded(
+                tag(" from each "),
+                alt((
+                    value(PerPlayerScope::Opponents, tag("opponent's graveyard")),
+                    value(PerPlayerScope::AllPlayers, tag("graveyard")),
+                )),
+            ),
+        )
+            .parse(i)
+    };
+    let qualifier_gap = || {
+        Some(parsed_clause(Effect::unimplemented(
+            PER_GRAVEYARD_EXILE_QUALIFIER_GAP,
+            lower,
+        )))
+    };
+    let Some((head, tail)) = nom_primitives::scan_split_at_phrase(after_article, tail_parser)
+    else {
+        // A qualifier between "card" and "from each graveyard" ("a creature
+        // card with mana value 3 or less from each graveyard").
+        let names_each_graveyard = nom_primitives::scan_split_at_phrase(after_article, |i| {
+            (
+                tag::<_, _, E>("from each "),
+                alt((tag::<_, _, E>("opponent's graveyard"), tag("graveyard"))),
+            )
+                .parse(i)
+        })
+        .is_some();
+        return if names_each_graveyard {
+            qualifier_gap()
+        } else {
+            None
+        };
+    };
+    let (after_scope, (_, random, scope)) = tail_parser(tail).ok()?;
+    let type_phrase = head.trim_end();
+    if !terminal_punctuation_only(after_scope) {
+        return qualifier_gap();
+    }
+    let filter = if type_phrase.is_empty() {
+        None
+    } else {
+        // The whole phrase must be a type phrase: anything else ("2/2") is a
+        // qualifier the filter reader would silently drop.
+        if (super::super::oracle_nom::target::parse_type_phrase, eof)
+            .parse(type_phrase)
+            .is_err()
+        {
+            return qualifier_gap();
+        }
+        Some(super::search::parse_search_filter(type_phrase, ctx))
+    };
+
+    let choose = Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Graveyard,
+        additional_zones: Vec::new(),
+        zone_owner: ZoneOwner::Each(scope),
+        filter,
+        chooser: Chooser::Controller.into(),
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
+        reciprocal_role: None,
+        up_to: false,
+        selection: if random.is_some() {
+            CardSelectionMode::Random
+        } else {
+            CardSelectionMode::Chosen
+        },
+        constraint: None,
+    };
+    // CR 608.2c: exile EVERY chosen card (`ChangeZoneAll` over the
+    // tracked set the per-player choose accumulated).
+    let exile_all = Effect::ChangeZoneAll {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        target: TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        },
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        enter_with_counters: vec![],
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    };
+    let mut clause = parsed_clause(choose);
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        exile_all,
+    )));
+    Some(clause)
+}
+
 /// CR 102.2 + CR 102.3 + CR 608.2c + CR 608.2d: "For each opponent, choose [up
 /// to one] [other] `<type-phrase>` that player controls" — Ultimate Magic:
 /// Meteor. The spell's controller chooses, for every opponent, one permanent

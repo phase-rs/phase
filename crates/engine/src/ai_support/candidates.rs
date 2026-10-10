@@ -7284,7 +7284,9 @@ mod tests {
             .push(CoreType::Creature);
         state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
         state.objects.get_mut(&prepared_id).unwrap().back_face =
-            Some(prepare_back_face_with_cost(ManaCost::NoCost));
+            // A {0} prepare spell needs no mana. `NoCost` would be an
+            // unpayable cost (CR 118.6), so the copy could not be cast.
+            Some(prepare_back_face_with_cost(ManaCost::zero()));
 
         // Create an unprepared creature on battlefield (must NOT appear).
         let plain_id = create_object(

@@ -312,6 +312,39 @@ describe("Discard cost modal", () => {
     });
   });
 
+  it("names a resolution-time cast pick as a cast, not a battlefield move", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10, 11],
+        count: 1,
+        min_count: 0,
+        up_to: true,
+        source_id: 19,
+        effect_kind: "CastFromZone",
+        zone: "Exile",
+      }),
+      {
+        10: { ...makeObject(10, "Opt"), zone: "Exile" },
+        11: { ...makeObject(11, "Lightning Bolt"), zone: "Exile" },
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Cast")).toBeInTheDocument();
+    expect(screen.getByText("Choose up to 1 card to cast")).toBeInTheDocument();
+    expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Lightning Bolt" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cast (1/1)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [11] },
+    });
+  });
+
   it("describes library placement without saying battlefield", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({

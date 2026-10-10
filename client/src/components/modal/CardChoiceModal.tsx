@@ -1306,11 +1306,15 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
   const isAttachChoice = data.effect_kind === "Attach";
+  // The engine's `effect_kind` names a resolution-time cast pick (a linked
+  // exile pool, a hand or a looked-at library); it casts, it moves nothing.
+  const isCastChoice = data.effect_kind === "CastFromZone";
   const isSacrifice =
     data.zone === "Battlefield" &&
     data.destination == null &&
     !isAttachChoice &&
-    !isTapUntapChoice;
+    !isTapUntapChoice &&
+    !isCastChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
@@ -1345,6 +1349,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
       : "Tap"
     : isAttachChoice
       ? "Attach"
+    : isCastChoice
+      ? "Cast"
     : isSacrifice
       ? "Sacrifice"
       : isTopdeck
