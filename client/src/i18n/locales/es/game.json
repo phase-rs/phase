@@ -671,6 +671,7 @@
     "libraryCount_one": "Biblioteca ({{count}} carta)",
     "libraryCount_other": "Biblioteca ({{count}} cartas)",
     "playFromTop": "Juega {{name}} desde la parte superior de la biblioteca",
+    "activateFromTop": "Activa {{name}} desde la parte superior de la biblioteca",
     "topOfLibrary": "la parte superior de la biblioteca",
     "indicatorOpponentPrefix": "Op ",
     "graveyardLower": "cementerio",
@@ -678,6 +679,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "No hay cartas en {{zone}}",
     "castFromZone": "Lanzar desde {{zone}}: {{name}}",
+    "activateFromZone": "Activar desde {{zone}}: {{name}}",
     "viewCount": "Ver {{count}}",
     "castableCount": "{{zone}} — {{count}} lanzables"
   },
