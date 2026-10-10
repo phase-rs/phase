@@ -2422,9 +2422,9 @@ fn h6_gate_false_by_resolution_stops_the_whole_ability() {
     assert_eq!(run(After::BearDies), vec![20, 20, 20]);
 }
 
-/// CR 603.12 + CR 603.4: a reflexive trigger created while a declared-player payload resolves
-/// keeps only the gate it was put on the stack with; when that gate turns false while it waits,
-/// its gated clause is skipped and the unconditional clause after it still runs.
+/// CR 603.12: a reflexive trigger created while a declared-player payload resolves has no stored
+/// recheck and is not given one, so when its guard turns false while it waits only the guarded
+/// clause is skipped and the unconditional clause after it still runs.
 #[test]
 fn h7_reflexive_trigger_gate_false_by_resolution_skips_only_its_clause() {
     let run = |guard: Option<AbilityCondition>, on_reflexive| {
