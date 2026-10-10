@@ -32,6 +32,9 @@ fn ability_scoped_to_slot(
     role: &ManaTargetRole,
     slot: ManaTargetSlot,
 ) -> Option<ResolvedAbility> {
+    // The role index is a declared position; it is also the stored position
+    // because resolution validation keeps every role of a multi-role mana in
+    // place (`OccurrenceVerdict::IllegalRetained`) unless all are illegal.
     let index = role.slot_index(slot)?;
     let filter = role.filter_for(slot)?;
     let chosen = ability.targets.get(index)?;
@@ -43,7 +46,7 @@ fn ability_scoped_to_slot(
     );
     let _kept = legal.into_iter().next()?;
     let mut scoped = ability.clone();
-    scoped.targets = retain_only_player_at(ability, Some(index));
+    scoped.project_target_occurrences(&retain_only_player_at(ability, Some(index)));
     Some(scoped)
 }
 
@@ -61,13 +64,17 @@ fn ability_scoped_to_slot(
 /// that half of the production silently produce no colors, which CR 608.2b does
 /// not license: only the part that "requires information about an illegal
 /// target" fails.
-fn retain_only_player_at(ability: &ResolvedAbility, keep: Option<usize>) -> Vec<TargetRef> {
+///
+/// Returns the kept POSITIONS: scoping is an occurrence projection
+/// (`ResolvedAbility::project_target_occurrences`), so each kept occurrence
+/// keeps its own pin.
+fn retain_only_player_at(ability: &ResolvedAbility, keep: Option<usize>) -> Vec<usize> {
     ability
         .targets
         .iter()
         .enumerate()
         .filter(|(i, t)| !matches!(t, TargetRef::Player(_)) || Some(*i) == keep)
-        .map(|(_, t)| t.clone())
+        .map(|(i, _)| i)
         .collect()
 }
 
@@ -111,14 +118,16 @@ fn count_scoped_ability(
     if let Some(filter) = role.count_source().filter(|filter| filter.is_context_ref()) {
         let from_context = super::resolve_player_for_context_ref(state, ability, filter);
         let mut scoped = ability.clone();
-        scoped.targets = retain_only_player_at(ability, None);
-        scoped.targets.extend(from_context.map(TargetRef::Player));
+        scoped.project_target_occurrences(&retain_only_player_at(ability, None));
+        if let Some(player) = from_context {
+            scoped.push_target(TargetRef::Player(player));
+        }
         return scoped;
     }
     // Case 3, else case 4.
     ability_scoped_to_slot(state, ability, role, ManaTargetSlot::CountSource).unwrap_or_else(|| {
         let mut scoped = ability.clone();
-        scoped.targets = retain_only_player_at(ability, None);
+        scoped.project_target_occurrences(&retain_only_player_at(ability, None));
         scoped
     })
 }

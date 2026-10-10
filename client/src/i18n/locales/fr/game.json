@@ -671,6 +671,7 @@
     "libraryCount_one": "Bibliothèque ({{count}} carte)",
     "libraryCount_other": "Bibliothèque ({{count}} cartes)",
     "playFromTop": "Jouer {{name}} depuis le dessus de la bibliothèque",
+    "activateFromTop": "Activer {{name}} depuis le dessus de la bibliothèque",
     "topOfLibrary": "dessus de la bibliothèque",
     "indicatorOpponentPrefix": "Adv ",
     "graveyardLower": "cimetière",
@@ -678,6 +679,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Aucune carte dans {{zone}}",
     "castFromZone": "Lancer depuis {{zone}} : {{name}}",
+    "activateFromZone": "Activer depuis {{zone}} : {{name}}",
     "viewCount": "Voir {{count}}",
     "castableCount": "{{zone}} — {{count}} lançable(s)"
   },
@@ -897,6 +899,7 @@
     },
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
+    "keepCurrentTarget": "Conserver cette cible",
     "skip": "Ignorer",
     "opponentChoice": "(au choix de l'adversaire)",
     "chooseNewTarget": "Choisissez la nouvelle cible du sort",
@@ -2406,7 +2409,8 @@
     "confirm": "Confirmer",
     "badgeNewTarget": "Nouvelle cible",
     "slotLabel": "Cible {{index}} : {{current}} → {{chosen}}",
-    "unselected": "inchangée"
+    "unselected": "inchangée",
+    "keep": "Conserver"
   },
   "separatePiles": {
     "chooserName": "Joueur {{number}}",

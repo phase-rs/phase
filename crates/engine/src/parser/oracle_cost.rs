@@ -26,10 +26,10 @@ use super::oracle_util::parse_number;
 use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
-    CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr,
-    QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
+    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope,
+    QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter,
+    EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -2001,7 +2001,7 @@ fn sacrifice_filter_lost_a_restriction(filter: &TargetFilter, tail: &str) -> boo
 }
 
 /// CR 301.5 + CR 303.4: Consume the "attached to ~" rider on a sacrifice cost's
-/// object phrase and record it as `FilterProp::AttachedToSource`, whose matcher
+/// object phrase and record it as `FilterProp::AttachedTo { to: AttachmentReferent::Source }`, whose matcher
 /// is "this object's `attached_to` field is the filter source".
 ///
 /// Faunsbane Troll ("{1}, Sacrifice an Aura attached to this creature") and
@@ -2028,7 +2028,12 @@ fn fold_attached_to_source_rider(filter: TargetFilter, tail: &str) -> (TargetFil
         return (filter, tail);
     };
     (
-        distribute_shared_properties(filter, &[FilterProp::AttachedToSource]),
+        distribute_shared_properties(
+            filter,
+            &[FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            }],
+        ),
         rest,
     )
 }
@@ -2743,7 +2748,7 @@ mod tests {
     }
 
     /// CR 301.5 + CR 303.4 + CR 601.2h + CR 602.2b: the "attached to ~" rider on a
-    /// sacrifice cost survives into the filter as `FilterProp::AttachedToSource`.
+    /// sacrifice cost survives into the filter as `FilterProp::AttachedTo { to: AttachmentReferent::Source }`.
     ///
     /// Faunsbane Troll ("{1}, Sacrifice an Aura attached to this creature") and
     /// Ronin, Shadow Stalker ("{T}, Sacrifice an Equipment attached to Ronin") —
@@ -2776,7 +2781,9 @@ mod tests {
                 "the rider must not disturb the noun phrase: {tf:?}"
             );
             assert!(
-                tf.properties.contains(&FilterProp::AttachedToSource),
+                tf.properties.contains(&FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }),
                 "{phrase:?} must restrict to attachments ON THE SOURCE, got {tf:?}"
             );
         }
@@ -2791,7 +2798,9 @@ mod tests {
             panic!("expected a typed filter, got {bare_t:?}");
         };
         assert!(
-            !bare_tf.properties.contains(&FilterProp::AttachedToSource),
+            !bare_tf.properties.contains(&FilterProp::AttachedTo {
+                to: AttachmentReferent::Source
+            }),
             "a bare \"Sacrifice an Aura\" must stay unrestricted, got {bare_tf:?}"
         );
 

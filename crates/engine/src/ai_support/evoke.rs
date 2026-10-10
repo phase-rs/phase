@@ -273,7 +273,7 @@ fn destroy_would_succeed(
 ) -> bool {
     let mut preview = state.clone();
     let mut effect = ability.clone();
-    effect.targets = vec![candidate];
+    effect.set_unpinned_targets(vec![candidate]);
     let mut events = Vec::new();
     crate::game::effects::destroy::resolve(&mut preview, &effect, &mut events).is_ok()
         && events.iter().any(|event| {
@@ -294,7 +294,7 @@ fn counter_would_succeed(
 ) -> bool {
     let mut preview = state.clone();
     let mut effect = ability.clone();
-    effect.targets = vec![candidate];
+    effect.set_unpinned_targets(vec![candidate]);
     let mut events = Vec::new();
     crate::game::effects::counter::resolve(&mut preview, &effect, &mut events).is_ok()
         && events.iter().any(|event| {

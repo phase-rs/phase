@@ -16,15 +16,16 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, BasicLandType,
-    CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CastPermissionConstraint,
-    CastingPermission, CombatHistoryScope, ContinuousModification, ControllerRef, CountScope,
-    DamageChannel, Duration, Effect, FilterProp, ModalSelectionCondition, ModalSelectionConstraint,
-    NameStickerSet, ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
-    PossessionAxis, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RoundingMode,
-    SpellCastingOption, StaticCondition, StaticDefinition, SubtypeExclusion,
-    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, AttachmentReferent,
+    BasicLandType, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    CastPermissionConstraint, CastingPermission, CombatHistoryScope, ContinuousModification,
+    ControllerRef, CountScope, DamageChannel, Duration, Effect, FilterProp,
+    ModalSelectionCondition, ModalSelectionConstraint, NameStickerSet, ObjectProperty, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, RoundingMode, SpellCastingOption, StaticCondition,
+    StaticDefinition, SubtypeExclusion, TargetDamageSourceBinding, TargetFilter, TargetRef,
+    ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -62,7 +63,7 @@ pub struct QuantityContext {
     /// CR 613.4c: The per-recipient binding for "<subject> gets +N/+M for
     /// each X attached to it" Aura/Equipment statics. Set by the layer
     /// evaluator when the dynamic modification's filter contains
-    /// `FilterProp::AttachedToRecipient`; `None` otherwise.
+    /// `FilterProp::AttachedTo { to: AttachmentReferent::Recipient }`; `None` otherwise.
     pub recipient: Option<ObjectId>,
     /// Current player for an "each player/opponent" resolution pass. Distinct
     /// from `controller`, which remains the printed ability's controller.
@@ -3215,7 +3216,10 @@ pub(crate) fn filter_uses_recipient(filter: &TargetFilter) -> bool {
 
 fn filter_prop_uses_recipient(prop: &FilterProp) -> bool {
     match prop {
-        FilterProp::AttachedToRecipient | FilterProp::Another => true,
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::Another => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_uses_recipient),
         // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
         FilterProp::Not { prop } => filter_prop_uses_recipient(prop),
@@ -3801,7 +3805,7 @@ pub(crate) fn resolve_quantity_for_ability_condition(
 }
 
 /// Resolve a QuantityExpr with ability targets/chosen-X plus a per-object
-/// recipient binding for `FilterProp::AttachedToRecipient`.
+/// recipient binding for `FilterProp::AttachedTo { to: AttachmentReferent::Recipient }`.
 pub(crate) fn resolve_quantity_with_targets_and_recipient(
     state: &GameState,
     expr: &QuantityExpr,
@@ -11953,9 +11957,11 @@ mod tests {
         let recipient_relative = QuantityExpr::Ref {
             qty: QuantityRef::SharedCardTypes {
                 source: CardTypeSetSource::Objects {
-                    filter: TargetFilter::Typed(
-                        TypedFilter::card().properties(vec![FilterProp::AttachedToRecipient]),
-                    ),
+                    filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::AttachedTo {
+                            to: crate::types::ability::AttachmentReferent::Recipient,
+                        },
+                    ])),
                 },
             },
         };

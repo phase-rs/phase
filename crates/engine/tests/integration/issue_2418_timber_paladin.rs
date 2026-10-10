@@ -24,7 +24,9 @@ fn aura_count_condition(comparator: Comparator, count: i32) -> StaticCondition {
                         TypeFilter::Subtype("Aura".to_string()),
                     ],
                     controller: None,
-                    properties: vec![FilterProp::AttachedToSource],
+                    properties: vec![FilterProp::AttachedTo {
+                        to: engine::types::ability::AttachmentReferent::Source,
+                    }],
                 }),
             },
         },

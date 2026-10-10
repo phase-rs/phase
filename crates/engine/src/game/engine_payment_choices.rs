@@ -535,7 +535,7 @@ fn handle_opponent_may_choice_inner(
                     .player_actions_this_way
                     .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
                 if matches!(ability.effect, Effect::DealDamage { .. }) {
-                    ability.targets = vec![TargetRef::Player(promptee)];
+                    ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
                 }
                 set_active_priority(state);
                 effects::resolve_ability_chain(state, &ability, events, 1)
@@ -589,7 +589,7 @@ fn resolve_all_declined_opponent_may(
                 // target (such as the affected player of a replaced Draw) after
                 // the post-replacement drain that supplied it has retired.
                 if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
-                    else_resolved.targets = ability.targets.clone();
+                    else_resolved.mirror_targets_from(ability);
                 }
                 else_resolved.context = ability.context.clone();
                 else_resolved
@@ -1798,7 +1798,7 @@ pub(super) fn handle_unless_payment(
                 Effect::DealDamage { .. } => {
                     let mut damage_ability = pending_effect.as_ref().clone();
                     damage_ability.effect = *effect.clone();
-                    damage_ability.targets = vec![TargetRef::Player(player)];
+                    damage_ability.set_unpinned_targets(vec![TargetRef::Player(player)]);
                     damage_ability.unless_pay = None;
                     damage_ability.sub_ability = None;
                     if let Err(e) =
@@ -1992,7 +1992,7 @@ pub(crate) fn finish_successful_unless_payment(
         state.cost_payment_failed_flag = false;
         let mut sub_resolved = sub.as_ref().clone();
         if sub_resolved.targets.is_empty() {
-            sub_resolved.targets = pending_effect.targets.clone();
+            sub_resolved.mirror_targets_from(pending_effect);
         }
         sub_resolved.context = pending_effect.context.clone();
         sub_resolved.context.optional_effect_performed = true;
@@ -2011,7 +2011,7 @@ pub(crate) fn finish_successful_unless_payment(
         // instruction and resolves even though payment suppressed the head.
         let mut sub_resolved = sub.as_ref().clone();
         if sub_resolved.targets.is_empty() {
-            sub_resolved.targets = pending_effect.targets.clone();
+            sub_resolved.mirror_targets_from(pending_effect);
         }
         sub_resolved.context = pending_effect.context.clone();
         let event_start =

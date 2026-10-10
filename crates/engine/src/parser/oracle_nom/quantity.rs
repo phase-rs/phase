@@ -27,12 +27,12 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
-    ControllerRef, CountBinding, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
-    FilterProp, LetterQuery, NameStickerSet, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, QuantityExpr, QuantityRef,
-    RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause,
-    TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, AttachmentReferent, CardTypeSetSource, CastManaObjectScope,
+    CastManaSpentMetric, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
+    DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
+    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
+    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -6760,7 +6760,12 @@ pub(crate) fn parse_attachment_type_list(input: &str) -> OracleResult<'_, Vec<Ty
 /// pair.
 pub(crate) fn parse_attachment_referent_prop(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
-        value(FilterProp::AttachedToSource, tag(" attached to ~")),
+        value(
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            },
+            tag(" attached to ~"),
+        ),
         // CR 301.5a + CR 303.4: source-anaphoric gendered pronoun denotes the
         // ability source (same id as `~`) — Winter Soldier, Captain America
         // (MSH templates). Maps to AttachedToSource, identical to the `~` arm.
@@ -6771,11 +6776,15 @@ pub(crate) fn parse_attachment_referent_prop(input: &str) -> OracleResult<'_, Fi
         // the enchanted player, not the Aura source), which would bind the wrong
         // object set.
         value(
-            FilterProp::AttachedToSource,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            },
             alt((tag(" attached to him"), tag(" attached to her"))),
         ),
         value(
-            FilterProp::AttachedToRecipient,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            },
             alt((tag(" attached to it"), tag(" attached to that creature"))),
         ),
         // CR 303.4 + CR 301.5: player-referent pronoun/noun phrase — the
@@ -6788,8 +6797,10 @@ pub(crate) fn parse_attachment_referent_prop(input: &str) -> OracleResult<'_, Fi
         // the source is the correct referent (Curse of Thirst, Curse of
         // Surveillance).
         value(
-            FilterProp::AttachedToPlayer {
-                player: ControllerRef::EnchantedPlayer,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player {
+                    player: ControllerRef::EnchantedPlayer,
+                },
             },
             alt((tag(" attached to them"), tag(" attached to that player"))),
         ),
@@ -8961,7 +8972,12 @@ mod tests {
                     properties,
                 }) => {
                     assert_eq!(controller, None);
-                    assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(
+                        properties,
+                        vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source
+                        }]
+                    );
                     assert_eq!(
                         type_filters,
                         vec![TypeFilter::AnyOf(vec![
@@ -8990,7 +9006,12 @@ mod tests {
                     properties,
                 }) => {
                     assert_eq!(controller, None);
-                    assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(
+                        properties,
+                        vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source
+                        }]
+                    );
                     assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
                 }
                 other => panic!("expected Typed filter, got {other:?}"),
@@ -9017,7 +9038,12 @@ mod tests {
                     properties,
                 }) => {
                     assert_eq!(controller, None);
-                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                    assert_eq!(
+                        properties,
+                        vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Recipient
+                        }]
+                    );
                     assert_eq!(
                         type_filters,
                         vec![TypeFilter::AnyOf(vec![
@@ -9048,7 +9074,12 @@ mod tests {
                     properties,
                 }) => {
                     assert_eq!(controller, None);
-                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                    assert_eq!(
+                        properties,
+                        vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Recipient
+                        }]
+                    );
                     assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
                 }
                 other => panic!("expected Typed filter, got {other:?}"),
@@ -9079,7 +9110,9 @@ mod tests {
                         assert_eq!(controller, None, "controller for {clause:?}");
                         assert_eq!(
                             properties,
-                            vec![FilterProp::AttachedToSource],
+                            vec![FilterProp::AttachedTo {
+                                to: AttachmentReferent::Source
+                            }],
                             "properties for {clause:?}"
                         );
                         assert_eq!(
@@ -9097,6 +9130,21 @@ mod tests {
 
     #[test]
     fn parse_for_each_attached_to_them_not_source_bound() {
+        // Positive control: the same combinator on the same type, with the
+        // source referent, does bind to the source — so the negative below is
+        // a real discrimination, not an unreachable parser.
+        let (rest, source_bound) = parse_for_each_attached_to_source("curse attached to ~")
+            .expect("\"attached to ~\" binds to the source");
+        assert_eq!(rest, "");
+        assert!(
+            matches!(
+                &source_bound,
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                } if properties.contains(&FilterProp::AttachedTo { to: AttachmentReferent::Source })
+            ),
+            "got {source_bound:?}"
+        );
         // CR 301.5a + CR 303.4: the singular-they "them" is recipient-anaphoric for
         // player-enchanting Auras (Curse of Thirst: "Curses attached to them" = the
         // enchanted player), so it must NOT bind to the source. The gendered arm
@@ -9113,7 +9161,7 @@ mod tests {
                 } = &q
                 {
                     assert!(
-                        !properties.contains(&FilterProp::AttachedToSource),
+                        !properties.contains(&FilterProp::AttachedTo { to: AttachmentReferent::Source }),
                         "\"attached to them\" must not bind to the source, got {q:?} (rest {rest:?})"
                     );
                 }
@@ -9131,7 +9179,12 @@ mod tests {
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter { properties, .. }),
             } => {
-                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                assert_eq!(
+                    properties,
+                    vec![FilterProp::AttachedTo {
+                        to: AttachmentReferent::Recipient
+                    }]
+                );
             }
             other => panic!("expected recipient ObjectCount, got {other:?}"),
         }
@@ -9149,7 +9202,12 @@ mod tests {
                     properties,
                 }) => {
                     assert_eq!(controller, None);
-                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                    assert_eq!(
+                        properties,
+                        vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Recipient
+                        }]
+                    );
                     assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
                 }
                 other => panic!("expected Typed filter, got {other:?}"),

@@ -5,7 +5,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::statics::CastFrequency;
@@ -116,7 +116,7 @@ fn tracked_set_cast_candidates(
     // `filter: Any`, which reads no object scope) and closed here so it stays that
     // way.
     let mut scoped_ability = ability.clone();
-    scoped_ability.targets = deduped.iter().copied().map(TargetRef::Object).collect();
+    scoped_ability.set_unpinned_targets(deduped.iter().copied().map(TargetRef::Object).collect());
     let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
     deduped
         .into_iter()
@@ -329,7 +329,7 @@ pub(crate) fn stash_declined_cast_fallback(
     }
     let mut fallback = sub.clone();
     if fallback.targets.is_empty() && !ability.targets.is_empty() {
-        fallback.targets = ability.targets.clone();
+        fallback.mirror_targets_from(ability);
     }
     super::apply_parent_chain_context(&mut fallback, ability, None, state);
     // Reset AFTER apply_parent_chain_context (which copies the parent's context,
@@ -399,7 +399,7 @@ fn open_private_zone_cast_selection(
             *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
         }
     }
-    stash.targets.clear();
+    stash.clear_targets();
     let eligible = compute_hand_pick_eligible(state, &stash, &stored_filter, source_zone);
 
     if eligible.is_empty() {
@@ -648,11 +648,13 @@ pub fn resolve(
         // cast grant, bind the filter's object-scope reads to the current
         // resolution's linked cards, not the source's lifetime exile pile.
         let mut scoped_ability = ability.clone();
-        scoped_ability.targets = candidate_ids
-            .iter()
-            .copied()
-            .map(TargetRef::Object)
-            .collect();
+        scoped_ability.set_unpinned_targets(
+            candidate_ids
+                .iter()
+                .copied()
+                .map(TargetRef::Object)
+                .collect(),
+        );
         let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
         target_ids = candidate_ids
             .iter()
@@ -1076,7 +1078,7 @@ pub fn resolve(
         // The rider has been translated into the window's per-cast metadata;
         // retaining it would run a second destination move after the window.
         window.sub_ability = None;
-        window.targets = target_ids.drain(..).map(TargetRef::Object).collect();
+        window.set_unpinned_targets(target_ids.drain(..).map(TargetRef::Object).collect());
         return super::free_cast_from_zones::resolve_with_face_policy(
             state,
             &window,
@@ -1376,7 +1378,7 @@ fn open_resolution_cast_window(
     if graveyard_replacement.is_some() {
         window.sub_ability = None;
     }
-    window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    window.set_unpinned_targets(pool.into_iter().map(TargetRef::Object).collect());
     super::free_cast_from_zones::resolve_with_face_policy(
         state,
         &window,
@@ -1813,24 +1815,6 @@ fn cast_stack_spell_copy_during_resolution(
         copy.cast_spell_keywords = cast_spell_keywords;
     }
 
-    let origin = obj.cast_from_zone.unwrap_or(Zone::Exile);
-    events.push(GameEvent::SpellCast {
-        card_id: obj.card_id,
-        controller: ability.controller,
-        object_id: copy_id,
-        cast_mana_value: Some(obj.spell_mana_value()),
-    });
-    let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
-        state,
-        ability.controller,
-        &obj,
-        origin,
-        CastingVariant::Normal,
-    )
-    .map_err(stack_spell_copy_cast_ledger_error)?;
-    crate::game::casting_costs::stamp_cast_occurrence_on_stack_spell(state, copy_id, occurrence)
-        .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-
     if crate::game::effects::prepare::open_copy_target_selection(
         state,
         copy_id,
@@ -1841,6 +1825,10 @@ fn cast_stack_spell_copy_during_resolution(
     {
         return Ok(());
     }
+    // CR 707.12 + CR 601.2i: with no target to announce, the copy is cast now;
+    // otherwise it becomes cast when its announcement walk completes.
+    crate::game::casting_costs::commit_copy_cast(state, copy_id, ability.controller, events)
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
 
     state.waiting_for = WaitingFor::Priority {
         player: ability.controller,
@@ -2130,7 +2118,7 @@ pub(crate) fn graveyard_exile_rider_entry_counters(
         return Vec::new();
     };
     let mut rider = sub.clone();
-    rider.targets = vec![TargetRef::Object(obj_id)];
+    rider.set_unpinned_targets(vec![TargetRef::Object(obj_id)]);
     let base: Vec<(crate::types::counter::CounterType, u32)> = enter_with_counters
         .iter()
         .map(|(counter_type, quantity)| {
@@ -3972,6 +3960,32 @@ mod tests {
             Some(Zone::Stack),
             "copy remains on the stack"
         );
+        // CR 601.2i: the copy is cast only once its targets are announced.
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == copy_id)
+            }),
+            "the copy is not cast before its announcement completes"
+        );
+        assert_eq!(state.objects[&copy_id].cast_occurrence, None);
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::CopyRetarget { copy_id: cid, .. } if cid == copy_id
+            ),
+            "targeted copy must open retarget selection, got {:?}",
+            state.waiting_for
+        );
+
+        // Choose a target and finalize the cast.
+        let events = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target_creature)),
+            },
+        )
+        .expect("choose shock target")
+        .events;
         assert!(
             events.iter().any(|event| {
                 matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == copy_id)
@@ -3996,23 +4010,6 @@ mod tests {
             state.spells_cast_this_turn_by_player[&PlayerId(0)][0].spell_object_id,
             Some(copy_id)
         );
-        assert!(
-            matches!(
-                state.waiting_for,
-                WaitingFor::CopyRetarget { copy_id: cid, .. } if cid == copy_id
-            ),
-            "targeted copy must open retarget selection, got {:?}",
-            state.waiting_for
-        );
-
-        // Choose a target and finalize the cast.
-        let _ = apply_as_current(
-            &mut state,
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(target_creature)),
-            },
-        )
-        .expect("choose shock target");
         assert!(
             state.stack.iter().any(|entry| {
                 matches!(
@@ -4050,7 +4047,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(68_655),
                 ability: None,
-                casting_variant: CastingVariant::Normal,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
         });

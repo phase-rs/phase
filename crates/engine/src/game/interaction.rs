@@ -1179,6 +1179,11 @@ struct TargetSequenceProjection {
     max: usize,
     unique: bool,
     action: TargetSequenceAction,
+    /// CR 115.7d: for a "choose new targets" retarget, the announced target of
+    /// each position, in position order; position `i` then also offers a KEEP
+    /// choice (`'k'`, index `i`) that leaves that target unchanged with its
+    /// announced incarnation. Empty for every other projection.
+    keep: Vec<TargetRef>,
     /// CR 115.1: what the announcing spell/ability will do to the chosen
     /// target, derived from the current slot's `effect_kind`. Only the two
     /// slot-carrying states (`TargetSelection`, `TriggerTargetSelection`) can
@@ -1370,6 +1375,7 @@ fn target_sequence_projection(
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                keep: Vec::new(),
                 // CR 601.2c: targets are announced one slot at a time, and each
                 // slot carries its own effect, so the label is per-slot rather
                 // than per-spell. A chained "destroy target creature. Draw a
@@ -1393,6 +1399,7 @@ fn target_sequence_projection(
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                keep: Vec::new(),
                 // CR 601.2c: targets are announced one slot at a time, and each
                 // slot carries its own effect, so the label is per-slot rather
                 // than per-spell. A chained "destroy target creature. Draw a
@@ -1418,6 +1425,7 @@ fn target_sequence_projection(
             max: *max_targets,
             unique: true,
             action: TargetSequenceAction::SelectObjects,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ChooseObjectsSelection {
@@ -1431,6 +1439,7 @@ fn target_sequence_projection(
                 .min(eligible.len()),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::EachPlayerCopyChosenSelection {
@@ -1441,6 +1450,7 @@ fn target_sequence_projection(
             max: *max as usize,
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ProliferateChoice { eligible, .. }
@@ -1450,6 +1460,7 @@ fn target_sequence_projection(
             max: eligible.len(),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::RetargetChoice {
@@ -1459,6 +1470,10 @@ fn target_sequence_projection(
             legal_new_targets,
             ..
         } => {
+            let keep = match scope {
+                crate::types::game_state::RetargetScope::All => current_targets.clone(),
+                _ => Vec::new(),
+            };
             let (candidates, count) = match scope {
                 // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review
                 // finding MED-2): admission for a `Single` submission is
@@ -1489,6 +1504,7 @@ fn target_sequence_projection(
                 max: count,
                 unique: false,
                 action: TargetSequenceAction::Retarget,
+                keep,
                 // CR 115.7: retargeting changes an existing spell's targets. The
                 // intent belongs to that spell, not to this choice, and this
                 // state carries no slot to read it from.
@@ -6272,12 +6288,20 @@ fn project_action_payload(
         }
         GameAction::RetargetSpell { new_targets } => {
             for (index, target) in new_targets.iter().enumerate() {
-                push_target_surface(
-                    surfaces,
-                    state,
-                    target,
-                    SurfaceRole::indexed(InteractionRoleCode::Target, index),
-                );
+                match target {
+                    Some(target) => push_target_surface(
+                        surfaces,
+                        state,
+                        target,
+                        SurfaceRole::indexed(InteractionRoleCode::Target, index),
+                    ),
+                    // CR 115.7d: this position keeps its announced target.
+                    None => push_value_surface(
+                        surfaces,
+                        SurfaceRole::indexed(InteractionRoleCode::Target, index),
+                        "keep",
+                    ),
+                }
             }
         }
         GameAction::LearnDecision { choice } => match choice {
@@ -7132,6 +7156,34 @@ fn target_sequence_choices(
     projection: &TargetSequenceProjection,
     filtered_state: &GameState,
 ) -> Vec<InteractionChoice> {
+    // CR 115.7d: one KEEP choice per retarget position, naming the target it
+    // leaves unchanged.
+    let keep_choices = projection
+        .keep
+        .iter()
+        .enumerate()
+        .map(|(position, target)| {
+            let mut surfaces = vec![InteractionPresentationSurface::Summary {
+                code: InteractionSummaryCode::Decision,
+            }];
+            push_value_surface(
+                &mut surfaces,
+                SurfaceRole::indexed(InteractionRoleCode::Target, position),
+                "keep",
+            );
+            push_target_surface(
+                &mut surfaces,
+                filtered_state,
+                target,
+                SurfaceRole::indexed(InteractionRoleCode::Target, position),
+            );
+            InteractionChoice {
+                id: interaction_choice_id(interaction_id, 'k', position),
+                surfaces,
+                status: InteractionChoiceStatus::Available,
+            }
+        })
+        .collect::<Vec<_>>();
     projection
         .candidates
         .iter()
@@ -7152,6 +7204,7 @@ fn target_sequence_choices(
                 status: InteractionChoiceStatus::Available,
             }
         })
+        .chain(keep_choices)
         .collect()
 }
 
@@ -9919,18 +9972,35 @@ fn materialize_target_sequence_response(
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let mut seen = HashSet::with_capacity(choice_ids.len());
-    let targets = choice_ids
+    // CR 115.7d: a KEEP choice answers only ITS OWN position (`None`); a keep
+    // id given at another position, or twice, is not a legal answer.
+    let picks = choice_ids
         .iter()
-        .map(|choice_id| {
+        .enumerate()
+        .map(|(position, choice_id)| {
+            if let Some(kept) = (0..projection.keep.len())
+                .find(|index| interaction_choice_id(interaction_id, 'k', *index) == *choice_id)
+            {
+                return if kept == position {
+                    Ok(None)
+                } else {
+                    Err(InteractionReasonCode::ConstraintUnsatisfied)
+                };
+            }
             let index = (0..projection.candidates.len())
                 .find(|index| interaction_choice_id(interaction_id, 't', *index) == *choice_id)
                 .ok_or(InteractionReasonCode::UnknownChoice)?;
             if projection.unique && !seen.insert(index) {
                 return Err(InteractionReasonCode::ConstraintUnsatisfied);
             }
-            Ok(projection.candidates[index].clone())
+            Ok(Some(projection.candidates[index].clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let targets: Vec<TargetRef> = picks.iter().flatten().cloned().collect();
+    if !matches!(projection.action, TargetSequenceAction::Retarget) && targets.len() != picks.len()
+    {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
+    }
     let action = match projection.action {
         TargetSequenceAction::ChooseTarget => match targets.as_slice() {
             [] => GameAction::ChooseTarget { target: None },
@@ -9949,9 +10019,7 @@ fn materialize_target_sequence_response(
                 .collect::<Result<_, _>>()?,
         },
         TargetSequenceAction::SelectTargets => GameAction::SelectTargets { targets },
-        TargetSequenceAction::Retarget => GameAction::RetargetSpell {
-            new_targets: targets,
-        },
+        TargetSequenceAction::Retarget => GameAction::RetargetSpell { new_targets: picks },
     };
     Ok((
         action,
@@ -11537,6 +11605,7 @@ mod tests {
         let object_b = TargetRef::Object(ObjectId(2));
         let object_c = TargetRef::Object(ObjectId(3));
         let waiting = WaitingFor::RetargetChoice {
+            keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
             scope: crate::types::game_state::RetargetScope::Single,
@@ -11567,6 +11636,7 @@ mod tests {
         let object_a = TargetRef::Object(ObjectId(1));
         let object_b = TargetRef::Object(ObjectId(2));
         let waiting = WaitingFor::RetargetChoice {
+            keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
             scope: crate::types::game_state::RetargetScope::Single,

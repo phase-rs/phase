@@ -95,15 +95,39 @@ pub(super) fn finish_resolving_stack_entry(
 /// reads here as a pruned slot. No printed card combines that re-seeding with
 /// a `ParentTargetSlot` consumer; writing the seeded copy back into the carrier
 /// would make the two agree.
-fn record_illegal_target_slots(state: &mut GameState, validated: Option<&mut ResolvedAbility>) {
+///
+/// CR 608.2b: the declared slots the check did not judge (holes of the
+/// validated declared view that are not illegal ? a `PassThrough` occurrence)
+/// are recorded separately in `unjudged_target_slots`: they supply no
+/// information, but neither storage nor the fizzle verdict changes.
+fn record_illegal_target_slots(
+    state: &mut GameState,
+    judged_and_validated: Option<(
+        &ResolvedAbility,
+        &ResolvedAbility,
+        &[Option<crate::game::targeting::DeclaredSlotBinding>],
+    )>,
+) {
     if let Some(root) = state
         .resolving_stack_entry
         .as_mut()
         .and_then(StackEntry::ability_mut)
     {
-        root.illegal_target_slots = validated.map_or_else(Vec::new, |validated| {
-            illegal_declared_target_slots(root, validated)
-        });
+        let (illegal, unjudged) = judged_and_validated.map_or_else(
+            || (Vec::new(), Vec::new()),
+            |(judged, validated, view)| {
+                let illegal = illegal_declared_target_slots(root, judged, validated);
+                let unjudged = view
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, binding)| binding.is_none() && !illegal.contains(slot))
+                    .map(|(slot, _)| slot)
+                    .collect();
+                (illegal, unjudged)
+            },
+        );
+        root.illegal_target_slots = illegal;
+        root.unjudged_target_slots = unjudged;
     }
 }
 
@@ -2083,7 +2107,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && !bestow_reverted_at_resolution
             && !mutate_reverted_at_resolution
         {
-            let mut validated = validate_targets_in_chain(state, ability);
+            let (validated, validated_view) =
+                crate::game::ability_utils::validate_targets_in_chain_with_view(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
             // CR 608.2b + CR 101.1: the ability's own text ("This ability still resolves if
             // its target becomes illegal") can override non-resolution. Targets are still
@@ -2146,8 +2171,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.resolution_source_relatch = None;
                 return;
             }
-            record_illegal_target_slots(state, Some(&mut validated));
-            let _ = illegal_declared_target_slots(ability, &mut validated);
+            // CR 608.2b: validation already stamped each node's local illegal
+            // positions; the carrier receives the chain-numbered stamp.
+            record_illegal_target_slots(state, Some((ability, &validated, &validated_view)));
             execute_effect(state, &validated, events);
         } else {
             record_illegal_target_slots(state, None);
@@ -4263,10 +4289,12 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_definition_ref,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
@@ -4509,10 +4537,12 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -4735,10 +4765,12 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -5133,10 +5165,12 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
-        selected_target_incarnations: a_selected_target_incarnations,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
+        unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
     } = a;
     let ResolvedAbility {
@@ -5216,10 +5250,12 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
-        selected_target_incarnations: b_selected_target_incarnations,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
+        unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
     } = b;
 
@@ -5235,12 +5271,13 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // keeps this manual comparison in agreement with the type's derived
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
-        && a_selected_target_incarnations == b_selected_target_incarnations
+        && a.aligned_target_pins() == b.aligned_target_pins()
         // CR 608.2b: the resolution legality stamp participates for the same
         // reason — agreement with the derived `PartialEq`.
         && a_activation_cost_reduction == b_activation_cost_reduction
         && a_activation_record == b_activation_record
         && a_illegal_target_slots == b_illegal_target_slots
+        && a_unjudged_target_slots == b_unjudged_target_slots
         && a_illegal_local_target_slots == b_illegal_local_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
@@ -5751,6 +5788,7 @@ mod tests {
     use crate::game::game_object::BackFaceData;
     use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
+    use crate::types::ability::{AttachSelection, AttachmentReferent, FilterProp};
     use crate::types::ability::{
         CastingPermission, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, Effect,
         ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
@@ -5769,6 +5807,138 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 608.2b (typed composition, not printed Oracle): an unjudged
+    /// `PassThrough` occurrence supplies no information to an application
+    /// reader either. Chain: `TargetOnly(C)` (slot 0) -> an `Attach` node whose
+    /// `[C]` is an unclaimed tail (slot 1) -> `TargetOnly(G)` (slot 2, an
+    /// independently legal creature, so the chain resolves) -> an untargeted
+    /// `DestroyAll(Equipment attached to <declared slot>)`. With C's actual
+    /// declaration illegal, reading the tail's slot 1 destroys nothing, while
+    /// reading G's slot 2 on the same chain destroys G's Equipment (reach: the
+    /// chain resolves and the reader works). Control: with C legal, reading
+    /// C's own slot 0 destroys C's Equipment.
+    #[test]
+    fn untargeted_reader_gets_no_information_from_an_unjudged_tail() {
+        let artifact = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let creature_filter = || TargetFilter::Typed(TypedFilter::creature());
+        // (C's declaring filter, slot read, [C's Equipment destroyed, G's destroyed])
+        let cases = [
+            (artifact(), 1, [false, false]),
+            (artifact(), 2, [false, true]),
+            (creature_filter(), 0, [true, false]),
+        ];
+        for (root_filter, read_slot, destroyed) in cases {
+            let label = format!("read slot {read_slot}, destroyed {destroyed:?}");
+            let mut state = setup();
+            let permanent = |state: &mut GameState, name: &str, core: CoreType| {
+                let id = create_object(
+                    state,
+                    CardId(1),
+                    PlayerId(1),
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(core);
+                if core == CoreType::Artifact {
+                    obj.card_types.subtypes.push("Equipment".to_string());
+                }
+                id
+            };
+            let c = permanent(&mut state, "Creature C", CoreType::Creature);
+            let g = permanent(&mut state, "Creature G", CoreType::Creature);
+            let c_equipment = permanent(&mut state, "Equipment E", CoreType::Artifact);
+            let g_equipment = permanent(&mut state, "Equipment F", CoreType::Artifact);
+            crate::game::effects::attach::attach_to(&mut state, c_equipment, c);
+            crate::game::effects::attach::attach_to(&mut state, g_equipment, g);
+            let spell = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Probe".to_string(),
+                Zone::Stack,
+            );
+            let destroy = ResolvedAbility::new(
+                Effect::DestroyAll {
+                    target: TargetFilter::Typed(
+                        TypedFilter::default()
+                            .subtype("Equipment".to_string())
+                            .properties(vec![FilterProp::AttachedTo {
+                                to: AttachmentReferent::DeclaredTarget { slot: read_slot },
+                            }]),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                spell,
+                PlayerId(0),
+            );
+            let mut keep_alive = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: creature_filter(),
+                },
+                vec![TargetRef::Object(g)],
+                spell,
+                PlayerId(0),
+            );
+            keep_alive.sub_ability = Some(Box::new(destroy));
+            let mut attach = ResolvedAbility::new(
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::ParentTarget,
+                    selection: AttachSelection::Targeted,
+                },
+                vec![TargetRef::Object(c)],
+                spell,
+                PlayerId(0),
+            );
+            attach.sub_ability = Some(Box::new(keep_alive));
+            let mut root = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: root_filter,
+                },
+                vec![TargetRef::Object(c)],
+                spell,
+                PlayerId(0),
+            );
+            root.sub_ability = Some(Box::new(attach));
+            root.capture_target_incarnations_recursive(&state);
+            assert_eq!(
+                crate::game::ability_utils::declared_targets_in_chain(&root).len(),
+                3,
+                "{label}: reach: C, the Attach tail and G occupy slots 0, 1 and 2"
+            );
+            state.stack.push_back(StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(3),
+                    ability: Some(Box::new(root)),
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+            let zone = |gone: bool| {
+                if gone {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            };
+            assert_eq!(
+                [
+                    state.objects[&c_equipment].zone,
+                    state.objects[&g_equipment].zone
+                ],
+                [zone(destroyed[0]), zone(destroyed[1])],
+                "{label}: [C's Equipment, G's Equipment]"
+            );
+        }
     }
 
     #[test]

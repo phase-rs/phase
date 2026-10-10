@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
+use crate::types::ability::AttachmentReferent;
 
 use super::ability::{
     AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
@@ -822,9 +823,10 @@ impl EventObjectSnapshot {
             // CR 607.2a: This compares against an object linked in the live
             // exile-link side table, which event snapshots deliberately omit.
             | FilterProp::SameNameAsExiledBySource
-            | FilterProp::AttachedToSource
-            | FilterProp::AttachedToRecipient
-            | FilterProp::AttachedToPlayer { .. }
+            | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+            | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+            | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+            | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject
             | FilterProp::MostPrevalentCreatureTypeIn { .. }

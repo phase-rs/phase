@@ -653,18 +653,18 @@ fn handed_child<'c>(
         return Some(Cow::Borrowed(child));
     }
     // CR 608.2c: the ordinary descent hands an undeclared child
-    // `inherited_parent_targets`; a descent that waits on a player's choice
+    // `inherited_parent_occurrences`; a descent that waits on a player's choice
     // first hands it the parent's targets where `should_propagate_parent_targets`
     // holds. Answer only where the two agree.
-    let inherited = super::inherited_parent_targets(parent, child);
+    let inherited = super::inherited_parent_occurrences(parent, child);
     let after_a_choice = if super::should_propagate_parent_targets(parent, child) {
-        parent.targets.clone()
+        parent.target_occurrences()
     } else {
         Vec::new()
     };
     (inherited == after_a_choice).then(|| {
         let mut handed = child.clone();
-        handed.targets = inherited;
+        handed.replace_target_occurrences(inherited);
         Cow::Owned(handed)
     })
 }

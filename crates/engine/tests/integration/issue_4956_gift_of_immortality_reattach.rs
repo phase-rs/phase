@@ -903,7 +903,9 @@ fn cass_preserves_equipment_reattach_continuation() {
         TargetFilter::Typed(tf) => {
             assert!(
                 tf.properties
-                    .contains(&engine::types::ability::FilterProp::AttachedToSource),
+                    .contains(&engine::types::ability::FilterProp::AttachedTo {
+                        to: engine::types::ability::AttachmentReferent::Source
+                    }),
                 "Equipment must look back via AttachedToSource LKI, got {tf:?}"
             );
         }

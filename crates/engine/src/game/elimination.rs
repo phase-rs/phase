@@ -553,6 +553,33 @@ pub fn eliminate_players_simultaneously(
             debug_assert!(false, "scoped search elimination resume failed: {error}");
         }
 
+        // CR 800.4a + CR 800.4g: a copy announcement is reconciled with the
+        // players still in the game: its prefix is replayed on the current
+        // board, and the copy's controller chooses the replacement announcer
+        // (`reconcile_copy_announcement_after_departure`). Runs before the
+        // generic dead-actor repoint below, which would otherwise replace the
+        // walk with unrelated priority. CR 601.2e: when no legal announcement
+        // remains, the copy's cast is illegal; CR 704.5e: the copy ceases to
+        // exist (`abandon_copy_walk`).
+        let announcement =
+            super::effects::copy_choice::walk_of(&state.waiting_for).map(|(walk, _)| walk);
+        let unannounceable =
+            match super::effects::copy_choice::reconcile_copy_announcement_after_departure(state) {
+                Ok(Some((walk, picks))) => {
+                    super::engine::advance_copy_walk(state, &walk, picks, events)
+                        .is_err()
+                        .then_some(walk)
+                }
+                Ok(None) => None,
+                // The announcement's slots cannot be built on the current board.
+                Err(_) => announcement,
+            };
+        if let Some(walk) = unannounceable {
+            if let Err(error) = super::engine::abandon_copy_walk(state, &walk, events) {
+                tracing::error!(%error, "an unannounceable copy was not abandoned");
+            }
+        }
+
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);

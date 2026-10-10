@@ -1155,6 +1155,110 @@ fn m6_two_target_control() {
     );
 }
 
+/// CR 608.2b: a chain declaring a player and, in a later clause, an object reads the declared
+/// player as no one exactly when the player's own slot is the illegal one.
+#[test]
+fn m7_declared_player_is_read_only_through_its_own_slot() {
+    let life_of_p1 = |pick: Pick, before: After| {
+        let object = def(Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        });
+        let chain = then(head(), then(object, def(lose(dp(G)))));
+        run(
+            chain,
+            &[Pick::Player(P1), pick],
+            &[],
+            before,
+            After::Nothing,
+        )
+        .life[1]
+    };
+    assert_eq!(
+        life_of_p1(Pick::Bear(1), After::Nothing),
+        17,
+        "reach guard: with both slots legal the declared player loses life"
+    );
+    assert_eq!(
+        life_of_p1(Pick::Bear(1), After::Hexproof),
+        20,
+        "the declared player's slot is illegal"
+    );
+    assert_eq!(
+        life_of_p1(Pick::Bear(0), After::BearDies),
+        17,
+        "only the object's slot is illegal"
+    );
+}
+
+/// CR 115.7a + CR 608.2c: changing the target of the declaring clause makes a later
+/// reader of its group name the new player, not the player first announced.
+#[test]
+fn m8_retargeting_the_declaring_clause_moves_the_reader_to_the_new_player() {
+    let life_after = |retarget_to: Option<PlayerId>| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Power 4 or greater makes Bolt Bend cost {R}.
+        scenario.add_creature(P0, "Smaug the Impenetrable", 8, 7);
+        let probe = scenario
+            .add_spell_to_hand(P0, "Probe", true)
+            .with_ability_definition(then(head(), def(lose(dp(G)))))
+            .id();
+        let bolt_bend = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bolt Bend",
+                true,
+                "This spell costs {3} less to cast if you control a creature with power 4 or greater.\n\
+                 Change the target of target spell or ability with a single target.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(probe).target_player(P1).commit();
+        if let Some(new_player) = retarget_to {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+            runner.cast(bolt_bend).target_object(probe).commit();
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::RetargetChoice { .. }
+                ) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            runner
+                .act(GameAction::RetargetSpell {
+                    new_targets: vec![Some(TargetRef::Player(new_player))],
+                })
+                .expect("retarget the declaring clause");
+        }
+        for _ in 0..8 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass");
+        }
+        assert!(runner.state().stack.is_empty(), "everything resolved");
+        runner
+            .state()
+            .players
+            .iter()
+            .map(|player| player.life)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        life_after(None),
+        vec![20, 17],
+        "reach guard: unretargeted, the announced player loses life"
+    );
+    assert_eq!(life_after(Some(P0)), vec![17, 20]);
+}
+
 /// D2: distinct groups G and G2 each keep their own player.
 #[test]
 fn d2_distinct_groups_keep_their_players() {

@@ -76,7 +76,7 @@ pub fn resolve_combine_host(
         }
         _ => {
             let mut continuation = ability.clone();
-            continuation.targets.clear();
+            continuation.clear_targets();
             continuation.effect = Effect::CombineHost {
                 source: CombineSource::SpecificObject { id: augment_id },
                 host: Box::new(TargetFilter::ParentTarget),
@@ -143,7 +143,7 @@ pub fn resolve_choose_augment_and_combine(
         }
         _ => {
             let mut continuation = ability.clone();
-            continuation.targets.clear();
+            continuation.clear_targets();
             continuation.effect = Effect::CombineHost {
                 source: CombineSource::ParentTarget,
                 host: Box::new(frozen_host),

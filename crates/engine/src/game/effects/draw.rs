@@ -443,7 +443,7 @@ fn prompt_up_to_draw_count(
             controller: ability.controller,
             source_id: ability.source_id,
             branches,
-            parent_targets: ability.targets.clone(),
+            parent_occurrences: crate::types::game_state::ParentTargetOccurrences::of(ability),
             context: ability.context.clone(),
             // CR 608.2c: the trailing instructions of this chain ("…, then
             // discard a card") are parked by `resolve_ability_chain`'s generic

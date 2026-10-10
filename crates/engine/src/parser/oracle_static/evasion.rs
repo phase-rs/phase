@@ -1,11 +1,12 @@
 // CR 509.1b — combat restriction / evasion statics.
 
-#[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
+#[allow(unused_imports)]
+use crate::types::ability::AttachmentReferent;
 
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
@@ -181,7 +182,7 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
 /// - `~` — the normalized source name → [`TargetFilter::SelfRef`] (Cloud doubling
 ///   "a triggered ability of ~").
 /// - "an Equipment attached to it" — here "it" is anaphoric on the doubler's own
-///   source, so it is the source-relative [`FilterProp::AttachedToSource`] set.
+///   source, so it is the source-relative [`FilterProp::AttachedTo { to: AttachmentReferent::Source }`] set.
 ///   `parse_type_phrase_folding` maps "attached to it" to `AttachedToRecipient` (an
 ///   enchanted-creature host), which is the wrong referent in a doubler, so this
 ///   clause is hand-built.
@@ -192,7 +193,9 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
             TargetFilter::Typed(
                 TypedFilter::default()
                     .subtype("Equipment".to_string())
-                    .properties(vec![FilterProp::AttachedToSource]),
+                    .properties(vec![FilterProp::AttachedTo {
+                        to: AttachmentReferent::Source,
+                    }]),
             ),
             alt((
                 tag("an equipment attached to it"),

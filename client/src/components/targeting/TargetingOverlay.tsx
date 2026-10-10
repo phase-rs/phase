@@ -133,7 +133,11 @@ export function TargetingOverlay() {
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
-  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) => slot.current != null);
+  // CR 707.10c: both keep permissions are engine-derived (keeping still has a
+  // legal completion); the overlay only renders them.
+  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.can_keep_rest === true;
+  const canKeepCurrentTarget = isCopyRetarget
+    && waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0]?.can_keep === true;
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
   const isEquipTarget = waitingFor?.type === "EquipTarget";
   // CR 701.36a: Populate — choose a creature token you control to copy.
@@ -176,7 +180,11 @@ export function TargetingOverlay() {
     ? (waitingFor.data.current_slot ?? 0)
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
-  const isOptionalCurrentSlot = activeSlot?.optional === true;
+  // CR 115.6: an optional slot may be declined. A copy announcement's decline
+  // permission is engine-derived (`can_decline`); the overlay only renders it.
+  const isOptionalCurrentSlot = isCopyRetarget
+    ? waitingFor.data.target_slots[currentTargetSlot]?.can_decline === true
+    : activeSlot?.optional === true;
   // CR 601.2c: display-only hint that this slot is announced by a non-controller
   // ("of an opponent's choice", e.g. Volcanic Offering). The engine routes the
   // prompt's `WaitingFor.player` to that announcer — who is exactly the viewer of
@@ -740,6 +748,19 @@ export function TargetingOverlay() {
               className="pointer-events-auto rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-600"
             >
               {t("targeting.keepCurrentTargets")}
+            </button>
+          )}
+          {canKeepCurrentTarget && (
+            <button
+              onClick={() =>
+                dispatch({
+                  type: "ChooseTarget",
+                  data: { target: null },
+                })
+              }
+              className="pointer-events-auto rounded-lg bg-emerald-800 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-700"
+            >
+              {t("targeting.keepCurrentTarget")}
             </button>
           )}
           {isOptionalCurrentSlot && (

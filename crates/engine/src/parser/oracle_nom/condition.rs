@@ -28,12 +28,12 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, AttackedYouScope, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
-    DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
-    TypedFilter, ZoneRef,
+    AbilityCondition, AggregateFunction, AttachmentReferent, AttackedYouScope, CardTypeSetSource,
+    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef,
+    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition, TargetFilter,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -2627,7 +2627,9 @@ fn parse_source_enchanted_by_aura_count(input: &str) -> OracleResult<'_, StaticC
             TypeFilter::Subtype("Aura".to_string()),
         ],
         controller: None,
-        properties: vec![FilterProp::AttachedToSource],
+        properties: vec![FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }],
     });
     Ok((
         rest,
@@ -14651,7 +14653,12 @@ mod tests {
             attachment_threshold_parts("two or more equipment are attached to it");
         assert_eq!(n, 2);
         assert_eq!(types, vec![TypeFilter::Subtype("Equipment".into())]);
-        assert_eq!(props, vec![FilterProp::AttachedToRecipient]);
+        assert_eq!(
+            props,
+            vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient
+            }]
+        );
 
         // "at least N" — the same condition via the other `parse_ge_threshold`
         // arm; no second combinator arm exists for it, which is the point.
@@ -14659,7 +14666,12 @@ mod tests {
             attachment_threshold_parts("at least three equipment are attached to it");
         assert_eq!(n, 3);
         assert_eq!(types, vec![TypeFilter::Subtype("Equipment".into())]);
-        assert_eq!(props, vec![FilterProp::AttachedToRecipient]);
+        assert_eq!(
+            props,
+            vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient
+            }]
+        );
     }
 
     /// Every referent the shared `parse_attachment_referent_prop` map knows is
@@ -14670,20 +14682,28 @@ mod tests {
         for (input, expected) in [
             (
                 "two or more equipment are attached to ~",
-                FilterProp::AttachedToSource,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source,
+                },
             ),
             (
                 "two or more equipment are attached to him",
-                FilterProp::AttachedToSource,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source,
+                },
             ),
             (
                 "two or more equipment are attached to that creature",
-                FilterProp::AttachedToRecipient,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Recipient,
+                },
             ),
             (
                 "two or more curses are attached to that player",
-                FilterProp::AttachedToPlayer {
-                    player: ControllerRef::EnchantedPlayer,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Player {
+                        player: ControllerRef::EnchantedPlayer,
+                    },
                 },
             ),
         ] {
@@ -14708,7 +14728,12 @@ mod tests {
                 TypeFilter::Subtype("Equipment".into()),
             ])]
         );
-        assert_eq!(props, vec![FilterProp::AttachedToSource]);
+        assert_eq!(
+            props,
+            vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Source
+            }]
+        );
     }
 
     /// The copula is REQUIRED, and these are the two ways that matters.
@@ -14723,7 +14748,12 @@ mod tests {
         // the copula token itself.
         let (n, _, props) = attachment_threshold_parts("two or more equipment are attached to it");
         assert_eq!(n, 2);
-        assert_eq!(props, vec![FilterProp::AttachedToRecipient]);
+        assert_eq!(
+            props,
+            vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient
+            }]
+        );
 
         // A bare NOUN PHRASE is not a condition. Admitting it would let
         // "two or more Equipment attached to it" stand as a complete

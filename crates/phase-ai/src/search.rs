@@ -2133,18 +2133,30 @@ pub fn fallback_action(
             }
         }
 
-        // Copy retarget: keep copied targets when all slots already have a
-        // current value; freshly cast prepare/paradigm copies start empty, so
-        // choose the first legal target for the current slot.
+        // Copy retarget: keep the copied targets where the engine says keeping
+        // the rest completes; else keep this position where keeping is
+        // answerable; a freshly announced copy (nothing to keep) chooses the
+        // first offered target for the current slot, or declines an optional
+        // slot that offers none.
+        WaitingFor::CopyRetarget {
+            announcer_election: Some(election),
+            ..
+        } => election
+            .candidates
+            .first()
+            .map(|opponent| GameAction::ChooseAnnouncingOpponent {
+                opponent: *opponent,
+            }),
         WaitingFor::CopyRetarget {
             target_slots,
             current_slot,
+            can_keep_rest,
             ..
         } => {
             let slot = target_slots.get(*current_slot)?;
-            if target_slots.iter().all(|slot| slot.current.is_some()) {
+            if *can_keep_rest {
                 Some(GameAction::KeepAllCopyTargets)
-            } else if slot.current.is_some() {
+            } else if slot.can_keep {
                 Some(GameAction::ChooseTarget { target: None })
             } else {
                 slot.legal_alternatives
@@ -2152,6 +2164,10 @@ pub fn fallback_action(
                     .cloned()
                     .map(|target| GameAction::ChooseTarget {
                         target: Some(target),
+                    })
+                    .or_else(|| {
+                        slot.can_decline
+                            .then_some(GameAction::ChooseTarget { target: None })
                     })
             }
         }
@@ -12662,21 +12678,99 @@ mod tests {
         );
     }
 
+    /// A creature for the copy-retarget fallback boards.
+    fn copy_board_creature(state: &mut GameState, card: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(1),
+            format!("Creature {card}"),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        id
+    }
+
+    /// A real copy on the stack: one "destroy target creature" node per entry
+    /// of `chain` (its declared target, or none for a fresh copy announcing),
+    /// chained as sub-abilities, with announcement pins captured.
+    fn copy_on_stack(state: &mut GameState, chain: &[Option<ObjectId>]) -> ObjectId {
+        let copy_id = create_object(
+            state,
+            CardId(20),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Stack,
+        );
+        let mut ability = chain
+            .iter()
+            .rev()
+            .fold(None, |sub: Option<ResolvedAbility>, target| {
+                let mut node = ResolvedAbility::new(
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        cant_regenerate: false,
+                    },
+                    target.map(TargetRef::Object).into_iter().collect(),
+                    copy_id,
+                    PlayerId(0),
+                );
+                node.sub_ability = sub.map(Box::new);
+                Some(node)
+            })
+            .expect("one node");
+        ability.capture_target_incarnations_recursive(state);
+        state.stack.push_back(StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(20),
+                ability: Some(Box::new(ability)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        copy_id
+    }
+
+    fn copy_slot(
+        current: Option<ObjectId>,
+        alternatives: &[ObjectId],
+        can_keep: bool,
+    ) -> engine::types::game_state::CopyTargetSlot {
+        engine::types::game_state::CopyTargetSlot {
+            current: current.map(TargetRef::Object),
+            legal_alternatives: alternatives
+                .iter()
+                .copied()
+                .map(TargetRef::Object)
+                .collect(),
+            address: None,
+            can_keep,
+            can_decline: false,
+        }
+    }
+
     #[test]
     fn copy_retarget_fallback_keeps_existing_targets_with_legal_action() {
         let mut state = make_state();
-        let original_target = TargetRef::Object(ObjectId(10));
+        let original = copy_board_creature(&mut state, 10);
+        let other = copy_board_creature(&mut state, 11);
+        let copy_id = copy_on_stack(&mut state, &[Some(original)]);
         state.waiting_for = WaitingFor::CopyRetarget {
             player: PlayerId(0),
-            copy_id: ObjectId(20),
-            target_slots: vec![engine::types::game_state::CopyTargetSlot {
-                current: Some(original_target),
-                legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
-            }],
+            controller: None,
+            copy_id,
+            target_slots: vec![copy_slot(Some(original), &[other], true)],
             effect_kind: EffectKind::CopySpell,
-            effect_source_id: Some(ObjectId(20)),
+            effect_source_id: Some(copy_id),
             current_slot: 0,
             paradigm_remaining_offers: None,
+            mode: Some(engine::types::game_state::CopyChoiceMode::Retarget),
+            picks: Some(Vec::new()),
+            can_keep_rest: true,
+            announcer_election: None,
         };
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
@@ -12686,26 +12780,28 @@ mod tests {
     }
 
     #[test]
-    fn copy_retarget_fallback_keeps_current_slot_before_later_empty_slot() {
+    fn copy_retarget_fallback_keeps_current_slot_when_keeping_the_rest_is_not_offered() {
         let mut state = make_state();
-        let current_target = TargetRef::Object(ObjectId(10));
+        let first = copy_board_creature(&mut state, 10);
+        let second = copy_board_creature(&mut state, 12);
+        let other = copy_board_creature(&mut state, 11);
+        let copy_id = copy_on_stack(&mut state, &[Some(first), Some(second)]);
         state.waiting_for = WaitingFor::CopyRetarget {
             player: PlayerId(0),
-            copy_id: ObjectId(20),
+            controller: None,
+            copy_id,
             target_slots: vec![
-                engine::types::game_state::CopyTargetSlot {
-                    current: Some(current_target),
-                    legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
-                },
-                engine::types::game_state::CopyTargetSlot {
-                    current: None,
-                    legal_alternatives: vec![TargetRef::Object(ObjectId(12))],
-                },
+                copy_slot(Some(first), &[other], true),
+                copy_slot(Some(second), &[other], false),
             ],
             effect_kind: EffectKind::CopySpell,
-            effect_source_id: Some(ObjectId(20)),
+            effect_source_id: Some(copy_id),
             current_slot: 0,
             paradigm_remaining_offers: None,
+            mode: Some(engine::types::game_state::CopyChoiceMode::Retarget),
+            picks: Some(Vec::new()),
+            can_keep_rest: false,
+            announcer_election: None,
         };
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
@@ -12723,25 +12819,29 @@ mod tests {
     #[test]
     fn copy_retarget_fallback_selects_first_target_for_fresh_copy_cast() {
         let mut state = make_state();
-        let first_target = TargetRef::Object(ObjectId(10));
+        let first = copy_board_creature(&mut state, 10);
+        let other = copy_board_creature(&mut state, 11);
+        let copy_id = copy_on_stack(&mut state, &[None]);
         state.waiting_for = WaitingFor::CopyRetarget {
             player: PlayerId(0),
-            copy_id: ObjectId(20),
-            target_slots: vec![engine::types::game_state::CopyTargetSlot {
-                current: None,
-                legal_alternatives: vec![first_target.clone(), TargetRef::Object(ObjectId(11))],
-            }],
+            controller: None,
+            copy_id,
+            target_slots: vec![copy_slot(None, &[first, other], false)],
             effect_kind: EffectKind::CopySpell,
-            effect_source_id: Some(ObjectId(20)),
+            effect_source_id: Some(copy_id),
             current_slot: 0,
             paradigm_remaining_offers: None,
+            mode: Some(engine::types::game_state::CopyChoiceMode::Announce),
+            picks: Some(Vec::new()),
+            can_keep_rest: false,
+            announcer_election: None,
         };
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(
             action,
             GameAction::ChooseTarget {
-                target: Some(first_target),
+                target: Some(TargetRef::Object(first)),
             }
         );
         assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
