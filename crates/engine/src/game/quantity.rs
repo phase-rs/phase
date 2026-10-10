@@ -9584,9 +9584,9 @@ pub(crate) fn resolve_player_count(
                                 )
                         }
                         // CR 508.6 + CR 102.2: opponent of the controller
-                        // attacking the enchanted/defending player this combat.
+                        // attacking the enchanted player (live combat membership).
                         // Delegates to the single-authority predicate in
-                        // `matches_player_scope` (the two copies must stay in sync).
+                        // `matches_player_scope`.
                         PlayerFilter::OpponentAttackingEnchantedPlayer => {
                             crate::game::effects::matches_player_scope(
                                 state, p.id, filter, controller, source_id,
