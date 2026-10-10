@@ -391,7 +391,7 @@ pub fn apply_pile_effect(
         for &object_id in chosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(chosen_pile_effect, source_id, source_controller);
-            chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
+            chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
     }
@@ -436,7 +436,7 @@ pub fn apply_unchosen_pile_effect(
         for &object_id in unchosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(unchosen_pile_effect, source_id, source_controller);
-            chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
+            chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
     }

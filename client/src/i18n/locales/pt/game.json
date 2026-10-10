@@ -899,6 +899,7 @@
     },
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
+    "keepCurrentTarget": "Manter Este Alvo",
     "skip": "Pular",
     "opponentChoice": "(à escolha do oponente)",
     "chooseNewTarget": "Escolha o novo alvo da mágica",
@@ -2417,7 +2418,8 @@
     "confirm": "Confirmar",
     "badgeNewTarget": "Novo alvo",
     "slotLabel": "Alvo {{index}}: {{current}} → {{chosen}}",
-    "unselected": "inalterado"
+    "unselected": "inalterado",
+    "keep": "Manter"
   },
   "separatePiles": {
     "chooserName": "Jogador {{number}}",

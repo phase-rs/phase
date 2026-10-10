@@ -428,6 +428,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         },
     });
     state.waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: PlayerId(0),
         stack_entry_index: 0,
         scope: RetargetScope::All,
@@ -441,7 +442,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         &mut state,
         PlayerId(0),
         GameAction::RetargetSpell {
-            new_targets: vec![unchanged.clone()],
+            new_targets: vec![Some(unchanged.clone())],
         },
     )
     .expect("unchanged targets do not need to be legal for choose-new-targets");

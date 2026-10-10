@@ -6,14 +6,14 @@ use rand_chacha::ChaCha20Rng;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
-    BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
-    ControllerRef, CopyRetargetPermission, DamageAmountScope, DamageAmountThreshold,
-    DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect, FilterProp, ModalChoice,
-    NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
-    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConditionAnchor,
-    TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
-    TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    AttachmentReferent, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
+    CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
+    DamageAmountThreshold, DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect,
+    FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
+    StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -8599,10 +8599,12 @@ pub(crate) fn seed_batched_attack_parent_targets(
     if !effect_uses_parent_target(&ability.effect) || !ability.targets.is_empty() {
         return;
     }
-    ability.targets = attacker_ids
-        .iter()
-        .map(|id| TargetRef::Object(*id))
-        .collect();
+    ability.set_unpinned_targets(
+        attacker_ids
+            .iter()
+            .map(|id| TargetRef::Object(*id))
+            .collect(),
+    );
 }
 
 /// CR 603.6 + CR 608.2c + CR 702.184a/702.122/702.171: Zone-change and
@@ -8706,7 +8708,7 @@ pub(crate) fn seed_event_context_parent_targets(
         }
     };
     if let Some(id) = parent_id {
-        ability.targets = vec![TargetRef::Object(id)];
+        ability.set_unpinned_targets(vec![TargetRef::Object(id)]);
         // CR 400.7 + CR 603.6: a zone-change trigger refers to the exact
         // post-change object. Pin that incarnation so leaving the destination
         // zone and returning before resolution cannot retarget the ability to
@@ -10706,6 +10708,30 @@ fn can_drain_deferred_triggers(state: &GameState, policy: DeferredTriggerDrainPo
     true
 }
 
+/// CR 603.3 + CR 603.3b + CR 601.2i: whether the queue holds the cast
+/// observers of a spell cast and announced during a resolution that has now
+/// finished (a parked context triggered by the casting of a spell still on the
+/// stack, such as a cast copy latched when its announcement completed), so the
+/// post-action boundary must put the whole queue, together with the action's
+/// fresh observers, on the stack as one batch above those spells: the
+/// post-announcement drain, not the resolution-safe one that holds observers
+/// until a resolving spell leaves the stack (issue #1793).
+pub(super) fn deferred_triggers_hold_announced_casts(state: &GameState) -> bool {
+    state.resolving_stack_entry.is_none()
+        && state.resolution_stack.is_empty()
+        && state.pending_resolution_completion.is_none()
+        && resolution_completion_can_settle(state)
+        && state.deferred_triggers.iter().any(|context| {
+            context.trigger_events.iter().any(|event| {
+                matches!(event, GameEvent::SpellCast { object_id, .. }
+                if state.stack.iter().any(|entry| {
+                    entry.id == *object_id
+                        && matches!(entry.kind, StackEntryKind::Spell { .. })
+                }))
+            })
+        })
+}
+
 pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
     can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::ResolutionSafe)
 }
@@ -11594,22 +11620,86 @@ pub(crate) fn filter_consumed_trigger_events_from(
     requester: TriggerCollectionRequester,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
-    events[event_start..]
+    unclaimed_trigger_events_from(events, event_start, requester, consumed).events
+}
+
+/// The unclaimed occurrences of an action buffer's suffix, each remembered at
+/// its position in the full buffer, so a claim a collector makes over the
+/// shortened list can be published as the full-buffer occurrence it is.
+pub(crate) struct UnclaimedTriggerEvents {
+    pub(crate) events: Vec<GameEvent>,
+    positions: Vec<usize>,
+}
+
+impl UnclaimedTriggerEvents {
+    /// CR 603.2c: the full-buffer identity of a claim made over `self.events`.
+    fn full_buffer_claim(
+        &self,
+        buffer: &[GameEvent],
+        claim: ConsumedTriggerEventOccurrence,
+    ) -> ConsumedTriggerEventOccurrence {
+        let position = self
+            .events
+            .iter()
+            .zip(&self.positions)
+            .filter(|(event, _)| **event == claim.event)
+            .nth(claim.occurrence)
+            .map(|(_, position)| *position)
+            .expect("a claim names an occurrence of the scanned events");
+        ConsumedTriggerEventOccurrence {
+            occurrence: trigger_event_occurrence(buffer, position),
+            ..claim
+        }
+    }
+}
+
+/// [`filter_consumed_trigger_events_from`], keeping each kept event's position
+/// in `events`.
+pub(crate) fn unclaimed_trigger_events_from(
+    events: &[GameEvent],
+    event_start: usize,
+    requester: TriggerCollectionRequester,
+    consumed: &[ConsumedTriggerEventOccurrence],
+) -> UnclaimedTriggerEvents {
+    let (positions, events): (Vec<usize>, Vec<GameEvent>) = events[event_start..]
         .iter()
         .enumerate()
         .filter_map(|(offset, event)| {
-            let occurrence = trigger_event_occurrence(events, event_start + offset);
+            let position = event_start + offset;
+            let occurrence = trigger_event_occurrence(events, position);
             if !consumed.iter().any(|consumed| {
                 consumed.event == *event
                     && consumed.occurrence == occurrence
                     && consumed.scope.consumes(requester)
             }) {
-                Some(event.clone())
+                Some((position, event.clone()))
             } else {
                 None
             }
         })
-        .collect()
+        .unzip();
+    UnclaimedTriggerEvents { events, positions }
+}
+
+/// CR 603.2 + CR 603.2c + CR 603.7: [`collect_delayed_triggers_into_deferred`]
+/// over the unclaimed occurrences of `buffer`, publishing each claim at its
+/// full-buffer occurrence so a later filter over `buffer` reads it exactly.
+pub(crate) fn collect_unclaimed_delayed_triggers_into_deferred(
+    state: &mut GameState,
+    buffer: &[GameEvent],
+    unclaimed: &UnclaimedTriggerEvents,
+) {
+    let DelayedTriggerMatch {
+        contexts: pending,
+        consumed: consumed_events,
+        ..
+    } = collect_matching_delayed_triggers(state, &unclaimed.events, DelayedTriggerEventScope::Any);
+    state.deferred_triggers.extend(pending);
+    state.consumed_before_priority_trigger_events.extend(
+        consumed_events
+            .into_iter()
+            .map(|claim| unclaimed.full_buffer_claim(buffer, claim)),
+    );
 }
 
 pub(crate) fn filter_consumed_trigger_events(
@@ -12654,7 +12744,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // `Owned`/`ProtectorMatches` above — recurse into the same authority
         // rather than bucketing with `AttachedToRecipient` (whose divergence is
         // about the per-recipient `FilterContext` binding, a different axis).
-        FilterProp::AttachedToPlayer { player } => controller_ref_binding_diverges(player),
+        FilterProp::AttachedTo { to: AttachmentReferent::Player { player } } => controller_ref_binding_diverges(player),
         FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => {
             controller_ref_binding_diverges(scope)
         }
@@ -12700,7 +12790,10 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // CR 613.4c: the per-recipient referent, which the fire-time
         // `FilterContext` carries as `None` — the prop-level counterpart of
         // `ObjectScope::Recipient`.
-        | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        // CR 601.2c: a declared target slot's object, read through the resolving
+        // ability, the prop-level counterpart of `TargetFilter::ParentTargetSlot`.
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
 
         // ---- RESOLUTION-PUBLISHED LEDGERS (CR 608.2c). ----
         //
@@ -12753,7 +12846,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // CR 400.7 + CR 301.5 + CR 303.4: source-relative reads, all served by
         // the `TriggerSourceContext` the fire-time leg carries.
         | FilterProp::SameName
-        | FilterProp::AttachedToSource
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
         | FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::BlockingSource
@@ -26112,7 +26205,9 @@ pub mod tests {
         for prop in [
             // Reads the resolving ability.
             FilterProp::SameNameAsParentTarget,
-            FilterProp::AttachedToRecipient,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            },
             // Reads a ledger a RESOLUTION publishes.
             FilterProp::InTrackedSet {
                 id: crate::types::identifiers::TrackedSetId(1),
@@ -26148,7 +26243,9 @@ pub mod tests {
         for prop in [
             FilterProp::Token,
             FilterProp::Tapped,
-            FilterProp::AttachedToSource,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            },
             FilterProp::SameName,
             FilterProp::IsChosenCreatureType,
             FilterProp::HasSingleTarget,
@@ -26980,6 +27077,74 @@ pub mod tests {
             filtered,
             vec![events[2].clone()],
             "the suffix-local first upkeep is globally the second occurrence"
+        );
+    }
+
+    /// CR 603.2c: a delayed scan over the unclaimed occurrences publishes its
+    /// claim at the full-buffer occurrence. With the first of two equal
+    /// upkeep events claimed, the delayed trigger takes the second, and its
+    /// claim names occurrence 1, not the shortened list's 0.
+    #[test]
+    fn unclaimed_delayed_scan_publishes_full_buffer_occurrences() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_2C01),
+            controller,
+            "Delayed Upkeep Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            ability: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            )),
+            controller,
+            source_id: source,
+            one_shot: true,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
+        });
+        let upkeep = GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        };
+        let events = vec![upkeep.clone(), upkeep.clone()];
+        let claimed = [ConsumedTriggerEventOccurrence {
+            event: upkeep.clone(),
+            occurrence: 0,
+            scope: ConsumedTriggerEventScope::AllCollectors,
+        }];
+        let unclaimed = unclaimed_trigger_events_from(
+            &events,
+            0,
+            TriggerCollectionRequester::Delayed,
+            &claimed,
+        );
+        assert_eq!(unclaimed.events, vec![upkeep.clone()], "reach: E#1 is left");
+
+        collect_unclaimed_delayed_triggers_into_deferred(&mut state, &events, &unclaimed);
+
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "reach: the delayed trigger fired"
+        );
+        assert_eq!(
+            state.consumed_before_priority_trigger_events,
+            vec![ConsumedTriggerEventOccurrence {
+                event: upkeep,
+                occurrence: 1,
+                scope: ConsumedTriggerEventScope::AllCollectors,
+            }],
+            "the published claim is E#1 of the full buffer"
         );
     }
 
@@ -40608,7 +40773,9 @@ pub mod tests {
                 Some(crate::types::ability::RepeatContinuation::ControllerChoice);
         }));
         contexts.push(candidate(&mut state, "(e) inherited target", &|pending| {
-            pending.ability.targets = vec![TargetRef::Player(PlayerId(1))];
+            pending
+                .ability
+                .set_unpinned_targets(vec![TargetRef::Player(PlayerId(1))]);
         }));
         let slot_effect = mana_effect(Some(crate::types::ability::ManaTargetRole::Recipient {
             recipient: TargetFilter::Player,

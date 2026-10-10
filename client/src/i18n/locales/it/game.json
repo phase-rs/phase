@@ -899,6 +899,7 @@
     },
     "confirmTap": "Conferma TAP ({{selected}}/{{count}})",
     "keepCurrentTargets": "Mantieni i bersagli attuali",
+    "keepCurrentTarget": "Mantieni questo bersaglio",
     "skip": "Salta",
     "opponentChoice": "(a scelta dell'avversario)",
     "chooseNewTarget": "Scegli il nuovo bersaglio della magia",
@@ -2417,7 +2418,8 @@
     "confirm": "Conferma",
     "badgeNewTarget": "Nuovo bersaglio",
     "slotLabel": "Bersaglio {{index}}: {{current}} → {{chosen}}",
-    "unselected": "invariato"
+    "unselected": "invariato",
+    "keep": "Mantieni"
   },
   "separatePiles": {
     "chooserName": "Giocatore {{number}}",

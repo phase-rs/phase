@@ -512,7 +512,7 @@ fn resolve_top_votes_tally(
                             controller,
                             chain_root_targets.to_vec(),
                         );
-                        chain.targets = vec![TargetRef::Object(winner_obj)];
+                        chain.set_unpinned_targets(vec![TargetRef::Object(winner_obj)]);
                         resolve_ability_chain(state, &chain, events, 1)?;
                     }
                 }
@@ -555,7 +555,7 @@ fn resolve_top_votes_tally(
                                     controller,
                                     chain_root_targets.to_vec(),
                                 );
-                                chain.targets = vec![TargetRef::Object(winner_obj)];
+                                chain.set_unpinned_targets(vec![TargetRef::Object(winner_obj)]);
                                 resolve_ability_chain(state, &chain, events, 1)?;
                             }
                         }
@@ -852,8 +852,10 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
@@ -979,8 +981,10 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
@@ -1462,8 +1466,10 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,
@@ -1646,8 +1652,10 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             controller,
             original_controller: None,

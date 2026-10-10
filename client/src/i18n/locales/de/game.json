@@ -899,6 +899,7 @@
     },
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
+    "keepCurrentTarget": "Dieses Ziel behalten",
     "skip": "Überspringen",
     "opponentChoice": "(nach Wahl des Gegners)",
     "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
@@ -2417,7 +2418,8 @@
     "confirm": "Bestätigen",
     "badgeNewTarget": "Neues Ziel",
     "slotLabel": "Ziel {{index}}: {{current}} → {{chosen}}",
-    "unselected": "unverändert"
+    "unselected": "unverändert",
+    "keep": "Behalten"
   },
   "separatePiles": {
     "chooserName": "Spieler {{number}}",

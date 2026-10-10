@@ -24,36 +24,53 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
   const hoverProps = useInspectHoverProps();
 
   const slotCount = Math.max(data.current_targets.length, 1);
-  const isMultiSlot = data.scope.type === "All" && slotCount > 1;
+  // CR 115.7d: "choose new targets" (All scope) may leave any position
+  // unchanged, so it offers Keep at every position count, one included.
+  // "Change the target" (Single scope) has nothing to keep. Slot chips are a
+  // separate question: they only appear when there is more than one position.
+  const permitsKeep = data.scope.type === "All";
+  const isMultiSlot = permitsKeep && slotCount > 1;
 
-  // CR 115.7: Default to keeping the current targets unchanged.
-  const [selected, setSelected] = useState<TargetRef[]>(data.current_targets);
+  // CR 115.7d: every position starts KEPT (`null`), which leaves its target
+  // unchanged with its announced object. A chosen target is sent as itself.
+  // "Change the target" (Single scope) has nothing to keep: it needs a pick.
+  const [selected, setSelected] = useState<(TargetRef | null)[]>(
+    () => Array.from({ length: slotCount }, () => null),
+  );
   const [activeSlot, setActiveSlot] = useState(0);
 
   const handleSelectSingle = useCallback((target: TargetRef) => {
     setSelected([target]);
   }, []);
 
-  const handleSelectSlot = useCallback((slotIndex: number, target: TargetRef) => {
+  const setSlot = useCallback((slotIndex: number, pick: TargetRef | null) => {
     setSelected((prev) => {
       const next = [...prev];
-      while (next.length < slotCount) {
-        next.push(data.current_targets[next.length] ?? target);
-      }
-      next[slotIndex] = target;
+      next[slotIndex] = pick;
       return next;
     });
     if (slotIndex + 1 < slotCount) {
       setActiveSlot(slotIndex + 1);
     }
-  }, [data.current_targets, slotCount]);
+  }, [slotCount]);
+
+  const handleSelectSlot = useCallback((slotIndex: number, target: TargetRef) => {
+    // Choosing the announced object again is the same as keeping it, unless
+    // the engine says the choice is a distinct election (its announced
+    // object is gone, so the id names a returned object).
+    const current = data.current_targets[slotIndex];
+    const isKeep = current != null
+      && targetsEqual(current, target)
+      && !(data.keep_is_distinct?.[slotIndex] ?? false);
+    setSlot(slotIndex, isKeep ? null : target);
+  }, [data.current_targets, data.keep_is_distinct, setSlot]);
 
   const handleConfirm = useCallback(() => {
-    const payload = isMultiSlot
+    const payload = permitsKeep
       ? selected.slice(0, slotCount)
       : selected.slice(0, 1);
     dispatch({ type: "RetargetSpell", data: { new_targets: payload } });
-  }, [dispatch, isMultiSlot, selected, slotCount]);
+  }, [dispatch, permitsKeep, selected, slotCount]);
 
   const scopeLabel =
     data.scope.type === "Single"
@@ -64,14 +81,12 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
     .map((target) => targetLabel(target, objects))
     .join(", ");
 
-  const confirmDisabled = useMemo(() => {
-    if (selected.length === 0) return true;
-    if (!isMultiSlot) return false;
-    return selected.length < slotCount
-      || selected.slice(0, slotCount).some((target) => target == null);
-  }, [isMultiSlot, selected, slotCount]);
+  const confirmDisabled = useMemo(
+    () => (permitsKeep ? selected.length < slotCount : selected[0] == null),
+    [permitsKeep, selected, slotCount],
+  );
 
-  const activeSelection = isMultiSlot ? selected[activeSlot] : selected[0];
+  const activeSelection = permitsKeep ? selected[activeSlot] : selected[0];
 
   // CR 115.7d + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
   // MED-2): admission is PER-SLOT (`engine::apply_retarget`'s `pool_for`),
@@ -82,7 +97,7 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
   // outer-empty compat payload, INVARIANT SC) falls back to the union,
   // which is what a `Legacy`-enforced or pre-field prompt's pool equals
   // anyway.
-  const renderSlot = isMultiSlot ? activeSlot : 0;
+  const renderSlot = permitsKeep ? activeSlot : 0;
   const slotOptions = data.slot_pools[renderSlot] ?? data.legal_new_targets;
 
   return (
@@ -97,9 +112,20 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
         />
       }
     >
-      {isMultiSlot && (
+      {permitsKeep && (
         <div className="mb-4 flex flex-wrap justify-center gap-2">
-          {data.current_targets.map((current, index) => {
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+              selected[activeSlot] == null
+                ? "bg-emerald-600/90 text-white ring-2 ring-emerald-300/70"
+                : "bg-slate-800/80 text-slate-200 hover:bg-slate-700/80"
+            }`}
+            onClick={() => setSlot(activeSlot, null)}
+          >
+            {t("retargetChoice.keep")}
+          </button>
+          {isMultiSlot && data.current_targets.map((current, index) => {
             const chosen = selected[index];
             const isActive = index === activeSlot;
             return (
@@ -142,7 +168,7 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
               transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
               whileHover={{ scale: 1.05, y: -6 }}
               onClick={() => (
-                isMultiSlot
+                permitsKeep
                   ? handleSelectSlot(activeSlot, target)
                   : handleSelectSingle(target)
               )}

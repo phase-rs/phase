@@ -5054,7 +5054,9 @@ fn whiplash_where_x_binds_equipment_count_to_life_loss_and_gain() {
             filter: TargetFilter::Typed(
                 TypedFilter::default()
                     .subtype("Equipment".to_string())
-                    .properties(vec![FilterProp::AttachedToSource]),
+                    .properties(vec![FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Source,
+                    }]),
             ),
         },
     };
@@ -5078,7 +5080,9 @@ fn whiplash_where_x_binds_equipment_count_to_life_loss_and_gain() {
                             filter: TargetFilter::Typed(tf),
                         },
                 } => assert!(
-                    tf.properties.contains(&FilterProp::AttachedToSource),
+                    tf.properties.contains(&FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Source
+                    }),
                     "amount filter must carry AttachedToSource, got {:?}",
                     tf.properties
                 ),
@@ -10402,7 +10406,12 @@ fn damage_all_for_each_aura_attached_to_that_creature() {
                         }) => {
                             assert_eq!(controller, None);
                             assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
-                            assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                            assert_eq!(
+                                properties,
+                                vec![FilterProp::AttachedTo {
+                                    to: crate::types::ability::AttachmentReferent::Recipient
+                                }]
+                            );
                         }
                         other => panic!("expected typed attachment filter, got {other:?}"),
                     },
@@ -64801,9 +64810,18 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
-        | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::DeclaredTarget { .. },
+        }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another

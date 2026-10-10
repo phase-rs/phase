@@ -100,7 +100,7 @@ pub fn resolve(
             ability.context.chain_root_targets.clone(),
         );
         if resolved.targets.is_empty() {
-            resolved.targets.push(TargetRef::Object(source_id));
+            resolved.push_target(TargetRef::Object(source_id));
         }
         state.park_ability_continuation(PendingContinuation::new(Box::new(resolved), state));
     } else {
@@ -159,7 +159,7 @@ fn run_on_decline_now(
     let mut resolved =
         build_resolved_from_def_with_chain_root(def, source_id, controller, chain_root_targets);
     if resolved.targets.is_empty() {
-        resolved.targets.push(TargetRef::Object(source_id));
+        resolved.push_target(TargetRef::Object(source_id));
     }
     let _ = super::resolve_ability_chain(state, &resolved, events, 0);
 }

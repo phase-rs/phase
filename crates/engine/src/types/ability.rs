@@ -6544,6 +6544,43 @@ pub enum CombatRelationSubject {
     ParentTarget,
 }
 
+/// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
+/// attached to. Object referents (`Source`, `Recipient`, `DeclaredTarget`) and
+/// the player referent (`Player`) resolve through separate authorities in
+/// `game::filter`; only the relation is shared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AttachmentReferent {
+    /// The filter's source object ("Aura and Equipment attached to ~" —
+    /// Kellan, the Fae-Blooded; Whiplash, Vengeful Engineer).
+    Source,
+    /// CR 613.4c: the per-recipient object of the resolving effect ("Enchanted
+    /// creature gets +N/+M for each Aura attached to it" — Strong Back, Mantle
+    /// of the Ancients, Bruenor Battlehammer). Falls back to the source when no
+    /// recipient is bound (self-source triggers: Catti-brie, Wyleth).
+    Recipient,
+    /// CR 303.4b: a player the candidate is attached to, identified by
+    /// `ControllerRef` ("the number of Curses attached to enchanted player" —
+    /// Curse of Thirst, Curse of Surveillance).
+    Player { player: ControllerRef },
+    /// CR 601.2c + CR 608.2c: the object announced for declared target slot
+    /// `slot` of the resolving chain ("Destroy all Equipment attached to that
+    /// creature" — Turn to Slag; Light of Judgment; Fiery Annihilation). `slot`
+    /// uses the numbering of `TargetFilter::ParentTargetSlot { index }`
+    /// (`ability_utils::declared_targets_in_chain` counted from the mode root,
+    /// else the chain root) and is read only through
+    /// `targeting::declared_slot_referent`.
+    DeclaredTarget { slot: usize },
+}
+
+impl AttachmentReferent {
+    /// Whether evaluating this referent reads a declared target slot of the
+    /// resolving chain (and therefore needs a declared-slot view or carrier).
+    pub fn reads_declared_slot(&self) -> bool {
+        matches!(self, AttachmentReferent::DeclaredTarget { .. })
+    }
+}
+
 /// Individual filter properties that can be combined in a Typed filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -6719,41 +6756,14 @@ pub enum FilterProp {
     HasAdventure,
     EnchantedBy,
     EquippedBy,
-    /// CR 301.5 + CR 303.4: True when the matched object's `attached_to` field
-    /// equals the filter source's object ID. Inverse of `EnchantedBy`/`EquippedBy`,
-    /// which check whether the source has an attachment. Used for "Aura and
-    /// Equipment attached to ~" quantity clauses (Kellan, the Fae-Blooded) and
-    /// for any compound filter whose subject is "attached to <self>".
-    AttachedToSource,
-    /// CR 301.5 + CR 303.4 + CR 613.4c: True when the matched object's
-    /// `attached_to` field equals the *recipient* of the resolving effect (the
-    /// per-object `id` in a layer's affected list). Distinct from
-    /// `AttachedToSource` — for an Aura/Equipment static "Enchanted/Equipped
-    /// creature gets +N/+M for each X attached to it", the pronoun "it" refers
-    /// to the affected creature, not to the static's source object. The
-    /// recipient is supplied through `FilterContext::recipient_id`; when
-    /// recipient is unknown (no per-recipient context), this prop evaluates to
-    /// false. Covers ~25 cards: Strong Back, Mantle of the Ancients,
-    /// Auramancer's Guise, Champion of the Flame, Bruenor Battlehammer's
-    /// "Each creature you control gets +2/+0 for each Equipment attached to
-    /// it", and the broader "<subject> gets +N/+M for each Aura/Equipment
-    /// attached to it" family.
-    AttachedToRecipient,
-    /// CR 303.4 + CR 301.5: True when the matched object's `attached_to` field
-    /// resolves to a PLAYER equal to the player identified by `player`. This is
-    /// the player-referent counterpart of `AttachedToSource`/`AttachedToRecipient`
-    /// (both of which resolve against an OBJECT referent) — a Curse (or any
-    /// other player-enchanting Aura) needs to count SIBLING permanents attached
-    /// to a specific player, not to a creature. Reuses `ControllerRef` (resolved
-    /// via `controller_ref_player`/`source_enchanted_player`) rather than adding
-    /// a narrower "which player" type, since every "which player" axis this
-    /// needs (the enchanted player, a target player, "you", …) is already
-    /// expressed there. Powers "the number of Curses attached to [enchanted
-    /// player]" (Curse of Thirst, Curse of Surveillance) — `player` is
-    /// `ControllerRef::EnchantedPlayer` there, resolved against the counting
-    /// ability's own source (itself a Curse attached to the same player).
-    AttachedToPlayer {
-        player: ControllerRef,
+    /// CR 701.3a + CR 303.4b: True when the matched object is attached to the
+    /// object or player named by `to`. The single attachment-relation prop: the
+    /// referent axis is parameterized by [`AttachmentReferent`] rather than one
+    /// sibling variant per referent. Inverse direction of
+    /// `EnchantedBy`/`EquippedBy`/`HasAttachment`, which ask whether an object
+    /// HAS an attachment.
+    AttachedTo {
+        to: AttachmentReferent,
     },
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
@@ -6953,6 +6963,7 @@ pub enum FilterProp {
     /// preserving the single-type constraint while expressing the OR
     /// semantics at the property layer. Nest by composing with other props.
     AnyOf {
+        #[serde(deserialize_with = "deserialize_filter_props_compat")]
         props: Vec<FilterProp>,
     },
     /// CR 608.2c: Logical negation of a filter property — matches objects for
@@ -6964,6 +6975,7 @@ pub enum FilterProp {
     /// (De Morgan) into `Not(AttackedThisTurn)` AND `Not(EnteredThisTurn)` rather
     /// than a bespoke `NotAttacked`/`NotEntered` sibling cluster. Boxed for recursion.
     Not {
+        #[serde(deserialize_with = "deserialize_boxed_filter_prop_compat")]
         prop: Box<FilterProp>,
     },
     /// CR 608.2c: The object is a member of the active resolution-chain tracked
@@ -7303,7 +7315,7 @@ pub struct TypedFilter {
     pub type_filters: Vec<TypeFilter>,
     #[serde(default)]
     pub controller: Option<ControllerRef>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_filter_props_compat")]
     pub properties: Vec<FilterProp>,
 }
 
@@ -9040,6 +9052,64 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     quantity_ref_from_value(value)
+}
+
+/// CR 701.3a + CR 303.4b: decode a `FilterProp`, accepting the three legacy
+/// attachment-referent tags that predate `FilterProp::AttachedTo { to }`
+/// (`AttachedToSource`, `AttachedToRecipient`, `AttachedToPlayer { player }`).
+/// Serialization is canonical-new only. Nested props reach this decoder through
+/// the hooked `AnyOf.props`, `Not.prop`, `TypedFilter.properties` and
+/// `additional_filter` fields, so a legacy tag at any depth is accepted.
+fn filter_prop_from_value<E: serde::de::Error>(
+    mut value: serde_json::Value,
+) -> Result<FilterProp, E> {
+    let to = match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("AttachedToSource") => AttachmentReferent::Source,
+        Some("AttachedToRecipient") => AttachmentReferent::Recipient,
+        Some("AttachedToPlayer") => {
+            let player = value
+                .get_mut("player")
+                .map(serde_json::Value::take)
+                .ok_or_else(|| E::custom("legacy AttachedToPlayer requires a player"))?;
+            AttachmentReferent::Player {
+                player: serde_json::from_value(player).map_err(E::custom)?,
+            }
+        }
+        _ => return serde_json::from_value(value).map_err(E::custom),
+    };
+    Ok(FilterProp::AttachedTo { to })
+}
+
+pub(crate) fn deserialize_filter_props_compat<'de, D>(
+    deserializer: D,
+) -> Result<Vec<FilterProp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(filter_prop_from_value)
+        .collect()
+}
+
+pub(crate) fn deserialize_boxed_filter_prop_compat<'de, D>(
+    deserializer: D,
+) -> Result<Box<FilterProp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    filter_prop_from_value(serde_json::Value::deserialize(deserializer)?).map(Box::new)
+}
+
+pub(crate) fn deserialize_optional_filter_prop_compat<'de, D>(
+    deserializer: D,
+) -> Result<Option<FilterProp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(filter_prop_from_value)
+        .transpose()
 }
 
 pub(crate) fn deserialize_boxed_quantity_ref_compat<'de, D>(
@@ -27628,7 +27698,11 @@ pub enum AbilityCondition {
             deserialize_with = "deserialize_revealed_card_types_compat"
         )]
         card_types: Vec<CoreType>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_filter_prop_compat"
+        )]
         additional_filter: Option<FilterProp>,
         /// CR 205.3m: Optional subtype constraint on the revealed card (e.g.
         /// Kenessos: "If it's a Kraken, Leviathan, Octopus, or Serpent
@@ -33455,7 +33529,13 @@ impl AttachTargetBindings {
 }
 
 /// Runtime ability data passed to effect handlers at resolution time.
+///
+/// Serde goes through the derived implementation (`remote = "Self"`) plus the
+/// hand-written `Deserialize` below, which normalizes and validates the target
+/// occurrence pins of every decoded node — whatever owner holds it (stack,
+/// resolution frames, pending casts, prompts) — before any reader sees it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
@@ -33515,11 +33595,23 @@ pub struct ResolvedAbility {
     /// `source_incarnation`'s `is_none_or` fail-open at `source_is_current`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_incarnations: Vec<ObjectIncarnationRef>,
-    /// CR 400.7 + CR 601.2c: Incarnations captured for ordinary player- or
-    /// controller-selected object targets. Separate from `target_incarnations`,
-    /// whose keyed pins are reserved for delayed-trigger referents.
+    /// CR 400.7 + CR 601.2c: the incarnation announced for each target
+    /// OCCURRENCE, aligned position-for-position with `targets` (`None` for a
+    /// player, or an occurrence nothing pinned). Empty means every occurrence
+    /// is unpinned. Separate from `target_incarnations`, whose keyed pins are
+    /// reserved for delayed-trigger referents. Written only through the
+    /// occurrence authority (`game::target_occurrences`), which moves targets
+    /// and pins together.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub selected_target_incarnations: Vec<ObjectIncarnationRef>,
+    pub target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// Decode-only carrier for the pre-positional, keyed pin list (wire key
+    /// `selected_target_incarnations`). Never serialized, and always empty
+    /// after decoding: `ResolvedAbility`'s `Deserialize` folds it into
+    /// `target_pins` (each object occurrence takes the first legacy pin with
+    /// its id; players and unmatched occurrences none; no pin invented), so a
+    /// legacy save re-serializes in positional form.
+    #[serde(rename = "selected_target_incarnations", default, skip_serializing)]
+    pub legacy_selected_target_incarnations: Vec<ObjectIncarnationRef>,
     /// CR 602.2b + CR 601.2f: self-referential activation cost modification
     /// carried from the printed ability definition so target-dependent riders
     /// can be applied after targets are committed.
@@ -33544,6 +33636,15 @@ pub struct ResolvedAbility {
     /// overwrites it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub illegal_target_slots: Vec<usize>,
+    /// CR 608.2b: Declared target slots (numbered like `illegal_target_slots`)
+    /// the legality check made as the chain began to resolve did not judge: a
+    /// `PassThrough` occurrence (an `Attach` node's unclaimed tail, carried for
+    /// a downstream sibling). Its storage and the fizzle verdict are unchanged,
+    /// but it supplies no information: `targeting::declared_slot_referent`
+    /// reads nothing from it. Stamped beside `illegal_target_slots` on the
+    /// resolution carrier's root by `stack::resolve_top`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unjudged_target_slots: Vec<usize>,
     /// CR 608.2b: This node's target-vector indices removed by the initial
     /// legality check for the current resolution. Unlike `illegal_target_slots`,
     /// these are local pre-compaction indices, not declared-chain identities.
@@ -33905,6 +34006,27 @@ pub struct ResolvedAbility {
     pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
 }
 
+impl Serialize for ResolvedAbility {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ResolvedAbility::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResolvedAbility {
+    /// CR 400.7: the persisted-target-occurrence boundary. Every decoded node
+    /// (its continuations decode through this same impl) folds a legacy keyed
+    /// pin list into positional pins and is refused, as a decode error rather
+    /// than a later panic or fail-open read, when its pins are not aligned with
+    /// its targets.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut ability = ResolvedAbility::deserialize(deserializer)?;
+        ability
+            .normalize_decoded_target_pins()
+            .map_err(de::Error::custom)?;
+        Ok(ability)
+    }
+}
+
 /// CR 400.7 + CR 601.2h: Structural equality for [`ResolvedAbility`].
 ///
 /// Hand-written rather than derived for exactly ONE reason: `cost_paid_objects`
@@ -33938,10 +34060,12 @@ impl PartialEq for ResolvedAbility {
             trigger_definition_ref: a_trigger_definition_ref,
             force_block_attacker: a_force_block_attacker,
             target_incarnations: a_target_incarnations,
-            selected_target_incarnations: a_selected_target_incarnations,
+            target_pins: _,
+            legacy_selected_target_incarnations: _,
             activation_cost_reduction: a_activation_cost_reduction,
             activation_record: a_activation_record,
             illegal_target_slots: a_illegal_target_slots,
+            unjudged_target_slots: a_unjudged_target_slots,
             illegal_local_target_slots: a_illegal_local_target_slots,
             controller: a_controller,
             original_controller: a_original_controller,
@@ -34009,10 +34133,12 @@ impl PartialEq for ResolvedAbility {
             trigger_definition_ref: b_trigger_definition_ref,
             force_block_attacker: b_force_block_attacker,
             target_incarnations: b_target_incarnations,
-            selected_target_incarnations: b_selected_target_incarnations,
+            target_pins: _,
+            legacy_selected_target_incarnations: _,
             activation_cost_reduction: b_activation_cost_reduction,
             activation_record: b_activation_record,
             illegal_target_slots: b_illegal_target_slots,
+            unjudged_target_slots: b_unjudged_target_slots,
             illegal_local_target_slots: b_illegal_local_target_slots,
             controller: b_controller,
             original_controller: b_original_controller,
@@ -34080,10 +34206,13 @@ impl PartialEq for ResolvedAbility {
             && a_trigger_definition_ref == b_trigger_definition_ref
             && a_force_block_attacker == b_force_block_attacker
             && a_target_incarnations == b_target_incarnations
-            && a_selected_target_incarnations == b_selected_target_incarnations
+            // CR 400.7: occurrence pins compare in their normalized, aligned
+            // form, so a legacy keyed decode equals its positional re-encode.
+            && self.aligned_target_pins() == other.aligned_target_pins()
             && a_activation_cost_reduction == b_activation_cost_reduction
             && a_activation_record == b_activation_record
             && a_illegal_target_slots == b_illegal_target_slots
+            && a_unjudged_target_slots == b_unjudged_target_slots
             && a_illegal_local_target_slots == b_illegal_local_target_slots
             && a_controller == b_controller
             && a_original_controller == b_original_controller
@@ -34486,10 +34615,12 @@ impl ResolvedAbility {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             activation_cost_reduction: None,
             activation_record: None,
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             modal: None,
             mode_abilities: Vec::new(),
@@ -34772,7 +34903,8 @@ impl ResolvedAbility {
         // whether two abilities would resolve identically, and two pins at
         // different epochs would not. Same field, different questions.
         self.target_incarnations.clear();
-        self.selected_target_incarnations.clear();
+        self.target_pins.clear();
+        self.legacy_selected_target_incarnations.clear();
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.clear_trigger_identity_recursive();
         }
@@ -34844,22 +34976,14 @@ impl ResolvedAbility {
     }
 
     /// CR 115.1a/c/d + CR 400.7 + CR 601.2c + CR 602.2b + CR 603.3d: Capture ordinary object targets at the shared
-    /// announcement/selection seam. Existing pins belong to delayed-trigger
-    /// referents and must not be replaced by a later assignment.
+    /// announcement/selection seam, one pin per occurrence
+    /// (`announce_target_pins`). Existing `target_incarnations` belong to
+    /// delayed-trigger referents and are not replaced by a later assignment.
     pub fn capture_target_incarnations_recursive(
         &mut self,
         state: &crate::types::game_state::GameState,
     ) {
-        self.selected_target_incarnations = self
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                TargetRef::Object(id) => {
-                    state.objects.get(id).map(ObjectIncarnationRef::from_object)
-                }
-                TargetRef::Player(_) => None,
-            })
-            .collect();
+        self.announce_target_pins(state);
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.capture_target_incarnations_recursive(state);
         }
@@ -34867,7 +34991,6 @@ impl ResolvedAbility {
             else_branch.capture_target_incarnations_recursive(state);
         }
     }
-
     /// CR 400.7 + CR 603.7c: True when `id` may still be affected by this
     /// ability.
     ///
@@ -34892,48 +35015,6 @@ impl ResolvedAbility {
             .iter()
             .find(|pin| pin.object_id == id)
             .is_none_or(|pin| pin.is_current(state))
-    }
-
-    /// CR 400.7: True when an ordinary selected target still names the
-    /// incarnation captured at announcement/selection time.
-    pub fn selected_target_pin_is_current(
-        &self,
-        id: ObjectId,
-        state: &crate::types::game_state::GameState,
-    ) -> bool {
-        self.selected_target_incarnations
-            .iter()
-            .find(|pin| pin.object_id == id)
-            .is_none_or(|pin| pin.is_current(state))
-    }
-
-    /// CR 115.7: A retarget refreshes the pin when the target changes, including
-    /// a same-ID target that left and returned as a new object.
-    pub fn retarget_target_requires_pin_refresh(
-        &self,
-        old: &TargetRef,
-        new: &TargetRef,
-        state: &crate::types::game_state::GameState,
-    ) -> bool {
-        old != new
-            || matches!(
-                new,
-                TargetRef::Object(id) if !self.selected_target_pin_is_current(*id, state)
-            )
-    }
-
-    /// CR 115.7: Refresh the selected-target pin for one target changed by a
-    /// retargeting effect, leaving every unchanged slot's original pin intact.
-    pub fn update_selected_target_incarnation(&mut self, pin: ObjectIncarnationRef) {
-        if let Some(existing) = self
-            .selected_target_incarnations
-            .iter_mut()
-            .find(|existing| existing.object_id == pin.object_id)
-        {
-            *existing = pin;
-        } else {
-            self.selected_target_incarnations.push(pin);
-        }
     }
 
     /// CR 603.7c + CR 400.7: The subset of `targets` this ability may still
@@ -35929,9 +36010,18 @@ impl ResolvedAbility {
     /// guarantee they land at index 0 regardless of their prior seat position.
     pub fn push_front_player_target_recursive(&mut self, player: PlayerId) {
         // CR 608.2d: Remove any existing occurrence first so the guesser is
-        // always at index 0 regardless of seat order in the target list.
-        self.targets.retain(|t| t != &TargetRef::Player(player));
-        self.targets.insert(0, TargetRef::Player(player));
+        // always at index 0 regardless of seat order in the target list. The
+        // object occurrences keep their own pins (an occurrence projection,
+        // then an unpinned player insertion).
+        let kept: Vec<usize> = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t != TargetRef::Player(player))
+            .map(|(position, _)| position)
+            .collect();
+        self.project_target_occurrences(&kept);
+        self.insert_target(0, TargetRef::Player(player), None);
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.push_front_player_target_recursive(player);
         }

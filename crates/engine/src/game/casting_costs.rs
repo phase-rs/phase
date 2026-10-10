@@ -67,6 +67,46 @@ pub(crate) fn finalized_spell_cast_ledger_error(
     EngineError::InvalidAction(format!("failed to record finalized spell cast: {error}"))
 }
 
+/// CR 601.2i + CR 707.12: a copy of an object cast during a resolution
+/// becomes cast once its casting steps (CR 601.2a?h, including the target
+/// announcement) are complete: publish `SpellCast`, record the cast in the
+/// ledger and stamp its occurrence. A copy whose announcement walk is
+/// abandoned (CR 601.2e) therefore never becomes cast and leaves no cast
+/// record, observer or latch. Idempotent: a copy already stamped (a save made
+/// before the commit moved to announcement completion) is not recorded twice.
+pub(crate) fn commit_copy_cast(
+    state: &mut GameState,
+    copy_id: ObjectId,
+    controller: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let copy =
+        state.objects.get(&copy_id).cloned().ok_or_else(|| {
+            EngineError::InvalidAction(format!("cast copy {copy_id:?} not found"))
+        })?;
+    if copy.cast_occurrence.is_some() {
+        return Ok(());
+    }
+    let origin = copy
+        .cast_from_zone
+        .unwrap_or(crate::types::zones::Zone::Exile);
+    events.push(GameEvent::SpellCast {
+        card_id: copy.card_id,
+        controller,
+        object_id: copy_id,
+        cast_mana_value: Some(copy.spell_mana_value()),
+    });
+    let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
+        state,
+        controller,
+        &copy,
+        origin,
+        crate::types::game_state::CastingVariant::Normal,
+    )
+    .map_err(finalized_spell_cast_ledger_error)?;
+    stamp_cast_occurrence_on_stack_spell(state, copy_id, occurrence)
+}
+
 /// CR 601.2i: Attach the ledger-minted identity to the finalized stack spell
 /// and every complete resolved-ability graph it carries.
 pub(crate) fn stamp_cast_occurrence_on_stack_spell(

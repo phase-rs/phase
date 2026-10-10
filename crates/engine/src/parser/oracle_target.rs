@@ -9,12 +9,12 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
-    CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
+    CombatRelation, CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter,
+    FilterProp, NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter,
+    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5249,9 +5249,10 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
-        | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another

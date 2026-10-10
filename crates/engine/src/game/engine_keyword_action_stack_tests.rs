@@ -935,15 +935,23 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
     let slots = vec![CopyTargetSlot {
         current: Some(TargetRef::Player(PlayerId(1))),
         legal_alternatives: vec![TargetRef::Player(PlayerId(1))],
+        address: None,
+        can_keep: false,
+        can_decline: false,
     }];
     state.waiting_for = WaitingFor::CopyRetarget {
         player,
+        controller: None,
         copy_id,
         target_slots: slots.clone(),
         effect_kind: EffectKind::Draw,
         effect_source_id: Some(copy_id),
         current_slot: 0,
         paradigm_remaining_offers: Some(remaining.clone()),
+        mode: None,
+        picks: None,
+        can_keep_rest: false,
+        announcer_election: None,
     };
     state.deferred_triggers = vec![
         deferred_draw_trigger(&mut state, "Copy Observer A", player),
@@ -951,16 +959,9 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
     ];
 
     let mut events = Vec::new();
-    finalize_copy_retarget(
-        &mut state,
-        player,
-        copy_id,
-        &slots,
-        EffectKind::Draw,
-        Some(copy_id),
-        &mut events,
-    )
-    .expect("finalize copy retarget");
+    let (walk, _) = crate::game::effects::copy_choice::walk_of(&state.waiting_for)
+        .expect("a legacy CopyRetarget infers its walk");
+    finalize_copy_walk(&mut state, &walk, vec![None], &mut events).expect("finalize copy retarget");
 
     assert!(
         matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
@@ -1033,19 +1034,13 @@ fn finalize_copy_retarget_refreshes_stale_same_id_object_pin() {
     move_to_zone(&mut state, target, Zone::Graveyard, &mut zone_events);
     move_to_zone(&mut state, target, Zone::Battlefield, &mut zone_events);
 
-    let copy_ability_for_retarget = state.stack[0]
-        .ability()
-        .expect("copy ability on stack")
-        .clone();
-    crate::game::effects::copy_spell::open_copy_retarget_choice(
+    assert!(crate::game::effects::copy_choice::open_copy_retarget_walk(
         &mut state,
         PlayerId(0),
         copy_id,
-        &[TargetRef::Object(target)],
-        &copy_ability_for_retarget,
         EffectKind::Destroy,
         copy_id,
-    );
+    ));
     let WaitingFor::CopyRetarget { target_slots, .. } = &state.waiting_for else {
         panic!("copy retarget choice must be opened");
     };
@@ -1067,7 +1062,14 @@ fn finalize_copy_retarget_refreshes_stale_same_id_object_pin() {
 
     let ability = state.stack[0].ability().expect("copy ability on stack");
     assert!(
-        ability.selected_target_pin_is_current(target, &state),
+        ability.target_occurrence_is_current(
+            ability
+                .targets
+                .iter()
+                .position(|t| *t == TargetRef::Object(target))
+                .expect("copy targets the chosen object"),
+            &state
+        ),
         "copy same-ID retarget must refresh the selected-target pin"
     );
 }

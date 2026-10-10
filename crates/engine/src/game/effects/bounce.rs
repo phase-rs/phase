@@ -496,11 +496,12 @@ pub fn resolve_all(
         ability
             .targets
             .iter()
-            .filter_map(|target| match target {
+            .enumerate()
+            .filter_map(|(position, target)| match target {
                 TargetRef::Object(id)
                     if state.battlefield.contains(id)
                         && ability.target_pin_is_current(*id, state)
-                        && ability.selected_target_pin_is_current(*id, state)
+                        && ability.target_occurrence_is_current(position, state)
                         && crate::game::filter::matches_target_filter(
                             state,
                             *id,

@@ -181,8 +181,8 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{
-    ChosenColorQualifierScope, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
-    TriggerConditionScope,
+    ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry, ParseContext,
+    PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
@@ -190,6 +190,7 @@ use crate::parser::oracle_ir::effect_chain::{
     OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
     ResidualConditionPolicy, ShellStage,
 };
+use crate::types::ability::TargetChoiceTiming;
 use crate::types::mana::ManaExpiry;
 
 /// CR 608.2c + CR 400.7: what, if anything, a delayed trigger's payload
@@ -7286,7 +7287,7 @@ fn try_parse_put_counter_choice(
     // `ability_utils::target_filter_binds_prior_target`. (The setter's two other
     // callers seed it for a ZoneChanged parent target and for a forwarded result
     // context; neither printing here is either.) A target the player announces
-    // lands in the separate `selected_target_incarnations` instead,
+    // lands in the separate occurrence pins (`target_pins`) instead,
     // so for an activated ability and a beginning-of-combat trigger the
     // `ParentTarget` arm was already vacuously unpinned. Nothing was traded
     // away. Measured as well: blinking Elspeth's target in response leaves the
@@ -25770,6 +25771,161 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     chain_declared_object_target_clause(clauses).map(|(_, filter)| filter)
 }
 
+/// CR 601.2c + CR 115.1: the single target filter a chain node announces as
+/// exactly one stack-time slot, for the effects whose slot collection is one
+/// plain filter (`ability_utils::collect_target_slot_specs`' generic arm).
+/// `Err(())` for an effect that announces a target through a shape this
+/// parse-time walk cannot number (paired subjects, fights, counter moves,
+/// attach operands, damage sources, companion player slots, …). `Ok(None)` for
+/// a node that announces nothing.
+fn single_declared_slot_filter(effect: &Effect) -> Result<Option<&TargetFilter>, ()> {
+    let Some(filter) = triggers::extract_target_filter_from_effect(effect) else {
+        return Ok(None);
+    };
+    let plain_single_slot = matches!(
+        effect,
+        Effect::DealDamage {
+            damage_source: None,
+            ..
+        } | Effect::Destroy { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::Bounce { .. }
+            | Effect::GainControl { .. }
+            | Effect::SetTapState { .. }
+            | Effect::LoseLife { .. }
+            | Effect::Pump { .. }
+    ) && !filter_names_target_player(filter);
+    if plain_single_slot {
+        Ok(Some(filter))
+    } else {
+        Err(())
+    }
+}
+
+/// CR 109.4 + CR 115.1: a `TargetPlayer` controller scope surfaces a companion
+/// player slot, which this walk does not number.
+fn filter_names_target_player(filter: &TargetFilter) -> bool {
+    crate::game::filter::filter_contains(filter, &|inner| {
+        matches!(
+            inner,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent),
+                ..
+            })
+        )
+    })
+}
+
+/// CR 601.2c: the exact slot count a multi-target spec announces, when fixed.
+fn fixed_slot_count(spec: &MultiTargetSpec) -> Option<usize> {
+    match (&spec.min, &spec.max) {
+        (QuantityExpr::Fixed { value: min }, Some(QuantityExpr::Fixed { value: max }))
+            if min == max && *min >= 0 =>
+        {
+            usize::try_from(*min).ok()
+        }
+        _ => None,
+    }
+}
+
+/// CR 601.2c + CR 608.2c: the typed declared-slot registry for the clauses
+/// pushed so far (see [`DeclaredSlotRegistry`]). Walks each clause's head node
+/// and its compound `sub_ability` line in declared order — the order
+/// `ability_utils::declared_targets_in_chain` numbers them — counting a node as
+/// one slot only through [`single_declared_slot_filter`]. A node announced at
+/// resolution (`TargetChoiceTiming::Resolution`), a conditional clause that
+/// announces a target, or an unnumberable effect makes the whole registry
+/// `Indeterminate`. A variable-count node (a non-fixed `multi_target`, or
+/// `optional_targeting`) ends the numbered prefix.
+fn chain_declared_slot_registry(clauses: &[ClauseIr]) -> DeclaredSlotRegistry {
+    let mut entries = Vec::new();
+    let mut next_index = Some(0usize);
+    for clause in clauses {
+        let head_timing = lower::target_choice_timing_for_clause(clause);
+        let head_multi = clause
+            .multi_target
+            .as_ref()
+            .or(clause.parsed.multi_target.as_ref());
+        let mut nodes: Vec<(&Effect, Option<&MultiTargetSpec>, bool, TargetChoiceTiming)> =
+            vec![(&clause.parsed.effect, head_multi, false, head_timing)];
+        let mut sub = clause.parsed.sub_ability.as_deref();
+        while let Some(def) = sub {
+            nodes.push((
+                &def.effect,
+                def.multi_target.as_ref(),
+                def.optional_targeting,
+                def.target_choice_timing,
+            ));
+            sub = def.sub_ability.as_deref();
+        }
+        for (effect, multi, optional_targeting, timing) in nodes {
+            let filter = match single_declared_slot_filter(effect) {
+                Ok(Some(filter)) => filter,
+                Ok(None) => continue,
+                Err(()) => return DeclaredSlotRegistry::Indeterminate,
+            };
+            if timing == TargetChoiceTiming::Resolution || clause.condition.is_some() {
+                return DeclaredSlotRegistry::Indeterminate;
+            }
+            let count = match multi {
+                None if !optional_targeting => Some(1),
+                Some(spec) if !optional_targeting => fixed_slot_count(spec),
+                _ => None,
+            };
+            let Some(count) = count else {
+                // Variable count: this node's slot and every later one are unnumbered.
+                entries.push(DeclaredSlotEntry {
+                    index: None,
+                    filter: filter.clone(),
+                });
+                next_index = None;
+                continue;
+            };
+            for _ in 0..count {
+                entries.push(DeclaredSlotEntry {
+                    index: next_index,
+                    filter: filter.clone(),
+                });
+                next_index = next_index.map(|index| index + 1);
+            }
+        }
+    }
+    DeclaredSlotRegistry::Known(entries)
+}
+
+/// CR 601.2c + CR 608.2c: resolve a demonstrative referent phrase ("that
+/// creature") at the start of `phrase_lower` to the declared slot it names, by
+/// a UNIQUE noun match over every announced slot of the earlier clauses
+/// (`oracle_target::parse_definite_parent_reference`). Binds only when the
+/// unique match lies in the numbered prefix; zero or several matches, a match
+/// past the prefix, an `Indeterminate` registry, or a modal mode give `None`.
+/// Returns the slot and the unconsumed remainder of `phrase_lower`.
+pub(super) fn resolve_declared_slot_anaphor<'a>(
+    phrase_lower: &'a str,
+    ctx: &ParseContext,
+) -> Option<(usize, &'a str)> {
+    if ctx.body_scope == crate::parser::oracle_ir::context::BodyScope::ModalMode {
+        return None;
+    }
+    let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+        return None;
+    };
+    let filters: Vec<TargetFilter> = entries.iter().map(|entry| entry.filter.clone()).collect();
+    let (bound, rest) =
+        crate::parser::oracle_target::parse_definite_parent_reference(phrase_lower, &filters)?;
+    let TargetFilter::ParentTargetSlot { index } = bound else {
+        return None;
+    };
+    // A slot whose own legality depends on another declared slot is never an
+    // antecedent, so referents never chain.
+    entries
+        .get(index)
+        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))?
+        .index
+        .map(|slot| (slot, rest))
+}
+
 /// CR 115.1: does this clause announce a target of its OWN — an instance of the
 /// word "target" in its effect, its compound remainder, or a multi-target spec?
 /// Context references (`SelfRef`, `ParentTarget`, …) announce nothing.
@@ -25784,6 +25940,156 @@ fn clause_announces_own_target(clause: &ClauseIr) -> bool {
             def.multi_target.is_some()
                 || triggers::extract_target_filter_from_effect(&def.effect).is_some()
         })
+}
+
+/// CR 115.10a + CR 608.2d + CR 701.8a: "Destroy up to N <filter> attached to
+/// that creature" (Light of Judgment) names no target — the objects are chosen
+/// while the effect is applied. When the clause's destroy filter reads a
+/// declared target slot (so its eligibility is the referent's attachments) and
+/// the printed fragment has no "target", lower it as a resolution-time
+/// selection followed by destruction of exactly the chosen set:
+/// `ChooseObjectsIntoTrackedSet { Controller, filter, 0..=N }` →
+/// `DestroyAll { TrackedSet(0) }`. The clause's own condition, optionality,
+/// duration and compound tail are kept (the tail follows the destroy). A
+/// non-fixed or non-"up to" count fails closed. Every other clause passes
+/// through unchanged.
+fn lift_untargeted_declared_slot_destroy(
+    clause: ParsedEffectClause,
+    multi_target: Option<MultiTargetSpec>,
+    text_lower: &str,
+) -> (ParsedEffectClause, Option<MultiTargetSpec>) {
+    let Effect::Destroy {
+        target,
+        cant_regenerate,
+    } = &clause.effect
+    else {
+        return (clause, multi_target);
+    };
+    if !crate::game::filter::filter_reads_declared_slot(target)
+        || nom_primitives::scan_contains(text_lower, "target ")
+    {
+        return (clause, multi_target);
+    }
+    let max = multi_target
+        .as_ref()
+        .and_then(|spec| match (&spec.min, &spec.max) {
+            (QuantityExpr::Fixed { value: 0 }, Some(QuantityExpr::Fixed { value }))
+                if *value > 0 =>
+            {
+                u32::try_from(*value).ok()
+            }
+            _ => None,
+        });
+    let Some(max) = max else {
+        return (
+            parsed_clause(Effect::unimplemented(
+                "untargeted_declared_slot_destroy_count",
+                text_lower,
+            )),
+            None,
+        );
+    };
+    let filter = target.clone();
+    let cant_regenerate = *cant_regenerate;
+    let mut lifted = clause;
+    lifted.effect = Effect::ChooseObjectsIntoTrackedSet {
+        chooser: TargetFilter::Controller,
+        filter,
+        min: 0,
+        max: Some(max),
+        cardinality: None,
+        eligibility: None,
+    };
+    let mut destroy = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DestroyAll {
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+            cant_regenerate,
+        },
+    );
+    destroy.sub_ability = lifted.sub_ability.take();
+    lifted.sub_ability = Some(Box::new(destroy));
+    (lifted, None)
+}
+
+/// CR 614.1a + CR 601.2c + CR 608.2c: bind a die-exile rider ("If that creature
+/// would die this turn, exile it instead") to the declared slot its subject
+/// names when that slot is NOT the immediately preceding node's own — the rider
+/// is absorbed as that node's sub-ability, so its `TargetFilter::Any` route
+/// would read the intervening node's target (Fiery Annihilation's Equipment)
+/// instead of the creature. The subject resolves through the chain-wide
+/// registry ([`resolve_declared_slot_anaphor`]); the rider then targets
+/// `TargetFilter::ParentTargetSlot { index }`.
+///
+/// Unchanged (`Any`) when the preceding clause announces no target, its last
+/// declared slot is the antecedent, or it holds the chain's only declared slot
+/// (no other antecedent exists). Fails closed when the subject cannot be
+/// resolved while another declared slot could be its antecedent and the
+/// preceding clause announces a target its noun does not name — binding the
+/// intervening node's target would install the replacement on the wrong object.
+fn bind_die_exile_rider_antecedent(
+    mut rider: AbilityDefinition,
+    rider_lower: &str,
+    clauses: &[ClauseIr],
+    ctx: &ParseContext,
+) -> AbilityDefinition {
+    let Some((_, earlier)) = clauses.split_last() else {
+        return rider;
+    };
+    let (DeclaredSlotRegistry::Known(before), DeclaredSlotRegistry::Known(all)) = (
+        chain_declared_slot_registry(earlier),
+        &ctx.chain_declared_slots,
+    ) else {
+        return rider;
+    };
+    let Some(previous_clause_slots) = all.get(before.len()..) else {
+        return rider;
+    };
+    if previous_clause_slots.is_empty() {
+        return rider;
+    }
+    let subject = tag::<_, _, OracleError<'_>>("if ")
+        .parse(rider_lower)
+        .map_or(rider_lower, |(rest, _)| rest);
+    match resolve_declared_slot_anaphor(subject, ctx) {
+        Some((slot, _)) => {
+            if previous_clause_slots.last().and_then(|entry| entry.index) != Some(slot) {
+                if let Effect::AddTargetReplacement { target, .. } = &mut *rider.effect {
+                    *target = TargetFilter::ParentTargetSlot { index: slot };
+                }
+            }
+            rider
+        }
+        None => {
+            // With a single declared slot in the whole chain so far, the
+            // preceding clause's target is the only possible antecedent, so the
+            // `Any` route cannot bind the wrong object (Scorching Dragonfire:
+            // "that creature or planeswalker").
+            if before.is_empty() && previous_clause_slots.len() == 1 {
+                return rider;
+            }
+            let previous_filters: Vec<TargetFilter> = previous_clause_slots
+                .iter()
+                .map(|entry| entry.filter.clone())
+                .collect();
+            let names_previous = crate::parser::oracle_target::parse_definite_parent_reference(
+                subject,
+                &previous_filters,
+            )
+            .is_some();
+            let is_demonstrative = tag::<_, _, OracleError<'_>>("that ").parse(subject).is_ok();
+            if is_demonstrative && !names_previous {
+                AbilityDefinition::new(
+                    rider.kind,
+                    Effect::unimplemented("die_exile_rider_antecedent", rider_lower),
+                )
+            } else {
+                rider
+            }
+        }
+    }
 }
 
 /// CR 115.1 + CR 608.2c: a clause gated by a target P/T threshold
@@ -40115,6 +40421,7 @@ fn parse_effect_chain_ir_body(
     // caller's value. The pair is always reached — the loop body contains no
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
+    let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
@@ -40125,6 +40432,7 @@ fn parse_effect_chain_ir_body(
         // pushed so far, so none of the body's early `continue` paths can leave
         // a stale antecedent for the next chunk.
         ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
+        ctx.chain_declared_slots = chain_declared_slot_registry(builder.clauses());
         // TOP of the iteration: check the PREVIOUS iteration's stamp, then re-arm.
         debug_assert!(
             pending_stamp
@@ -40961,6 +41269,12 @@ fn parse_effect_chain_ir_body(
             try_parse_die_exile_rider(rider_lower.trim_end_matches('.').trim(), kind)
         {
             if !builder.is_empty() {
+                let rider_def = bind_die_exile_rider_antecedent(
+                    rider_def,
+                    &rider_lower,
+                    builder.clauses(),
+                    ctx,
+                );
                 builder
                     .clause(
                         normalized_text,
@@ -42583,6 +42897,11 @@ fn parse_effect_chain_ir_body(
             // head declared. Refreshed from the chunk after parse.
             declared_target_slots: chain_declared_target_slots.clone(),
             chain_declared_object_target: ctx.chain_declared_object_target.clone(),
+            // CR 601.2c + CR 608.2c: the typed declared-slot registry, published
+            // with the same lifecycle as `chain_declared_object_target`.
+            chain_declared_slots: ctx.chain_declared_slots.clone(),
+            // CR 700.2: a mode's chunks stay inside the mode.
+            body_scope: ctx.body_scope,
             // CR 116.2b + CR 708.7: a granted activated-ability body context is a
             // property of the whole ability, not of an individual chunk, so all
             // chunks inside it share the flag — the head "turn this creature face
@@ -43087,6 +43406,11 @@ fn parse_effect_chain_ir_body(
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
         };
+        let (clause, multi_target) = lift_untargeted_declared_slot_destroy(
+            clause,
+            multi_target,
+            &text_no_qty.to_ascii_lowercase(),
+        );
         let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
 
         // CR 608.2c: a clause that STATED its subject ("target opponent loses
@@ -44600,6 +44924,7 @@ fn parse_effect_chain_ir_body(
     // `take()` immediately above the loop; this line is the reason no chain's
     // declared-object-target fact can escape to its caller.
     ctx.chain_declared_object_target = outer_declared_object_target;
+    ctx.chain_declared_slots = outer_declared_slots;
 
     // Once more after the loop: the final iteration's stamp has no next-iteration
     // top to check it. See the declaration of `pending_stamp` above.

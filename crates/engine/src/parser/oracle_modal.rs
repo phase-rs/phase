@@ -1480,6 +1480,9 @@ fn parse_modal_mode_irs(
             // `base_ctx` holds — a reset base stays reset, and no mode can
             // invent authority its parent lacked.
             mode_ctx.subject = mode_anaphor_subject(mode_ctx.subject.take());
+            // CR 700.2: declared-slot numbering is mode-local at runtime, so a
+            // mode never admits a declared-slot referent.
+            mode_ctx.body_scope = super::oracle_ir::context::BodyScope::ModalMode;
             mode_ctx.diagnostics.clear();
             let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
             guard_unsupported_mode_qualifiers_ir(&mut ability, kind, &mode_ctx);
