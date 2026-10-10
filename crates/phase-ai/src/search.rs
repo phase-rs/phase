@@ -92,7 +92,7 @@ fn first_serum_powder_in_hand(
 /// turn (e.g. 10 counters → 10 pings). None of the registered duel-suite
 /// decks contain such cards; if one is added, revisit this cap or replace
 /// it with structural "source-state-unchanged" detection.
-const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
+pub(crate) const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 
 /// CR 117.1 + Whitemane Lion loop mitigation (issue #563): AI safety cap on
 /// the number of times the same card can be CAST in a single turn by the AI.
@@ -501,7 +501,13 @@ fn choose_action_with_session_inner(
         return direct(fallback_action(state, config, &contract).and_then(&bind_specialist));
     }
 
-    if let Some(action) = fast_priority_action(state, ai_player, config, session)
+    // One decision, one lethal-reach certification: decided here for the
+    // whole ensemble, inside its information model and its shared budget, and
+    // never again by the scorer below or by any sampled world it runs.
+    let ensemble_deadline = ensemble_deadline(config);
+    let root_domain = RootPriorityDomain::new(state, ai_player);
+    if let Some(action) = certified_lethal_action(config, ensemble_deadline, &root_domain)
+        .or_else(|| fast_priority_action(&root_domain, config, session))
         .filter(|action| durable_pact_routes || !is_certified_pact_root(state, ai_player, action))
     {
         if durable_pact_routes {
@@ -518,7 +524,7 @@ fn choose_action_with_session_inner(
         }
     }
 
-    let mut scored = score_candidates_with_session(state, ai_player, config, session);
+    let mut scored = score_candidates_uncertified(&root_domain, config, session, ensemble_deadline);
     if durable_pact_routes {
         draft_pact_routes_for_scored_actions(state, ai_player, &scored, session);
     } else {
@@ -623,12 +629,43 @@ fn random_card_predicate_guess(
     Some(action)
 }
 
-fn fast_priority_action(
-    state: &GameState,
+/// The AI's root priority domain under the pre-cast exchange gate
+/// (`flat_priority_actions` + [`root_action_is_allowed`]) for one decision
+/// state, computed at most once and only when something asks for it. Building
+/// it is a full legal-action generation with its affordability probes, so the
+/// decision's lethal-reach certification, its priority shortcuts and the
+/// scorer it falls through to all read this one copy.
+pub(crate) struct RootPriorityDomain<'a> {
+    state: &'a GameState,
     ai_player: PlayerId,
+    actions: std::cell::OnceCell<Vec<GameAction>>,
+}
+
+impl<'a> RootPriorityDomain<'a> {
+    pub(crate) fn new(state: &'a GameState, ai_player: PlayerId) -> Self {
+        Self {
+            state,
+            ai_player,
+            actions: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn actions(&self) -> &[GameAction] {
+        self.actions.get_or_init(|| {
+            engine::ai_support::flat_priority_actions(self.state)
+                .into_iter()
+                .filter(|action| root_action_is_allowed(self.state, self.ai_player, action))
+                .collect()
+        })
+    }
+}
+
+fn fast_priority_action(
+    domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Option<GameAction> {
+    let (state, ai_player) = (domain.state, domain.ai_player);
     let WaitingFor::Priority { player } = state.waiting_for else {
         return None;
     };
@@ -641,14 +678,184 @@ fn fast_priority_action(
             .then_some(GameAction::PassPriority);
     }
 
-    let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
-        .into_iter()
-        .filter(|action| root_action_is_allowed(state, ai_player, action))
-        .collect();
-    let action = low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
-        large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
+    let actions = domain.actions();
+    let action = low_value_priority_pass_from_actions(state, ai_player, actions).or_else(|| {
+        large_board_main_phase_fast_action_from_actions(state, ai_player, actions, config, session)
     });
     action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
+}
+
+/// The certified lethal-reach answer to the AI's decision — the next step of a
+/// lethal line at priority, or the mode/X/target that keeps one alive at the
+/// line's own prompt — or `None`.
+///
+/// This is the ONLY entry to certification from the search, and it runs once
+/// per decision at the ensemble boundary (`choose_action` and
+/// [`score_candidates_with_session`], which the scored and parallel-worker
+/// entry points share). It is deliberately absent from
+/// `fast_priority_action` / `score_candidates_core`, which run once per sampled
+/// world: certification already covers every sampled world itself. With
+/// determinization enabled its sampled worlds share `deadline` with the
+/// scoring ensemble that follows, so the decision's single wall-clock ceiling
+/// stays authoritative.
+fn certified_lethal_action(
+    config: &AiConfig,
+    deadline: engine::util::Deadline,
+    domain: &RootPriorityDomain<'_>,
+) -> Option<GameAction> {
+    let (state, ai_player) = (domain.state, domain.ai_player);
+    if !config.play_lookahead {
+        return None;
+    }
+    match state.waiting_for {
+        WaitingFor::Priority { player } if player == ai_player => {
+            certified_lethal_priority_action(state, ai_player, config, domain.actions(), deadline)
+        }
+        _ => certified_lethal_prompt_action(state, ai_player, config, deadline),
+    }
+}
+
+/// The next step of a reducer-certified lethal line from this priority
+/// decision, certified inside the information model the search uses.
+///
+/// CR 400.2: with determinization enabled (`K > 0`), the certification never
+/// reads the opponent's real hidden hand or library — it runs on each of the
+/// same K sampled worlds the scoring ensemble uses, and a step is taken only
+/// when every sample certifies it. With `K == 0` (every shipped preset) it runs
+/// on the state itself, as the search does.
+pub(crate) fn certified_lethal_priority_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    actions: &[GameAction],
+    deadline: engine::util::Deadline,
+) -> Option<GameAction> {
+    // `allowed` is the world's priority domain already under the pre-cast
+    // exchange gate; the loop guards are applied here.
+    let lethal_in = |world: &GameState, allowed: &[GameAction]| {
+        #[cfg(test)]
+        CERTIFICATION_RUNS.with(|runs| runs.set(runs.get() + 1));
+        let issued: Vec<_> = allowed
+            .iter()
+            .filter(|action| priority_action_is_allowed_by_loop_guards(world, ai_player, action))
+            .cloned()
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        crate::reach::lethal_priority_action(world, ai_player, &issued, &admission)
+    };
+    let k = config.search.determinization_samples;
+    if k == 0 {
+        return lethal_in(state, actions);
+    }
+    agreed_across_samples(state, ai_player, k, deadline, |sample| {
+        let allowed: Vec<_> = engine::ai_support::flat_priority_actions(sample)
+            .into_iter()
+            .filter(|action| root_action_is_allowed(sample, ai_player, action))
+            .collect();
+        lethal_in(sample, &allowed)
+    })
+    // The AI's own zones are identical in every sample, so its step is one
+    // the real state issues too; bind it to the real payload.
+    .and_then(|action| crate::reach::issued_counterpart(actions, &action))
+}
+
+/// The answer to the AI's own cast prompt (mode, X, or target) that keeps a
+/// certified lethal line alive, decided inside the same information model as
+/// [`certified_lethal_priority_action`].
+fn certified_lethal_prompt_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    deadline: engine::util::Deadline,
+) -> Option<GameAction> {
+    if !config.play_lookahead
+        || !crate::reach::prompt_could_finish(state, ai_player)
+        || !matches!(
+            engine::ai_support::classify_payment_continuation(state),
+            engine::ai_support::PaymentContinuationState::NotAffiliated
+        )
+    {
+        return None;
+    }
+    let answer_in = |world: &GameState| {
+        let issued: Vec<GameAction> = AiDecisionContract::issue(world, ai_player)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        crate::reach::lethal_prompt_action(world, ai_player, &issued, &admission)
+    };
+    match config.search.determinization_samples {
+        0 => answer_in(state),
+        k => agreed_across_samples(state, ai_player, k, deadline, answer_in),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test witness: how many worlds the search has run lethal-reach priority
+    /// certification in, on this thread.
+    pub(crate) static CERTIFICATION_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// CR 400.2: the action `decide` takes in every one of the `k` determinized
+/// worlds, or `None` when any world declines or two worlds disagree — a
+/// certificate that holds only in some plausible worlds is not one the AI can
+/// act on without reading the real hidden zones.
+pub(crate) fn agreed_across_samples(
+    state: &GameState,
+    ai_player: PlayerId,
+    k: u32,
+    deadline: engine::util::Deadline,
+    decide: impl Fn(&GameState) -> Option<GameAction>,
+) -> Option<GameAction> {
+    let mut agreed: Option<GameAction> = None;
+    for sample in determinized_samples(state, ai_player, k) {
+        // The decision's shared wall-clock ceiling: a certificate that could
+        // not cover every world in budget is not one to act on.
+        if deadline.expired() {
+            return None;
+        }
+        let action = decide(&sample)?;
+        // A world whose certificate completed past the ceiling was not
+        // covered in budget either.
+        if deadline.expired() {
+            return None;
+        }
+        match &agreed {
+            Some(previous) if *previous != action => return None,
+            Some(_) => {}
+            None => agreed = Some(action),
+        }
+    }
+    agreed
+}
+
+/// The `K` determinized opponent-hidden-zone worlds the scoring ensemble
+/// averages over, in sample order. Seeded from the position, so every caller
+/// sees the same K worlds for the same decision.
+fn determinized_samples(
+    state: &GameState,
+    ai_player: PlayerId,
+    k: u32,
+) -> impl Iterator<Item = GameState> + '_ {
+    // Seed: fixed across K for a given (position, game, worker); per-sample split
+    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
+    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
+    // via the per-worker `state.rng` re-seed.
+    let base_seed = crate::planner::quick_state_hash(state)
+        .wrapping_add(state.rng_seed)
+        .wrapping_add(state.rng.clone().next_u64());
+    (0..k).map(move |i| {
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        crate::determinize::determinize_opponents(state, ai_player, &mut rng)
+    })
 }
 
 /// Keep the direct priority shortcuts under the pre-cast exchange gate. The
@@ -684,6 +891,19 @@ fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameA
         // No exact authority is fail-open; the engine preview never authorizes
         // a rejection from a reconstructed actor/owner pair.
         .unwrap_or(true)
+}
+
+/// The full admission rule for an engine-issued root priority action: the
+/// targeted-exchange gate plus the AI loop guards. Shared with the lethal-reach
+/// search so a line priced in a simulated state never relies on an action the
+/// real decision boundary would refuse.
+pub(crate) fn root_action_is_admitted(
+    state: &GameState,
+    ai_player: PlayerId,
+    action: &GameAction,
+) -> bool {
+    root_action_is_allowed(state, ai_player, action)
+        && priority_action_is_allowed_by_loop_guards(state, ai_player, action)
 }
 
 fn large_board_main_phase_has_no_development_sources(
@@ -2587,48 +2807,64 @@ pub(crate) fn score_candidates_with_session(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
+    // A certified lethal line — its next step at priority, or the mode, X, and
+    // target that keep it lethal at its prompts — outranks every candidate
+    // scored in isolation. Decided once for the whole ensemble, inside its
+    // information model and its shared budget.
+    let deadline = ensemble_deadline(config);
+    let root_domain = RootPriorityDomain::new(state, ai_player);
+    if let Some(action) = certified_lethal_action(config, deadline, &root_domain) {
+        return vec![(action, 1.0)];
+    }
+    score_candidates_uncertified(&root_domain, config, session, deadline)
+}
+
+/// The ensemble's ONE shared wall-clock ceiling across all K sequential
+/// samples (bounds AGGREGATE latency ~time_budget_ms, not K x budget), created
+/// before the decision's lethal-reach certification so that certification
+/// spends from the same budget. Measurement mode is bounded by node cap only —
+/// mirrors `PlannerServices::with_deadline`, so `cargo ai-gate` stays
+/// deterministic and K-bounded solely by nodes. Without determinization there
+/// is no shared ensemble budget: each search builds its own deadline.
+fn ensemble_deadline(config: &AiConfig) -> engine::util::Deadline {
+    if config.search.determinization_samples == 0 || config.execution_mode.is_measurement() {
+        return engine::util::Deadline::none();
+    }
+    match config.search.time_budget_ms {
+        Some(ms) => engine::util::Deadline::after(ms),
+        None => engine::util::Deadline::none(),
+    }
+}
+
+/// [`score_candidates_with_session`] after its lethal-reach certification has
+/// declined: shortcuts and scoring only, per sampled world when K > 0.
+/// `root_domain` is the decision state's own priority domain; a single search
+/// over that state reuses it, while each sampled world builds its own.
+fn score_candidates_uncertified(
+    root_domain: &RootPriorityDomain<'_>,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+    deadline: engine::util::Deadline,
+) -> Vec<(GameAction, f64)> {
+    let (state, ai_player) = (root_domain.state, root_domain.ai_player);
     // Attacker declarations are public-state tactical choices. Running K hidden
     // information samples cannot improve them, but would multiply the bounded
     // multiplayer comparison and make a singleton support drift.
     if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
-        return score_candidates_core(state, ai_player, config, session, None);
+        return score_candidates_core_in(root_domain, config, session, None);
     }
     let k = config.search.determinization_samples;
     if k == 0 {
         // Unchanged path: no determinization, no shared-deadline override.
-        return score_candidates_core(state, ai_player, config, session, None);
+        return score_candidates_core_in(root_domain, config, session, None);
     }
-
-    // ONE shared wall-clock ceiling across all K sequential samples (bounds
-    // AGGREGATE latency ~time_budget_ms, not K x budget). Measurement mode is
-    // bounded by node cap only — mirrors `PlannerServices::with_deadline`, so
-    // `cargo ai-gate` stays deterministic and K-bounded solely by nodes.
-    let deadline = if config.execution_mode.is_measurement() {
-        engine::util::Deadline::none()
-    } else {
-        match config.search.time_budget_ms {
-            Some(ms) => engine::util::Deadline::after(ms),
-            None => engine::util::Deadline::none(),
-        }
-    };
-
-    // Seed: fixed across K for a given (position, game, worker); per-sample split
-    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
-    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
-    // via the per-worker `state.rng` re-seed.
-    let base_seed = crate::planner::quick_state_hash(state)
-        .wrapping_add(state.rng_seed)
-        .wrapping_add(state.rng.clone().next_u64());
 
     let mut acc: Vec<(GameAction, f64)> = Vec::new();
     let mut positions: std::collections::HashMap<GameActionKey, usize> =
         std::collections::HashMap::new();
     let mut counts: std::collections::HashMap<GameActionKey, usize> =
         std::collections::HashMap::new();
-    for i in 0..k {
-        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
-        let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        let sampled = crate::determinize::determinize_opponents(state, ai_player, &mut rng);
+    for sampled in determinized_samples(state, ai_player, k) {
         let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
@@ -3232,6 +3468,23 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
+    score_candidates_core_in(
+        &RootPriorityDomain::new(state, ai_player),
+        config,
+        session,
+        deadline_override,
+    )
+}
+
+/// [`score_candidates_core`] over a decision state whose priority domain may
+/// already have been built for this decision.
+fn score_candidates_core_in(
+    domain: &RootPriorityDomain<'_>,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+    deadline_override: Option<engine::util::Deadline>,
+) -> Vec<(GameAction, f64)> {
+    let (state, ai_player) = (domain.state, domain.ai_player);
     // The scored/parallel-worker path bypasses `choose_action_with_session_inner`.
     // Preserve Resolve All's user-proposed shortcut semantics here as well: Grant
     // is chosen from the engine-issued consent domain without tactical scoring.
@@ -3260,7 +3513,7 @@ fn score_candidates_core(
     if let Some(action) = evoke_variant_choice(state, ai_player) {
         return vec![(action, 1.0)];
     }
-    if let Some(action) = fast_priority_action(state, ai_player, config, session) {
+    if let Some(action) = fast_priority_action(domain, config, session) {
         return vec![(action, 1.0)];
     }
 

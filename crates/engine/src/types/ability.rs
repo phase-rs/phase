@@ -15010,6 +15010,55 @@ impl AbilityCost {
             | AbilityCost::Unimplemented { .. } => false,
         }
     }
+
+    /// CR 701.21a + CR 118.3: `true` when every permanent this cost could
+    /// demand be sacrificed is the cost's own source, so paying it needs no
+    /// other permanent. A cost that sacrifices nothing is vacuously `true`.
+    ///
+    /// `Composite` requires every leg; `OneOf` requires every branch, since
+    /// any of them may be the one paid (CR 118.12a classification, mirroring
+    /// `categories()`); `PerCounter` delegates to its base.
+    pub fn sacrifices_only_source(&self) -> bool {
+        match self {
+            AbilityCost::Sacrifice(sacrifice) => matches!(sacrifice.target, TargetFilter::SelfRef),
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                costs.iter().all(AbilityCost::sacrifices_only_source)
+            }
+            AbilityCost::PerCounter { base, .. } => base.sacrifices_only_source(),
+            // An effect paid as a cost sacrifices whatever its own filter
+            // names; only a non-sacrifice effect is known to need nothing.
+            AbilityCost::EffectCost { effect } => !matches!(**effect, Effect::Sacrifice { .. }),
+            // Every other variant pays something other than a sacrifice.
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => true,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

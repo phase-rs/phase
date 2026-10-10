@@ -216,13 +216,14 @@ pub use bracket_estimate::{
     BracketViolation, CommanderBracketTier,
 };
 // Plumbing: read-only re-export of the X-affordability authority
-// (`max_x_value`) and the cost-leg extractor that feeds it
-// (`extract_x_mana_cost`) so the `phase-ai` consumer crate can price "the only
-// legal X is 0" without duplicating the cost machinery. `casting_costs` is otherwise
-// `pub(crate)`; this exposes exactly that one function from it. The governing
-// rule annotation lives on the function definition in `casting_costs.rs`, not
-// on this visibility re-export.
-pub use casting_costs::{extract_x_mana_cost, max_x_value};
+// (`max_x_value`) and the cost-leg extractors that feed it
+// (`extract_x_mana_cost`, `extract_mana_leg`) so the `phase-ai` consumer crate
+// can price "the only legal X is 0" and the mana an activation commits without
+// duplicating the cost machinery. `casting_costs` is otherwise `pub(crate)`;
+// this exposes exactly those functions from it. The governing rule annotations
+// live on the function definitions in `casting_costs.rs`, not on this
+// visibility re-export.
+pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
