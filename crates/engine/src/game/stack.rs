@@ -119,8 +119,6 @@ pub(super) fn abandon_active_resolution_carrier(
         .expect("resolution abandonment cannot clear a buried ability continuation");
     finish_resolving_stack_entry(state, disposition);
     state.resolution_source_relatch = None;
-    // CR 608.2n: an abandoned resolution owes no final move any more.
-    state.deferred_spell_delivery = None;
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }
@@ -937,9 +935,8 @@ pub(crate) fn restore_alternative_spell_normal_face(
 /// redirects (the Invoke Calamity rider) and board-wide RIP/Leyline redirects
 /// fire, then record a Rod of Absorption link and apply an exile-instead
 /// consequence rider when the spell landed in exile. Shared by `resolve_top`
-/// and the deferred delivery after a free-cast window
-/// (`deliver_deferred_spell`). A `NeedsChoice` result means the move is parked
-/// for a CR 616.1 ordering choice.
+/// and the deferred final part (`finish_deferred_spell_resolution`). A
+/// `NeedsChoice` result means the move is parked for a CR 616.1 ordering choice.
 fn deliver_resolved_spell_off_stack(
     state: &mut GameState,
     spell_id: ObjectId,
@@ -1050,55 +1047,6 @@ fn finish_spell_stack_exit(
             effects::change_zone::shuffle_library(state, owner, events);
         }
     }
-}
-
-/// CR 608.2n + CR 608.2g: deliver a spell whose move was held back while it was
-/// paused on its own free-cast window (`DeferredSpellDelivery`), once that
-/// window and the instructions behind it are done and its carrier is about to
-/// settle. A spell its own instructions already moved off the stack ("Exile
-/// Invoke Calamity") stays where they put it; its stack-exit bookkeeping still
-/// runs, as in `resolve_top`.
-pub(super) fn deliver_deferred_spell(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let Some(pending) = state.deferred_spell_delivery.clone() else {
-        return;
-    };
-    // Only the deferring spell's own carrier consumes the record; any other
-    // carrier leaves it in place.
-    let Some((controller, casting_variant)) = state
-        .resolving_stack_entry
-        .as_ref()
-        .filter(|entry| entry.id == pending.object_id)
-        .and_then(|entry| match &entry.kind {
-            StackEntryKind::Spell {
-                casting_variant, ..
-            } => Some((entry.controller, *casting_variant)),
-            StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. }
-            | StackEntryKind::CombatDamage { .. } => None,
-        })
-    else {
-        return;
-    };
-    state.deferred_spell_delivery = None;
-    // As in `resolve_top`: the default move is skipped for a spell its own
-    // instructions already moved, and a parked move returns before the
-    // stack-exit bookkeeping.
-    if spell_still_on_stack(state, pending.object_id)
-        && !matches!(
-            deliver_resolved_spell_off_stack(
-                state,
-                pending.object_id,
-                controller,
-                pending.destination,
-                events,
-            ),
-            ZoneMoveResult::Done
-        )
-    {
-        return;
-    }
-    finish_spell_stack_exit(state, pending.object_id, casting_variant, events);
 }
 
 /// CR 608.2n / CR 608.3 / CR 608.3e: Predicate guard for post-resolution
@@ -1642,6 +1590,465 @@ pub(crate) fn bind_resolving_ability_referents(
     }
 }
 
+/// CR 608.2c + CR 608.2d: whether the object now resolving still has an
+/// instruction of its own outstanding — a question it asked is open, or work
+/// it parked (a continuation, a typed resolution frame, a replacement choice,
+/// a spell it is casting) has not drained. Read right after its instructions
+/// ran. It is exactly the condition under which the carrier authority
+/// (`engine::resolving_stack_entry_can_settle`, at a priority boundary) refuses
+/// to retire the resolution, so a final part deferred on it is completed by
+/// that authority and by nothing else.
+///
+/// A game that ended during the resolution (CR 104.1) is not paused on
+/// anything: no answer will ever resume it, so the final part is not deferred.
+fn resolution_is_paused(state: &GameState) -> bool {
+    match state.waiting_for {
+        WaitingFor::GameOver { .. } => false,
+        WaitingFor::Priority { .. } => !super::engine::resolving_stack_entry_can_settle(state),
+        _ => true,
+    }
+}
+
+/// What a resolving spell's on-resolution keyword hooks armed; the destination
+/// rule (`resolved_spell_destination`) reads it.
+#[derive(Debug, Clone, Copy, Default)]
+struct OnResolutionArming {
+    /// CR 702.192a: Paradigm primed — the spell is exiled instead of going to
+    /// the graveyard.
+    paradigm_armed: bool,
+    /// CR 702.88a: rebound's next-upkeep delayed trigger is queued — the spell
+    /// is exiled instead of going to the graveyard.
+    rebound_armed: bool,
+}
+
+/// The on-resolution keyword hooks of a resolving spell — cipher (CR 702.99a),
+/// paradigm (CR 702.192a), rebound (CR 702.88a) and epic (CR 702.50a) — which
+/// run once its instructions are done, as it is about to leave the stack.
+///
+/// Returns `None` when the cipher encode offer took the resolution's next
+/// answer: the card is held off the stack until that choice completes, and the
+/// caller must not route it anywhere. Otherwise, what the hooks armed.
+fn arm_on_resolution_hooks(
+    state: &mut GameState,
+    entry: &StackEntry,
+    ability: Option<&ResolvedAbility>,
+    live_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Option<OnResolutionArming> {
+    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
+    // `Keyword::Cipher`, is represented by a card, and its controller has a
+    // creature to host it, pause for the optional "exile this card encoded on a
+    // creature you control" choice. The card is held off the stack until the
+    // choice completes (mirroring the Mutate merge pause); the choice handler
+    // exiles+encodes on accept, or routes the card to its graveyard on decline.
+    // Skipped (resolution proceeds to graveyard normally) when there is no legal
+    // host.
+    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
+    // control" — "you" is the object's controller, i.e. the spell's controller as
+    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
+    // selects `legal_encode_creatures(state, controller)` AND becomes
+    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
+    // same "you".
+    if super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
+        return None;
+    }
+
+    // CR 702.xxx: Paradigm (Strixhaven) — first-resolution hook. If the
+    // resolving spell carries `Keyword::Paradigm` and this is the first
+    // resolution of any spell with this name by the controller (per the
+    // reminder text: "After you first resolve a spell with this name"), arm
+    // the Paradigm offer: push a `ParadigmPrime` record and mint an
+    // `ExileLinkKind::ParadigmSource` link, then override destination routing
+    // to Exile. Copies (`is_token`) never arm Paradigm because their card
+    // name is derived but they are not "the" spell per the reminder. Assign
+    // when WotC publishes SOS CR update.
+    let paradigm_armed = {
+        let obj = state.objects.get(&entry.id);
+        let has_paradigm = obj.is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Paradigm)
+        });
+        if has_paradigm {
+            let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
+            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
+            // control with this spell's name has resolved this game, at the
+            // beginning of each of YOUR precombat main phases for the rest of the
+            // game, create a copy of this object in exile. You may cast the copy
+            // without paying its mana cost". ONE "you", both halves, no
+            // historical-cast clause — the same shape as epic's CR 702.50a below.
+            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
+            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
+            // free copy on the thief's precombat main phases. This argument is BOTH
+            // the `state.paradigm_primed` key and the `already_primed` gate that
+            // reads it three lines earlier inside `arm_paradigm` itself — one
+            // value, one site, so routing keeps the pair in agreement by
+            // construction rather than splitting it.
+            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
+        } else {
+            false
+        }
+    };
+
+    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
+    // non-permanent spell that carries `Keyword::Rebound`, was cast from
+    // its owner's hand, and is not a token, push the next-upkeep delayed
+    // triggered ability that offers an optional free recast and override
+    // the destination from graveyard to exile.
+    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
+    // CR 603.7a: delayed triggered abilities are created during resolution.
+    // CR 603.7d: source of the delayed trigger IS the resolving spell.
+    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
+    // CR 702.88c: multiple instances of rebound on the same spell are
+    // redundant — `has_keyword` returns true even if duplicates exist, so
+    // arming runs at most once per resolution.
+    let rebound_armed = if !is_permanent_spell(state, entry.id) {
+        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
+        });
+        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
+        // popped, so real instant/sorcery spells must read the pre-announcement
+        // zone from the local ResolvedAbility context. `spell_cast_origin`
+        // remains the fallback for object-stamped placeholder/permanent paths.
+        let cast_from_zone = ability
+            .and_then(|a| a.context.cast_from_zone)
+            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
+        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
+        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
+        // both the arming condition and the entitlement. This argument is the
+        // entitlement half — the player who may recast — but the engine's arming
+        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
+        // above. Routing only this half would grant a thief a rebound whose own
+        // arming condition CR 702.88a makes false for them.
+        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
+        // record WHOSE hand, then both halves move together.
+        if has_rebound && cast_from_zone == Some(Zone::Hand) {
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // CR 702.50a-b: Epic — on-resolve hook. If the resolving spell still
+    // carries `Keyword::Epic`, lock its controller out of casting spells for
+    // the rest of the game (CR 702.50b) and arm a RECURRING delayed triggered
+    // ability that copies the spell at the beginning of each of the
+    // controller's upkeeps (CR 702.50a). A copied spell that still has Epic
+    // also arms this effect when it resolves; Epic-generated copies do not
+    // recurse because `EpicCopy` strips `Keyword::Epic` before pushing them.
+    // The Epic spell itself takes the normal destination (no override); that
+    // object is the prototype the upkeep copies clone.
+    let has_epic = state
+        .objects
+        .get(&entry.id)
+        .is_some_and(|o| super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Epic));
+    if has_epic {
+        if let Some(spell_ability) = ability {
+            // CR 702.50a: "For the rest of the game, you can't cast spells" and
+            // "At the beginning of each of your upkeeps for the rest of the
+            // game, copy this spell…" — ONE "you", used twice, with no
+            // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
+            // that is the spell's controller as it resolves, so a stolen Epic
+            // spell locks out its thief and copies on the thief's upkeeps.
+            super::effects::epic::arm_epic(state, entry.id, live_controller, spell_ability.clone());
+        }
+    }
+
+    Some(OnResolutionArming {
+        paradigm_armed,
+        rebound_armed,
+    })
+}
+
+/// The zone a resolving spell leaves the stack for once its instructions are
+/// done: the battlefield for a permanent spell (CR 608.3), its owner's
+/// graveyard for an instant or sorcery (CR 608.2n), or wherever a keyword,
+/// an alternative cost, a casting permission's rider or an armed hook sends it
+/// instead. One rule for the inline and the deferred (`finish_deferred_spell_resolution`)
+/// completion of a resolution.
+///
+/// `resolution_start_phase` is the phase the resolution began in: "end the
+/// combat phase" exiles the resolving object only when it resolves during
+/// combat (CR 724.2b).
+fn resolved_spell_destination(
+    state: &GameState,
+    entry_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
+    casting_variant: CastingVariant,
+    arming: OnResolutionArming,
+    resolution_start_phase: crate::types::phase::Phase,
+) -> Zone {
+    let end_procedure_exiles_resolving_object = ability.is_some_and(|ability| {
+        matches!(ability.effect, Effect::EndTheTurn)
+            || (matches!(ability.effect, Effect::EndCombatPhase)
+                && resolution_start_phase.is_combat())
+    });
+    if end_procedure_exiles_resolving_object {
+        // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
+        // phase" procedures exile every object on the stack, including the
+        // resolving object that `resolve_top` already popped before
+        // executing its effect.
+        Zone::Exile
+    } else if arming.paradigm_armed {
+        // CR 702.xxx: Paradigm-armed spell exiles instead of going to
+        // graveyard. The ExileLink is already created by arm_paradigm.
+        Zone::Exile
+    } else if arming.rebound_armed {
+        // CR 702.88a: Rebound-armed non-permanent spell exiles instead
+        // of going to graveyard — the delayed trigger is already
+        // queued by `arm_rebound`.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Adventure {
+        // CR 715.3d: Adventure spell resolves → exile with casting permission.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Omen {
+        // CR 720.3d: Omen spell resolves → shuffle into owner's library.
+        Zone::Library
+    } else if casting_variant == CastingVariant::Harmonize {
+        // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
+        if is_permanent_spell(state, entry_id) {
+            Zone::Battlefield
+        } else {
+            Zone::Exile
+        }
+    } else if casting_variant == CastingVariant::Aftermath {
+        // CR 702.127a: If an aftermath spell was cast from a graveyard,
+        // exile it instead of putting it anywhere else any time it would
+        // leave the stack.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Flashback {
+        // CR 702.34a: If the flashback cost was paid, exile this card
+        // instead of putting it anywhere else any time it would leave the stack.
+        // Flashback only appears on instants/sorceries — unconditional exile is correct.
+        Zone::Exile
+    } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
+        || stack_exile_linked_source(state, entry_id).is_some())
+        && !is_permanent_spell(state, entry_id)
+    {
+        // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
+        // spell cast this way would be put into your graveyard, exile it
+        // instead") are a STATIC destination rule selected here. Permanent
+        // spells still resolve to the battlefield. The Invoke Calamity
+        // free-cast rider is no longer read here — it is a self-scoped
+        // `Moved` replacement on the spell, consulted by the pipeline when
+        // the spell's stack → graveyard move is delivered (CR 614.6).
+        // Rod of Absorption's per-object linked source is the same kind of
+        // STATIC destination rule and is honored here too.
+        Zone::Exile
+    } else if is_permanent_spell(state, entry_id) {
+        // CR 608.3: Permanent spells enter the battlefield.
+        Zone::Battlefield
+    } else if ability.is_some_and(|a| a.context.additional_cost_paid)
+        && state.objects.get(&entry_id).is_some_and(|o| {
+            o.keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
+        })
+    {
+        // CR 702.27a: If the buyback cost was paid, put this spell into its
+        // owner's hand instead of into that player's graveyard as it resolves.
+        // Buyback appears only on instants/sorceries, so this branch is
+        // unreachable for permanent spells. Does NOT redirect on counter
+        // (CR 701.5a) or fizzle (CR 608.2b) — buyback applies only "as it
+        // resolves."
+        Zone::Hand
+    } else {
+        // CR 608.2n: Non-permanent spells are put into owner's graveyard.
+        Zone::Graveyard
+    }
+}
+
+/// What `finish_deferred_spell_resolution` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeferredFinalPart {
+    /// The resolving carrier is not an instant or sorcery whose final part was
+    /// deferred; there was nothing to run.
+    NotOwed,
+    /// The final part ran and the spell has left the stack.
+    Completed,
+    /// The final part raised a question of its own — a CR 616.1 ordering
+    /// choice on the spell's move, or the cipher encode offer — and the
+    /// carrier must stay installed until that prompt's resume path completes
+    /// the move.
+    Parked,
+}
+
+/// CR 608.2c + CR 608.2n: whether the resolving carrier is an instant or
+/// sorcery spell whose instructions paused and whose final part — leaving the
+/// stack for its owner's graveyard — therefore still has to run
+/// (`resolve_top`'s deferral).
+///
+/// The engine pops the resolving object from `state.stack` when it begins
+/// resolving, so a card that is again a live stack entry is a new cast of it
+/// (buyback, a recursion loop) and not the paused resolution: a carrier left
+/// over from that earlier resolution owes nothing to the new spell.
+pub(super) fn resolving_spell_owes_final_part(state: &GameState) -> bool {
+    spell_awaiting_final_part(state).is_some()
+}
+
+/// CR 608.2n + CR 800.4a: the instant or sorcery whose deferred final part is
+/// still owed (see [`resolving_spell_owes_final_part`]). It was popped from
+/// `state.stack` as it began resolving, but it is still an object on the
+/// stack — `targeting::zone_object_ids(Zone::Stack)` cannot see it, so the
+/// player-leaves-the-game procedure asks for it here.
+pub(super) fn spell_awaiting_final_part(state: &GameState) -> Option<&StackEntry> {
+    state.resolving_stack_entry.as_ref().filter(|entry| {
+        matches!(entry.kind, StackEntryKind::Spell { .. })
+            && !is_permanent_spell(state, entry.id)
+            && spell_still_on_stack(state, entry.id)
+            && !state.stack.iter().any(|live| live.id == entry.id)
+    })
+}
+
+/// CR 608.2c + CR 608.2n: run the final part of a resolution `resolve_top`
+/// deferred because one of the spell's instructions paused for a choice — the
+/// on-resolution keyword hooks, the destination rule, and the move off the
+/// stack, exactly as the inline completion runs them — now that every
+/// instruction has been followed. Called by the carrier authority at the
+/// moment it would retire the carrier; the carrier is retired only on
+/// `Completed` or `NotOwed`.
+///
+/// This is also where the resolution is reported (`GameEvent::StackResolved`):
+/// at the pause the spell was still on the stack, still resolving. As on the
+/// inline path, the report accompanies the final part whether the move
+/// completes or parks a question of its own.
+pub(super) fn finish_deferred_spell_resolution(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DeferredFinalPart {
+    let Some(entry) = spell_awaiting_final_part(state).cloned() else {
+        return finish_deferred_resolution_of_departed_spell(state, events);
+    };
+    let StackEntryKind::Spell {
+        ability,
+        casting_variant,
+        ..
+    } = &entry.kind
+    else {
+        unreachable!("`spell_awaiting_final_part` admits only spell carriers");
+    };
+    let casting_variant = *casting_variant;
+    // CR 608.2c + CR 400.7a + CR 613.1b + CR 109.4: the LIVE controller, read
+    // while the object is still on the stack — the same latch `resolve_top`
+    // takes before its instructions run, taken again here because a layer-2
+    // control change can have moved the spell while it was paused.
+    let live_controller = stack_object_controller(state, &entry);
+    // CR 608.2c + CR 109.5: re-stamp the baked announcement controller so the
+    // hooks run for whoever controls the spell now (mirrors `resolve_top`).
+    let ability = ability.as_deref().map(|ability| {
+        let mut ability = ability.clone();
+        if ability.controller != live_controller {
+            ability.set_controller_recursive(live_controller);
+        }
+        ability
+    });
+    let resolved = GameEvent::StackResolved {
+        object_id: entry.id,
+    };
+    let Some(arming) =
+        arm_on_resolution_hooks(state, &entry, ability.as_ref(), live_controller, events)
+    else {
+        // CR 702.99a: the cipher encode offer owns the resolution's next
+        // answer; its choice handler moves the card.
+        events.push(resolved);
+        clear_deferred_final_part(state);
+        return DeferredFinalPart::Parked;
+    };
+    // CR 724.1b / CR 724.2b: the phase the resolution BEGAN in, latched by
+    // `resolve_top` when it deferred this final part — not the phase now, which
+    // the paused instructions may have moved on. Only a carrier persisted
+    // before that latch existed lacks it; the current phase is its best
+    // available answer.
+    let resolution_start_phase = ability
+        .as_ref()
+        .and_then(|ability| ability.context.resolution_start_phase)
+        .unwrap_or(state.phase);
+    let dest = resolved_spell_destination(
+        state,
+        entry.id,
+        ability.as_ref(),
+        casting_variant,
+        arming,
+        resolution_start_phase,
+    );
+    // `spell_awaiting_final_part` admits only a spell still on the stack, so
+    // the inline path's stack-residency guard holds here by construction.
+    match deliver_resolved_spell_off_stack(state, entry.id, entry.controller, dest, events) {
+        ZoneMoveResult::Done => {
+            finish_spell_stack_exit(state, entry.id, casting_variant, events);
+            events.push(resolved);
+            DeferredFinalPart::Completed
+        }
+        // CR 616.1: a replacement-ordering choice parked the move; the
+        // replacement-choice resume path delivers it.
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            events.push(resolved);
+            clear_deferred_final_part(state);
+            DeferredFinalPart::Parked
+        }
+    }
+}
+
+/// CR 608.2m + CR 608.2n: the final part of a deferred resolution whose spell
+/// is no longer on the stack — its own instructions moved it ("Exile Invoke
+/// Calamity"), or its owner left the game while its controller finished it.
+/// It keeps resolving fully (CR 608.2m), so it is still reported resolved and
+/// owes the stack-exit bookkeeping of how it was cast, as on the inline path;
+/// only the move is skipped, because it is already where it was put (issue
+/// #323). A carrier whose final part was not deferred owes nothing here.
+fn finish_deferred_resolution_of_departed_spell(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DeferredFinalPart {
+    let Some((spell_id, casting_variant)) = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| {
+            !spell_still_on_stack(state, entry.id)
+                && !state.stack.iter().any(|live| live.id == entry.id)
+        })
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                casting_variant,
+                ..
+            } if ability.context.resolution_start_phase.is_some() => {
+                Some((entry.id, *casting_variant))
+            }
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        })
+    else {
+        return DeferredFinalPart::NotOwed;
+    };
+    finish_spell_stack_exit(state, spell_id, casting_variant, events);
+    events.push(GameEvent::StackResolved {
+        object_id: spell_id,
+    });
+    DeferredFinalPart::Completed
+}
+
+/// The deferred final part has run (and parked a question of its own): clear
+/// the carrier's deferral latch, so the carrier, which stays installed until
+/// that question is answered, is not later read as still owing it.
+fn clear_deferred_final_part(state: &mut GameState) {
+    if let Some(StackEntryKind::Spell {
+        ability: Some(carried),
+        ..
+    }) = state
+        .resolving_stack_entry
+        .as_mut()
+        .map(|carrier| &mut carrier.kind)
+    {
+        carried.context.resolution_start_phase = None;
+    }
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -1674,12 +2081,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // boundary must settle its exact carrier before another stack object can
     // begin resolving. A parked continuation remains live and therefore still
     // fails the invariant below rather than being silently cleared.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && super::engine::resolution_instructions_are_done(state)
-    {
-        deliver_deferred_spell(state, events);
-    }
-    super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+    super::engine::settle_resolving_stack_entry_after_continuation_resume(state, events);
     // CR 608.2c + CR 608.2m: A prior resolution must finish its instructions
     // before another stack object begins resolving. A parked continuation owns
     // its carrier until its own completion or abort path; silently clearing it here would
@@ -2146,24 +2548,40 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
-    // `Keyword::Cipher`, is represented by a card, and its controller has a
-    // creature to host it, pause for the optional "exile this card encoded on a
-    // creature you control" choice. The card is held off the stack until the
-    // choice completes (mirroring the Mutate merge pause); the choice handler
-    // exiles+encodes on accept, or routes the card to its graveyard on decline.
-    // Skipped (resolution proceeds to graveyard normally) when there is no legal
-    // host. `is_spell` gates out triggered/activated stack entries.
-    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
-    // control" — "you" is the object's controller, i.e. the spell's controller as
-    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
-    // selects `legal_encode_creatures(state, controller)` AND becomes
-    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
-    // same "you".
-    if is_spell && super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
-        events.push(GameEvent::StackResolved {
-            object_id: entry.id,
-        });
+    // CR 608.2c + CR 608.2n: the controller follows the spell's instructions in
+    // the order written, and "as the final part of an instant or sorcery
+    // spell's resolution, the spell is put into its owner's graveyard." When
+    // one of those instructions paused for a player's choice (a chosen
+    // discard or a library search, CR 608.2d; a free-cast window, CR 608.2g),
+    // the instructions have not all been followed yet, so that final part has
+    // not come: the spell stays on the stack, still resolving, and
+    // `finish_deferred_spell_resolution` runs the final part — the
+    // on-resolution keyword hooks, the destination, the move, and the
+    // `StackResolved` report — once the carrier's resolution has completed
+    // (`engine::settle_finished_resolving_stack_entry`). Moving the spell now
+    // would put Faithless Looting into the graveyard BENEATH the cards it then
+    // discards, and Doomsday into the graveyard its own search then exiles
+    // "the rest" of.
+    //
+    // The phase the resolution began in is latched on the carrier's spell
+    // (CR 724.2b: "end the combat phase" exiles the resolving object only
+    // during combat), because the paused instructions may still move the turn
+    // on before the final part runs.
+    //
+    // Permanent spells are CR 608.3, not CR 608.2n: their entry is its own
+    // pipeline below, with its own paused-entry carrier (`PendingSpellResolution`).
+    if is_spell && !is_permanent_spell(state, entry.id) && resolution_is_paused(state) {
+        if let Some(StackEntryKind::Spell {
+            ability: Some(carried),
+            ..
+        }) = state
+            .resolving_stack_entry
+            .as_mut()
+            .filter(|carrier| carrier.id == entry.id)
+            .map(|carrier| &mut carrier.kind)
+        {
+            carried.context.resolution_start_phase = Some(resolution_start_phase);
+        }
         state.current_trigger_event = None;
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
@@ -2171,216 +2589,48 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // CR 702.xxx: Paradigm (Strixhaven) — first-resolution hook. If the
-    // resolving spell carries `Keyword::Paradigm` and this is the first
-    // resolution of any spell with this name by the controller (per the
-    // reminder text: "After you first resolve a spell with this name"), arm
-    // the Paradigm offer: push a `ParadigmPrime` record and mint an
-    // `ExileLinkKind::ParadigmSource` link, then override destination routing
-    // to Exile. Copies (`is_token`) never arm Paradigm because their card
-    // name is derived but they are not "the" spell per the reminder. Assign
-    // when WotC publishes SOS CR update.
-    let paradigm_armed = if is_spell {
-        let obj = state.objects.get(&entry.id);
-        let has_paradigm = obj.is_some_and(|o| {
-            !o.is_token
-                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Paradigm)
-        });
-        if has_paradigm {
-            let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
-            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
-            // control with this spell's name has resolved this game, at the
-            // beginning of each of YOUR precombat main phases for the rest of the
-            // game, create a copy of this object in exile. You may cast the copy
-            // without paying its mana cost". ONE "you", both halves, no
-            // historical-cast clause — the same shape as epic's CR 702.50a below.
-            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
-            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
-            // free copy on the thief's precombat main phases. This argument is BOTH
-            // the `state.paradigm_primed` key and the `already_primed` gate that
-            // reads it three lines earlier inside `arm_paradigm` itself — one
-            // value, one site, so routing keeps the pair in agreement by
-            // construction rather than splitting it.
-            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
-    // non-permanent spell that carries `Keyword::Rebound`, was cast from
-    // its owner's hand, and is not a token, push the next-upkeep delayed
-    // triggered ability that offers an optional free recast and override
-    // the destination from graveyard to exile.
-    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
-    // CR 603.7a: delayed triggered abilities are created during resolution.
-    // CR 603.7d: source of the delayed trigger IS the resolving spell.
-    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
-    // CR 702.88c: multiple instances of rebound on the same spell are
-    // redundant — `has_keyword` returns true even if duplicates exist, so
-    // arming runs at most once per resolution.
-    let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
-        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
-            !o.is_token
-                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
-        });
-        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
-        // popped, so real instant/sorcery spells must read the pre-announcement
-        // zone from the local ResolvedAbility context. `spell_cast_origin`
-        // remains the fallback for object-stamped placeholder/permanent paths.
-        let cast_from_zone = ability
-            .as_ref()
-            .and_then(|a| a.context.cast_from_zone)
-            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
-        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
-        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
-        // both the arming condition and the entitlement. This argument is the
-        // entitlement half — the player who may recast — but the engine's arming
-        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
-        // above. Routing only this half would grant a thief a rebound whose own
-        // arming condition CR 702.88a makes false for them.
-        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
-        // record WHOSE hand, then both halves move together.
-        if has_rebound && cast_from_zone == Some(Zone::Hand) {
-            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // CR 702.50a-b: Epic — on-resolve hook. If the resolving spell still
-    // carries `Keyword::Epic`, lock its controller out of casting spells for
-    // the rest of the game (CR 702.50b) and arm a RECURRING delayed triggered
-    // ability that copies the spell at the beginning of each of the
-    // controller's upkeeps (CR 702.50a). A copied spell that still has Epic
-    // also arms this effect when it resolves; Epic-generated copies do not
-    // recurse because `EpicCopy` strips `Keyword::Epic` before pushing them.
-    // The Epic spell itself takes the normal destination below (no override);
-    // that object is the prototype the upkeep copies clone.
-    if is_spell {
-        let has_epic = state.objects.get(&entry.id).is_some_and(|o| {
-            super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Epic)
-        });
-        if has_epic {
-            if let Some(spell_ability) = ability.clone() {
-                // CR 702.50a: "For the rest of the game, you can't cast spells" and
-                // "At the beginning of each of your upkeeps for the rest of the
-                // game, copy this spell…" — ONE "you", used twice, with no
-                // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
-                // that is the spell's controller as it resolves, so a stolen Epic
-                // spell locks out its thief and copies on the thief's upkeeps.
-                super::effects::epic::arm_epic(state, entry.id, live_controller, *spell_ability);
+    let arming = if is_spell {
+        match arm_on_resolution_hooks(state, &entry, ability.as_deref(), live_controller, events) {
+            Some(arming) => arming,
+            // CR 702.99a: the cipher encode offer owns the resolution's next
+            // answer; the card is held off the stack until it completes.
+            None => {
+                events.push(GameEvent::StackResolved {
+                    object_id: entry.id,
+                });
+                state.current_trigger_event = None;
+                state.current_trigger_events.clear();
+                state.current_trigger_match_count = None;
+                state.die_result_this_resolution = None;
+                return;
             }
         }
-    }
+    } else {
+        OnResolutionArming::default()
+    };
 
-    // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
-    // window remains on the stack and targetable until its continuation ends.
-    let paused_on_free_cast_window = matches!(
-        state.waiting_for,
-        WaitingFor::CastOffer {
-            kind: CastOfferKind::FreeCastWindow { .. },
-            ..
-        }
-    );
-    if is_spell {
-        let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
-            matches!(ability.effect, Effect::EndTheTurn)
-                || (matches!(ability.effect, Effect::EndCombatPhase)
-                    && resolution_start_phase.is_combat())
-        });
-        let dest = if end_procedure_exiles_resolving_object {
-            // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
-            // phase" procedures exile every object on the stack, including the
-            // resolving object that `resolve_top` already popped before
-            // executing its effect.
-            Zone::Exile
-        } else if paradigm_armed {
-            // CR 702.xxx: Paradigm-armed spell exiles instead of going to
-            // graveyard. The ExileLink is already created by arm_paradigm.
-            Zone::Exile
-        } else if rebound_armed {
-            // CR 702.88a: Rebound-armed non-permanent spell exiles instead
-            // of going to graveyard — the delayed trigger is already
-            // queued by `arm_rebound`.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Adventure {
-            // CR 715.3d: Adventure spell resolves → exile with casting permission.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Omen {
-            // CR 720.3d: Omen spell resolves → shuffle into owner's library.
-            Zone::Library
-        } else if casting_variant == CastingVariant::Harmonize {
-            // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
-            if is_permanent_spell(state, entry.id) {
-                Zone::Battlefield
-            } else {
-                Zone::Exile
+    // CR 608.2g + CR 608.3: A permanent spell paused on a during-resolution
+    // free-cast window remains on the stack and targetable until its
+    // continuation ends. (A non-permanent spell paused there never reaches this
+    // point: the CR 608.2n deferral above returned.)
+    if is_spell
+        && !matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
             }
-        } else if casting_variant == CastingVariant::Aftermath {
-            // CR 702.127a: If an aftermath spell was cast from a graveyard,
-            // exile it instead of putting it anywhere else any time it would
-            // leave the stack.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Flashback {
-            // CR 702.34a: If the flashback cost was paid, exile this card
-            // instead of putting it anywhere else any time it would leave the stack.
-            // Flashback only appears on instants/sorceries — unconditional exile is correct.
-            Zone::Exile
-        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
-            || stack_exile_linked_source(state, entry.id).is_some())
-            && !is_permanent_spell(state, entry.id)
-        {
-            // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
-            // spell cast this way would be put into your graveyard, exile it
-            // instead") are a STATIC destination rule selected here. Permanent
-            // spells still resolve to the battlefield. The Invoke Calamity
-            // free-cast rider is no longer read here — it is a self-scoped
-            // `Moved` replacement on the spell, consulted by the pipeline when
-            // the spell's stack → graveyard move is delivered below (CR 614.6).
-            // Rod of Absorption's per-object linked source is the same kind of
-            // STATIC destination rule and is honored here too.
-            Zone::Exile
-        } else if is_permanent_spell(state, entry.id) {
-            // CR 608.3: Permanent spells enter the battlefield.
-            Zone::Battlefield
-        } else if ability
-            .as_ref()
-            .is_some_and(|a| a.context.additional_cost_paid)
-            && state.objects.get(&entry.id).is_some_and(|o| {
-                o.keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
-            })
-        {
-            // CR 702.27a: If the buyback cost was paid, put this spell into its
-            // owner's hand instead of into that player's graveyard as it resolves.
-            // Buyback appears only on instants/sorceries, so this branch is
-            // unreachable for permanent spells. Does NOT redirect on counter
-            // (CR 701.5a) or fizzle (CR 608.2b) — buyback applies only "as it
-            // resolves."
-            Zone::Hand
-        } else {
-            // CR 608.2n: Non-permanent spells are put into owner's graveyard.
-            Zone::Graveyard
-        };
-        // CR 608.2n + CR 608.2g: the spell is put into its zone "as the final
-        // part" of its resolution, which its open free-cast window and the
-        // instructions parked behind it have not reached. Record the
-        // destination selected above; the continuation's completion delivers
-        // it (`deliver_deferred_spell`). A permanent spell keeps its earlier
-        // handling: it stays where it is.
-        if paused_on_free_cast_window && dest != Zone::Battlefield {
-            state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
-                object_id: entry.id,
-                destination: dest,
-            });
-        }
-        if dest == Zone::Battlefield && !paused_on_free_cast_window {
+        )
+    {
+        let dest = resolved_spell_destination(
+            state,
+            entry.id,
+            ability.as_deref(),
+            casting_variant,
+            arming,
+            resolution_start_phase,
+        );
+        if dest == Zone::Battlefield {
             // CR 707.10f + CR 608.3f: A copy of a permanent spell becomes a token
             // permanent AS it resolves onto the battlefield — BEFORE the ETB
             // replacement pipeline matches the ZoneChange and before the
@@ -2905,7 +3155,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // the source via `SelfRef`), the post-resolution default move must
             // be skipped — otherwise the spell card travels exile→graveyard
             // and undoes its own self-exile clause (issue #323).
-            if !paused_on_free_cast_window && spell_still_on_stack(state, entry.id) {
+            if spell_still_on_stack(state, entry.id) {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
                 // default move through the pipeline — see
                 // `deliver_resolved_spell_off_stack`.
@@ -2939,9 +3189,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        if !paused_on_free_cast_window {
-            finish_spell_stack_exit(state, entry.id, casting_variant, events);
-        }
+        finish_spell_stack_exit(state, entry.id, casting_variant, events);
 
         // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
         // battlefield attached to the player or object it was targeting.
@@ -6086,12 +6334,12 @@ mod tests {
         }
     }
 
-    /// CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
-    /// window owes its final move. A settle site without the event stream
-    /// cannot retire its carrier while that move is owed; the next resolution
-    /// delivers it first, and only then is the carrier retired.
+    /// CR 608.2c + CR 608.2n: a carrier whose instant or sorcery is still on the
+    /// stack owes that spell's final part. The settle before a trigger
+    /// selection does not retire it; the next resolution runs the final part
+    /// first, and only then is the carrier retired.
     #[test]
-    fn an_owed_spell_move_blocks_settling_until_it_is_delivered() {
+    fn an_owed_final_part_blocks_settling_until_it_is_run() {
         let mut state = setup();
         let spell = create_object(
             &mut state,
@@ -6101,26 +6349,27 @@ mod tests {
             Zone::Stack,
         );
         state.resolving_stack_entry = Some(pending_spell_entry(spell));
-        state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
-            object_id: spell,
-            destination: Zone::Graveyard,
-        });
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
 
-        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        let mut events = Vec::new();
+        super::super::engine::settle_resolving_stack_entry_before_trigger_selection(
+            &mut state,
+            &mut events,
+        );
         assert!(
             state.resolving_stack_entry.is_some(),
-            "the carrier stays while its spell's move is owed"
+            "the carrier stays while its spell's final part is owed"
         );
         assert_eq!(state.objects[&spell].zone, Zone::Stack);
 
-        let mut events = Vec::new();
         resolve_top(&mut state, &mut events);
         assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
         assert!(state.players[0].graveyard.contains(&spell));
-        assert!(state.deferred_spell_delivery.is_none());
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == spell)
+        ));
         assert!(
             state.resolving_stack_entry.is_none(),
             "then the carrier settles"

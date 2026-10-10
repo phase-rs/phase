@@ -122,6 +122,17 @@ fn run_post_action_pipeline_from_with_policy(
     crate::game::perf_counters::record_post_action_pipeline_pass();
     stage_pending_activation_trigger_events(state, events, event_start);
 
+    // CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused
+    // is put into its owner's graveyard as the final part of its resolution,
+    // once those instructions are done. Whatever answer completed them, this
+    // priority boundary proves it (the settle predicate refuses while any of
+    // the resolution's work is still live), so run that final part here, before
+    // the trigger scan below, so the spell's own move reaches its observers in
+    // this same pass.
+    if super::stack::resolving_spell_owes_final_part(state) {
+        super::engine::settle_resolving_stack_entry_after_continuation_resume(state, events);
+    }
+
     // CR 117.3c + CR 117.5: the wait a completed no-choice pass hands back. With
     // no carried recipient this is exactly baseline's active-player wait.
     let settled_priority_wait = WaitingFor::Priority {
@@ -480,7 +491,7 @@ fn run_post_action_pipeline_from_with_policy(
     // / mid-spell settles; same-controller groups get `OrderTriggers` first).
     // A drained trigger that itself needs input returns its own WaitingFor,
     // handled by the check below.
-    if settle_pending_resolution_completion(state) {
+    if settle_pending_resolution_completion(state, events) {
         if let Some(wf) =
             triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
         {
@@ -682,7 +693,10 @@ fn stage_pending_activation_trigger_events(
 /// final free cast has actually been announced. The drain uses the
 /// stack-announcement boundary so B/C's triggers may be ordered above their
 /// still-stacked spells, rather than the ordinary resolution drain's spell guard.
-pub(super) fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
+pub(super) fn settle_pending_resolution_completion(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     let Some(completion) = state.pending_resolution_completion.as_ref() else {
         return false;
     };
@@ -707,12 +721,11 @@ pub(super) fn settle_pending_resolution_completion(state: &mut GameState) -> boo
     // resolution. Now its terminal instruction has completed, so clear the
     // resolution-only LKI before the explicit post-announcement drain.
     state.pending_resolution_completion = None;
-    super::stack::finish_resolving_stack_entry(
-        state,
-        super::lifecycle::DelayedTerminalDisposition::Resolved,
-    );
-    state.resolution_source_relatch = None;
-    true
+    // CR 608.2n: the rippled spell's own final part runs first; should it park
+    // a question of its own, the carrier stays and the parked triggers wait for
+    // the ordinary priority-boundary drain instead of the post-announcement one.
+    super::engine::retire_completed_resolution_carrier(state, events);
+    state.resolving_stack_entry.is_none()
 }
 
 /// CR 603.2 + CR 603.3b + CR 608.2g: replacement-resume casts can complete

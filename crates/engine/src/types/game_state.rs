@@ -6662,18 +6662,6 @@ pub enum BatchCompletion {
 /// the terminal batch belongs to the still-stashed resolving Ripple ability;
 /// the post-announcement boundary then combines this cast's triggers with the
 /// earlier accepted casts' parked observers before ordering the one batch.
-/// CR 608.2n + CR 608.2g: the move of a resolving instant or sorcery to the
-/// zone it goes to "as the final part" of its resolution, held back while the
-/// spell is paused on its own during-resolution free-cast window (Finale of
-/// Promise, Collected Conjuring). The spell stays on the stack until the window
-/// and the rest of its instructions are done; the destination is the one
-/// `resolve_top` selected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeferredSpellDelivery {
-    pub object_id: ObjectId,
-    pub destination: crate::types::zones::Zone,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResolutionCompletion {
     pub player: PlayerId,
@@ -22320,9 +22308,6 @@ declare_game_state! {
     /// that spell's cast triggers into the same deferred ordering batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resolution_completion: Option<PendingResolutionCompletion>,
-    /// CR 608.2n + CR 608.2g: see [`DeferredSpellDelivery`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred_spell_delivery: Option<DeferredSpellDelivery>,
     /// CR 107.3i: the X announced for an in-flight COST, keyed by the object whose cost
     /// it is. CR 107.3i: "Normally, all instances of X on an object have the same value
     /// at any given time" — so a triggered ability of that SAME object which fires
@@ -28344,7 +28329,6 @@ impl GameState {
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
             pending_resolution_completion: None,
-            deferred_spell_delivery: None,
             resolution_source_relatch: None,
             last_loop_action_sequence: Vec::new(),
             current_trigger_events: Vec::new(),
@@ -31361,7 +31345,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         pending_resolution_completion: _,
-        deferred_spell_delivery: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         stack_trigger_firings: _,
@@ -31663,7 +31646,6 @@ impl PartialEq for GameState {
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
-            && self.deferred_spell_delivery == other.deferred_spell_delivery
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).

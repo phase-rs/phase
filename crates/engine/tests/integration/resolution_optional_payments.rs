@@ -1761,11 +1761,39 @@ fn eliminated_resolution_sacrifice_payer_declines_real_stack_replacement_pause()
 
     assert!(runner.state().active_optional_effect_frame().is_none());
     assert!(runner.state().active_ability_continuation().is_none());
-    assert!(runner.state().resolving_stack_entry.is_none());
     assert!(runner.state().pending_cost_move_resume.is_none());
-    assert!(runner.state().pending_replacement.is_none());
     assert_eq!(runner.state().players[P0.0 as usize].life, life);
     assert_eq!(runner.state().players[p2.0 as usize].life, p2_life - 1);
+    // CR 608.2n: the departed payer's decline completed the spell's
+    // instructions, so the spell is only now put into its owner's graveyard —
+    // and the Warden, back on the battlefield since the spell began resolving,
+    // offers its optional exile on that move too.
+    let WaitingFor::ReplacementChoice {
+        player: replacement_chooser,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the spell's own graveyard move must pause on the Warden's optional replacement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*replacement_chooser, P0);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    let decline = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Decline")
+        .unwrap();
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseReplacement { index: decline },
+    )
+    .unwrap();
+
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().pending_replacement.is_none());
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
 }
 

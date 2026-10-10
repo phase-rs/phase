@@ -28772,6 +28772,17 @@ pub struct SpellContext {
     /// batch-run context equality is unaffected. Not redacted from viewer states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ability_provenance: Option<AbilityProvenance>,
+    /// CR 608.2n + CR 724.1b + CR 724.2b: the phase an instant or sorcery
+    /// spell began resolving in, latched on the resolution carrier's spell by
+    /// `stack::resolve_top` when one of the spell's instructions pauses and the
+    /// spell's final part is deferred. That final part reads it to decide
+    /// whether an "end the combat phase" instruction exiled the resolving
+    /// spell (only during a combat phase), however the phase has moved since.
+    /// Read only on that deferred path; `None` until a resolution is deferred,
+    /// and cleared once that final part has run, so it also marks that the
+    /// carrier still owes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_start_phase: Option<crate::types::phase::Phase>,
 }
 
 impl SpellContext {
