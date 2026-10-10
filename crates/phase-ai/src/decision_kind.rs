@@ -268,6 +268,7 @@ mod tests {
             classify(
                 &WaitingFor::MulliganDecision {
                     pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 0,
                         phase: engine::types::game_state::MulliganDecisionPhase::Declare,

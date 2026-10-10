@@ -21,7 +21,7 @@
 //! per-policy trace.
 
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, MulliganDecisionEntry, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -56,6 +56,16 @@ pub use ramp_keepables::RampKeepablesMulligan;
 pub use spellslinger_keepables::SpellslingerKeepablesMulligan;
 pub use tokens_wide_keepables::TokensWideKeepablesMulligan;
 pub use tribal_density::TribalDensityMulligan;
+
+/// Free reveals one seat takes before the AI declines further ones.
+pub(crate) const FREE_REVEAL_BOUND: u8 = 5;
+
+/// CR 103.5: whether the AI takes an engine-issued `FreeReveal`: only while the
+/// registered pile can still clear the condition and the seat is under the bound.
+pub(crate) fn takes_free_reveal(state: &GameState, entry: &MulliganDecisionEntry) -> bool {
+    entry.free_reveals_taken < FREE_REVEAL_BOUND
+        && !engine::game::mulligan::free_reveal_futile_for(state, entry.player)
+}
 
 /// Returns the alternative face only for modal double-faced cards. Other
 /// double-faced layouts cannot be played as either face from a hand (CR 712.12).
@@ -335,10 +345,40 @@ pub fn turn_order_for(state: &GameState, player: PlayerId) -> TurnOrder {
     }
 }
 
+/// Whether the registry keeps the player's current hand (the AI's own evaluation).
+#[cfg(test)]
+pub(crate) fn registry_keeps(state: &GameState, player: PlayerId) -> bool {
+    let hand: Vec<ObjectId> = state.players[player.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .collect();
+    let count = match &state.waiting_for {
+        WaitingFor::MulliganDecision { pending, .. } => pending
+            .iter()
+            .find(|e| e.player == player)
+            .map_or(0, |e| e.mulligan_count),
+        _ => 0,
+    };
+    MulliganRegistry::default()
+        .evaluate_hand(
+            &hand,
+            state,
+            &DeckFeatures::default(),
+            &PlanSnapshot::default(),
+            turn_order_for(state, player),
+            count,
+        )
+        .keep
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod cedh_registration_tests {
+    use engine::database::card_db::CardDatabase;
+    use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload};
+    use engine::types::format::FormatConfig;
     use std::sync::Arc;
 
     use engine::game::bracket_estimate::CommanderBracketTier;
@@ -648,6 +688,7 @@ mod cedh_registration_tests {
         let (mut state, hand) = landless_hand_on_mulligan_step(first_card_name, 7);
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 4,
                 phase: MulliganDecisionPhase::Declare,
@@ -1195,5 +1236,44 @@ mod cedh_registration_tests {
             }),
             "the live chooser must leave the existing Serum Powder dispatch reachable for a certified-dead hand"
         );
+    }
+
+    /// `p` is the chance a seven-card hand from the default list lacks two lands
+    /// or two nonlands; a chain truncates only when its first `B + 1` hands are
+    /// all offered, so `B` is the smallest bound with `p^(B+1) < 1e-5`.
+    #[test]
+    fn free_reveal_bound_is_the_smallest_with_a_negligible_truncation_chance() {
+        fn choose(n: usize, k: usize) -> f64 {
+            (0..k).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64)
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/tests/fixtures/integration_cards.json.gz");
+        let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(
+            std::fs::File::open(path).expect("integration fixture should open"),
+        ));
+        let db = CardDatabase::from_export_reader(decoder).expect("integration fixture loads");
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 0);
+        load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
+        let pool = state
+            .deck_pool_of(PlayerId(0))
+            .expect("the default list registers a pile");
+        let (mut lands, mut total) = (0usize, 0usize);
+        for entry in pool.current_main.iter() {
+            total += entry.count as usize;
+            if entry.card.card_type.core_types.contains(&CoreType::Land) {
+                lands += entry.count as usize;
+            }
+        }
+        assert!(lands > 0 && lands < total, "reach: a varied pile");
+
+        let hand = 7_usize;
+        let p: f64 = (0..=hand)
+            .filter(|drawn_lands| *drawn_lands < 2 || hand - drawn_lands < 2)
+            .map(|l| choose(lands, l) * choose(total - lands, hand - l) / choose(total, hand))
+            .sum();
+        let bound = i32::from(FREE_REVEAL_BOUND);
+        assert!(p.powi(bound + 1) < 1e-5, "p = {p}");
+        assert!(p.powi(bound) >= 1e-5, "p = {p}");
     }
 }

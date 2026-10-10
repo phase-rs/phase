@@ -2498,9 +2498,9 @@ export type WaitingFor =
   | {
       type: "MulliganDecision";
       data: {
-        pending: { player: PlayerId; mulligan_count: number; phase: MulliganDecisionPhase }[];
+        pending: { player: PlayerId; mulligan_count: number; free_reveals_taken?: number; phase: MulliganDecisionPhase }[];
         free_first_mulligan: boolean;
-        declared?: { player: PlayerId; mulligan_count: number; kind: MulliganDeclarationKind }[];
+        declared?: { player: PlayerId; mulligan_count: number; free_reveals_taken?: number; kind: MulliganDeclarationKind }[];
       };
     }
   | {

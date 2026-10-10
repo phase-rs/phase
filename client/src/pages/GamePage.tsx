@@ -277,6 +277,7 @@ export function GamePage() {
   const roomNameParam = searchParams.get("roomName");
   const sourceParam = searchParams.get("source") ?? undefined;
   const draftIdParam = searchParams.get("draftId") ?? undefined;
+  const pileParam = searchParams.get("pile") ?? undefined;
   // The lobby authority this join/spectate was launched from. Produced by
   // our own navigation from a canonical `LobbySource.url`; a hand-edited
   // value surfaces through the adapter's existing handshake error path, the
@@ -780,6 +781,7 @@ export function GamePage() {
       source={sourceParam}
       draftId={draftIdParam}
       serverUrl={serverParam}
+      pile={pileParam}
       onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined

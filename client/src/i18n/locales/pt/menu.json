@@ -364,5 +364,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Pilha",
+    "default": "Pilha padrão"
   }
 }

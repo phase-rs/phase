@@ -1054,8 +1054,8 @@ pub struct ResolvedZoneChangeCommand {
     pub destination_position: usize,
     pub owner: PlayerId,
     /// The owner the object had before this transition rebound it to `owner`
-    /// (Hand entry from a shared zone under `HandEntryOwnership::ReceiverOwns`);
-    /// `None` when ownership is unchanged.
+    /// (Hand entry from a shared zone, or a land play, under
+    /// `EntryOwnership::ActorOwns`); `None` when ownership is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebound_from: Option<PlayerId>,
     pub entry_timestamp: Option<u64>,
@@ -3430,7 +3430,8 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
     let record = &command.zone_change_record;
     let changes_incarnation = command.from != command.to;
     command.object.incarnation == LEGACY_INCARNATION
-        || command.owner != record.owner
+        || command.owner != record.arrival.owner
+        || record.owner != command.rebound_from.unwrap_or(command.owner)
         || record.object_id != command.object.object_id
         || record.from_zone != Some(command.from)
         || record.to_zone != command.to
@@ -3442,11 +3443,18 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
             && record.entered_incarnation != Some(command.resulting_incarnation))
         || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
         || command.rebound_from.is_some_and(|previous| {
-            // The rebind is a Hand entry out of one of the two zones a format
-            // can share, and it changes the owner.
+            // The rebind changes the owner and is a Hand entry out of one of the
+            // two zones a format can share, or a land play (CR 305.1) from a zone
+            // a land can be played from.
             previous == command.owner
-                || command.to != Zone::Hand
-                || !matches!(command.from, Zone::Library | Zone::Graveyard)
+                || !matches!(
+                    (command.from, command.to),
+                    (Zone::Library | Zone::Graveyard, Zone::Hand)
+                        | (
+                            Zone::Library | Zone::Graveyard | Zone::Exile,
+                            Zone::Battlefield
+                        )
+                )
         })
 }
 

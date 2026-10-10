@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-10-09T00:00:00Z",
+  "updated": "2026-10-10T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -20,28 +20,12 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Burst Lightning"
+          "count": 1,
+          "name": "Thundering Falls"
         },
         {
           "count": 4,
-          "name": "Eddymurk Crab"
-        },
-        {
-          "count": 2,
-          "name": "Flow State"
-        },
-        {
-          "count": 2,
-          "name": "Get Out"
-        },
-        {
-          "count": 4,
-          "name": "Hearth Elemental"
-        },
-        {
-          "count": 2,
-          "name": "Impractical Joke"
+          "name": "Sunderflock"
         },
         {
           "count": 6,
@@ -49,15 +33,47 @@
         },
         {
           "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 1,
-          "name": "Multiversal Passage"
+          "name": "Eddymurk Crab"
         },
         {
           "count": 4,
-          "name": "Prismari Charm"
+          "name": "Opt"
+        },
+        {
+          "count": 3,
+          "name": "Traumatic Critique"
+        },
+        {
+          "count": 3,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 1,
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
+          "count": 2,
+          "name": "Get Out"
+        },
+        {
+          "count": 2,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 2,
+          "name": "Impractical Joke"
+        },
+        {
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 4,
+          "name": "Hearth Elemental"
         },
         {
           "count": 4,
@@ -65,19 +81,11 @@
         },
         {
           "count": 4,
-          "name": "Sleight of Hand"
+          "name": "Prismari Charm"
         },
         {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 3,
-          "name": "Traumatic Critique"
-        },
-        {
-          "count": 2,
-          "name": "Winternight Stories"
+          "count": 4,
+          "name": "Steam Vents"
         },
         {
           "count": 4,
@@ -85,53 +93,57 @@
         },
         {
           "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 4,
-          "name": "Sunderflock"
+          "name": "Sleight of Hand"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 2,
-          "name": "Hydro-Man, Fluid Felon"
-        },
-        {
-          "count": 4,
-          "name": "Colorstorm Stallion"
+          "name": "Return the Favor"
         },
         {
           "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
+          "name": "Get Out"
         },
         {
           "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "Flashfreeze"
+          "name": "Torch the Tower"
         },
         {
           "count": 1,
           "name": "Sear"
         },
         {
+          "count": 3,
+          "name": "Hydro-Man, Fluid Felon"
+        },
+        {
+          "count": 1,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
           "count": 2,
-          "name": "Annul"
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Fire Magic"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Broadside Barrage"
         }
       ]
     },
@@ -857,39 +869,23 @@
       "main": [
         {
           "count": 4,
-          "name": "Countersculpt"
+          "name": "Deserted Beach"
         },
         {
           "count": 4,
-          "name": "Jace's Machinations"
+          "name": "Countersculpt"
         },
         {
-          "count": 2,
-          "name": "Fatehold Charm"
+          "count": 3,
+          "name": "Plains"
         },
         {
-          "count": 2,
-          "name": "Theorist's Sanctum"
-        },
-        {
-          "count": 1,
-          "name": "Day of Judgment"
-        },
-        {
-          "count": 2,
-          "name": "Petrified Hamlet"
+          "count": 4,
+          "name": "Get Lost"
         },
         {
           "count": 2,
           "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Consult the Star Charts"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
         },
         {
           "count": 2,
@@ -897,53 +893,93 @@
         },
         {
           "count": 1,
-          "name": "Three Steps Ahead"
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 3,
           "name": "No More Lies"
         },
         {
-          "count": 2,
-          "name": "Restless Anchorage"
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
           "name": "Hallowed Fountain"
         },
         {
-          "count": 4,
-          "name": "Deserted Beach"
-        },
-        {
           "count": 3,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 4,
-          "name": "Get Lost"
-        },
-        {
-          "count": 4,
-          "name": "The Theorist, Jace Beleren"
+          "name": "Jace's Machinations"
         },
         {
           "count": 2,
-          "name": "Plains"
+          "name": "Restless Anchorage"
+        },
+        {
+          "count": 2,
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 1,
+          "name": "Fountainport"
         },
         {
           "count": 4,
           "name": "Floodfarm Verge"
         },
         {
+          "count": 1,
+          "name": "Fatehold Charm"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
+          "name": "Theorist's Sanctum"
+        },
+        {
+          "count": 2,
+          "name": "Day of Judgment"
+        },
+        {
           "count": 3,
-          "name": "Island"
+          "name": "Seam Rip"
+        },
+        {
+          "count": 1,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 4,
+          "name": "Consult the Star Charts"
+        },
+        {
+          "count": 1,
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 4,
+          "name": "The Theorist, Jace Beleren"
         }
       ],
       "sideboard": [
         {
           "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
           "name": "Captain Marvel, Earth's Protector"
+        },
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
         },
         {
           "count": 1,
@@ -955,23 +991,15 @@
         },
         {
           "count": 1,
-          "name": "Seam Rip"
+          "name": "Flashfreeze"
         },
         {
           "count": 2,
           "name": "Pinnacle Starcage"
         },
         {
-          "count": 1,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
           "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Day of Judgment"
+          "name": "Sphinx of False Conclusions"
         },
         {
           "count": 1,
@@ -979,11 +1007,166 @@
         },
         {
           "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 2,
           "name": "Flashfreeze"
+        },
+        {
+          "count": 2,
+          "name": "Ultima"
+        }
+      ]
+    },
+    {
+      "name": "Lifegain",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Dalkovan Encampment"
+        },
+        {
+          "count": 1,
+          "name": "Bleachbone Verge"
+        },
+        {
+          "count": 4,
+          "name": "Shattered Sanctum"
+        },
+        {
+          "count": 3,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 2,
+          "name": "Deep-Cavern Bat"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 4,
+          "name": "Case of the Uneaten Feast"
+        },
+        {
+          "count": 2,
+          "name": "Starscape Cleric"
+        },
+        {
+          "count": 3,
+          "name": "Liliana the Faultless"
+        },
+        {
+          "count": 1,
+          "name": "Zoraline, Cosmos Caller"
+        },
+        {
+          "count": 4,
+          "name": "Hinterland Sanctifier"
+        },
+        {
+          "count": 3,
+          "name": "Haliya, Guided by Light"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 3,
+          "name": "Moseo, Vein's New Dean"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 3,
+          "name": "Ajani Resolute"
+        },
+        {
+          "count": 2,
+          "name": "Enlightened Confidant"
+        },
+        {
+          "count": 1,
+          "name": "Emptiness"
+        },
+        {
+          "count": 4,
+          "name": "Amalia Benavides Aguirre"
+        },
+        {
+          "count": 3,
+          "name": "Lunar Convocation"
+        },
+        {
+          "count": 1,
+          "name": "Enlightened Confidant"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Requisition Raid"
+        },
+        {
+          "count": 2,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 1,
+          "name": "Starscape Cleric"
+        },
+        {
+          "count": 1,
+          "name": "Lunar Convocation"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 3,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Curious Farm Animals"
+        },
+        {
+          "count": 1,
+          "name": "Decorum Dissertation"
         }
       ]
     },
@@ -1242,161 +1425,6 @@
         {
           "count": 1,
           "name": "Sear"
-        }
-      ]
-    },
-    {
-      "name": "Lifegain",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Dalkovan Encampment"
-        },
-        {
-          "count": 1,
-          "name": "Bleachbone Verge"
-        },
-        {
-          "count": 4,
-          "name": "Shattered Sanctum"
-        },
-        {
-          "count": 3,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 2,
-          "name": "Deep-Cavern Bat"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 4,
-          "name": "Case of the Uneaten Feast"
-        },
-        {
-          "count": 2,
-          "name": "Starscape Cleric"
-        },
-        {
-          "count": 3,
-          "name": "Liliana the Faultless"
-        },
-        {
-          "count": 1,
-          "name": "Zoraline, Cosmos Caller"
-        },
-        {
-          "count": 4,
-          "name": "Hinterland Sanctifier"
-        },
-        {
-          "count": 3,
-          "name": "Haliya, Guided by Light"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 3,
-          "name": "Moseo, Vein's New Dean"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Ajani Resolute"
-        },
-        {
-          "count": 2,
-          "name": "Enlightened Confidant"
-        },
-        {
-          "count": 1,
-          "name": "Emptiness"
-        },
-        {
-          "count": 4,
-          "name": "Amalia Benavides Aguirre"
-        },
-        {
-          "count": 3,
-          "name": "Lunar Convocation"
-        },
-        {
-          "count": 1,
-          "name": "Enlightened Confidant"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Requisition Raid"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 1,
-          "name": "Starscape Cleric"
-        },
-        {
-          "count": 1,
-          "name": "Lunar Convocation"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 3,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Curious Farm Animals"
-        },
-        {
-          "count": 1,
-          "name": "Decorum Dissertation"
         }
       ]
     }

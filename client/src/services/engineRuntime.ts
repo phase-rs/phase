@@ -265,6 +265,16 @@ export async function bestOfThreeCeilingForFormat(format: GameFormat): Promise<M
   return engine.bestOfThreeCeilingForFormat(format) as MatchType;
 }
 
+/** Who supplies a format's deck; mirrors the engine's `DeckSupply` wire strings. */
+export type DeckSupply = "PlayerBuilt" | "EngineFixed" | "HostPile";
+
+/** The engine's answer to who supplies `format`'s deck. */
+export async function deckSupplyForFormat(format: GameFormat): Promise<DeckSupply> {
+  await ensureWasmInit();
+  const engine = await loadEngineModule();
+  return engine.deckSupplyForFormat(format) as DeckSupply;
+}
+
 /**
  * CR 702.124: Of `candidates`, which can legally pair with `firstCommander` as a
  * co-commander? The engine is the single authority for the partner family

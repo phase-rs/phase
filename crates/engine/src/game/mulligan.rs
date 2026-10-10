@@ -115,6 +115,7 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
         .seat_order
         .iter()
         .map(|&player| MulliganDecisionEntry {
+            free_reveals_taken: 0,
             player,
             mulligan_count: state
                 .prepaid_mulligan_bottoms
@@ -214,6 +215,7 @@ pub fn handle_mulligan_decision(
         ));
     }
     let current_count = pending[idx].mulligan_count;
+    let reveals_taken = pending[idx].free_reveals_taken;
 
     match choice {
         MulliganChoice::Keep => {
@@ -257,6 +259,7 @@ pub fn handle_mulligan_decision(
                 declared.push(MulliganDeclaration {
                     player,
                     mulligan_count: current_count,
+                    free_reveals_taken: reveals_taken,
                     kind: MulliganDeclarationKind::Regular,
                 });
             }
@@ -269,7 +272,10 @@ pub fn handle_mulligan_decision(
                 ));
             }
             match mulligan_timing(state) {
-                MulliganTiming::Immediate => redraw_after_free_reveal(state, player, events),
+                MulliganTiming::Immediate => {
+                    redraw_after_free_reveal(state, player, events);
+                    pending[idx].free_reveals_taken = reveals_taken.saturating_add(1);
+                }
                 MulliganTiming::Simultaneous => {
                     // CR 103.5: record the declaration; the reveal and redraw
                     // happen when the round closes.
@@ -277,6 +283,7 @@ pub fn handle_mulligan_decision(
                     declared.push(MulliganDeclaration {
                         player,
                         mulligan_count: current_count,
+                        free_reveals_taken: reveals_taken,
                         kind: MulliganDeclarationKind::FreeReveal,
                     });
                 }
@@ -369,6 +376,40 @@ pub(crate) fn free_reveal_offered_to(state: &GameState, seat: PlayerId) -> bool 
             .any(|entry| entry.player == seat && free_reveal_offered(state, entry)),
         _ => false,
     }
+}
+
+/// CR 103.5 as modified by the Dandan free-reveal rule: whether no hand dealt
+/// from the shared pile list could avoid the reveal condition. A function of
+/// the format axis and the registered pile only; absent or empty pile data
+/// answers `false`.
+pub fn free_reveal_futile_for(state: &GameState, seat: PlayerId) -> bool {
+    let FreeRevealMulligan::WhenHandLacks {
+        min_lands,
+        min_nonlands,
+    } = state.format_config.format.free_reveal_mulligan()
+    else {
+        return false;
+    };
+    let Some(pool) = state.deck_pool_of(seat) else {
+        return false;
+    };
+    let (mut lands, mut nonlands) = (0usize, 0usize);
+    for entry in pool.current_main.iter() {
+        // CR 205.2a: land is a card type.
+        if entry.card.card_type.core_types.contains(&CoreType::Land) {
+            lands += entry.count as usize;
+        } else {
+            nonlands += entry.count as usize;
+        }
+    }
+    lands + nonlands > 0 && !redraw_can_clear(min_lands, min_nonlands, lands, nonlands)
+}
+
+/// Whether a seven-card draw from `lands` lands and `nonlands` nonland cards
+/// can hold at least `min_lands` lands and at least `min_nonlands` nonlands.
+fn redraw_can_clear(min_lands: u8, min_nonlands: u8, lands: usize, nonlands: usize) -> bool {
+    let (min_lands, min_nonlands) = (usize::from(min_lands), usize::from(min_nonlands));
+    lands >= min_lands && nonlands >= min_nonlands && min_lands + min_nonlands <= STARTING_HAND_SIZE
 }
 
 /// (lands, nonland cards) in `player`'s hand. CR 205.2a: land is a card type.
@@ -653,6 +694,12 @@ fn close_declare_round(
                         MulliganDeclarationKind::Regular => d.mulligan_count + 1,
                         // The free reveal is not a regular mulligan: no count, no bottom.
                         MulliganDeclarationKind::FreeReveal => d.mulligan_count,
+                    },
+                    free_reveals_taken: match d.kind {
+                        MulliganDeclarationKind::Regular => d.free_reveals_taken,
+                        MulliganDeclarationKind::FreeReveal => {
+                            d.free_reveals_taken.saturating_add(1)
+                        }
                     },
                     phase: MulliganDecisionPhase::Declare,
                 })
@@ -1283,6 +1330,7 @@ mod tests {
         state.waiting_for = wf.clone();
         // Untyped test cards are all nonland: a (0, 7) hand that Dandan would offer.
         let entry = MulliganDecisionEntry {
+            free_reveals_taken: 0,
             player: PlayerId(0),
             mulligan_count: 0,
             phase: MulliganDecisionPhase::Declare,
@@ -2821,6 +2869,7 @@ mod tests {
         assert_eq!(
             declared,
             &vec![MulliganDeclaration {
+                free_reveals_taken: 0,
                 player: p1,
                 mulligan_count: 0,
                 kind: MulliganDeclarationKind::Regular,
@@ -2978,5 +3027,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn redraw_can_clear_is_a_count_rule_over_the_axis() {
+        assert!(redraw_can_clear(2, 2, 2, 2));
+        assert!(!redraw_can_clear(2, 2, 1, 70));
+        assert!(!redraw_can_clear(2, 2, 70, 1));
+        assert!(redraw_can_clear(2, 5, 2, 5));
+        assert!(
+            !redraw_can_clear(4, 4, 40, 40),
+            "eight required cards do not fit a seven-card hand"
+        );
+        assert!(redraw_can_clear(0, 0, 0, 0));
     }
 }

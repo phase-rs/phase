@@ -309,7 +309,7 @@ pub fn resolve(
             .iter()
             .filter(|record| {
                 record.to_zone == spec.destination
-                    && record.owner == ability.controller
+                    && record.arrival.owner == ability.controller
                     && crate::game::filter::matches_target_filter_on_zone_change_record(
                         state, record, &spec.noun, &ctx,
                     )

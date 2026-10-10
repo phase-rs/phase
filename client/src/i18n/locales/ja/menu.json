@@ -364,5 +364,9 @@
       "ai": "AI",
       "multiplayer": "マルチプレイヤー"
     }
+  },
+  "pileSource": {
+    "label": "山札",
+    "default": "デフォルトの山札"
   }
 }

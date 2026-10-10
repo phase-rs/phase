@@ -13,6 +13,8 @@ import {
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
+import { formatSuppliesDeck } from "../../data/formatRegistry";
+import { suppliedAiDeckChoice } from "../../services/pileSource";
 import { SelectField } from "../ui/SelectField";
 import { copyText } from "../../services/copyText";
 
@@ -63,6 +65,7 @@ function SeatRow({
   canEdit,
   deckChoices,
   pickRandomAiDeck,
+  hideDeckPicker,
   mutate,
 }: {
   slot: PlayerSlot;
@@ -71,6 +74,7 @@ function SeatRow({
   canEdit: boolean;
   deckChoices: Array<{ id: string; label: string; choice: DeckChoice }>;
   pickRandomAiDeck: () => DeckChoice | null;
+  hideDeckPicker: boolean;
   mutate: (mutation: SeatMutation) => void;
 }) {
   const { t } = useTranslation();
@@ -162,7 +166,7 @@ function SeatRow({
                   </option>
                 ))}
               </SelectField>
-              <SelectField
+              {!hideDeckPicker && <SelectField
                 chevronSize="sm"
                 value={selectedDeckKey}
                 onChange={(e) =>
@@ -191,7 +195,7 @@ function SeatRow({
                     {label}
                   </option>
                 ))}
-              </SelectField>
+              </SelectField>}
               <button
                 type="button"
                 onClick={() =>
@@ -308,11 +312,15 @@ export function HostControlTile() {
 
   const isConnecting = hostingStatus === "connecting";
   const minPlayers = hostSession?.formatConfig.min_players ?? 2;
-  const deckChoices = aiDeckCatalog.candidates.map((candidate) => ({
-    id: candidate.id,
-    label: candidate.name,
-    choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
-  }));
+  // A supplied-deck format's AI seats submit nothing; the one empty entry feeds every deck consumer below.
+  const suppliedFormat = hostSession ? formatSuppliesDeck(hostSession.formatConfig.format) : false;
+  const deckChoices = suppliedFormat
+    ? [suppliedAiDeckChoice()]
+    : aiDeckCatalog.candidates.map((candidate) => ({
+        id: candidate.id,
+        label: candidate.name,
+        choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
+      }));
   // Pick a random format-legal deck for each fresh AI-seat assignment.
   // Previously this defaulted to `deckChoices[0]`, which meant every AI seat
   // got the same deck — uninteresting and exposed catalog ordering. The
@@ -513,6 +521,7 @@ export function HostControlTile() {
                 canEdit={canEditSeats}
                 deckChoices={deckChoices}
                 pickRandomAiDeck={pickRandomAiDeck}
+                hideDeckPicker={suppliedFormat}
                 mutate={seatMutate}
               />
             ))}

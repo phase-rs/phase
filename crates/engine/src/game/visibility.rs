@@ -3120,7 +3120,7 @@ fn event_visible_to_viewer(
             viewer,
             *object_id,
             *to,
-            record.owner,
+            record.arrival.owner,
             record
                 .trigger_source_context
                 .as_ref()
@@ -3216,7 +3216,7 @@ fn event_visible_to_viewer(
                 return true;
             }
             match to {
-                Zone::Hand | Zone::Library => can_view_private_for_player(record.owner),
+                Zone::Hand | Zone::Library => can_view_private_for_player(record.arrival.owner),
                 Zone::Battlefield | Zone::Stack => {
                     state.objects.get(object_id).is_some_and(|obj| {
                         can_view_private_for_player(obj.controller)
@@ -4401,6 +4401,7 @@ mod tests {
         );
         record.name = "Secret Card".to_string();
         record.owner = PlayerId(0);
+        record.arrival.owner = PlayerId(0);
 
         let events = vec![
             GameEvent::CardDrawn {
@@ -4516,6 +4517,7 @@ mod tests {
         );
         record.name = "Secret Teammate Card".to_string();
         record.owner = drawer;
+        record.arrival.owner = drawer;
         let events = vec![
             GameEvent::CardDrawn {
                 player_id: drawer,
@@ -4619,6 +4621,7 @@ mod tests {
         );
         record.name = "Cascade Card".to_string();
         record.owner = owner;
+        record.arrival.owner = owner;
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: card,
@@ -4740,6 +4743,7 @@ mod tests {
         );
         record.name = "Secret Foretell".to_string();
         record.owner = owner;
+        record.arrival.owner = owner;
         let events = vec![
             GameEvent::ZoneChanged {
                 object_id: foretold,
@@ -4779,6 +4783,7 @@ mod tests {
             state.objects[&card].snapshot_for_zone_change(card, Some(Zone::Exile), Zone::Graveyard);
         record.name = "Public Face-Down Exile".to_string();
         record.owner = PlayerId(1);
+        record.arrival.owner = PlayerId(1);
         record
             .trigger_source_context
             .as_mut()
@@ -4865,6 +4870,7 @@ mod tests {
         );
         record.name = "Milled Card".to_string();
         record.owner = PlayerId(1);
+        record.arrival.owner = PlayerId(1);
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: ObjectId(7),
@@ -8954,6 +8960,7 @@ mod tests {
         );
         public_record.name = "Public Legacy Event".to_string();
         public_record.owner = PlayerId(1);
+        public_record.arrival.owner = PlayerId(1);
 
         let mut hidden_record = state.objects[&hidden].snapshot_for_zone_change(
             hidden,

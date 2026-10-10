@@ -14127,24 +14127,40 @@ mod tests {
         let p0_owned = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
             owner: PlayerId(0),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             controller: PlayerId(0),
             ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Hand), Zone::Graveyard)
         };
         let p0_owned_stolen = ZoneChangeRecord {
             core_types: vec![CoreType::Artifact],
             owner: PlayerId(0),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(1),
+            },
             controller: PlayerId(1),
             ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
         };
         let p1_owned_stolen_by_p0 = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
             owner: PlayerId(1),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(1),
+                controller: PlayerId(0),
+            },
             controller: PlayerId(0),
             ..ZoneChangeRecord::test_minimal(ObjectId(12), Some(Zone::Battlefield), Zone::Graveyard)
         };
         let token = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
             owner: PlayerId(0),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             controller: PlayerId(0),
             is_token: true,
             ..ZoneChangeRecord::test_minimal(ObjectId(13), Some(Zone::Battlefield), Zone::Graveyard)
@@ -14152,6 +14168,10 @@ mod tests {
         let nonpermanent = ZoneChangeRecord {
             core_types: vec![CoreType::Instant],
             owner: PlayerId(0),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             controller: PlayerId(0),
             ..ZoneChangeRecord::test_minimal(ObjectId(14), Some(Zone::Hand), Zone::Graveyard)
         };
@@ -24122,6 +24142,10 @@ mod dandan_scoped_zone_tests {
         let mut state = state.clone();
         state.zone_changes_this_turn.push_back(ZoneChangeRecord {
             owner,
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner,
+                controller: PlayerId(0),
+            },
             power: Some(3),
             ..ZoneChangeRecord::test_minimal(ObjectId(50), Some(Zone::Graveyard), Zone::Hand)
         });

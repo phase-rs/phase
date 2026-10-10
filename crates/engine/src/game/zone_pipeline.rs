@@ -24,7 +24,7 @@ use crate::types::game_state::{
 };
 use std::collections::HashSet;
 
-use crate::types::format::HandEntryOwnership;
+use crate::types::format::EntryOwnership;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -166,9 +166,9 @@ pub struct EntryMods {
     pub attach_to: Option<AttachTarget>,
     /// CR 608.2c: the player performing the instruction that moves the object;
     /// seeded onto `ProposedEvent::ZoneChange.performed_by` so delivery records
-    /// who exiled it (CR 406.6). `None` when no player performs the move. A Hand
-    /// delivery out of a shared zone also reads it as the taker who becomes the
-    /// card's owner under `HandEntryOwnership::ReceiverOwns`.
+    /// who exiled it (CR 406.6). `None` when no player performs the move. Under
+    /// `EntryOwnership::ActorOwns` delivery also reads it as the player who
+    /// becomes the card's owner ([`entry_receiver`]).
     pub performed_by: Option<PlayerId>,
 }
 
@@ -406,13 +406,17 @@ impl ZoneMoveRequest {
     }
 
     /// CR 601.2a: casting moves the card from where it is to the stack — part
-    /// of the casting process, exempt from the replacement consult.
-    pub fn casting_to_stack(object_id: ObjectId, source: ObjectId) -> Self {
+    /// of the casting process, exempt from the replacement consult. `caster` is
+    /// the player who performs the move.
+    pub fn casting_to_stack(object_id: ObjectId, source: ObjectId, caster: PlayerId) -> Self {
         Self {
             object_id,
             to: Zone::Stack,
             cause: ZoneChangeCause::CastingToStack { source },
-            mods: EntryMods::default(),
+            mods: EntryMods {
+                performed_by: Some(caster),
+                ..EntryMods::default()
+            },
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
@@ -3494,28 +3498,32 @@ fn compute_merged_card_component_route(
 /// The player who owns `object_id` once it enters `to`, when that differs from
 /// its current owner.
 ///
-/// CR 400.3 routes a card to its owner's hand; a format whose hand-entry axis is
-/// `ReceiverOwns` makes the taker the owner of a card that comes out of a zone
-/// both seats read as one container. The origin gate reads the object's current
-/// zone, so a card leaving a per-seat zone keeps its owner.
-fn hand_entry_receiver(
+/// Under `EntryOwnership::ActorOwns` the performer becomes the owner of a card
+/// it takes into hand out of a container both seats read as one (CR 400.3
+/// otherwise routes it to its owner's hand), of a spell it casts (CR 601.2a),
+/// and of a land it plays (CR 305.1). A Battlefield entry rebinds only when the
+/// event has no source object: effect moves (Reanimate, blink) carry one and
+/// keep the owner, the land-play special action (CR 116.1) carries none.
+fn entry_receiver(
     state: &GameState,
     object_id: ObjectId,
     to: Zone,
-    taker: Option<PlayerId>,
+    performer: Option<PlayerId>,
+    cause: Option<ObjectId>,
 ) -> Option<PlayerId> {
-    let taker = taker?;
-    if to != Zone::Hand {
-        return None;
-    }
-    match state.format_config.format.hand_entry_ownership() {
-        HandEntryOwnership::OwnerKept => return None,
-        HandEntryOwnership::ReceiverOwns => {}
+    let performer = performer?;
+    match state.format_config.format.entry_ownership() {
+        EntryOwnership::OwnerKept => return None,
+        EntryOwnership::ActorOwns => {}
     }
     let object = state.objects.get(&object_id)?;
-    let shared_container = state.zone_storage_seat(object.zone, object.owner)
-        == state.zone_storage_seat(object.zone, taker);
-    (object.owner != taker && shared_container).then_some(taker)
+    let rebinds = match to {
+        Zone::Hand => state.object_in_players_zone(object, object.zone, performer),
+        Zone::Stack => true,
+        Zone::Battlefield => cause.is_none(),
+        Zone::Library | Zone::Graveyard | Zone::Exile | Zone::Command => false,
+    };
+    (rebinds && object.owner != performer).then_some(performer)
 }
 
 /// Deliver a zone-change event that has already passed through replacement.
@@ -3783,14 +3791,14 @@ pub(crate) fn deliver_replaced_zone_change(
                     // `ProposedEvent::ZoneChange.enter_transformed` above; the
                     // flag is inert for any non-battlefield destination (the guard
                     // gates on `to == Battlefield`).
-                    let hand_receiver = hand_entry_receiver(state, object_id, to, performed_by);
+                    let receiver = entry_receiver(state, object_id, to, performed_by, cause);
                     zones::move_to_zone_with_entry_flags(
                         state,
                         object_id,
                         to,
                         events,
                         should_transform,
-                        hand_receiver,
+                        receiver,
                     );
                 }
             }
@@ -4899,7 +4907,7 @@ mod announced_spell_residency_tests {
         let mut events = Vec::new();
         let result = move_object_with_terminal(
             &mut state,
-            ZoneMoveRequest::casting_to_stack(object_id, object_id),
+            ZoneMoveRequest::casting_to_stack(object_id, object_id, PlayerId(0)),
             &mut events,
         );
 
@@ -7214,6 +7222,57 @@ mod hand_entry_receiver_tests {
 
         assert_in_hand_of(&state, card, P0);
         assert_eq!(rebound_owners(&state), vec![None]);
+    }
+
+    #[test]
+    fn only_hand_from_a_shared_zone_casts_and_sourceless_battlefield_entries_rebind() {
+        let mut state = dandan();
+        let pile = card_in(&mut state, 1, P0, Zone::Library);
+        let exiled = card_in(&mut state, 2, P0, Zone::Exile);
+        let effect_source = Some(ObjectId(100));
+
+        assert_eq!(
+            entry_receiver(&state, pile, Zone::Hand, Some(P1), None),
+            Some(P1)
+        );
+        assert_eq!(
+            entry_receiver(&state, exiled, Zone::Stack, Some(P1), Some(exiled)),
+            Some(P1)
+        );
+        assert_eq!(
+            entry_receiver(&state, pile, Zone::Battlefield, Some(P1), None),
+            Some(P1)
+        );
+
+        for to in [Zone::Library, Zone::Graveyard, Zone::Exile, Zone::Command] {
+            assert_eq!(
+                entry_receiver(&state, pile, to, Some(P1), None),
+                None,
+                "{to:?}"
+            );
+        }
+        assert_eq!(
+            entry_receiver(&state, exiled, Zone::Hand, Some(P1), None),
+            None,
+            "a Hand entry out of a per-seat zone"
+        );
+        assert_eq!(
+            entry_receiver(&state, pile, Zone::Battlefield, Some(P1), effect_source),
+            None,
+            "an effect-placed permanent"
+        );
+        assert_eq!(entry_receiver(&state, pile, Zone::Stack, None, None), None);
+        assert_eq!(
+            entry_receiver(&state, pile, Zone::Stack, Some(P0), None),
+            None
+        );
+
+        let mut standard = GameState::new_two_player(42);
+        let theirs = card_in(&mut standard, 1, P0, Zone::Exile);
+        assert_eq!(
+            entry_receiver(&standard, theirs, Zone::Stack, Some(P1), Some(theirs)),
+            None
+        );
     }
 
     #[test]

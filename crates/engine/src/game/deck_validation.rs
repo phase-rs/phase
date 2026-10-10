@@ -14,7 +14,7 @@ use crate::types::custom_format::{
     passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    CardPool, DeckCopyLimit, DeckSizeSubject, FormatConfig, GameFormat, SelectedFormat,
+    CardPool, DeckCopyLimit, DeckSizeSubject, DeckSupply, FormatConfig, GameFormat, SelectedFormat,
     SideboardPolicy,
 };
 use crate::types::keywords::{Keyword, PartnerType};
@@ -63,6 +63,19 @@ pub struct DeckCompatibilityRequest {
         deserialize_with = "deserialize_draft_set_codes"
     )]
     pub draft_set_codes: Vec<String>,
+}
+
+impl DeckCompatibilityRequest {
+    /// Whether every card slot of the submission is empty.
+    pub fn is_empty_submission(&self) -> bool {
+        self.main_deck.is_empty()
+            && self.sideboard.is_empty()
+            && self.commander.is_empty()
+            && self.companion.is_empty()
+            && self.planar_deck.is_empty()
+            && self.scheme_deck.is_empty()
+            && self.signature_spell.is_empty()
+    }
 }
 
 /// Engine-authored deck-builder state for selecting an Oathbreaker's signature
@@ -397,6 +410,15 @@ pub fn validate_deck_for_format(
         .is_some_and(|selected| selected.rules().is_err())
     {
         return Err(vec![CUSTOM_FORMAT_UNRESOLVED.to_string()]);
+    }
+    // An empty submission requests the engine-supplied deck.
+    if request.is_empty_submission()
+        && request
+            .selected_format
+            .as_ref()
+            .is_some_and(|selected| selected.tag().deck_supply() != DeckSupply::PlayerBuilt)
+    {
+        return Ok(());
     }
     let unknown_cards = collect_unknown_cards(db, request);
     // CR 100.4a / CR 903.5e: A "BO3-ready" deck is one with a real sideboard

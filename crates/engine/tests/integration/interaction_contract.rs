@@ -272,6 +272,7 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
     mulligan.state_mut().waiting_for = WaitingFor::MulliganDecision {
         pending: vec![
             MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: P0,
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::BottomCards {
@@ -280,6 +281,7 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
                 },
             },
             MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: P1,
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
@@ -2120,11 +2122,13 @@ fn simultaneous_mulligan_preserves_only_the_other_owners_slot() {
     state.waiting_for = WaitingFor::MulliganDecision {
         pending: vec![
             MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: P0,
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             },
             MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: P1,
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,

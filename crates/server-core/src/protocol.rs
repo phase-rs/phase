@@ -3346,9 +3346,18 @@ mod tests {
         }
     }
 
+    /// The resolved-rules journal admits a land-play `rebound_from` on a
+    /// `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield); a v123
+    /// peer rejects that `GameState.resolved_rules_journal`, so it must be refused
+    /// before it receives v124 state.
+    /// `MulliganDecisionEntry` and `MulliganDeclaration` gain `free_reveals_taken`; a
+    /// v124 peer drops the count, so it must be refused before it receives v125 state.
+    /// `ZoneChangeRecord` gains `arrival`; a v125 peer rejects the journal when the
+    /// departure owner differs from the command owner, so it must be refused before it
+    /// receives v126 state.
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
-    /// (CR 608.2c + CR 115.1a); a v123 peer cannot deserialize it, so it must be
-    /// refused before it receives v124 state. `SpellContext` also gains
+    /// (CR 608.2c + CR 115.1a); a v126 peer cannot deserialize it, so it must be
+    /// refused before it receives v127 state. `SpellContext` also gains
     /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
@@ -3485,8 +3494,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_124_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 124);
+    fn protocol_version_is_127_for_declared_player_reference() {
+        assert_eq!(PROTOCOL_VERSION, 127);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3497,7 +3506,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_124_for_declared_player_reference` stays
+    /// `protocol_version_is_127_for_declared_player_reference` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

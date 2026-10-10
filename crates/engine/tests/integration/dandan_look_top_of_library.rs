@@ -128,6 +128,11 @@ fn dandan_casting_an_opponent_owned_hit_bottoms_every_other_looked_at_card() {
         })
         .expect("choosing a P1-owned hit must succeed");
     assert_eq!(p.runner.state().objects[&chosen].zone, Zone::Stack);
+    assert_eq!(
+        p.runner.state().objects[&chosen].owner,
+        P0,
+        "the caster owns the spell it cast"
+    );
     let lib = library(&p);
     let tail: Vec<_> = lib[lib.len() - 3..].to_vec();
     let mut rest: Vec<_> = (1..4).map(|i| id_of(&p, i)).collect();

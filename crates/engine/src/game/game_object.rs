@@ -2800,6 +2800,10 @@ impl GameObject {
             mana_value: self.effective_mana_value(),
             controller: self.controller,
             owner: self.owner,
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: self.owner,
+                controller: self.controller,
+            },
             from_zone: from,
             cast_from_zone: self.cast_from_zone,
             played_from_zone: self.played_from_zone,
@@ -3970,9 +3974,10 @@ impl GameObject {
         }
     }
 
-    /// CR 702.66a: Delve may exile only a card from its owner's graveyard.
-    pub fn is_delve_eligible(&self, player: PlayerId) -> bool {
-        self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
+    /// CR 702.66a: Delve may exile only a card from the graveyard the caster reads.
+    pub fn is_delve_eligible(&self, state: &GameState, player: PlayerId) -> bool {
+        state.object_in_players_zone(self, Zone::Graveyard, player)
+            && self.is_represented_by_a_card()
     }
 
     /// CR 714.2: Every chapter number this Saga's chapter abilities are keyed

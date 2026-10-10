@@ -12418,6 +12418,7 @@ mod state_transport_derived_tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: [PlayerId(0), PlayerId(1)]
                 .map(|player| MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player,
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
@@ -15521,6 +15522,66 @@ mod issue_4548_full_create_tests {
         assert!(
             result.is_ok(),
             "full-mode create did not reject the invalid format deck"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_mode_create_accepts_an_empty_host_deck_for_dandan() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: empty_deck(),
+                display_name: "Alice".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: Default::default(),
+                ai_seats: Vec::new(),
+                format_config: Some(engine::types::format::FormatConfig::dandan()),
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+                booster_pack_pool: None,
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&create).expect("create json").into(),
+                ))
+                .await
+                .expect("send create");
+            recv_server_message(&mut socket).await
+        })
+        .await;
+        server.abort();
+
+        let reply = result.expect("full-mode Dandan create timed out");
+        assert!(
+            matches!(reply, ServerMessage::GameCreated { .. }),
+            "expected GameCreated, got {reply:?}"
         );
     }
 
@@ -21446,6 +21507,7 @@ mod issue_4548_deadlock_tests {
 #[cfg(test)]
 mod ai_seat_setup_tests {
     use engine::database::CardDatabase;
+    use engine::types::format::FormatConfig;
     use engine::types::match_config::MatchType;
     use phase_ai::config::AiDifficulty;
     use seat_reducer::types::DeckChoice;
@@ -21565,6 +21627,34 @@ mod ai_seat_setup_tests {
             setups[0].choice,
             DeckChoice::DeckList(Box::new(starter)),
             "the recorded choice must be the deck the seat actually got, not `Random`"
+        );
+    }
+
+    #[test]
+    fn an_empty_ai_deck_list_is_accepted_only_where_the_engine_supplies_the_deck() {
+        let db = db_with(&["Forest"]);
+        let setups_for = |format: &FormatConfig| {
+            ai_seat_setups(
+                &db,
+                &[request(Some(list(&[])), None)],
+                2,
+                Some(format),
+                MatchType::Bo1,
+            )
+        };
+        for format in [FormatConfig::dandan(), FormatConfig::momir()] {
+            let setups = setups_for(&format).unwrap_or_else(|reasons| {
+                panic!(
+                    "{:?}: an empty AI deck is accepted: {reasons}",
+                    format.format
+                )
+            });
+            assert_eq!(setups.len(), 1);
+        }
+        let refused = setups_for(&FormatConfig::standard());
+        assert!(
+            refused.is_err(),
+            "Standard refuses an empty AI deck: {refused:?}"
         );
     }
 }

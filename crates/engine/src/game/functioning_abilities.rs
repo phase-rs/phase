@@ -84,6 +84,7 @@ use crate::types::ability::{
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::player::PlayerId;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
@@ -397,9 +398,11 @@ fn static_def_applies(
     }
     // CR 604.1 / CR 613.1: a static's `condition` must hold for the
     // effect to apply continuously — re-evaluated every time the layers
-    // pipeline (or any reader of statics) runs.
+    // pipeline (or any reader of statics) runs. CR 109.5: a bound holder is
+    // the "you" its player-anchored leaves read.
+    let controller = context.ability_holder.unwrap_or(obj.controller);
     def.condition.as_ref().is_none_or(|cond| {
-        evaluate_condition_with_context(state, cond, obj.controller, obj.id, context)
+        evaluate_condition_with_context(state, cond, controller, obj.id, context)
     })
 }
 
@@ -436,27 +439,25 @@ pub fn active_static_definitions<'a>(
 /// [`active_static_definitions`] with each definition's position in `obj`'s
 /// full `static_definitions`, for callers that must name WHICH definition
 /// applies (CR 601.2a: a graveyard-cast permission the player announces).
-/// Same gates, same order.
+/// Same gates, same order. `holder` (CR 109.5) is the player whose "you" the
+/// conditions read when that is not the object's controller; `None` reads the
+/// controller.
 pub fn active_static_definitions_indexed<'a>(
     state: &'a GameState,
     obj: &'a GameObject,
+    holder: Option<PlayerId>,
 ) -> Box<dyn Iterator<Item = (usize, &'a StaticDefinition)> + 'a> {
     // CR 702.26b: phased-out permanents' abilities never function.
     if obj.is_phased_out() {
         return Box::new(std::iter::empty());
     }
+    let context = holder.map_or(ConditionContext::NONE, ConditionContext::ability_holder);
     Box::new(
         obj.static_definitions
             .iter_all()
             .enumerate()
             .filter(move |(_, def)| {
-                static_def_applies(
-                    state,
-                    obj,
-                    def,
-                    ConditionContext::NONE,
-                    PolarityDeferral::Skip,
-                )
+                static_def_applies(state, obj, def, context, PolarityDeferral::Skip)
             }),
     )
 }

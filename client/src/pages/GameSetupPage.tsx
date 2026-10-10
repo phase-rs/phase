@@ -13,6 +13,7 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import { PileSourceChoice } from "../components/menu/PileSourceChoice";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
@@ -43,6 +44,7 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
+import { DEFAULT_PILE_CHOICE, pileSourceParam, type PileChoice } from "../services/pileSource";
 
 // --- Format trigger styling ---
 //
@@ -107,6 +109,13 @@ export function GameSetupPage() {
   const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
+  const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  // A pile is picked for one format; any format change returns to the default pile.
+  const [pileFormat, setPileFormat] = useState(selectedFormat);
+  if (pileFormat !== selectedFormat) {
+    setPileFormat(selectedFormat);
+    setPile(DEFAULT_PILE_CHOICE);
+  }
   const [setupError, setSetupError] = useState<string | null>(() => {
     const state = location.state as { setupError?: string } | null;
     return state?.setupError ?? null;
@@ -185,6 +194,7 @@ export function GameSetupPage() {
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
     if (!activeDeckName && !suppliesDeck) return;
+    if (!pile.legal) return;
     if (activeDeckName && !isRandomDeckSelection(activeDeckName)) void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, activeDeckName), "run-unguarded");
     const gameId = crypto.randomUUID();
     // Snapshot the per-seat AI config from preferences into the active-game
@@ -217,13 +227,15 @@ export function GameSetupPage() {
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
     const loopMode = loopDetectionModeToQuery(loopDetection);
     const loopParam = loopMode ? `&loop=${loopMode}` : "";
+    const pileName = pileSourceParam(pile.source);
+    const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";
     // The URL carries the format NAME only, so the edited config (starting
     // life) has to ride along out-of-band or GamePage re-derives it from
     // `FORMAT_DEFAULTS` and silently discards the edit. Router state — the
     // same channel `useBroker` uses — rather than a URL param, because the
     // native-engine route above deliberately writes no resume pointer.
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}${pileParam}`,
       { state: { formatConfig } },
     );
   };
@@ -244,7 +256,7 @@ export function GameSetupPage() {
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
   const cannotStartAi =
-    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading || !pile.legal;
 
   // cEDH warning: shown when the human deck is not bracket 5 but the table is
   // in cEDH mode (all AI play cEDH).
@@ -620,6 +632,12 @@ export function GameSetupPage() {
 
               {/* Separator */}
               <div className="border-t border-white/8" />
+
+              <PileSourceChoice
+                format={selectedFormat}
+                value={pile.source}
+                onChange={setPile}
+              />
 
               {/* AI opponent configuration */}
               <AiOpponentConfig

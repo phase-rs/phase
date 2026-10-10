@@ -495,9 +495,19 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
-    let event_stream = format!("{all:?}")
+    let mut event_stream = format!("{all:?}")
         .replace(", cast_mana_value: None", "")
         .replace(", new_total: LifeTotalReading(None)", "");
+    for owner in 0..2 {
+        for controller in 0..2 {
+            event_stream = event_stream.replace(
+                &format!(
+                    ", arrival: ArrivalIdentity {{ owner: PlayerId({owner}), controller: PlayerId({controller}) }}"
+                ),
+                "",
+            );
+        }
+    }
     assert_eq!(
         event_stream, GOLDEN_ON,
         "ON: the accumulated event stream must be byte-identical to the pre-PR-7 golden — \

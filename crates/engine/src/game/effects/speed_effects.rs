@@ -645,6 +645,10 @@ mod tests {
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
                 controller: PlayerId(1),
                 ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
             }),

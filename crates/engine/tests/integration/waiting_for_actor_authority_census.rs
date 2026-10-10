@@ -854,6 +854,7 @@ fn mulligan_adapters_preserve_the_single_pending_actor_rule() {
     let decision = |n: u8| WaitingFor::MulliganDecision {
         pending: (0..n)
             .map(|i| MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(i),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,

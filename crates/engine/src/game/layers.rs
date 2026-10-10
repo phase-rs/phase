@@ -1352,8 +1352,9 @@ pub(crate) struct ConditionContext {
     /// CR 113.1b + CR 109.5: the PLAYER who has the ability being evaluated,
     /// when that differs from the source object's controller — a permission a
     /// resolved effect granted to a player ("target player gains \"During your
-    /// turn, …\""). "You"/"your" in that ability mean this player, so the
-    /// whose-turn leaves (`DuringYourTurn`, `DuringOpponentsTurn`) read it in
+    /// turn, …\""), or the would-be caster of a graveyard-resident permission.
+    /// "You"/"your" in that ability mean this player, so the whose-turn leaves
+    /// (`DuringYourTurn`, `DuringOpponentsTurn`) and `IsPresent` read it in
     /// preference to the source object's controller. `None` everywhere else.
     pub ability_holder: Option<PlayerId>,
 }
@@ -2075,7 +2076,11 @@ fn evaluate_condition_inner(
         }
         StaticCondition::IsPresent { filter } => match filter {
             Some(f) => {
-                let ctx = FilterContext::from_source(state, source_id);
+                // CR 113.1b + CR 109.5: a bound holder is the "you" of "you control".
+                let ctx = match context.ability_holder {
+                    Some(holder) => FilterContext::from_source_with_controller(source_id, holder),
+                    None => FilterContext::from_source(state, source_id),
+                };
                 state
                     .objects
                     .keys()

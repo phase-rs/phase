@@ -6470,15 +6470,15 @@ fn parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn(
 /// are disjoint and their sum is exact; a duplicated origin ("your hand or
 /// your hand") declines so it cannot double count. Origins other than your hand
 /// or library, other possessives, "and" joiners, and any missing/extra
-/// "this turn" decline the whole phrase. The owner is always "your": zone-list
-/// forms for other possessives stay `Unimplemented` (e.g. "target player's
-/// graveyard from their library").
+/// "this turn" decline the whole phrase. The owner is always "your" here: the
+/// "target player's graveyard from their ..." sibling lives in
+/// `parse_cards_put_into_target_player_graveyard_from_zones`.
 pub(crate) fn parse_cards_put_into_your_graveyard_from_zones(
     input: &str,
 ) -> OracleResult<'_, Vec<QuantityRef>> {
     let (rest, filter) = parse_cards_put_into_head(input)?;
     let (rest, _) = tag("your graveyard from ").parse(rest)?;
-    let (rest, zones) = parse_put_into_graveyard_origin_zones(rest)?;
+    let (rest, zones) = parse_put_into_graveyard_origin_zones_for_owner(rest, ControllerRef::You)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
     let filter =
         super::condition::add_owned_with_props(filter, ControllerRef::You, &[FilterProp::NonToken]);
@@ -6495,10 +6495,62 @@ pub(crate) fn parse_cards_put_into_your_graveyard_from_zones(
     ))
 }
 
-/// CR 701.9a + CR 701.17a: origin list for "put into your graveyard from ...":
-/// "your hand", "your library", or either joined by "or" (the second possessive
-/// is optional: "your hand or library"). Distinct zones only.
-fn parse_put_into_graveyard_origin_zones(input: &str) -> OracleResult<'_, Vec<Zone>> {
+/// CR 107.3c (X defined by the spell's text is evaluated at resolution) +
+/// CR 701.17a (mill = library to graveyard) + CR 400.7 (per-turn zone-change
+/// records) + CR 404.1 (the "their" possessive is anaphoric to the announced
+/// target player's cards; a player's graveyard holds their cards) +
+/// CR 115.1a ("target player's" announces the spell's target): "[type] cards
+/// [that were] put into target player's graveyard from their <zone>[ or
+/// <zone>] this turn" (Cruel Calculations) -> one `ZoneChangeCountThisTurn`
+/// per origin zone (hand / library only), owned by the targeted player.
+///
+/// Mirrors `parse_cards_put_into_your_graveyard_from_zones`: the "their"
+/// possessive binds to `ControllerRef::TargetPlayer` (the announced target,
+/// read at resolution from the first `TargetRef::Player`), never to the
+/// `EnchantedPlayer` curse anaphor of the "from anywhere" form. Each
+/// zone-change record has exactly one `from_zone`, so the per-zone counts are
+/// disjoint and their sum is exact; a duplicated origin declines so it cannot
+/// double count. Mixed possessives ("their hand or your library"), "his or
+/// her", "and" joiners, non-hand/library origins, a bare "their graveyard"
+/// without the "target player's" head, and any missing/extra "this turn"
+/// decline the whole phrase.
+pub(crate) fn parse_cards_put_into_target_player_graveyard_from_zones(
+    input: &str,
+) -> OracleResult<'_, Vec<QuantityRef>> {
+    let (rest, filter) = parse_cards_put_into_head(input)?;
+    let (rest, _) = tag("target player's graveyard from ").parse(rest)?;
+    let (rest, zones) =
+        parse_put_into_graveyard_origin_zones_for_owner(rest, ControllerRef::TargetPlayer)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    let filter = super::condition::add_owned_with_props(
+        filter,
+        ControllerRef::TargetPlayer,
+        &[FilterProp::NonToken],
+    );
+    Ok((
+        rest,
+        zones
+            .into_iter()
+            .map(|zone| QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(zone),
+                to: Some(Zone::Graveyard),
+                filter: filter.clone(),
+            })
+            .collect(),
+    ))
+}
+
+/// CR 701.9a (discard = hand to graveyard) + CR 701.17a (mill = library to
+/// graveyard): origin list for "put into [possessive] graveyard from ...",
+/// parameterized by owner so the your-form ("your hand", "your library") and
+/// the target-player form ("their hand", "their library") share one grammar.
+/// The first possessive is required and owner-bound ("your " for You, "their "
+/// for TargetPlayer); the second is optional ("your hand or library" / "their
+/// hand or library"). Distinct zones only.
+fn parse_put_into_graveyard_origin_zones_for_owner(
+    input: &str,
+    owner: ControllerRef,
+) -> OracleResult<'_, Vec<Zone>> {
     fn origin_zone(input: &str) -> OracleResult<'_, Zone> {
         alt((
             value(Zone::Hand, tag("hand")),
@@ -6506,13 +6558,31 @@ fn parse_put_into_graveyard_origin_zones(input: &str) -> OracleResult<'_, Vec<Zo
         ))
         .parse(input)
     }
+    let possessive = match owner {
+        ControllerRef::You => "your ",
+        ControllerRef::TargetPlayer => "their ",
+        ControllerRef::Opponent
+        | ControllerRef::ScopedPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => return Err(oracle_err(input)),
+    };
     verify(
         map(
             pair(
-                preceded(tag("your "), origin_zone),
+                preceded(tag(possessive), origin_zone),
                 many0(preceded(
                     alt((tag(", or "), tag(" or "))),
-                    preceded(opt(tag("your ")), origin_zone),
+                    preceded(opt(tag(possessive)), origin_zone),
                 )),
             ),
             |(first, mut more)| {

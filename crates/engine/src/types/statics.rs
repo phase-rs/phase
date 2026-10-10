@@ -304,7 +304,7 @@ impl CastFrequency {
 /// apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum GraveyardPermissionPool {
-    /// "From your graveyard": only cards the caster owns.
+    /// "From your graveyard": only cards in the graveyard the caster reads.
     #[default]
     OwnGraveyard,
     /// "From any graveyard": cards in every player's graveyard.
@@ -316,10 +316,18 @@ impl GraveyardPermissionPool {
         matches!(self, GraveyardPermissionPool::OwnGraveyard)
     }
 
-    /// Whether a graveyard card owned by `card_owner` is in this pool for `caster`.
-    pub fn admits(self, card_owner: PlayerId, caster: PlayerId) -> bool {
+    /// Whether `card` is in this pool for `caster`: "your graveyard" is the
+    /// graveyard container the caster reads (CR 400.1 + CR 109.5).
+    pub fn admits(
+        self,
+        state: &crate::types::game_state::GameState,
+        card: &crate::game::game_object::GameObject,
+        caster: PlayerId,
+    ) -> bool {
         match self {
-            GraveyardPermissionPool::OwnGraveyard => card_owner == caster,
+            GraveyardPermissionPool::OwnGraveyard => {
+                state.object_in_players_zone(card, Zone::Graveyard, caster)
+            }
             GraveyardPermissionPool::AnyGraveyard => true,
         }
     }

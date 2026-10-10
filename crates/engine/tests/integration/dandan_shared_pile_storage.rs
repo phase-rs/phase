@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::{
-    dandan_fixed_deck_names, load_and_hydrate_decks, momir_fixed_deck_names, DeckPayload,
+    dandan_default_pile_names, load_and_hydrate_decks, momir_fixed_deck_names, DeckPayload,
 };
 use engine::game::engine::{apply, start_game_with_starting_player};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -30,8 +30,8 @@ use crate::support::shared_card_db;
 const WASM_LIB_RS: &str = include_str!("../../../engine-wasm/src/lib.rs");
 
 /// The decklist as printed in the format announcement, written out
-/// independently of `DANDAN_DECKLIST`.
-fn expected_decklist() -> BTreeMap<String, usize> {
+/// independently of `DANDAN_DEFAULT_PILE`.
+pub(crate) fn expected_decklist() -> BTreeMap<String, usize> {
     let mut list: BTreeMap<String, usize> = [
         ("Dandân", 10),
         ("Island", 20),
@@ -180,7 +180,7 @@ fn v1_non_shared_formats_keep_per_seat_libraries() {
 #[test]
 fn v2_fixed_list_resolves_against_the_real_database() {
     let Some(db) = shared_card_db() else { return };
-    let names = dandan_fixed_deck_names();
+    let names = dandan_default_pile_names();
     assert_eq!(names.len(), 80);
     let distinct: std::collections::BTreeSet<_> = names.iter().collect();
     assert_eq!(distinct.len(), 23);

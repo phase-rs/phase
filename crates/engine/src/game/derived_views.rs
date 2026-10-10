@@ -3090,7 +3090,7 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
                 zone_label(Some(*to))
             ),
             object_id: Some(*object_id),
-            player: Some(record.controller),
+            player: Some(record.arrival.controller),
         }),
         // CR 701.17a: an action-worded mill trigger's event slot holds only
         // `Milled`, so this is the arm the stack tooltip reads. `fallback` is
@@ -3241,6 +3241,49 @@ mod tests {
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
     use std::collections::HashMap;
+
+    /// CR 108.3 + CR 400.7: the player a zone-change trigger shows is the
+    /// identity the move installed, not the one the card had when it left.
+    #[test]
+    fn a_zone_change_trigger_display_names_the_installed_controller() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::dandan(), 2, 42);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Pile Card".to_string(),
+            Zone::Library,
+        );
+        let record =
+            state.objects[&card].snapshot_for_zone_change(card, Some(Zone::Library), Zone::Hand);
+        let record = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Library,
+            Zone::Hand,
+            PlayerId(0),
+            Some(PlayerId(1)),
+            record,
+        )
+        .expect("the rebinding move applies")
+        .zone_change_record;
+        assert_eq!(
+            (record.owner, record.controller),
+            (PlayerId(0), PlayerId(0)),
+            "reach: the departure snapshot is the pile's"
+        );
+        let display = trigger_event_display(
+            &state,
+            &GameEvent::ZoneChanged {
+                object_id: card,
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(record),
+            },
+        )
+        .expect("a zone change has a display");
+        assert_eq!(display.player, Some(PlayerId(1)));
+    }
 
     /// CR 701.17a: after the mill re-key, a `TriggerMode::Milled*` trigger's
     /// event slot holds only `Milled`, so `trigger_event_display` must answer for
@@ -5444,6 +5487,10 @@ mod tests {
                 mana_value: 0,
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 from_zone: Some(Zone::Library),
                 cast_from_zone: None,
                 played_from_zone: None,

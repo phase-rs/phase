@@ -57514,6 +57514,10 @@ fn push_cards_to_graveyard_this_turn(state: &mut GameState, owner: PlayerId, cou
                 mana_value: 1,
                 controller: owner,
                 owner,
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner,
+                    controller: owner,
+                },
                 is_token: false,
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     ObjectId(40_000 + i as u64),

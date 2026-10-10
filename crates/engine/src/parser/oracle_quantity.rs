@@ -990,6 +990,13 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    if let Ok((rest, expr)) = parse_cards_put_into_target_player_graveyard_from_zones_quantity(text)
+    {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     // "the number of card types among cards in all graveyards"
     // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
     if text.contains("cards in your opponents' graveyards")
@@ -1329,6 +1336,36 @@ fn parse_cards_put_into_graveyard_from_zones_quantity(
     let (rest, refs) = all_consuming(preceded(
         tag("the number of "),
         nom_quantity::parse_cards_put_into_your_graveyard_from_zones,
+    ))
+    .parse(input)?;
+    let mut exprs: Vec<QuantityExpr> = refs
+        .into_iter()
+        .map(|qty| QuantityExpr::Ref { qty })
+        .collect();
+    let expr = if exprs.len() == 1 {
+        exprs.remove(0)
+    } else {
+        QuantityExpr::Sum { exprs }
+    };
+    Ok((rest, expr))
+}
+
+/// CR 107.3c + CR 701.17a (mill = library to graveyard) + CR 400.7 +
+/// CR 404.1 + CR 111.7: "the number of [type] cards [that were] put into
+/// target player's graveyard from their hand or library this turn" (Cruel
+/// Calculations). Sole owner of the target-player zone-list forms (1..n origin
+/// zones): a single origin collapses to a bare `Ref`, several build a `Sum`
+/// of per-origin `ZoneChangeCountThisTurn` refs (disjoint, so exact).
+/// Anchored at both ends: the leading "the number of " and `all_consuming`
+/// after " this turn". Declines everything the your-form declines, plus mixed
+/// possessives and a bare "their graveyard" without the "target player's"
+/// head.
+fn parse_cards_put_into_target_player_graveyard_from_zones_quantity(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, refs) = all_consuming(preceded(
+        tag("the number of "),
+        nom_quantity::parse_cards_put_into_target_player_graveyard_from_zones,
     ))
     .parse(input)?;
     let mut exprs: Vec<QuantityExpr> = refs
@@ -9157,6 +9194,114 @@ mod tests {
             assert_eq!(where_x(phrase), None, "where-X must decline {phrase:?}");
             assert_eq!(
                 parse_cards_put_into_graveyard_from_zones_quantity(phrase)
+                    .ok()
+                    .filter(|(rest, _)| rest.is_empty()),
+                None,
+                "combinator must decline {phrase:?}"
+            );
+        }
+    }
+    // -----------------------------------------------------------------------
+    // CR 107.3c + CR 701.17a + CR 400.7 + CR 404.1 + CR 115.1a:
+    // "the number of cards [that were] put into target player's graveyard from
+    // their hand or library this turn" (Cruel Calculations).
+    // -----------------------------------------------------------------------
+
+    const CRUEL_POSITIVE: &str =
+        "the number of cards that were put into target player's graveyard from their library this turn";
+
+    fn put_into_target_player_graveyard_ref(
+        from: Zone,
+        type_filter: Option<TypeFilter>,
+    ) -> QuantityExpr {
+        let base = match type_filter {
+            Some(tf) => TypedFilter::new(tf),
+            None => TypedFilter::default(),
+        };
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(from),
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(base.properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                    FilterProp::NonToken,
+                ])),
+            },
+        }
+    }
+
+    #[test]
+    fn put_into_target_player_graveyard_single_origin_collapses_to_ref() {
+        let expected = put_into_target_player_graveyard_ref(Zone::Library, None);
+        for phrase in [
+            CRUEL_POSITIVE,
+            "the number of cards put into target player's graveyard from their library this turn",
+        ] {
+            assert_eq!(
+                parse_cda_quantity(phrase),
+                Some(expected.clone()),
+                "{phrase:?}"
+            );
+            assert_eq!(where_x(phrase), Some(expected.clone()), "{phrase:?}");
+        }
+    }
+
+    #[test]
+    fn put_into_target_player_graveyard_hand_or_library_builds_sum() {
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                put_into_target_player_graveyard_ref(Zone::Hand, None),
+                put_into_target_player_graveyard_ref(Zone::Library, None),
+            ],
+        };
+        for phrase in [
+            "the number of cards that were put into target player's graveyard from their hand or library this turn",
+            "the number of cards that were put into target player's graveyard from their hand or their library this turn",
+        ] {
+            assert_eq!(parse_cda_quantity(phrase), Some(expected.clone()), "{phrase:?}");
+            assert_eq!(where_x(phrase), Some(expected.clone()), "{phrase:?}");
+        }
+    }
+
+    #[test]
+    fn put_into_target_player_graveyard_type_narrows() {
+        assert_eq!(
+            parse_cda_quantity(
+                "the number of creature cards that were put into target player's graveyard from their hand this turn"
+            ),
+            Some(put_into_target_player_graveyard_ref(
+                Zone::Hand,
+                Some(TypeFilter::Creature)
+            ))
+        );
+    }
+
+    /// Hostile sentences. Each decline is paired with the positive control so a
+    /// broken harness cannot make every row vacuously `None`.
+    #[test]
+    fn put_into_target_player_graveyard_hostile_variants_decline() {
+        assert!(where_x(CRUEL_POSITIVE).is_some(), "positive control");
+        for phrase in [
+            "the number of cards that were put into target player's graveyard from your library this turn",
+            "the number of cards that were put into target player's graveyard from their hand or your library this turn",
+            "the number of cards that were put into target player's graveyard from your hand or their library this turn",
+            "the number of cards that were put into their graveyard from their library this turn",
+            "the number of cards that were put into target player's graveyard from his or her library this turn",
+            "the number of cards that were put into target player's graveyard from their hand and library this turn",
+            "the number of cards that were put into target player's graveyard from their library or their library this turn",
+            "the number of cards that were put into target player's graveyard from their library or library this turn",
+            "the number of cards that were put into target player's graveyard from their exile this turn",
+            "the number of cards that were put into target player's graveyard from their graveyard this turn",
+            "the number of cards that were put into target player's graveyard from their library",
+            "the number of cards that were put into target player's graveyard from their library last turn",
+            "the number of cards that were put into target player's graveyard from their library this turn and exile",
+            "when the number of cards that were put into target player's graveyard from their library this turn",
+        ] {
+            assert_eq!(where_x(phrase), None, "where-X must decline {phrase:?}");
+            assert_eq!(
+                parse_cards_put_into_target_player_graveyard_from_zones_quantity(phrase)
                     .ok()
                     .filter(|(rest, _)| rest.is_empty()),
                 None,

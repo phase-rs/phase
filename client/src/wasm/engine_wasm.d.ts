@@ -139,6 +139,11 @@ export function customFormatFromLobbyConfig(name: string, format_config: any): a
 export function deckCopyLimit(name: string): any;
 
 /**
+ * Who supplies `format`'s deck; the lobby offers a pile choice only for `HostPile`.
+ */
+export function deckSupplyForFormat(format: any): any;
+
+/**
  * Estimates a Commander deck's bracket without touching `GAME_STATE`.
  * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
  * deck has no commander or the card database is not loaded.
@@ -725,6 +730,7 @@ export interface InitOutput {
     readonly companionCandidates: (a: any) => [number, number, number];
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
+    readonly deckSupplyForFormat: (a: any) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];

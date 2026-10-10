@@ -44,15 +44,13 @@ pub(crate) fn looked_at_controller_library_cards(
     state: &GameState,
     controller: crate::types::player::PlayerId,
 ) -> Vec<ObjectId> {
-    let library = state.zone_storage_seat(Zone::Library, controller);
     state
         .last_revealed_ids
         .iter()
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|object| {
-                object.zone == Zone::Library
-                    && state.zone_storage_seat(Zone::Library, object.owner) == library
+                state.object_in_players_zone(object, Zone::Library, controller)
             })
         })
         .collect()

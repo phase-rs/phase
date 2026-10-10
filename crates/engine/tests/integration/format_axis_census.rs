@@ -8,7 +8,9 @@
 //! `source_census::code` (the comment-stripping authority) with the sibling
 //! censuses in this binary rather than re-deriving either.
 
-use engine::types::format::{CardPool, GameFormat};
+use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload};
+use engine::types::format::{CardPool, DeckSupply, FormatConfig, GameFormat};
+use engine::types::game_state::GameState;
 use strum::IntoEnumIterator;
 
 use super::loop_shortcut_offer_writer_census::cfg_test_scoped_lines;
@@ -247,9 +249,10 @@ fn format_axis_methods_carry_no_wildcard_arm() {
     assert_axis_method_has_no_wildcard_arm("pub fn shared_zones(");
     assert_axis_method_has_no_wildcard_arm("pub fn deal_order(");
     assert_axis_method_has_no_wildcard_arm("pub fn free_reveal_mulligan(");
-    assert_axis_method_has_no_wildcard_arm("pub fn hand_entry_ownership(");
+    assert_axis_method_has_no_wildcard_arm("pub fn entry_ownership(");
     assert_axis_method_has_no_wildcard_arm("pub fn opening_hand_equivalence(");
     assert_axis_method_has_no_wildcard_arm("pub fn best_of_three_ceiling(");
+    assert_axis_method_has_no_wildcard_arm("pub fn deck_supply(");
 }
 
 /// What is pinned is the
@@ -267,6 +270,63 @@ fn unrestricted_card_pool_declarations_match_the_committed_list() {
     assert_eq!(
         declared,
         vec![GameFormat::Freeform, GameFormat::FreeformCommander]
+    );
+}
+
+/// Which built-ins supply the deck is a deliberate declaration, pinned here.
+#[test]
+fn engine_supplied_deck_declarations_match_the_committed_list() {
+    let declared: Vec<(GameFormat, DeckSupply)> = GameFormat::iter()
+        .map(|format| (format, format.deck_supply()))
+        .filter(|(_, supply)| *supply != DeckSupply::PlayerBuilt)
+        .collect();
+    assert_eq!(
+        declared,
+        vec![
+            (GameFormat::Momir, DeckSupply::EngineFixed),
+            (GameFormat::Dandan, DeckSupply::HostPile),
+        ]
+    );
+}
+
+#[test]
+fn supplies_fixed_deck_is_derived_from_the_deck_supply_axis() {
+    let mut supplying = 0;
+    for format in GameFormat::iter() {
+        let derived = format.deck_supply() != DeckSupply::PlayerBuilt;
+        supplying += usize::from(derived);
+        assert_eq!(format.supplies_fixed_deck(), derived, "{format:?}");
+        assert_eq!(
+            FormatConfig::for_format(format)
+                .expect("built-in format")
+                .supplies_fixed_deck,
+            derived,
+            "{format:?}: the registry's stored field agrees with the axis"
+        );
+    }
+    assert_eq!(supplying, 2, "reach guard: Momir and Dandân supply a deck");
+}
+
+/// Every format whose deck the engine supplies loads a non-empty library from an empty submission.
+#[test]
+fn every_engine_supplied_format_loads_a_library_from_an_empty_submission() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mut checked = 0;
+    for format in GameFormat::iter().filter(|f| f.deck_supply() != DeckSupply::PlayerBuilt) {
+        let config = FormatConfig::for_format(format).expect("built-in format");
+        let mut state = GameState::new(config, 2, 7);
+        load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(db));
+        assert!(
+            state.seats_with_empty_library().is_empty(),
+            "{format:?}: an empty submission must load the engine-supplied deck"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 2,
+        "reach guard: both supplying formats were loaded"
     );
 }
 
@@ -298,9 +358,10 @@ fn no_format_axis_key_reaches_the_client_mirror() {
             "shared_zones",
             "deal_order",
             "free_reveal_mulligan",
-            "hand_entry_ownership",
+            "entry_ownership",
             "opening_hand_equivalence",
             "best_of_three_ceiling",
+            "deck_supply",
         ] {
             assert!(
                 !src.contains(key),

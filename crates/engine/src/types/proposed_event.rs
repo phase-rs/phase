@@ -592,8 +592,8 @@ pub enum ProposedEvent {
         /// event through replacement and CR 616.1 pause/resume so delivery can
         /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
         /// `None` for moves no player performs (rules processes, raw movers).
-        /// A Hand delivery out of a shared zone also reads it as the taker who
-        /// becomes the card's owner under `HandEntryOwnership::ReceiverOwns`.
+        /// Under `EntryOwnership::ActorOwns` delivery also reads it as the
+        /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]

@@ -1584,6 +1584,14 @@ pub enum NextSpellModifier {
     WithoutPayingManaCost,
 }
 
+/// CR 400.7 + CR 108.3: owner and controller the destination object holds after a
+/// zone change, kept apart from the departure snapshot on [`ZoneChangeRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArrivalIdentity {
+    pub owner: PlayerId,
+    pub controller: PlayerId,
+}
+
 /// CR 400.7: Snapshot of an object's properties at the time of a zone change,
 /// enabling data-driven filtered counting at resolution time and event-time
 /// trigger-filter evaluation (CR 603.10) after the object has moved zones.
@@ -1592,6 +1600,7 @@ pub enum NextSpellModifier {
 /// (e.g. "whenever a creature with power 4 or greater dies") can read the
 /// event-time characteristics instead of chasing the object to its new zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ZoneChangeRecordWire")]
 pub struct ZoneChangeRecord {
     pub object_id: ObjectId,
     pub name: String,
@@ -1633,6 +1642,8 @@ pub struct ZoneChangeRecord {
     pub mana_value: u32,
     pub controller: PlayerId,
     pub owner: PlayerId,
+    /// Owner and controller the destination object holds; equals the departure pair unless an entry rebind or a CR 110.2a override installed another.
+    pub arrival: ArrivalIdentity,
     /// CR 603.6a + CR 111.1: `None` when the object was created directly in the
     /// destination zone without existing in a prior zone (e.g. token creation
     /// on the battlefield, emblem creation in the command zone). For normal
@@ -1723,6 +1734,130 @@ pub struct ZoneChangeRecord {
     pub is_suspected: bool,
 }
 
+/// Deserialization shape of [`ZoneChangeRecord`]; a record saved without `arrival` loads with arrival equal to departure.
+#[derive(Deserialize)]
+struct ZoneChangeRecordWire {
+    object_id: ObjectId,
+    name: String,
+    core_types: Vec<CoreType>,
+    subtypes: Vec<String>,
+    supertypes: Vec<Supertype>,
+    keywords: Vec<Keyword>,
+    #[serde(default)]
+    trigger_definitions: Vec<TriggerEntry>,
+    #[serde(default)]
+    trigger_source_context: Option<TriggerSourceContext>,
+    power: Option<i32>,
+    toughness: Option<i32>,
+    #[serde(default)]
+    base_power: Option<i32>,
+    #[serde(default)]
+    base_toughness: Option<i32>,
+    colors: Vec<ManaColor>,
+    mana_value: u32,
+    controller: PlayerId,
+    owner: PlayerId,
+    #[serde(default)]
+    arrival: Option<ArrivalIdentity>,
+    from_zone: Option<Zone>,
+    #[serde(default)]
+    cast_from_zone: Option<Zone>,
+    #[serde(default)]
+    played_from_zone: Option<Zone>,
+    to_zone: Zone,
+    #[serde(default)]
+    attachments: Vec<AttachmentSnapshot>,
+    #[serde(default)]
+    linked_exile_snapshot: Vec<LinkedExileSnapshot>,
+    #[serde(default)]
+    is_token: bool,
+    #[serde(default)]
+    combat_status: ZoneChangeCombatStatus,
+    #[serde(default)]
+    co_departed: Vec<ObjectId>,
+    #[serde(default)]
+    entered_incarnation: Option<u64>,
+    #[serde(default)]
+    attached_to: Option<AttachTarget>,
+    #[serde(default)]
+    turn_zone_change_index: usize,
+    #[serde(default)]
+    recorded_turn_number: u32,
+    #[serde(default)]
+    is_suspected: bool,
+}
+
+impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
+    fn from(wire: ZoneChangeRecordWire) -> Self {
+        let ZoneChangeRecordWire {
+            object_id,
+            name,
+            core_types,
+            subtypes,
+            supertypes,
+            keywords,
+            trigger_definitions,
+            trigger_source_context,
+            power,
+            toughness,
+            base_power,
+            base_toughness,
+            colors,
+            mana_value,
+            controller,
+            owner,
+            arrival,
+            from_zone,
+            cast_from_zone,
+            played_from_zone,
+            to_zone,
+            attachments,
+            linked_exile_snapshot,
+            is_token,
+            combat_status,
+            co_departed,
+            entered_incarnation,
+            attached_to,
+            turn_zone_change_index,
+            recorded_turn_number,
+            is_suspected,
+        } = wire;
+        Self {
+            object_id,
+            name,
+            core_types,
+            subtypes,
+            supertypes,
+            keywords,
+            trigger_definitions,
+            trigger_source_context,
+            power,
+            toughness,
+            base_power,
+            base_toughness,
+            colors,
+            mana_value,
+            controller,
+            owner,
+            arrival: arrival.unwrap_or(ArrivalIdentity { owner, controller }),
+            from_zone,
+            cast_from_zone,
+            played_from_zone,
+            to_zone,
+            attachments,
+            linked_exile_snapshot,
+            is_token,
+            combat_status,
+            co_departed,
+            entered_incarnation,
+            attached_to,
+            turn_zone_change_index,
+            recorded_turn_number,
+            is_suspected,
+        }
+    }
+}
+
 impl ZoneChangeRecord {
     /// Returns the owned source context captured with this exact event record.
     /// Callers must not reconstruct a source from a current object or from an
@@ -1732,6 +1867,15 @@ impl ZoneChangeRecord {
     /// must fail closed.
     pub fn trigger_source_context(&self) -> Option<&TriggerSourceContext> {
         self.trigger_source_context.as_ref()
+    }
+
+    /// Records the identity an entry rebind installs on the destination object
+    /// (CR 108.3 as a format modifies it); the departure snapshot is untouched.
+    pub(crate) fn install_rebound_arrival(&mut self, owner: PlayerId) {
+        self.arrival = ArrivalIdentity {
+            owner,
+            controller: owner,
+        };
     }
 
     /// Completes the context's relationship projections after the zone authority
@@ -1959,6 +2103,10 @@ impl ZoneChangeRecord {
             mana_value: 0,
             controller: PlayerId(0),
             owner: PlayerId(0),
+            arrival: ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             from_zone: from,
             cast_from_zone: None,
             played_from_zone: None,
@@ -8260,6 +8408,19 @@ impl GameState {
         self.shared_zone_holder(zone).unwrap_or(seat)
     }
 
+    /// CR 400.1: whether `object` sits in the `zone` container `player` reads —
+    /// the owner's own container, or the one shared pile when the format shares
+    /// `zone`.
+    pub fn object_in_players_zone(
+        &self,
+        object: &GameObject,
+        zone: Zone,
+        player: PlayerId,
+    ) -> bool {
+        object.zone == zone
+            && self.zone_storage_seat(zone, object.owner) == self.zone_storage_seat(zone, player)
+    }
+
     fn player_at_seat(&self, seat: PlayerId) -> &Player {
         self.players
             .iter()
@@ -9651,6 +9812,9 @@ pub struct MulliganDeclaration {
     pub player: PlayerId,
     /// Mulligans taken before this declaration (a `Regular` redraw makes it one more).
     pub mulligan_count: u8,
+    /// Free reveals this seat has taken before this declaration.
+    #[serde(default)]
+    pub free_reveals_taken: u8,
     #[serde(default)]
     pub kind: MulliganDeclarationKind,
 }
@@ -9661,6 +9825,9 @@ pub struct MulliganDeclaration {
 pub struct MulliganDecisionEntry {
     pub player: PlayerId,
     pub mulligan_count: u8,
+    /// Free reveals this seat has taken; public, since a reveal is shown to every player.
+    #[serde(default)]
+    pub free_reveals_taken: u8,
     #[serde(default)]
     pub phase: MulliganDecisionPhase,
 }
@@ -27086,7 +27253,7 @@ impl GameState {
             && self
                 .objects
                 .get(&object_id)
-                .is_some_and(|object| object.is_delve_eligible(player))
+                .is_some_and(|object| object.is_delve_eligible(self, player))
     }
 
     /// CR 702.66a: A graveyard card the caster may still select to pay generic
@@ -27100,7 +27267,7 @@ impl GameState {
             None => self
                 .objects
                 .get(&object_id)
-                .is_some_and(|object| object.is_delve_eligible(player)),
+                .is_some_and(|object| object.is_delve_eligible(self, player)),
         }
     }
 
@@ -42230,6 +42397,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::ResolveAllReady { epoch: 1 }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::Declare,
@@ -42239,6 +42407,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::BottomCards {
@@ -42251,6 +42420,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 2,
                 phase: MulliganDecisionPhase::BottomCards {
@@ -42265,12 +42435,14 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
             declared: vec![MulliganDeclaration {
+                free_reveals_taken: 0,
                 player: PlayerId(1),
                 mulligan_count: 0,
                 kind: MulliganDeclarationKind::FreeReveal,
@@ -42612,6 +42784,7 @@ mod tests {
     #[test]
     fn mulligan_decision_declared_round_trips_and_is_omitted_when_empty() {
         let entry = MulliganDecisionEntry {
+            free_reveals_taken: 0,
             player: PlayerId(0),
             mulligan_count: 0,
             phase: MulliganDecisionPhase::Declare,
@@ -42620,6 +42793,7 @@ mod tests {
             pending: vec![entry.clone()],
             free_first_mulligan: false,
             declared: vec![MulliganDeclaration {
+                free_reveals_taken: 0,
                 player: PlayerId(1),
                 mulligan_count: 2,
                 kind: MulliganDeclarationKind::Regular,
@@ -42650,6 +42824,7 @@ mod tests {
             MulliganDeclarationKind::FreeReveal,
         ] {
             let declaration = MulliganDeclaration {
+                free_reveals_taken: 0,
                 player: PlayerId(1),
                 mulligan_count: 0,
                 kind,
@@ -46345,6 +46520,10 @@ mod shared_zone_storage_tests {
     fn library_stamp_names_the_storage_seat() {
         let record = ZoneChangeRecord {
             owner: P1,
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: P1,
+                controller: PlayerId(0),
+            },
             ..ZoneChangeRecord::test_minimal(ObjectId(1), Some(Zone::Hand), Zone::Library)
         };
         for (state, expected) in [

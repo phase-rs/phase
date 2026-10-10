@@ -44,11 +44,11 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
     runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
     runner.state_mut().objects.get_mut(&copy).unwrap().is_copy = true;
 
-    assert!(runner.state().objects[&real].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&token].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&copy].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&opponent].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&wrong_zone].is_delve_eligible(P0));
+    assert!(runner.state().objects[&real].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&token].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&copy].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&opponent].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&wrong_zone].is_delve_eligible(runner.state(), P0));
 
     let card_id = runner.state().objects[&delve_spell].card_id;
     runner

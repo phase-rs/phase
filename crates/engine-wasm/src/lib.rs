@@ -44,7 +44,7 @@ use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
 use engine::types::events::GameEvent;
 use engine::types::format::{
-    validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
+    validate_starting_life_bounds, DeckCopyLimit, DeckSupply, FormatConfig, GameFormat,
 };
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
@@ -1130,6 +1130,19 @@ fn best_of_three_ceiling_or_bo1(format: Option<GameFormat>) -> MatchType {
     format.map_or(MatchType::Bo1, GameFormat::best_of_three_ceiling)
 }
 
+/// Who supplies `format`'s deck; the lobby offers a pile choice only for `HostPile`.
+#[wasm_bindgen(js_name = deckSupplyForFormat)]
+pub fn deck_supply_for_format(format: JsValue) -> JsValue {
+    to_js(&deck_supply_or_player_built(
+        serde_wasm_bindgen::from_value::<GameFormat>(format).ok(),
+    ))
+}
+
+/// An undecodable format answers `PlayerBuilt`, so the client asks for a deck.
+fn deck_supply_or_player_built(format: Option<GameFormat>) -> DeckSupply {
+    format.map_or(DeckSupply::PlayerBuilt, GameFormat::deck_supply)
+}
+
 /// Whether the named card can serve as this format's command-zone leader.
 /// Reads the engine's MTGJSON-derived `CardFace` leadership fields and
 /// format-specific deck-validation predicates.
@@ -1686,7 +1699,7 @@ pub fn initialize_multiplayer_host_game(
 /// driven from a native `#[cfg(test)]` module — the shells around it take
 /// `JsValue`s and return through `to_js`, which calls the real `JSON.parse`
 /// binding and panics outside a wasm32 runtime (see the note at the
-/// `ai_scoring_rng_bridge_tests` module). Pure extraction: no behaviour change.
+/// `ai_scoring_rng_bridge_tests` module).
 fn validate_deck_list_seats(
     db: &CardDatabase,
     deck_list: &DeckList,
@@ -1694,61 +1707,39 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
-    // Fixed-deck formats (Momir's Madness) supply the deck from the engine for
-    // every seat, so the client submits empty decks — there is nothing
-    // client-side to validate. `load_and_hydrate_decks` fills each seat's
-    // library with the engine-owned fixed deck. Gate on the engine predicate,
-    // never a format literal.
-    if !format_config.format.supplies_fixed_deck() {
-        for (seat, deck) in [
-            ("Player".to_string(), &deck_list.player),
-            ("AI opponent".to_string(), &deck_list.opponent),
-        ] {
-            if let Err(reasons) = validate_name_deck_for_format_full(
-                db,
-                &deck.main_deck,
-                &deck.sideboard,
-                &deck.commander,
-                &deck.companion,
-                &deck.planar_deck,
-                &deck.scheme_deck,
-                &deck.signature_spell,
-                &deck_list.draft_set_codes,
-                format_config,
-                match_type,
-                player_count,
-            ) {
-                return Some(
-                    reasons
-                        .into_iter()
-                        .map(|reason| format!("{seat} deck: {reason}"))
-                        .collect(),
-                );
-            }
-        }
-        for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
-            let seat = format!("AI player {}", idx + 2);
-            if let Err(reasons) = validate_name_deck_for_format_full(
-                db,
-                &deck.main_deck,
-                &deck.sideboard,
-                &deck.commander,
-                &deck.companion,
-                &deck.planar_deck,
-                &deck.scheme_deck,
-                &deck.signature_spell,
-                &deck_list.draft_set_codes,
-                format_config,
-                match_type,
-                player_count,
-            ) {
-                return Some(
-                    reasons
-                        .into_iter()
-                        .map(|reason| format!("{seat} deck: {reason}"))
-                        .collect(),
-                );
-            }
+    let seats = [
+        ("Player".to_string(), &deck_list.player),
+        ("AI opponent".to_string(), &deck_list.opponent),
+    ]
+    .into_iter()
+    .chain(
+        deck_list
+            .ai_decks
+            .iter()
+            .enumerate()
+            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
+    );
+    for (seat, deck) in seats {
+        if let Err(reasons) = validate_name_deck_for_format_full(
+            db,
+            &deck.main_deck,
+            &deck.sideboard,
+            &deck.commander,
+            &deck.companion,
+            &deck.planar_deck,
+            &deck.scheme_deck,
+            &deck.signature_spell,
+            &deck_list.draft_set_codes,
+            format_config,
+            match_type,
+            player_count,
+        ) {
+            return Some(
+                reasons
+                    .into_iter()
+                    .map(|reason| format!("{seat} deck: {reason}"))
+                    .collect(),
+            );
         }
     }
     None
@@ -4967,11 +4958,13 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(0),
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
                 },
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(1),
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
@@ -6952,6 +6945,7 @@ mod deck_list_seat_validation_tests {
     use engine::database::CardDatabase;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::custom_format::CustomFormatId;
     use engine::types::mana::ManaColor;
     use std::collections::BTreeMap;
 
@@ -7090,19 +7084,100 @@ mod deck_list_seat_validation_tests {
         );
     }
 
-    /// Second hostile fixture — the paired negative for the one branch the
-    /// extraction moves. `supplies_fixed_deck()` is `matches!(self,
-    /// GameFormat::Momir)`, so `CommanderDraft` enters the block (proven by the
-    /// row above) and `Momir` skips it entirely: a fixed-deck format supplies
-    /// every seat's deck from the engine, so there is nothing client-side to
-    /// validate.
+    fn plains_seat(n: usize) -> PlayerDeckList {
+        PlayerDeckList {
+            main_deck: n_plains(n),
+            ..Default::default()
+        }
+    }
+
+    /// `pile` on one seat (0 = player, 1 = opponent, 2 = the extra AI seat), every other seat empty.
+    fn pile_on_seat(seat: usize, pile: PlayerDeckList) -> DeckList {
+        let mut seats = [
+            PlayerDeckList::default(),
+            PlayerDeckList::default(),
+            PlayerDeckList::default(),
+        ];
+        seats[seat] = pile;
+        let [player, opponent, ai] = seats;
+        DeckList {
+            player,
+            opponent,
+            ai_decks: vec![ai],
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn a_fixed_deck_format_skips_seat_validation_entirely() {
+    fn dandan_validates_every_seat_and_admits_empty_seats() {
         let db = test_db();
+        let check = |list: &DeckList, config: &FormatConfig| {
+            validate_deck_list_seats(&db, list, config, None, 2)
+        };
+        let dandan = FormatConfig::dandan();
+        assert_eq!(check(&pile_on_seat(0, plains_seat(80)), &dandan), None);
         assert_eq!(
-            validate_deck_list_seats(&db, &three_seat_list(&[]), &FormatConfig::momir(), None, 4),
+            check(&pile_on_seat(0, PlayerDeckList::default()), &dandan),
+            None
+        );
+        for (seat, label) in [(0, "Player"), (1, "AI opponent"), (2, "AI player 2")] {
+            assert_eq!(
+                check(&pile_on_seat(seat, plains_seat(79)), &dandan),
+                Some(vec![format!(
+                    "{label} deck: Dand\u{e2}n deck must have exactly 80 cards (found 79)"
+                )]),
+            );
+        }
+        let refused = check(
+            &pile_on_seat(0, PlayerDeckList::default()),
+            &FormatConfig::standard(),
+        )
+        .expect("Standard refuses an empty deck");
+        assert!(refused[0].starts_with("Player deck:"), "{refused:?}");
+    }
+
+    #[test]
+    fn momir_admits_empty_seats_and_validates_a_submitted_deck() {
+        let db = test_db();
+        let momir = FormatConfig::momir();
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &pile_on_seat(0, PlayerDeckList::default()),
+                &momir,
+                None,
+                2
+            ),
             None,
         );
+        let refused =
+            validate_deck_list_seats(&db, &pile_on_seat(0, plains_seat(60)), &momir, None, 2)
+                .expect("a non-snow Momir deck is refused");
+        assert!(
+            refused[0].starts_with("Player deck: Momir's Madness"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn deck_supply_reads_the_format_axis_and_fails_to_player_built() {
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Standard)),
+            DeckSupply::PlayerBuilt
+        );
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Custom(CustomFormatId(1)))),
+            DeckSupply::PlayerBuilt
+        );
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Momir)),
+            DeckSupply::EngineFixed
+        );
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Dandan)),
+            DeckSupply::HostPile
+        );
+        assert_eq!(deck_supply_or_player_built(None), DeckSupply::PlayerBuilt);
     }
 
     fn n_plains(n: usize) -> Vec<String> {

@@ -2137,7 +2137,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // anaphorically refers to the equipped/enchanted permanent.
         TargetFilter::ParentTargetOwner => {
             if let Some(GameEvent::ZoneChanged { record, .. }) = event {
-                return Some(TargetRef::Player(record.owner));
+                return Some(TargetRef::Player(record.arrival.owner));
             }
             if let Some(event) = event {
                 if let Some(source_obj_id) = extract_source_from_event(event) {
@@ -2822,7 +2822,7 @@ pub(crate) fn extract_player_from_event(
         // this arm, ETB and dies-trigger sub-effects with `target:
         // TriggeringPlayer` fell back to the ability controller, hitting the
         // wrong player (Suture Priest #560, Bloodchief Ascension #546).
-        GameEvent::ZoneChanged { record, .. } => Some(record.controller),
+        GameEvent::ZoneChanged { record, .. } => Some(record.arrival.controller),
         // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
         // counter-placement trigger is the player who put the counters.
         GameEvent::CounterAdded { actor, .. } => Some(*actor),
@@ -3718,6 +3718,73 @@ pub(crate) fn resolve_tracked_set_sentinel(
 #[cfg(test)]
 mod tests {
 
+    /// CR 109.4 + CR 110.2a: the player a zone-change event names is the
+    /// controller the move installed, not the one the card had when it left.
+    #[test]
+    fn a_zone_change_event_names_the_installed_controller() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(7),
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        );
+        record.arrival.controller = PlayerId(1);
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        };
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
+    }
+
+    /// CR 108.3 + CR 400.7: "that card's owner" after a rebound move is the
+    /// owner the move installed, not the one the card had when it left.
+    #[test]
+    fn a_parent_target_owner_zone_change_names_the_installed_owner() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::dandan(), 2, 42);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Pile Card".to_string(),
+            Zone::Library,
+        );
+        let record =
+            state.objects[&card].snapshot_for_zone_change(card, Some(Zone::Library), Zone::Hand);
+        let record = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Library,
+            Zone::Hand,
+            PlayerId(0),
+            Some(PlayerId(1)),
+            record,
+        )
+        .expect("the rebinding move applies")
+        .zone_change_record;
+        assert_eq!(
+            (record.owner, record.controller),
+            (PlayerId(0), PlayerId(0)),
+            "reach: the departure snapshot is the pile's"
+        );
+        let event = GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Library),
+            to: Zone::Hand,
+            record: Box::new(record),
+        };
+        assert_eq!(
+            resolve_event_context_target_for_event_or_state(
+                &state,
+                &TargetFilter::ParentTargetOwner,
+                ObjectId(99),
+                Some(&event),
+            ),
+            Some(TargetRef::Player(PlayerId(1)))
+        );
+    }
+
     /// CR 113.8 + CR 608.2h: a targeting event's referent controller. An event
     /// carrying no targeter (a legacy save) falls back to the object authority
     /// on `source_id`: with the source permanent now controlled by P0 (owner
@@ -4400,6 +4467,10 @@ mod tests {
             to: Zone::Graveyard,
             record: Box::new(crate::types::game_state::ZoneChangeRecord {
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
                 controller: PlayerId(1),
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     moved,
@@ -6210,6 +6281,10 @@ mod tests {
         ] {
             let record = ZoneChangeRecord {
                 controller: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(ObjectId(7), from, to)
             };
             let event = GameEvent::ZoneChanged {
@@ -6259,6 +6334,10 @@ mod tests {
         let entering_creature_id = ObjectId(200);
         let record = ZoneChangeRecord {
             controller: PlayerId(1),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(1),
+            },
             ..ZoneChangeRecord::test_minimal(entering_creature_id, None, Zone::Battlefield)
         };
         state.current_trigger_event = Some(GameEvent::ZoneChanged {

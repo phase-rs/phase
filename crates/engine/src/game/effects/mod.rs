@@ -13066,7 +13066,7 @@ fn previous_effect_counts_by_player_from_events(
         EffectKind::ChangeZoneAll => {
             for event in &events[..=resolved_index] {
                 if let GameEvent::ZoneChanged { record, .. } = event {
-                    *counts.entry(record.owner).or_insert(0) += 1;
+                    *counts.entry(record.arrival.owner).or_insert(0) += 1;
                 }
             }
         }
@@ -25310,7 +25310,7 @@ mod tests {
                 _ => None,
             })
             .expect("Tergrid return should emit a battlefield-entry ZoneChanged event");
-        assert_eq!(event_record.controller, PlayerId(0));
+        assert_eq!(event_record.arrival.controller, PlayerId(0));
         assert_eq!(
             state
                 .zone_changes_this_turn
@@ -25319,7 +25319,7 @@ mod tests {
                 .find(|record| {
                     record.object_id == victim_id && record.to_zone == Zone::Battlefield
                 })
-                .map(|record| record.controller),
+                .map(|record| record.arrival.controller),
             Some(PlayerId(0))
         );
         assert_eq!(
@@ -27076,6 +27076,10 @@ mod tests {
             mana_value: 8,
             controller: PlayerId(0),
             owner: PlayerId(0),
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Graveyard), Zone::Battlefield)
         };
         let events = vec![GameEvent::ZoneChanged {
@@ -29332,7 +29336,9 @@ mod tests {
         creature_record.base_toughness = Some(7);
         creature_record.core_types = vec![CoreType::Creature];
         creature_record.controller = PlayerId(1);
+        creature_record.arrival.controller = PlayerId(1);
         creature_record.owner = PlayerId(1);
+        creature_record.arrival.owner = PlayerId(1);
 
         let events = vec![
             // Extra public-zone move: without the sacrifice-id-keyed record
@@ -43336,6 +43342,10 @@ mod tests {
     fn zone_changed_event(object_id: ObjectId, owner: PlayerId) -> GameEvent {
         let record = ZoneChangeRecord {
             owner,
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner,
+                controller: PlayerId(0),
+            },
             ..ZoneChangeRecord::test_minimal(object_id, Some(Zone::Hand), Zone::Library)
         };
         GameEvent::ZoneChanged {
@@ -43454,6 +43464,25 @@ mod tests {
             ),
             Some(HashMap::new()),
             "a completed no-move ChangeZoneAll must replace stale counts with an empty map"
+        );
+    }
+
+    #[test]
+    fn previous_effect_counts_change_zone_all_credits_the_installed_owner() {
+        let source = ObjectId(10);
+        let effect = hand_to_library_effect(TargetFilter::ScopedPlayer);
+        let mut moved = zone_changed_event(ObjectId(1), PlayerId(0));
+        if let GameEvent::ZoneChanged { record, .. } = &mut moved {
+            record.arrival.owner = PlayerId(1);
+        }
+        assert_eq!(
+            previous_effect_counts_by_player_from_events(
+                EffectKind::from(&effect),
+                source,
+                &[moved, resolved_event(EffectKind::ChangeZoneAll, source)],
+            ),
+            Some(HashMap::from([(PlayerId(1), 1)])),
+            "the recipient is the owner the move installed"
         );
     }
 
