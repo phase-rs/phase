@@ -1012,6 +1012,7 @@ mod issue_924_offspring;
 mod issue_927_tireless_provisioner;
 mod issue_9282_counter_stack_referent;
 mod issue_934_ring_goes_south;
+mod issue_9377_hidden_identity_side_tables;
 mod issue_941_champions_full_party;
 mod issue_9505_exile_origin_fail_closed;
 mod issue_bound_by_moonsilver_sacrifice_attach;
