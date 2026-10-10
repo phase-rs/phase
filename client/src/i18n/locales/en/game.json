@@ -704,6 +704,7 @@
     "libraryCount_one": "Library ({{count}} card)",
     "libraryCount_other": "Library ({{count}} cards)",
     "playFromTop": "Play {{name}} from top of library",
+    "activateFromTop": "Activate {{name}} from top of library",
     "topOfLibrary": "top of library",
     "indicatorOpponentPrefix": "Opp ",
     "graveyardLower": "graveyard",
@@ -711,6 +712,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "No cards in {{zone}}",
     "castFromZone": "Cast from {{zone}}: {{name}}",
+    "activateFromZone": "Activate from {{zone}}: {{name}}",
     "viewCount": "View {{count}}",
     "castableCount": "{{zone}} — {{count}} castable"
   },

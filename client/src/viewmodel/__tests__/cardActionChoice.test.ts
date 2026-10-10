@@ -10,6 +10,7 @@ import {
   resolveDirectPlayOrCastAction,
   resolveObjectActivation,
   resolveSingleActionDispatch,
+  zoneSurfaceActionsForObject,
 } from "../cardActionChoice.ts";
 import { abilityChoiceLabel } from "../costLabel.ts";
 
@@ -288,6 +289,53 @@ describe("resolveSingleActionDispatch", () => {
   it("returns null for a lone CastPreparedCopy", () => {
     const preparedAction: GameAction = { type: "CastPreparedCopy", data: { source: 1 } };
     expect(resolveSingleActionDispatch([preparedAction], makeGameObject())).toBeNull();
+  });
+});
+
+describe("zoneSurfaceActionsForObject", () => {
+  const castAction: GameAction = {
+    type: "CastSpell",
+    data: { object_id: 1, card_id: 100, targets: [] },
+  };
+  const playLandAction: GameAction = {
+    type: "PlayLand",
+    data: { object_id: 1, card_id: 100 },
+  };
+  // CR 702.170f: a runtime-granted ability (plot from the top of the library)
+  // has an index past the serialized `abilities`, so the object carries no
+  // entry for it.
+  const runtimeGrantedAbility: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 1, ability_index: 0 },
+  };
+
+  it("offers cast, play, and non-mana activated abilities", () => {
+    const actions = [castAction, playLandAction, runtimeGrantedAbility];
+    expect(
+      zoneSurfaceActionsForObject({ "1": actions }, makeGameObject({ abilities: [] }), 1),
+    ).toEqual(actions);
+  });
+
+  it("drops mana payments, which the delve/convoke flow handles", () => {
+    const object = makeGameObject({
+      abilities: [{ is_mana_ability: true, effect: { type: "Mana" } }],
+    });
+    const manaAbility: GameAction = {
+      type: "ActivateAbility",
+      data: { source_id: 1, ability_index: 0 },
+    };
+    const convoke: GameAction = {
+      type: "TapForConvoke",
+      data: { object_id: 1, mana_type: "Green" },
+    };
+    expect(
+      zoneSurfaceActionsForObject(
+        { "1": [manaAbility, convoke, tapLandAction(1), castAction] },
+        object,
+        1,
+      ),
+    ).toEqual([castAction]);
+    expect(zoneSurfaceActionsForObject({ "1": [castAction] }, object, 999)).toEqual([]);
   });
 });
 
