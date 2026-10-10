@@ -3155,6 +3155,7 @@ impl GameObject {
     pub fn snapshot_for_attack_declaration(&self, object_id: ObjectId) -> AttackDeclarationRecord {
         AttackDeclarationRecord {
             object_id,
+            incarnation: Some(self.incarnation),
             lki: self.snapshot_public_characteristics(),
             is_token: self.is_token,
             is_commander: self.is_commander,

@@ -121,16 +121,27 @@ fn resolve_single_object_targets(
     // attached-host rule of the `TriggeringSource` arm (CR 301.5a + CR 303.4b),
     // which applies only when a published event names no object.
     if crate::game::targeting::is_pure_event_context_filter(filter) {
-        // CR 400.7: only the incarnation the event recorded — a referent that
-        // blinked since the trigger was put on the stack is a new object.
-        return crate::game::targeting::resolve_event_referent_objects(
-            state,
-            filter,
-            ability.source_id,
-        )
-        .into_iter()
-        .filter(|&id| is_phased_in_battlefield_permanent(state, id))
-        .collect();
+        let ids = match filter {
+            // CR 400.7: only the incarnation the event recorded — a referent
+            // that blinked since the trigger was put on the stack is a new
+            // object.
+            TargetFilter::TriggeringSource | TargetFilter::EventTarget => {
+                crate::game::targeting::resolve_event_referent_objects(
+                    state,
+                    filter,
+                    ability.source_id,
+                )
+            }
+            // CR 608.2k + CR 201.5a: a bound reference (`SpecificObject`, the
+            // granter stamp) names its object independent of the published
+            // event batch; the shared authority resolves it with the ability's
+            // context.
+            _ => crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter),
+        };
+        return ids
+            .into_iter()
+            .filter(|&id| is_phased_in_battlefield_permanent(state, id))
+            .collect();
     }
     ability
         .targets
@@ -2592,6 +2603,102 @@ mod tests {
             vec![tapped],
             "same incarnation: positive control"
         );
+    }
+
+    /// CR 400.7: the damage event records the incarnation that dealt the damage,
+    /// so a blinked damage source is likewise not the referent.
+    #[test]
+    fn become_prepared_event_referent_ignores_a_blinked_damage_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let dealer = add_prepare_creature(&mut state, PlayerId(0), "Dealer", true);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+        let damage = |state: &GameState| GameEvent::DamageDealt {
+            source_id: dealer,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: Some(state.objects[&dealer].incarnation),
+        };
+
+        let stale = damage(&state);
+        blink(&mut state, dealer);
+        state.current_trigger_event = Some(stale);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_prepared(&events).is_empty(), "{events:?}");
+
+        let fresh = damage(&state);
+        state.current_trigger_event = Some(fresh);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![dealer], "same incarnation");
+    }
+
+    /// A bound object reference is not read from the trigger event: a nonempty
+    /// published batch naming another object does not displace it, for prepare
+    /// and unprepare alike.
+    #[test]
+    fn bound_object_reference_ignores_a_nonempty_event_batch() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let bound = add_prepare_creature(&mut state, PlayerId(0), "Bound", true);
+        let other = add_prepare_creature(&mut state, PlayerId(0), "Other", true);
+        publish_event_naming(&mut state, other);
+        state.current_trigger_events = vec![GameEvent::PermanentUntapped { object_id: other }];
+        let target = TargetFilter::SpecificObject { id: bound };
+
+        let prepare = ResolvedAbility::new(
+            Effect::BecomePrepared {
+                target: target.clone(),
+                scope: EffectScope::Single,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &prepare, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![bound]);
+        assert!(state.objects[&other].prepared.is_none());
+
+        let unprepare = ResolvedAbility::new(
+            Effect::BecomeUnprepared {
+                target,
+                scope: EffectScope::Single,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_unprepared(&mut state, &unprepare, &mut events).unwrap();
+        assert_eq!(became_unprepared(&events), vec![bound]);
+    }
+
+    /// CR 201.5a: the granter stamp resolves through the shared authority even
+    /// with a nonempty event batch naming a different object.
+    #[test]
+    fn granting_object_reference_ignores_a_nonempty_event_batch() {
+        let mut state = GameState::new_two_player(42);
+        let granter = add_prepare_creature(&mut state, PlayerId(0), "Granter", true);
+        let other = add_prepare_creature(&mut state, PlayerId(0), "Other", true);
+        publish_event_naming(&mut state, other);
+        state.current_trigger_events = vec![GameEvent::PermanentUntapped { object_id: other }];
+        let ability = ResolvedAbility::new(
+            Effect::BecomePrepared {
+                target: TargetFilter::GrantingObject { bound: None },
+                scope: EffectScope::Single,
+            },
+            vec![],
+            granter,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![granter]);
+        assert!(state.objects[&other].prepared.is_none());
     }
 
     /// CR 702.26b: a phased-out event referent is treated as though it does not

@@ -1066,6 +1066,74 @@ fn become_unprepared_event_referent_attacker_loses_designation() {
     assert!(is_prepared(&runner, bystander));
 }
 
+/// CR 400.7 + CR 608.2k + CR 722.3b: the attack trigger is left on the stack and
+/// the attacker is blinked and re-prepared (it "enters prepared") before the
+/// trigger resolves. The stale unprepare names the attacker that was declared,
+/// not the new object at the same `ObjectId`, so the returned creature keeps
+/// its fresh designation. Paired positive: `..._attacker_loses_designation`.
+#[test]
+fn become_unprepared_event_referent_ignores_a_blinked_attacker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Unprepared Watcher",
+            2,
+            2,
+            ATTACK_THAT_CREATURE_UNPREPARE,
+        )
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacking Scholar", 2, 2).id();
+    let mut runner = scenario.build();
+    for id in [watcher, attacker] {
+        give_prepare_face(&mut runner, id);
+        pre_prepare(&mut runner, id);
+    }
+
+    runner.pass_both_players();
+    let mut events = runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers must be accepted")
+        .events;
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: the attack trigger is on the stack"
+    );
+    let incarnation = runner.state().objects[&attacker].incarnation;
+
+    for zone in [Zone::Exile, Zone::Battlefield] {
+        assert!(
+            !move_object_for_test(
+                runner.state_mut(),
+                ZoneMoveRequest::effect(attacker, zone, watcher),
+                &mut events,
+            ),
+            "the blink must complete without a replacement choice"
+        );
+    }
+    assert!(
+        runner.state().objects[&attacker].incarnation > incarnation,
+        "reach guard: the creature returned as a new object"
+    );
+    give_prepare_face(&mut runner, attacker);
+    pre_prepare(&mut runner, attacker);
+
+    pass_until_stack_empty(&mut runner, &mut events);
+
+    assert!(
+        effect_resolved(&events, EffectKind::BecomeUnprepared),
+        "reach guard: the stale trigger still resolved"
+    );
+    assert!(
+        is_prepared(&runner, attacker),
+        "the new incarnation is not the attacker that was declared"
+    );
+}
+
 /// CR 608.2k + CR 603.2 + CR 722.3a: "that creature" in a "becomes tapped"
 /// trigger is the creature that became tapped (here by attacking), not the
 /// trigger's source.

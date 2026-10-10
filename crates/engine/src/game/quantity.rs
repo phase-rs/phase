@@ -10682,12 +10682,14 @@ mod tests {
         state.attacker_declarations_this_turn = vec![
             AttackDeclarationRecord {
                 object_id: p0_attacker,
+                incarnation: None,
                 lki: creature_lki("Goblin", PlayerId(0)),
                 is_token: false,
                 is_commander: false,
             },
             AttackDeclarationRecord {
                 object_id: p1_attacker,
+                incarnation: None,
                 lki: creature_lki("Soldier", PlayerId(1)),
                 is_token: false,
                 is_commander: false,
@@ -19485,6 +19487,7 @@ mod tests {
         }
         let record_with_power = |power| AttackDeclarationRecord {
             object_id: attacker,
+            incarnation: None,
             lki: {
                 let mut lki = state.objects[&attacker].snapshot_public_characteristics();
                 lki.power = Some(power);
@@ -19512,6 +19515,7 @@ mod tests {
             attacks: vec![],
             declaration_records: vec![AttackDeclarationRecord {
                 object_id: unrelated_attacker,
+                incarnation: None,
                 lki: {
                     let mut lki =
                         state.objects[&unrelated_attacker].snapshot_public_characteristics();

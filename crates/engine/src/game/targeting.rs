@@ -858,7 +858,9 @@ pub fn resolve_event_context_targets(
 /// concerns is the authority; an event that did not (legacy or non-object
 /// events) cannot discriminate and so names the live object.
 ///
-/// - `PermanentTapped` records the incarnation that became tapped.
+/// - `PermanentTapped` records the incarnation that became tapped;
+///   `DamageDealt` the incarnation that dealt the damage; `AttackersDeclared`
+///   stamps each attacker's incarnation on its declaration record.
 /// - `ZoneChanged` into the battlefield records the entrant's incarnation; a
 ///   `ZoneChanged` out of the battlefield (or to any other zone) names an object
 ///   that no longer exists as such — any permanent now at that id is a new one.
@@ -870,6 +872,10 @@ fn event_names_live_incarnation(
         GameEvent::PermanentTapped {
             incarnation: Some(incarnation),
             ..
+        }
+        | GameEvent::DamageDealt {
+            source_incarnation: Some(incarnation),
+            ..
         } => obj.incarnation == *incarnation,
         GameEvent::ZoneChanged {
             to: Zone::Battlefield,
@@ -879,6 +885,16 @@ fn event_names_live_incarnation(
             .entered_incarnation
             .is_none_or(|incarnation| obj.incarnation == incarnation),
         GameEvent::ZoneChanged { .. } => false,
+        // CR 508.1a: the attack declaration stamps each attacker's incarnation.
+        GameEvent::AttackersDeclared {
+            declaration_records,
+            ..
+        } => declaration_records
+            .iter()
+            .find(|record| record.object_id == obj.id)
+            .and_then(|record| record.incarnation)
+            .is_none_or(|incarnation| obj.incarnation == incarnation),
+        // Events that record no incarnation cannot discriminate.
         _ => true,
     }
 }
@@ -896,6 +912,21 @@ pub(crate) fn resolve_event_referent_objects(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
+    // Only the filters that name the trigger event's own object carry an event
+    // incarnation. Bound references (`SpecificObject`, `LastCreated`, ...) and
+    // every other pure-event filter keep the shared resolver unchanged.
+    if !matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget
+    ) {
+        return resolve_event_context_targets(state, filter, source_id)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
     let batch: Vec<&GameEvent> = if state.current_trigger_events.is_empty() {
         state.current_trigger_event.iter().collect()
     } else {

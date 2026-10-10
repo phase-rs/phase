@@ -66,7 +66,8 @@ pub struct TournamentRequestId(pub u64);
 ///      prepared", CR 722.3a + CR 115.10a), `prepared_copy_source` on
 ///      `SpellCastRecord`, and `prepare_face` on `CopiableValues` and
 ///      `GameObject::copied_prepare_face` (a copy of a preparation creature
-///      keeps its prepare spell, CR 722.2b). A v122 peer cannot parse the new
+///      keeps its prepare spell, CR 722.2b), and `AttackDeclarationRecord::incarnation`
+///      (CR 400.7). A v122 peer cannot parse the new
 ///      `FilterProp` tag and would read a mass scope as a single-target
 ///      prepare because serde ignores the unknown field. Full-game peers and
 ///      P2P move in lockstep (wire 105); lobby carriers hold no `GameState`

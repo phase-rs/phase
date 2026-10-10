@@ -3297,6 +3297,7 @@ fn layer1_copy_of_a_preparation_creature_is_prepared_by_codie() {
     let aviator_copying_plain =
         scenario.add_real_card(P0, "Encouraging Aviator", Zone::Battlefield, db);
     let clone = scenario.add_creature(P0, "Clone", 0, 0).id();
+    let copy_of_clone = scenario.add_creature(P0, "Second Clone", 0, 0).id();
     let plain = scenario.add_creature(P0, "Plain Donor", 2, 2).id();
     scenario.with_mana_pool(P0, mana(WUBRG));
     let mut runner = scenario.build();
@@ -3324,6 +3325,13 @@ fn layer1_copy_of_a_preparation_creature_is_prepared_by_codie() {
     };
     become_copy(&mut runner, clone, aviator);
     become_copy(&mut runner, aviator_copying_plain, plain);
+    // Copy of a copy: the donor's CURRENT copiable values (Aviator's, via the
+    // first Clone) carry the prepare spell forward.
+    become_copy(&mut runner, copy_of_clone, clone);
+    assert_eq!(
+        runner.state().objects[&copy_of_clone].name,
+        "Encouraging Aviator"
+    );
     assert_eq!(runner.state().objects[&clone].name, "Encouraging Aviator");
     assert_eq!(
         runner.state().objects[&aviator_copying_plain].name,
@@ -3346,6 +3354,11 @@ fn layer1_copy_of_a_preparation_creature_is_prepared_by_codie() {
         "CR 722.2b: the Clone's copied prepare spell makes it eligible"
     );
     exact_linked_copy(state, clone, P0, "Jump");
+    assert!(
+        state.objects[&copy_of_clone].prepared.is_some(),
+        "CR 707.2: a copy of the Clone has the copied prepare spell too"
+    );
+    exact_linked_copy(state, copy_of_clone, P0, "Jump");
     assert!(
         state.objects[&aviator_copying_plain].prepared.is_none(),
         "CR 722.2b: a copy of a creature with no prepare spell has none"

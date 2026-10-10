@@ -643,7 +643,13 @@ pub(crate) fn copiable_prepare_face(obj: &GameObject) -> Option<Arc<BackFaceData
     if obj.face_down {
         return None;
     }
-    effective_prepare_face(obj).map(|face| Arc::new(face.clone()))
+    // The object's OWN stored face: an intrinsic snapshot stays independent of
+    // Layer 1 (a copy effect folds over it in `compute_current_copiable_values`,
+    // which replaces the whole value set including `prepare_face`).
+    obj.back_face
+        .as_ref()
+        .filter(|face| is_prepare_spell_face(face))
+        .map(|face| Arc::new(face.clone()))
 }
 
 /// CR 722.2a: whether a stored face is a prepare spell (as opposed to a
@@ -3134,12 +3140,11 @@ mod tests {
             "layer-derived, not written to the stored face"
         );
 
-        // Copy of a copy: the clone's own copiable values still carry it.
-        let clone_values = intrinsic_copiable_values(&clone);
-        assert_eq!(clone_values.prepare_face.as_deref(), Some(&prepare));
-        let mut second = creature_with_stored_face(None);
-        apply(&mut second, &clone_values);
-        assert_eq!(effective_prepare_face(&second), Some(&prepare));
+        // The intrinsic snapshot stays independent of Layer 1: the clone's own
+        // printed form has no prepare spell. (Copy of a copy folds through
+        // `compute_current_copiable_values`; see the Codie Clone integration
+        // test.)
+        assert_eq!(intrinsic_copiable_values(&clone).prepare_face, None);
 
         // Lose: a preparation creature that copies a plain creature has none.
         let mut copies_plain = creature_with_stored_face(Some(prepare.clone()));

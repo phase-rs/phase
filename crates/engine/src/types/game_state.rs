@@ -1893,6 +1893,12 @@ pub struct ZoneChangeCombatStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttackDeclarationRecord {
     pub object_id: ObjectId,
+    /// CR 400.7: the incarnation that was declared as an attacker. An attack
+    /// trigger that resolves after the attacker left and returned (a blink)
+    /// names this object, not the new one at the same `ObjectId`. `None` on
+    /// legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
     pub lki: LKISnapshot,
     /// CR 111.1: Token identity at declaration time.
     #[serde(default)]
