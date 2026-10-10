@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
     # retain a bounded job while leaving room for the remaining lint gates.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
