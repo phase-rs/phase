@@ -328,13 +328,53 @@ pub fn resolve(
         // carried by event context or attached host, not a target the controller chose,
         // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
         // without falling back to `source_id` for unresolved ParentTarget.
-        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-            .into_iter()
-            .filter_map(|t| match t {
-                TargetRef::Object(id) => Some(id),
-                TargetRef::Player(_) => None,
-            })
-            .collect()
+        if matches!(filter, TargetFilter::TriggeringSource) {
+            if let Some(trig_obj) = ability.triggering_object {
+                // CR 400.7: If the object left and returned, it is a new object and must not be sacrificed.
+                if state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
+                    obj.zone == Zone::Battlefield
+                        && trig_obj
+                            .incarnation
+                            .is_none_or(|inc| obj.incarnation == inc)
+                }) {
+                    vec![trig_obj.object_id]
+                } else {
+                    vec![]
+                }
+            } else if let Some(host_ref) = ability.triggering_host {
+                if host_ref.is_current(state) {
+                    vec![host_ref.object_id]
+                } else {
+                    vec![]
+                }
+            } else if let Some(counterpart_pin) = ability.triggering_counterpart {
+                if counterpart_pin.is_current(state) {
+                    vec![counterpart_pin.object_id]
+                } else {
+                    vec![]
+                }
+            } else {
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    filter,
+                    ability.source_id,
+                )
+                .into_iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect()
+            }
+        } else {
+            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+                .into_iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect()
+        }
     } else {
         // CR 400.7 + CR 603.7c: `effect_object_targets` indexes ParentTargetSlot
         // by DECLARED position, so a pin-filtered slice would renumber every
@@ -357,6 +397,19 @@ pub fn resolve(
             .any(|id| !ability.target_pin_is_current(*id, state));
     targeted_objects.retain(|id| ability.target_pin_is_current(*id, state));
     if stale_parent_target_slot {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
+
+    // CR 400.7 + CR 608.2c: An untargeted TriggeringSource anaphor ("sacrifice it")
+    // names a specific triggering object. If that referent departed or is stale,
+    // the instruction has no valid target — resolve as a hard no-op rather than
+    // falling through to the untargeted pool.
+    if matches!(filter, TargetFilter::TriggeringSource) && targeted_objects.is_empty() {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -412,6 +465,7 @@ pub fn resolve(
         TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::CostPaidObject
+            | TargetFilter::TriggeringSource
     ) {
         targeted_objects.retain(|id| {
             state

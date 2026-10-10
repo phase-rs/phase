@@ -67,11 +67,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
-    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
-    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationDirection,
+    CombatRelationSubject, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
+    DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect, EffectScope,
+    FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
     OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
@@ -2636,6 +2636,29 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if matches!(def.valid_card, Some(TargetFilter::AttachedTo)) {
         if let Some(execute) = def.execute.as_deref_mut() {
             retarget_each_other_to_attached_host_in_ability(execute);
+            // CR 301.5a: On an Aura/Equipment self-trigger whose subject is the attached host,
+            // "creatures blocking it" refers to creatures blocking the attached host.
+            rebind_combat_relation_subject_in_ability(
+                execute,
+                CombatRelationSubject::Source,
+                CombatRelationSubject::AttachedTo,
+            );
+        }
+    }
+
+    // CR 509.1h + CR 603.2: In a BecomesBlocked trigger watching another creature
+    // (e.g. Ib Halfheart: "Whenever another Goblin you control becomes blocked, ... it deals
+    // 4 damage to each creature blocking it"), "it" in the combat relation filter denotes
+    // the triggering creature that became blocked, not the source.
+    if def.mode == TriggerMode::BecomesBlocked
+        && !matches!(def.valid_card, None | Some(TargetFilter::SelfRef))
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rebind_combat_relation_subject_in_ability(
+                execute,
+                CombatRelationSubject::Source,
+                CombatRelationSubject::TriggeringObject,
+            );
         }
     }
 
@@ -5966,6 +5989,105 @@ fn retarget_each_other_to_attached_host_in_ability(def: &mut AbilityDefinition) 
     }
     if let Some(els) = def.else_ability.as_deref_mut() {
         retarget_each_other_to_attached_host_in_ability(els);
+    }
+}
+
+fn rebind_combat_relation_subject_in_filter(
+    filter: &mut TargetFilter,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                rebind_combat_relation_subject_in_prop(prop, from, to);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for sub in filters {
+                rebind_combat_relation_subject_in_filter(sub, from, to);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_combat_relation_subject_in_filter(filter, from, to);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_combat_relation_subject_in_prop(
+    prop: &mut FilterProp,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    match prop {
+        FilterProp::CombatRelation { subject, .. } if *subject == from => {
+            *subject = to;
+        }
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => {
+            rebind_combat_relation_subject_in_filter(target, from, to);
+        }
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => rebind_combat_relation_subject_in_filter(reference, from, to),
+        FilterProp::AnyOf { props } => {
+            for p in props {
+                rebind_combat_relation_subject_in_prop(p, from, to);
+            }
+        }
+        FilterProp::Not { prop: p } => rebind_combat_relation_subject_in_prop(p, from, to),
+        _ => {}
+    }
+}
+
+fn rebind_combat_relation_subject_in_effect(
+    effect: &mut Effect,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        rebind_combat_relation_subject_in_filter(filter, from, to);
+    });
+
+    match effect {
+        Effect::PutCounterAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => {
+            rebind_combat_relation_subject_in_filter(target, from, to);
+        }
+        _ => {}
+    }
+}
+
+/// CR 301.5a / CR 509.1h: Rebind the subject of combat relation filters throughout an ability.
+fn rebind_combat_relation_subject_in_ability(
+    ability: &mut AbilityDefinition,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    for mode in &mut ability.mode_abilities {
+        rebind_combat_relation_subject_in_ability(mode, from, to);
+    }
+    if let Some(target) = ability.optional_player.as_mut() {
+        rebind_combat_relation_subject_in_filter(target, from, to);
+    }
+    rebind_combat_relation_subject_in_effect(&mut ability.effect, from, to);
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rebind_combat_relation_subject_in_ability(sub, from, to);
+    }
+    if let Some(els) = ability.else_ability.as_deref_mut() {
+        rebind_combat_relation_subject_in_ability(els, from, to);
     }
 }
 
@@ -17431,7 +17553,7 @@ fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCo
     let filter = add_property(
         filter,
         FilterProp::CombatRelation {
-            relation: CombatRelation::BlockingOrBlockedBy,
+            relation: CombatRelation::Live(CombatRelationDirection::Either),
             subject: CombatRelationSubject::Source,
         },
     );
@@ -21418,14 +21540,14 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
             return None;
         }
         let valid_card = match possessive {
-            Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
-            None => Some(subject.clone()),
+            Some(ctrl) => add_controller(subject.clone(), ctrl),
+            None => subject.clone(),
         };
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
             destination_constraint: DestinationConstraint::Any,
-            valid_card,
+            valid_card: Some(valid_card),
         });
     }
 

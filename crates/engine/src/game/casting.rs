@@ -27679,6 +27679,16 @@ pub(crate) fn record_activation_announcement(
     ability_index: usize,
     ability: &mut ResolvedAbility,
 ) {
+    // CR 113.7a + CR 602.2a: Capture the source's incarnation at the moment of
+    // activation announcement, before any costs (such as sacrifice) move the source
+    // to another zone and increment its incarnation.
+    if ability.source_incarnation.is_none() {
+        let source_incarnation = state
+            .objects
+            .get(&source_id)
+            .map(|source| source.incarnation);
+        ability.set_source_incarnation_recursive(source_incarnation);
+    }
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
     let provenance = state

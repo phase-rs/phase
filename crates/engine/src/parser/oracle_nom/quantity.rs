@@ -27,12 +27,13 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
-    ControllerRef, CountBinding, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
-    FilterProp, LetterQuery, NameStickerSet, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, QuantityExpr, QuantityRef,
-    RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause,
-    TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CombatRelation,
+    CombatRelationDirection, CombatRelationSubject, Comparator, ControllerRef, CountBinding,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, LetterQuery,
+    NameStickerSet, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -5292,6 +5293,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
+        parse_for_each_blocked_by_source_type,
         parse_for_each_recipient_shared_quality,
         // CR 604.1 + CR 611.3a + CR 613.4c: "<type> on the battlefield with
         // <keyword>" — must precede `parse_for_each_battlefield_type`, whose
@@ -6807,6 +6809,31 @@ fn parse_for_each_blocking_source_type(input: &str) -> OracleResult<'_, Quantity
                 type_filters: vec![tf],
                 controller: None,
                 properties: vec![FilterProp::BlockingSource],
+            }),
+        },
+    ))
+}
+
+fn parse_for_each_blocked_by_source_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, tf) = parse_type_filter_word(input)?;
+    let (rest, _) = alt((
+        tag(" it's blocking"),
+        tag(" it\u{2019}s blocking"),
+        tag(" it is blocking"),
+        tag(" ~ is blocking"),
+        tag(" this creature is blocking"),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: None,
+                properties: vec![FilterProp::CombatRelation {
+                    relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
+                    subject: CombatRelationSubject::Source,
+                }],
             }),
         },
     ))

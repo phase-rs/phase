@@ -12,8 +12,9 @@ use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode, DamageAmountScope,
+    ChosenAttribute, CombatHistoryScope, CombatRelation, CombatRelationDirection,
+    CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CopyChooseScope,
+    CopyRetargetPermission, CountScope, CounterTransferMode, DamageAmountScope,
     DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
     DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
     ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
@@ -37381,7 +37382,7 @@ fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &s
         .properties
         .push(FilterProp::Attacking { defender: None });
     expected.properties.push(FilterProp::CombatRelation {
-        relation: CombatRelation::BlockingOrBlockedBy,
+        relation: CombatRelation::Live(CombatRelationDirection::Either),
         subject: CombatRelationSubject::Source,
     });
     assert_eq!(filter, &expected);

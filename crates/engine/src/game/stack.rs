@@ -4252,6 +4252,9 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_source,
         trigger_definition_ref,
         force_block_attacker: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         activation_cost_reduction: _,
@@ -4498,6 +4501,9 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         activation_cost_reduction: _,
@@ -4724,6 +4730,9 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         activation_cost_reduction: _,
@@ -5059,6 +5068,9 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: a_force_block_attacker,
+        triggering_host: a_triggering_host,
+        triggering_object: a_triggering_object,
+        triggering_counterpart: a_triggering_counterpart,
         target_incarnations: a_target_incarnations,
         controller: a_controller,
         original_controller: _,
@@ -5142,6 +5154,9 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: b_force_block_attacker,
+        triggering_host: b_triggering_host,
+        triggering_object: b_triggering_object,
+        triggering_counterpart: b_triggering_counterpart,
         target_incarnations: b_target_incarnations,
         controller: b_controller,
         original_controller: _,
@@ -5220,6 +5235,9 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_declares_return_result == b_declares_return_result
         && a_reads_return_result == b_reads_return_result
         && a_force_block_attacker == b_force_block_attacker
+        && a_triggering_host == b_triggering_host
+        && a_triggering_object == b_triggering_object
+        && a_triggering_counterpart == b_triggering_counterpart
         // CR 400.7 + CR 603.7c: two otherwise-identical abilities pinned to
         // DIFFERENT incarnations are not the same ability. Participating here
         // keeps this manual comparison in agreement with the type's derived

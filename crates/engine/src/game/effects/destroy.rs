@@ -369,6 +369,19 @@ pub fn resolve_all(
         .copied()
         .collect();
 
+    // CR 704.3 + CR 603.10a: Snapshot immediate combat relationships before the first
+    // destruction is delivered so sequential moves do not prune combat links before
+    // later-destroyed objects record their departure combat status.
+    if matching.len() > 1 {
+        for &obj_id in &matching {
+            let status = crate::game::zones::capture_combat_status(state, obj_id);
+            state
+                .simultaneous_combat_snapshots
+                .entry(obj_id)
+                .or_insert(status);
+        }
+    }
+
     for &obj_id in &matching {
         let proposed = ProposedEvent::Destroy {
             object_id: obj_id,
@@ -389,6 +402,10 @@ pub fn resolve_all(
                 return Ok(());
             }
         }
+    }
+
+    for &obj_id in &matching {
+        state.simultaneous_combat_snapshots.remove(&obj_id);
     }
 
     // CR 603.10a + CR 704.3: every creature destroyed by this effect left the

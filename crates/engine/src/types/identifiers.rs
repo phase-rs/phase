@@ -277,7 +277,7 @@ impl ObjectIdentityBinding {
 /// `is_none_or` fallback the sibling `entered_incarnation` consumers in
 /// `game/filter.rs` and `game/triggers.rs` already use for legacy and synthesized
 /// records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TriggeringObjectRef {
     pub object_id: ObjectId,
     /// CR 400.7: the incarnation the triggering event proves for `object_id`, or

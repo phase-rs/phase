@@ -8848,9 +8848,16 @@ fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> 
     {
         return None;
     }
-    let subject = nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+    // CR 615.1a: In passive phrasing, the damage source is introduced by "by <subject>"
+    // following the damage verb "dealt" — either immediately ("dealt by <subject>")
+    // or separated by recipient/duration clauses ("dealt to <recipient> [this turn] by <subject>").
+    // Bound the passive scan to the sentence carrying the "dealt" clause so a trailing "by"
+    // clause in a later sentence cannot become the source restriction for this shield.
+    let sentence = sentence_carrying_anchor(norm_lower, "dealt").unwrap_or(norm_lower);
+    let (_, (_, after_dealt)) = nom_primitives::split_once_on(sentence, "dealt").ok()?;
+    let subject = nom_primitives::scan_at_word_boundaries(after_dealt, |input| {
         preceded(
-            tag::<_, _, OracleError<'_>>("dealt by "),
+            tag::<_, _, OracleError<'_>>("by "),
             take_damage_source_subject_clause,
         )
         .parse(input)
@@ -29123,7 +29130,8 @@ mod snapshot_tests {
 mod opposition_agent_parser_tests {
     use super::*;
     use crate::types::ability::{
-        CastingPermission, ManaSpendPermission, PermissionGrantee, RestrictionExpiry, ShieldKind,
+        CastingPermission, CombatRelation, CombatRelationDirection, CombatRelationSubject,
+        ManaSpendPermission, PermissionGrantee, RestrictionExpiry, ShieldKind,
     };
     use crate::types::card_type::CoreType;
     use crate::types::statics::{CastFrequency, ProhibitionScope, StaticMode};
@@ -29568,6 +29576,64 @@ mod opposition_agent_parser_tests {
         assert_eq!(
             ls, None,
             "CR 615.1a: unsupported qualifiers must fail closed rather than dropping restrictions"
+        );
+    }
+
+    #[test]
+    fn wall_of_vapor_and_armored_transport_damage_source_scope() {
+        // CR 615.1a + CR 509.1g: Wall of Vapor prevents damage from creatures it's blocking.
+        // The damage_source_filter must be scoped via CombatRelation::Live(BlockedBy), so it does not
+        // prevent damage from spells or unblocked creatures.
+        let wov = parse_replacement_line(
+            "Prevent all damage that would be dealt to this creature by creatures it's blocking.",
+            "Wall of Vapor",
+        )
+        .expect("Wall of Vapor prevention replacement must parse");
+        assert_eq!(wov.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            wov.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        assert_eq!(
+            wov.damage_source_filter,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::CombatRelation {
+                    relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
+                    subject: CombatRelationSubject::Source,
+                }]
+            )))
+        );
+
+        // CR 615.1a + CR 509.1g: Armored Transport prevents combat damage from creatures blocking it.
+        let at = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to this creature by creatures blocking it.",
+            "Armored Transport",
+        )
+        .expect("Armored Transport prevention replacement must parse");
+        assert_eq!(at.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(at.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            at.damage_source_filter,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::CombatRelation {
+                    relation: CombatRelation::Live(CombatRelationDirection::Blocking),
+                    subject: CombatRelationSubject::Source,
+                }]
+            )))
+        );
+
+        // CR 615.1a: Passive source scan must be bounded to its own sentence and not cross into later sentences.
+        let _multi_sentence = parse_replacement_line(
+            "Prevent all damage that would be dealt to this creature. Prevent all damage that would be dealt to another creature you control by red creatures.",
+            "Test Card",
+        );
+        // The first sentence has no "by <source>" clause and must not inherit "by red creatures" from the second sentence.
+        assert_eq!(
+            parse_damage_source_filter_passive("prevent all damage that would be dealt to this creature. prevent all damage that would be dealt to another creature you control by red creatures."),
+            None,
+            "passive source scan for first sentence must not cross sentence boundary into later 'by' clause"
         );
     }
 

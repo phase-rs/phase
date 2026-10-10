@@ -18,11 +18,12 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, StackEntryKind};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::KeywordKind;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::zones::Zone;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
@@ -395,6 +396,124 @@ impl DamageContext {
             lifelink_bonus: 0,
         }
     }
+
+    /// CR 113.7a + CR 608.2h: Build context from last known information snapshot
+    /// when the named damage source has left the battlefield.
+    pub(crate) fn from_lki(
+        source_id: ObjectId,
+        source_incarnation: Option<u64>,
+        lki: &crate::types::game_state::LKISnapshot,
+    ) -> Self {
+        Self {
+            source_id,
+            source_incarnation,
+            controller: lki.controller,
+            source_is_creature: lki.card_types.contains(&CoreType::Creature),
+            has_deathtouch: lki
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Deathtouch)),
+            has_lifelink: lki.keywords.iter().any(|k| matches!(k, Keyword::Lifelink)),
+            has_wither: lki.keywords.iter().any(|k| matches!(k, Keyword::Wither)),
+            has_infect: lki.keywords.iter().any(|k| matches!(k, Keyword::Infect)),
+            combat_damage_poison: lki
+                .keywords
+                .iter()
+                .filter_map(|k| match k {
+                    Keyword::Toxic(n) => Some(*n),
+                    _ => None,
+                })
+                .sum(),
+            excess_recipient: None,
+            lifelink_bonus: 0,
+        }
+    }
+}
+
+/// CR 113.7a + CR 400.7 + CR 608.2h: Resolves damage context for `DamageSource::TriggeringSource`.
+/// Checks captured identities (`triggering_object`, `triggering_host`) with exact incarnation.
+/// If a named damage source has departed the battlefield, uses its exact LKI from `zone_changes_this_turn`
+/// rather than falling back to raw events (which falsely attribute damage to event counterparts).
+fn damage_context_for_triggering_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> DamageContext {
+    if let Some(trig_obj) = ability.triggering_object {
+        if let Some(obj) = state.objects.get(&trig_obj.object_id) {
+            if obj.zone == Zone::Battlefield
+                && trig_obj
+                    .incarnation
+                    .is_none_or(|inc| obj.incarnation == inc)
+            {
+                if let Some(ctx) = DamageContext::from_source(state, trig_obj.object_id) {
+                    return ctx;
+                }
+            }
+        }
+        // CR 113.7a + CR 608.2h: Departed named damage source uses exact LKI from zone_changes_this_turn.
+        let departure = state.zone_changes_this_turn.iter().rev().find(|r| {
+            r.object_id == trig_obj.object_id
+                && r.from_zone == Some(Zone::Battlefield)
+                && trig_obj.incarnation.is_none_or(|inc| {
+                    r.trigger_source_context()
+                        .is_some_and(|ctx| ctx.identity.reference.incarnation == inc)
+                })
+        });
+        if let Some(record) = departure {
+            if let Some(ctx) = record.trigger_source_context() {
+                return DamageContext::from_lki(
+                    trig_obj.object_id,
+                    Some(ctx.identity.reference.incarnation),
+                    &ctx.lki,
+                );
+            }
+        }
+        return DamageContext::from_source(state, trig_obj.object_id)
+            .unwrap_or_else(|| DamageContext::fallback(trig_obj.object_id, ability.controller));
+    }
+
+    if let Some(host_ref) = ability.triggering_host {
+        if let Some(obj) = state.objects.get(&host_ref.object_id) {
+            if obj.zone == Zone::Battlefield && obj.incarnation == host_ref.incarnation {
+                if let Some(ctx) = DamageContext::from_source(state, host_ref.object_id) {
+                    return ctx;
+                }
+            }
+        }
+        // CR 113.7a + CR 608.2h: Departed named damage source uses exact LKI from zone_changes_this_turn.
+        let departure = state.zone_changes_this_turn.iter().rev().find(|r| {
+            r.object_id == host_ref.object_id
+                && r.from_zone == Some(Zone::Battlefield)
+                && r.trigger_source_context()
+                    .is_some_and(|ctx| ctx.identity.reference.incarnation == host_ref.incarnation)
+        });
+        if let Some(record) = departure {
+            if let Some(ctx) = record.trigger_source_context() {
+                return DamageContext::from_lki(
+                    host_ref.object_id,
+                    Some(ctx.identity.reference.incarnation),
+                    &ctx.lki,
+                );
+            }
+        }
+        return DamageContext::from_source(state, host_ref.object_id)
+            .unwrap_or_else(|| DamageContext::fallback(host_ref.object_id, ability.controller));
+    }
+
+    // Fall back to raw event only when no captured identity exists
+    let effective_event = state.current_trigger_event.as_ref().or_else(|| {
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|e| match &e.kind {
+                StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
+                _ => None,
+            })
+    });
+    effective_event
+        .and_then(crate::game::targeting::extract_source_from_event)
+        .and_then(|id| DamageContext::from_source(state, id))
+        .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller))
 }
 
 impl From<DamageContextSnapshot> for DamageContext {
@@ -1504,14 +1623,9 @@ fn single_damage_source(
         Some(DamageSource::Target) => target_damage_source(state, ability),
         // "That creature/permanent deals damage..." inside a triggered ability
         // binds the damage source to the triggering event object.
-        Some(DamageSource::TriggeringSource) => Some(
-            state
-                .current_trigger_event
-                .as_ref()
-                .and_then(crate::game::targeting::extract_source_from_event)
-                .and_then(|id| DamageContext::from_source(state, id))
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        ),
+        Some(DamageSource::TriggeringSource) => {
+            Some(damage_context_for_triggering_source(state, ability))
+        }
         None => Some(
             DamageContext::from_source(state, ability.source_id)
                 .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
@@ -1947,12 +2061,9 @@ pub fn resolve_all(
         Some(DamageSource::Target) => {
             target_source_ctx.expect("Target damage source resolved before the recipient set")
         }
-        Some(DamageSource::TriggeringSource) => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
-            .and_then(|id| DamageContext::from_source(state, id))
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        Some(DamageSource::TriggeringSource) => {
+            damage_context_for_triggering_source(state, ability)
+        }
         None => DamageContext::from_source(state, ability.source_id)
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         // CR 120.1: `EachTarget` (multi-source per-power) is only produced by the

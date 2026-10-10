@@ -4222,6 +4222,9 @@ fn walk_ability(
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         force_block_attacker: _, // exact force-block referent, no read/write effect
+        triggering_host: _,    // exact triggered-host authority, no read/write effect
+        triggering_object: _,  // exact triggering-object referent, no read/write effect
+        triggering_counterpart: _, // exact counterpart combatant, no read/write effect
         target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no read/write effect
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect

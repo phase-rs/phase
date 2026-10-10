@@ -1501,6 +1501,7 @@ mod vorinclex_loyalty_actor_scope;
 mod vraska_betrayals_sting;
 mod vrestin_menoptra_leader_5949;
 mod waiting_for_actor_authority_census;
+mod wall_of_vapor_damage_prevention;
 mod ward_of_bones_relative_count_cast_prohibition;
 mod ward_of_bones_relative_count_land_prohibition;
 mod warning_source_shield_persists_across_damage_steps;

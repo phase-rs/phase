@@ -11489,7 +11489,7 @@ mod tests {
         AttachCardinality, CopyRecipient, ManaProduction, ManaTargetRole, PreventionAmount,
         PreventionScope,
     };
-    use crate::types::ability::{CombatRelation, CombatRelationSubject};
+    use crate::types::ability::{CombatRelation, CombatRelationDirection, CombatRelationSubject};
 
     #[test]
     fn node_declaration_query_matches_production_role_boundaries() {
@@ -11684,7 +11684,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::CombatRelation {
                         subject: CombatRelationSubject::ParentTarget,
-                        relation: CombatRelation::BlockingOrBlockedBy,
+                        relation: CombatRelation::Live(CombatRelationDirection::Either),
                     },
                 ])),
             },
@@ -11971,7 +11971,7 @@ mod tests {
                 defender: Some(ControllerRef::You),
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::Source,
             },
         ] {

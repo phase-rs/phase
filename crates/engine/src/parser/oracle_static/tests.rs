@@ -34237,7 +34237,7 @@ fn combat_relation_subject_static_binds_source_anchored_filter() {
         };
         assert!(
             props.contains(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::Source,
             }),
             "{line:?}: expected a source-anchored BlockingOrBlockedBy prop, got {props:?}"

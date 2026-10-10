@@ -10,11 +10,11 @@ use nom::Parser;
 
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
-    CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter,
+    CombatRelationDirection, CombatRelationSubject, Comparator, ControllerRef, CountScope,
+    DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty, ObjectScope, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -6190,19 +6190,88 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
 }
 
 fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
-    let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
-        tag("creature"),
-    )
-        .parse(text)
-        .ok()?;
-    Some((
-        FilterProp::CombatRelation {
-            relation: CombatRelation::BlockingOrBlockedBy,
-            subject: CombatRelationSubject::ParentTarget,
-        },
-        text.len() - rest.len(),
+    alt((
+        // CR 509.1g/509.1h: " blocking or blocked by target creature"
+        map(
+            (
+                tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
+                tag("creature"),
+            ),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
+                subject: CombatRelationSubject::ParentTarget,
+            },
+        ),
+        // CR 509.1g/509.1h: " blocking or blocked by ~" / " blocking or blocked by this creature" / " blocking or blocked by it"
+        map(
+            preceded(
+                tag(" blocking or blocked by "),
+                alt((tag("~"), tag("this creature"), tag("it"))),
+            ),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
+                subject: CombatRelationSubject::Source,
+            },
+        ),
+        // CR 509.1g: " it's blocking", " it is blocking", " ~ is blocking", " this creature is blocking", etc.
+        map(
+            alt((
+                tag(" it's blocking"),
+                tag(" it\u{2019}s blocking"),
+                tag(" it is blocking"),
+                tag(" ~ is blocking"),
+                tag(" ~'s blocking"),
+                tag(" ~’s blocking"),
+                tag(" this creature is blocking"),
+                tag(" this creature's blocking"),
+                tag(" this creature\u{2019}s blocking"),
+            )),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
+                subject: CombatRelationSubject::Source,
+            },
+        ),
+        // CR 509.1g: " that creature is blocking", " target creature is blocking", etc.
+        map(
+            alt((
+                tag(" that creature is blocking"),
+                tag(" that creature's blocking"),
+                tag(" that creature\u{2019}s blocking"),
+                tag(" target creature is blocking"),
+                tag(" target creature's blocking"),
+                tag(" target creature\u{2019}s blocking"),
+            )),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
+                subject: CombatRelationSubject::ParentTarget,
+            },
+        ),
+        // CR 509.1g: " blocking that creature", " blocking target creature"
+        map(
+            preceded(
+                tag(" blocking "),
+                alt((tag("that creature"), tag("target creature"))),
+            ),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::Blocking),
+                subject: CombatRelationSubject::ParentTarget,
+            },
+        ),
+        // CR 509.1g: " blocking it", " blocking ~", " blocking this creature"
+        map(
+            preceded(
+                tag(" blocking "),
+                alt((tag("it"), tag("~"), tag("this creature"))),
+            ),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::Blocking),
+                subject: CombatRelationSubject::Source,
+            },
+        ),
     ))
+    .parse(text)
+    .ok()
+    .map(|(rest, prop)| (prop, text.len() - rest.len()))
 }
 
 /// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
@@ -11572,7 +11641,7 @@ mod tests {
             filter,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::Live(CombatRelationDirection::Either),
                     subject: CombatRelationSubject::ParentTarget,
                 }
             ]))

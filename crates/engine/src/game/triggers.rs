@@ -29,7 +29,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
-    ObjectId, ObjectIncarnationRef, TriggerFiring,
+    ObjectId, ObjectIncarnationRef, TriggerFiring, TriggeringObjectRef,
 };
 use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
@@ -3174,6 +3174,22 @@ fn collect_matching_triggers_inner(
                     // seed the cost-time LKI snapshot for "that creature's power."
                     pending_ability
                         .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
+                }
+                if let Some(trig_obj) = triggering_object_from_trigger_event(
+                    state,
+                    Some(&trig_def.mode),
+                    Some(obj_id),
+                    Some(&trigger_event),
+                ) {
+                    pending_ability.bind_triggering_object_recursive(Some(trig_obj));
+                }
+                if let Some(counterpart) = triggering_counterpart_from_trigger_event(
+                    state,
+                    Some(&trig_def.mode),
+                    Some(obj_id),
+                    Some(&trigger_event),
+                ) {
+                    pending_ability.bind_triggering_counterpart_recursive(Some(counterpart));
                 }
                 pending.push(MatchedTrigger {
                     trig_idx,
@@ -8574,6 +8590,164 @@ fn triggering_spell_pin(
     (obj.zone == Zone::Stack).then(|| ObjectIncarnationRef::from_object(obj))
 }
 
+/// CR 301.5a + CR 303.4b + CR 608.2c: Aura/Equipment triggers referencing the attached host
+/// (e.g. Trailblazer's Torch: "Whenever equipped creature becomes blocked, it deals 2 damage to each creature blocking it")
+/// snapshot the exact host permanent at trigger firing / instantiation time so a later re-attachment
+/// before resolution (such as via Magnetic Theft) does not redirect or empty the filter population.
+pub(super) fn triggering_host_from_source(
+    state: &GameState,
+    source_context: Option<&TriggerSourceContext>,
+    source_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    let host_id = source_context
+        .and_then(|ctx| ctx.attached_to)
+        .and_then(|target| match target {
+            crate::game::game_object::AttachTarget::Object(id) => Some(id),
+            crate::game::game_object::AttachTarget::Player(_) => None,
+        })
+        .or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|o| o.attached_to)
+                .and_then(|target| match target {
+                    crate::game::game_object::AttachTarget::Object(id) => Some(id),
+                    crate::game::game_object::AttachTarget::Player(_) => None,
+                })
+        })?;
+    state
+        .objects
+        .get(&host_id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
+/// CR 509.3c + CR 509.3d + CR 608.2c: Resolves the oriented triggering object (such as the watched attacker
+/// that became blocked in a `BecomesBlocked` trigger, or the watched blocker in a `Blocks` trigger)
+/// when the trigger fired or is placed on the stack.
+pub(super) fn triggering_object_from_trigger_event(
+    state: &GameState,
+    mode: Option<&TriggerMode>,
+    source_id: Option<ObjectId>,
+    trigger_event: Option<&GameEvent>,
+) -> Option<TriggeringObjectRef> {
+    let event = trigger_event?;
+    match event {
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *attacker,
+            };
+            Some(TriggeringObjectRef {
+                object_id: subject,
+                incarnation: state.objects.get(&subject).map(|o| o.incarnation),
+            })
+        }
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(TriggeringObjectRef {
+            object_id: *attacker,
+            incarnation: state.objects.get(attacker).map(|o| o.incarnation),
+        }),
+        GameEvent::BlockersDeclared { assignments } => {
+            let (blocker, attacker) = assignments.first()?;
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BecomesBlocked) => *attacker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *blocker,
+            };
+            Some(TriggeringObjectRef {
+                object_id: subject,
+                incarnation: state.objects.get(&subject).map(|o| o.incarnation),
+            })
+        }
+        GameEvent::ZoneChanged {
+            object_id, record, ..
+        } => {
+            let incarnation = if record.to_zone == Zone::Battlefield {
+                record.entered_incarnation
+            } else {
+                record
+                    .trigger_source_context()
+                    .map(|s| s.identity.reference.incarnation)
+            };
+            Some(TriggeringObjectRef {
+                object_id: *object_id,
+                incarnation,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// CR 509.3c + CR 509.3d + CR 400.7: Exact counterpart combatant (such as the blocker
+/// of an attacking creature, or the attacker of a blocking creature) captured
+/// when the trigger fired or is placed on the stack.
+pub(super) fn triggering_counterpart_from_trigger_event(
+    state: &GameState,
+    mode: Option<&TriggerMode>,
+    source_id: Option<ObjectId>,
+    trigger_event: Option<&GameEvent>,
+) -> Option<ObjectIncarnationRef> {
+    let event = trigger_event?;
+    let counterpart_id = match event {
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *attacker,
+            };
+            if subject == *attacker {
+                *blocker
+            } else {
+                *attacker
+            }
+        }
+        GameEvent::BlockersDeclared { assignments } => {
+            let (blocker, attacker) = assignments.first()?;
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BecomesBlocked) => *attacker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *blocker,
+            };
+            if subject == *blocker {
+                *attacker
+            } else {
+                *blocker
+            }
+        }
+        _ => return None,
+    };
+    state
+        .objects
+        .get(&counterpart_id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
 /// CR 603.3 + CR 603.3c + CR 603.3d: Push a pending trigger to the stack with
 /// its event batch keyed by entry id. Returns the new entry's `ObjectId` so
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
@@ -8855,6 +9029,28 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
     ability.bind_force_block_attacker_recursive(event_attacker);
     ability.context.triggering_spell = triggering_spell_pin(state, trigger_event.as_ref());
+    if ability.triggering_host.is_none() {
+        let host = triggering_host_from_source(state, ability.trigger_source.as_ref(), source_id);
+        ability.bind_triggering_host_recursive(host);
+    }
+    if ability.triggering_object.is_none() {
+        let trig_obj = triggering_object_from_trigger_event(
+            state,
+            None,
+            Some(source_id),
+            trigger_event.as_ref(),
+        );
+        ability.bind_triggering_object_recursive(trig_obj);
+    }
+    if ability.triggering_counterpart.is_none() {
+        let counterpart = triggering_counterpart_from_trigger_event(
+            state,
+            None,
+            Some(source_id),
+            trigger_event.as_ref(),
+        );
+        ability.bind_triggering_counterpart_recursive(counterpart);
+    }
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(
         state,
@@ -12976,6 +13172,10 @@ fn combat_relation_subject_binding_diverges(
         // both legs — the same authority `ObjectScope::Source` is adjudicated
         // non-divergent under.
         CombatRelationSubject::Source => false,
+        // CR 603.2 + CR 608.2c: the triggering object is carried by event context on both legs.
+        CombatRelationSubject::TriggeringObject => false,
+        // CR 301.5 + CR 303.4: the source's attached host is carried by `TriggerSourceContext` on both legs.
+        CombatRelationSubject::AttachedTo => false,
     }
 }
 
@@ -17049,6 +17249,8 @@ pub(super) fn build_triggered_ability_from_context(
             resolved.set_scoped_player_recursive(state.active_player);
         }
         resolved.set_trigger_source_recursive(source_context.clone());
+        let host = triggering_host_from_source(state, Some(source_context), source_id);
+        resolved.bind_triggering_host_recursive(host);
         // CR 400.7 + CR 509.1c: Source-referential force-block instructions
         // latch their source incarnation as soon as the triggered ability is
         // instantiated. EventSource remains intentionally unbound until the
@@ -17070,6 +17272,8 @@ pub(super) fn build_triggered_ability_from_context(
             controller,
         );
         resolved.set_trigger_source_recursive(source_context.clone());
+        let host = triggering_host_from_source(state, Some(source_context), source_id);
+        resolved.bind_triggering_host_recursive(host);
         if let Some(definition_ref) = definition_ref {
             resolved.set_trigger_definition_ref_recursive(definition_ref.clone());
         }
@@ -26190,6 +26394,18 @@ pub mod tests {
                 &crate::types::ability::CombatRelationSubject::Source
             ),
             "CR 400.7: the source is carried by the `TriggerSourceContext`"
+        );
+        assert!(
+            !combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::TriggeringObject
+            ),
+            "CR 603.2: triggering object is carried by event context on both legs"
+        );
+        assert!(
+            !combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::AttachedTo
+            ),
+            "CR 301.5: attached host is carried by TriggerSourceContext"
         );
         for scope in [
             crate::types::ability::PtValueScope::Current,

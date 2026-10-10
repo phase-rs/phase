@@ -4894,7 +4894,7 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
                     add_property(
                         f,
                         FilterProp::CombatRelation {
-                            relation: CombatRelation::BlockingOrBlockedBy,
+                            relation: CombatRelation::Live(CombatRelationDirection::Either),
                             subject: CombatRelationSubject::Source,
                         },
                     )
