@@ -75525,30 +75525,63 @@ fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
 
 /// CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
 /// with ~" (Summon: Esper Valigarmanda) casts one card of the source's linked
-/// exile as the ability resolves. The type-list reader would drop the link,
-/// so the head stays an honest gap and the rider after it is the standalone
-/// concession gap — never a permission over every exiled card of the types.
-/// The single-type form keeps its link (Raphael, Most Attitude).
+/// exile as the ability resolves, at its printed cost. The type list keeps the
+/// link (`ExiledBySource`), the driver is `DuringResolution`, and the any-type
+/// rider rides the cast. The single-type form keeps its link and its
+/// lingering permission (Raphael, Most Attitude), and a "play" of the
+/// type-list shape stays a gap (CR 305.1).
 #[test]
-fn cast_a_type_list_card_exiled_with_self_is_a_gap() {
+fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_pool() {
     let chain = parse_effect_chain(
         "You may cast an instant or sorcery card exiled with ~, and mana of any type can be \
          spent to cast that spell.",
         AbilityKind::Spell,
     );
     let effects = collect_chain_effects(&chain);
-    assert!(
-        matches!(
-            effects.first(),
-            Some(Effect::Unimplemented { name, .. }) if name == LINKED_EXILE_RESOLUTION_CAST_GAP
-        ),
-        "{effects:?}"
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    let Effect::CastFromZone {
+        target: TargetFilter::And { filters },
+        without_paying_mana_cost: false,
+        mode: CardPlayMode::Cast,
+        driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+        duration: None,
+        ..
+    } = effects[0]
+    else {
+        panic!("a paid resolution cast of the linked pool: {effects:?}");
+    };
+    assert_eq!(filters.len(), 2, "{filters:?}");
+    assert_eq!(filters[1], TargetFilter::ExiledBySource);
+    let TargetFilter::Typed(typed) = &filters[0] else {
+        panic!("instant or sorcery: {filters:?}");
+    };
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery
+        ])],
+        "{typed:?}"
     );
     assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::CastFromZone { .. })),
-        "no cast grant: {effects:?}"
+        typed
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }),
+        "the type leg is in exile: {typed:?}"
+    );
+
+    let play = parse_effect_chain(
+        "You may play a land or instant card exiled with ~.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*play.effect,
+            Effect::Unimplemented { name, .. } if name == LINKED_EXILE_RESOLUTION_CAST_GAP
+        ),
+        "{:?}",
+        play.effect
     );
 
     let raphael = parse_effect_chain(
@@ -75560,6 +75593,7 @@ fn cast_a_type_list_card_exiled_with_self_is_a_gap() {
             &*raphael.effect,
             Effect::CastFromZone {
                 target: TargetFilter::And { filters },
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 ..
             } if filters.contains(&TargetFilter::ExiledBySource)
         ),
@@ -81479,4 +81513,157 @@ fn a_mana_rider_conjunct_must_end_its_sentence() {
     assert!(!super::sequence::starts_bare_and_clause(&format!(
         "{bare}. draw a card"
     )));
+}
+
+/// CR 101.4c + CR 404.1 + CR 608.2c: "exile a[n] <type> card [at random] from
+/// each [opponent's] graveyard" is one card from EVERY graveyard of the
+/// population: a per-player `ChooseFromZone { Each(..) }` chosen by the
+/// controller (or at random), then `ChangeZoneAll { TrackedSet }` to exile.
+/// A targeted or mass form, or a clause that continues, is not this shape.
+#[test]
+fn exile_a_card_from_each_graveyard_chooses_one_per_graveyard() {
+    fn per_graveyard(
+        text: &str,
+    ) -> Option<(ZoneOwner, CardSelectionMode, Option<TargetFilter>, Effect)> {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::ChooseFromZone {
+            count: 1,
+            zone: Zone::Graveyard,
+            zone_owner,
+            chooser,
+            up_to: false,
+            selection,
+            filter,
+            ..
+        } = &*chain.effect
+        else {
+            return None;
+        };
+        assert_eq!(*chooser, Chooser::Controller.into(), "{text}");
+        let sub = chain.sub_ability.as_deref().expect("the exile follows");
+        Some((
+            *zone_owner,
+            *selection,
+            filter.clone(),
+            (*sub.effect).clone(),
+        ))
+    }
+    let exile_those = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        )
+    };
+
+    let (owner, selection, filter, exile) =
+        per_graveyard("Exile an instant or sorcery card from each graveyard.").unwrap();
+    assert_eq!(owner, ZoneOwner::Each(PerPlayerScope::AllPlayers));
+    assert_eq!(selection, CardSelectionMode::Chosen);
+    assert!(filter.is_some(), "the type phrase is kept");
+    assert!(exile_those(&exile), "{exile:?}");
+
+    let (owner, selection, filter, exile) =
+        per_graveyard("Exile a card at random from each opponent's graveyard.").unwrap();
+    assert_eq!(owner, ZoneOwner::Each(PerPlayerScope::Opponents));
+    assert_eq!(selection, CardSelectionMode::Random);
+    assert_eq!(filter, None, "any card");
+    assert!(exile_those(&exile), "{exile:?}");
+
+    for text in [
+        "Exile target card from each graveyard.",
+        "Exile all cards from each graveyard.",
+        "Exile a card from each graveyard you control.",
+    ] {
+        assert!(per_graveyard(text).is_none(), "{text}");
+    }
+}
+
+/// CR 608.2c: "each player who <unmodelled clause> …" (Kefka, Dancing Mad:
+/// "each player who owns a spell you cast this way loses life equal to its
+/// mana value") is an `unbound_subject` gap, never "each player". The
+/// relative clauses the parser does read keep their scopes (Kwain, Itinerant
+/// Meddler; Thornbow Archer), and a bare "each player" stays every player.
+#[test]
+fn an_unmodelled_player_relative_clause_is_an_unbound_subject() {
+    let kefka = parse_effect_chain(
+        "Each player who owns a spell you cast this way loses life equal to its mana value.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*kefka.effect,
+            Effect::Unimplemented { name, description: Some(text) }
+                if name == "unbound_subject" && text.contains("who owns a spell")
+        ),
+        "{:?}",
+        kefka.effect
+    );
+    // Grim Reminder: "each opponent who cast a spell this turn with the same
+    // name as that card loses 6 life".
+    let grim = parse_effect_chain(
+        "Each opponent who cast a spell this turn with the same name as that card loses 6 life.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*grim.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject"),
+        "{:?}",
+        grim.effect
+    );
+
+    // The reserved "who lost" head reaches the subject reader whole (Papalymo
+    // Totolymo); without its own guard the controller would sacrifice.
+    let papalymo = parse_effect_chain(
+        "Each opponent who lost life this turn sacrifices a creature with the greatest \
+         power among creatures they control.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*papalymo.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject"),
+        "{:?}",
+        papalymo.effect
+    );
+
+    let kwain = parse_effect_chain(
+        "Each player who drew a card this way gains 1 life.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            kwain.player_scope,
+            Some(PlayerFilter::PerformedActionThisWay { .. })
+        ),
+        "{:?}",
+        kwain.player_scope
+    );
+    assert!(
+        matches!(&*kwain.effect, Effect::GainLife { .. }),
+        "{:?}",
+        kwain.effect
+    );
+
+    let archer = parse_effect_chain(
+        "Each opponent who doesn't control an Elf loses 1 life.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            archer.player_scope,
+            Some(PlayerFilter::ControlsCount { .. })
+        ),
+        "{:?}",
+        archer.player_scope
+    );
+
+    let everyone = parse_effect_chain("Each player loses 1 life.", AbilityKind::Spell);
+    assert_eq!(everyone.player_scope, Some(PlayerFilter::All));
+    assert!(
+        matches!(&*everyone.effect, Effect::LoseLife { .. }),
+        "{:?}",
+        everyone.effect
+    );
 }

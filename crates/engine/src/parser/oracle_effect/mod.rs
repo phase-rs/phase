@@ -10494,8 +10494,24 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // per-object flip outcome the engine doesn't model. The type phrase would
     // otherwise stop before the relative clause and drop it silently, applying
     // the effect to EVERY object, so the clause fails closed.
-    if nom_primitives::scan_contains(&text.to_ascii_lowercase(), "whose coin comes up") {
+    let lower_head = text.to_lowercase();
+    if nom_primitives::scan_contains(&lower_head, "whose coin comes up") {
         return parsed_clause(Effect::unimplemented("per_object_coin_flip_outcome", text));
+    }
+    // CR 608.2c: a body that still opens with "who" is the relative clause of
+    // a player subject the shell peeled ("each player | who owns a spell you
+    // cast this way loses life …" — Kefka, Dancing Mad) that no subject reader
+    // models. Parsing on from its later verb would drop the restriction and
+    // apply the effect to every player of the scope, so it fails closed. The
+    // one "who"-headed body a reader does model is the villainous-choice
+    // chooser ("who lost 3 or more life this turn faces a villainous choice
+    // — …"), which `parse_villainous_choice_chooser_prefix` owns.
+    if tag::<_, _, OracleError<'_>>("who ")
+        .parse(lower_head.as_str())
+        .is_ok()
+        && parse_villainous_choice_chooser_prefix(lower_head.as_str()).is_err()
+    {
+        return parsed_clause(Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, text));
     }
     // CR 102.2 + CR 102.3 + CR 608.2c: "For each opponent, choose [up to one]
     // <type> that player controls" — the controller chooses one permanent per
@@ -10504,9 +10520,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // the following "the chosen permanents" instruction. Dispatched first: the
     // generic "choose …" arms below would read the relative "that player
     // controls" against the controller and drop the per-opponent population.
-    if let Some(clause) =
-        imperative::parse_for_each_opponent_choose_controlled(&text.to_lowercase(), ctx)
-    {
+    if let Some(clause) = imperative::parse_for_each_opponent_choose_controlled(&lower_head, ctx) {
         return clause;
     }
     // CR 608.2c: Self-ref continuation adverb. "also" after a self-ref subject
@@ -11029,6 +11043,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // cannot model as a per-iterated-player set — so it falls through to
     // `Effect::unimplemented`.
     if let Some(clause) = imperative::parse_for_each_player_exile_controlled(tp.lower, ctx) {
+        return clause;
+    }
+
+    // CR 101.4c + CR 404.1 + CR 608.2c: "exile a[n] <type> card [at random]
+    // from each [opponent's] graveyard" — one card per graveyard (Summon:
+    // Esper Valigarmanda, King Narfi's Betrayal, Kefka, Dancing Mad). Same
+    // per-player choose + mass-exile shape as Kaya above.
+    if let Some(clause) = imperative::parse_exile_one_card_from_each_graveyard(tp.lower, ctx) {
         return clause;
     }
 
@@ -30975,17 +30997,39 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     }
 
     // CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
-    // with ~" (Summon: Esper Valigarmanda) names one card of the source's
-    // linked exile, cast as the ability resolves. Branch 2 reads a type LIST
-    // through `parse_cast_type_list`, which drops the singular "exiled with ~"
-    // link the single-type reader binds ("a card exiled with ~", Raphael, Most
-    // Attitude), so the grant would cover every exiled card of those types;
-    // and it would linger past the resolution. An honest gap instead.
-    if names_a_card_exiled_with_self(rest) && parse_cast_type_list(rest).is_some() {
-        return Some(Effect::unimplemented(
-            LINKED_EXILE_RESOLUTION_CAST_GAP,
-            rest,
-        ));
+    // with ~" (Summon: Esper Valigarmanda) names ONE card of the source's
+    // linked exile, cast as the ability resolves ("You can't wait to cast it
+    // later in the turn"). The type list keeps the link here (Branch 2's
+    // `parse_cast_type_list` reader would drop it), and the `DuringResolution`
+    // driver makes the resolver offer one card of that pool at its printed
+    // cost instead of a lingering permission over every exiled card.
+    if names_a_card_exiled_with_self(rest) {
+        if let Some(mut typed_filter) = parse_cast_type_list(rest) {
+            // CR 305.1: a land is played, never cast, so a "play" of this
+            // shape has no resolution-time cast; it stays a gap.
+            if mode != CardPlayMode::Cast {
+                return Some(Effect::unimplemented(
+                    LINKED_EXILE_RESOLUTION_CAST_GAP,
+                    rest,
+                ));
+            }
+            ensure_exile_zone_on_cast_target(&mut typed_filter);
+            return Some(Effect::CastFromZone {
+                target: TargetFilter::And {
+                    filters: vec![typed_filter, TargetFilter::ExiledBySource],
+                },
+                without_paying_mana_cost: false,
+                mode,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                cast_cost_modifier: None,
+                additional_cost: None,
+            });
+        }
     }
 
     // Branch 1.9: the owned-linked + lesser-mana-value compound exile grant

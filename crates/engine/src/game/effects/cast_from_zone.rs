@@ -243,16 +243,7 @@ fn compute_hand_pick_eligible(
                 // this immediate resolution-cast transaction.
                 if private_immediate_cast {
                     return projection.as_ref().is_some_and(|projection| {
-                        projection
-                            .with_flushed_baseline(|baseline| {
-                                private_resolution_cast_request(baseline, ability, *id)
-                            })
-                            .is_some_and(|request| {
-                                projection
-                                    .spell_face_legality(ability.controller, *id, &request)
-                                    .count()
-                                    != 0
-                            })
+                        resolution_cast_is_possible(projection, ability, *id)
                     });
                 }
                 return crate::game::casting::resolution_spell_face_admission(
@@ -461,6 +452,93 @@ fn open_private_zone_cast_selection(
     Ok(())
 }
 
+/// CR 608.2d: whether `card` could be cast right now by the immediate
+/// resolution cast `ability` describes, previewed on an isolated clone of the
+/// projection's flushed baseline. Shared by every resolution-time pick so a
+/// card the caster could not cast is never offered.
+fn resolution_cast_is_possible(
+    projection: &crate::game::casting::ResolutionCastProjection,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+) -> bool {
+    projection
+        .with_flushed_baseline(|baseline| private_resolution_cast_request(baseline, ability, card))
+        .is_some_and(|request| {
+            projection
+                .spell_face_legality(ability.controller, card, &request)
+                .count()
+                != 0
+        })
+}
+
+/// CR 607.2a + CR 608.2g: Offer one card of the source's linked exile for a
+/// paid cast while the ability resolves. `pool` is already narrowed to the
+/// linked cards the clause's own filter admits, so the stashed cast keeps only
+/// that residual filter: the link is proven by the pool, and re-reading it at
+/// the later resume would consult a different linked-exile snapshot. An empty
+/// pick casts nothing and leaves the cards exiled. CR 608.2d: only cards that
+/// could be cast right now are offered; with none, the ability offers nothing.
+fn open_linked_exile_cast_selection(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    pool: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut stash = ability.clone();
+    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
+    let residual = target_filter
+        .without_exile_anaphor()
+        .unwrap_or(TargetFilter::Any);
+    if let Effect::CastFromZone { target, .. } = &mut stash.effect {
+        *target = freeze_resolution_cast_filter(state, ability, residual, None).normalized();
+    }
+    stash.targets.clear();
+    let projection = crate::game::casting::ResolutionCastProjection::new(state);
+    let pool: Vec<ObjectId> = pool
+        .into_iter()
+        .filter(|id| resolution_cast_is_possible(&projection, &stash, *id))
+        .collect();
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+        subject: None,
+    });
+    if pool.is_empty() {
+        return Ok(());
+    }
+    crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
+    state.waiting_for = WaitingFor::EffectZoneChoice {
+        player: ability.controller,
+        cards: pool,
+        count: 1,
+        min_count: 0,
+        up_to: true,
+        source_id: ability.source_id,
+        effect_kind: EffectKind::CastFromZone,
+        zone: Zone::Exile,
+        destination: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_transformed: false,
+        enters_under_player: None,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+        // CR 708.2a: cast-from-zone selection is not a face-down entry.
+        face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        count_param: 0,
+        library_position: None,
+        mass_library_order: None,
+        is_cost_payment: false,
+        enters_modified_if: None,
+        duration: None,
+    };
+    Ok(())
+}
+
 /// CR 601.2a + CR 118.9: Cast a card from a zone without paying its mana cost.
 ///
 /// Grants a `CastingPermission::ExileWithAltCost` on the target card(s),
@@ -595,6 +673,10 @@ pub fn resolve(
     // would drop every target not in `last_revealed_ids`. The remap therefore
     // only applies on the empty-target fallback below.
     let mut used_last_revealed_library_fallback = false;
+    // CR 607.2a: the pool below came from the source's linked exile, not from
+    // a declared target — an untargeted "a card exiled with ~" is chosen at
+    // resolution from that pool.
+    let mut pool_is_linked_exile = false;
     if target_filter.references_exiled_by_source()
         && matches!(
             driver,
@@ -665,6 +747,7 @@ pub fn resolve(
                     && crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
             })
             .collect();
+        pool_is_linked_exile = !target_ids.is_empty();
         // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora, Sovereign of
         // the Deep) leave the looked-at cards in the library. `Dig { keep_count:
         // 0 }` publishes them via `last_revealed_ids`, not exile links, but the
@@ -977,6 +1060,22 @@ pub fn resolve(
     // the card from whichever zone it currently occupies. Emry's "you may cast
     // that card THIS TURN" carries `duration: Some(_)` and is lowered to
     // `LingeringPermission` by the parser, so it never reaches this branch.
+    // CR 607.2a + CR 608.2g: a PAID during-resolution cast of one card of the
+    // source's linked exile ("you may cast an instant or sorcery card exiled
+    // with this Saga, and mana of any type can be spent to cast that spell" —
+    // Summon: Esper Valigarmanda). Nothing was targeted, so the caster picks
+    // the card from that pool as the ability resolves (or picks none), then
+    // pays its printed cost; it is never a lingering permission over the pool.
+    if pool_is_linked_exile
+        && !without_paying
+        && driver.is_during_resolution()
+        && alt_ability_cost.is_none()
+        && duration.is_none()
+        && !target_ids.is_empty()
+    {
+        return open_linked_exile_cast_selection(state, ability, target_filter, target_ids, events);
+    }
+
     let paid_during_resolution_cast = !without_paying
         && driver.is_during_resolution()
         && alt_ability_cost.is_none()
@@ -1439,18 +1538,32 @@ fn private_resolution_cast_request(
     ability: &ResolvedAbility,
     card: ObjectId,
 ) -> Option<crate::game::casting::ResolutionCastRequest> {
-    let (cast_transformed, alt_ability_cost, constraint, driver) = match &ability.effect {
+    let (
+        cast_transformed,
+        alt_ability_cost,
+        constraint,
+        driver,
+        without_paying,
+        mana_spend_permission,
+        additional_cost,
+    ) = match &ability.effect {
         Effect::CastFromZone {
             cast_transformed,
             alt_ability_cost,
             constraint,
             driver,
+            without_paying_mana_cost,
+            mana_spend_permission,
+            additional_cost,
             ..
         } => (
             *cast_transformed,
             alt_ability_cost.as_ref(),
             constraint.clone(),
             *driver,
+            *without_paying_mana_cost,
+            *mana_spend_permission,
+            additional_cost.clone(),
         ),
         _ => return None,
     };
@@ -1464,6 +1577,12 @@ fn private_resolution_cast_request(
             crate::game::keywords::effective_keyword_mana_cost(state, card, *keyword)
                 .map(|cost| crate::types::ability::ResolutionCastCost::AlternativeMana { cost })?
         }
+        // CR 601.2f + CR 609.4b: a paid pick (`open_linked_exile_cast_selection`)
+        // pays the card's total cost; an any-type rider changes only how.
+        None if !without_paying => crate::types::ability::ResolutionCastCost::FullCost {
+            mana_spend_permission,
+            additional_cost,
+        },
         _ => crate::types::ability::ResolutionCastCost::Free,
     };
     let constraint = constraint.or_else(|| effective_cast_from_zone_constraint(ability));

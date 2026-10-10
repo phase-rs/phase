@@ -762,13 +762,32 @@ pub(crate) fn resolve_random_in_chain(
             _ => return false,
         };
 
-    // CR 608.2d: `Each` has no single candidate pool, and a per-player random
-    // pick is unbuilt. No parse produces the combination (of the 43 cards whose
-    // text carries per-player wording, none say "at random"), so rather than
-    // build speculative machinery the pool authority rejects the owner up front
-    // and this arm keeps the rejection loud instead of reading it as an empty
-    // pool. Release behavior is a no-op resolution, as before.
-    let cards = match resolve_candidate_cards(
+    // CR 404.1 + CR 608.2c: a per-player random pick ("exile a card at random
+    // from each opponent's graveyard" — Kefka, Dancing Mad) selects `count`
+    // cards from EACH iterated player's own pool. No player chooses, so there
+    // is no order to ask for and nothing to park; the picks are published as
+    // this chain's fresh tracked set, exactly as the interactive per-player
+    // iteration accumulates them, for the `ChangeZoneAll { TrackedSet }` after
+    // it.
+    if let ZoneOwner::Each(scope) = zone_owner {
+        let spec = PerPlayerSpec::of(ability).expect("matched ChooseFromZone above");
+        let mut picked = Vec::new();
+        for player in per_player_iteration_population(state, ability, scope) {
+            let pool = spec.pool(state, ability, player);
+            let clamped = count.min(pool.len());
+            picked.extend(pool.choose_multiple(&mut state.rng, clamped).copied());
+        }
+        super::publish_fresh_tracked_set(state, picked.clone());
+        ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ChooseFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return true;
+    }
+
+    let cards = resolve_candidate_cards(
         state,
         ability,
         zone,
@@ -776,16 +795,8 @@ pub(crate) fn resolve_random_in_chain(
         zone_owner,
         filter.as_ref(),
         candidate_source,
-    ) {
-        Ok(cards) => cards,
-        Err(_) => {
-            debug_assert!(
-                !matches!(zone_owner, ZoneOwner::Each(_)),
-                "a random ChooseFromZone with a per-player zone owner has no resolution path"
-            );
-            Vec::new()
-        }
-    };
+    )
+    .unwrap_or_default();
 
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.

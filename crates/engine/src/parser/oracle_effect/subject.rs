@@ -2938,6 +2938,28 @@ fn parse_subject_application_for(
     if let Ok((rest_lower, _)) =
         alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(lower.as_str())
     {
+        // CR 608.2c: a player population restricted by a relative clause no
+        // arm here models ("each opponent who lost life this turn" — Papalymo
+        // Totolymo) is not that population: the type-phrase reader below
+        // would drop the clause, leaving a subject-less effect its controller
+        // performs. Leave it unbound so the clause fails closed
+        // (`UNBOUND_SUBJECT_GAP`).
+        if (
+            alt((
+                tag::<_, _, OracleError<'_>>("other players"),
+                tag("other player"),
+                tag("players"),
+                tag("player"),
+                tag("opponents"),
+                tag("opponent"),
+            )),
+            tag(" who "),
+        )
+            .parse(rest_lower)
+            .is_ok()
+        {
+            return None;
+        }
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
         let (filter, rest) = parse_type_phrase_folding(phrase);
