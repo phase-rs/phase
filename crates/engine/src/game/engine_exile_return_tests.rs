@@ -2322,8 +2322,8 @@ mod latch_window {
         plain.duration = None;
         assert!(!plain.contains_duration_event(DurationEvent::SourceLeftBattlefield));
 
-        // (latched holders, origin lookups) per buffer length.
-        let measured: Vec<(u64, u64)> = FILLER_EVENTS
+        // (latched holders, unlatched holders, origin lookups) per buffer length.
+        let measured: Vec<(Vec<ObjectId>, Vec<ObjectId>, u64)> = FILLER_EVENTS
             .into_iter()
             .map(|filler_events| {
                 let mut state = priest.state.clone();
@@ -2353,26 +2353,34 @@ mod latch_window {
                 crate::game::perf_counters::reset();
                 check_exile_returns(&mut state, &mut events);
 
-                let latched_holders = state
-                    .stack
-                    .iter()
-                    .filter(|entry| {
+                let (latched_holders, unlatched_holders): (Vec<_>, Vec<_>) =
+                    state.stack.iter().partition(|entry| {
                         !node_latches(entry.ability().expect("triggered entry")).is_empty()
-                    })
-                    .count() as u64;
+                    });
                 let lookups = crate::game::perf_counters::exile_return_latch_snapshot()
                     .trigger_origin_lookups;
-                (latched_holders, lookups)
+                (
+                    latched_holders.iter().map(|entry| entry.id).collect(),
+                    unlatched_holders.iter().map(|entry| entry.id).collect(),
+                    lookups,
+                )
             })
             .collect();
 
-        // The first element is the reach-guard (every duration-bearing holder
-        // latched, so the pass did its work); the second is one lookup per
+        // The first two elements are the reach-guard (exactly the
+        // duration-bearing holders latched, so the pass did its work and wrote
+        // each latch to its own entry); the third is one lookup per
         // duration-bearing holder whatever the buffer length.
+        let bounded_ids: Vec<ObjectId> = (0..BOUNDED_HOLDERS)
+            .map(|index| ObjectId(9_300_000 + index))
+            .collect();
+        let plain_ids: Vec<ObjectId> = (0..PLAIN_HOLDERS)
+            .map(|index| ObjectId(9_400_000 + index))
+            .collect();
         assert_eq!(
             measured,
-            [(BOUNDED_HOLDERS, BOUNDED_HOLDERS); FILLER_EVENTS.len()],
-            "(latched holders, origin lookups) for {FILLER_EVENTS:?} filler events"
+            vec![(bounded_ids, plain_ids, BOUNDED_HOLDERS); FILLER_EVENTS.len()],
+            "(latched holders, unlatched holders, origin lookups) for {FILLER_EVENTS:?} filler events"
         );
     }
 }

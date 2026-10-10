@@ -237,12 +237,12 @@ fn assert_equals_sequential(row: &str, bulk: &Drive, reference: &Drive) {
     );
     let bulk_state = serde_json::to_value(&bulk.state).expect("state serializes");
     let reference_state = serde_json::to_value(&reference.state).expect("state serializes");
-    let differing: Vec<&String> = bulk_state
-        .as_object()
-        .expect("state is an object")
-        .iter()
-        .filter(|(key, value)| reference_state.get(key.as_str()) != Some(*value))
-        .map(|(key, _)| key)
+    let bulk_map = bulk_state.as_object().expect("state is an object");
+    let reference_map = reference_state.as_object().expect("state is an object");
+    let differing: BTreeSet<&String> = bulk_map
+        .keys()
+        .chain(reference_map.keys())
+        .filter(|key| bulk_map.get(key.as_str()) != reference_map.get(key.as_str()))
         .collect();
     assert!(
         differing.is_empty(),
@@ -1504,10 +1504,17 @@ fn legendary_distinct_sources_ask_after_member_one() {
 /// member-1 fixed point refuses the run before the layer verdict is read.
 #[test]
 fn copy_branch_population_conditioned_static_refuses() {
+    // Reach guard: without Jetmir the same two-Scute copy run is admitted, so
+    // the refusal below comes from Jetmir.
+    let control = landfall_board(5, |s| scutes(s, 2));
+    let (control_bulk, _) = parity("L-SHAPE-C control", control);
+    assert_eq!(control_bulk.counters.bulk_entries, 2);
+
     let s0 = landfall_board(5, |s| {
         scutes(s, 2);
         s.add_creature_from_oracle(P0, "Jetmir, Nexus of Revels", 5, 4, JETMIR);
     });
+    assert_parsed(&s0, "Jetmir, Nexus of Revels");
     assert_eq!(s0.stack.len(), 2, "reach guard: 2 Scute triggers");
     let (bulk, reference) = parity("L-SHAPE-C", s0);
     assert_eq!(tokens_named(&reference.state, "Scute Swarm"), 2);
@@ -1603,11 +1610,20 @@ fn copy_branch_run_ends_at_the_first_member_whose_collection_is_non_empty() {
 /// by each entry, so the layer verdict refuses the run.
 #[test]
 fn population_conditioned_static_refuses() {
+    // Reach guard: without Jetmir the same two-Scute run is admitted, so the
+    // refusal below comes from Jetmir.
+    let control = landfall_board(0, |s| scutes(s, 2));
+    let (control_bulk, _) = parity("L-SHAPE control", control);
+    assert_eq!(control_bulk.counters.bulk_entries, 2);
+
     let s0 = landfall_board(0, |s| {
         scutes(s, 2);
         s.add_creature_from_oracle(P0, "Jetmir, Nexus of Revels", 5, 4, JETMIR);
     });
-    let (bulk, _) = parity("L-SHAPE", s0);
+    assert_parsed(&s0, "Jetmir, Nexus of Revels");
+    assert_eq!(s0.stack.len(), 2, "reach guard: 2 Scute triggers");
+    let (bulk, reference) = parity("L-SHAPE", s0);
+    assert_eq!(tokens_named(&reference.state, "Insect"), 2);
     assert_eq!(bulk.counters.bulk_entries, 0);
 }
 

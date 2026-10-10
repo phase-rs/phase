@@ -870,8 +870,12 @@ fn countered_back_face_spell_is_recorded_with_its_cast_face() {
         .act(GameAction::ChooseModalFace { back_face: true })
         .expect("choose the back face");
     for _ in 0..8 {
-        if let WaitingFor::ManaPayment { .. } = runner.state().waiting_for {
-            runner.act(GameAction::PassPriority).expect("finalize mana");
+        match &runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("finalize mana");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => break,
+            other => panic!("unexpected window while casting: {other:?}"),
         }
     }
     let object = &runner.state().objects[&card];
