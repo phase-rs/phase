@@ -2319,6 +2319,7 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
             legacy_quantity_ref(attr) || legacy_quantity_expr(value)
         }
         PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(legacy_player_filter),
         // The damage-source narrowing is a nested object population.
         PlayerFilter::OpponentDealtDamage { source, .. } => {
             source.as_deref().is_some_and(legacy_target_filter)
@@ -2334,6 +2335,7 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -7346,6 +7348,13 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             p
         }
         PlayerFilter::AllExcept { exclude } => rw_player_filter(exclude),
+        PlayerFilter::AnyOf { filters } => {
+            let mut p = RwProfile::empty();
+            for f in filters {
+                p.merge(rw_player_filter(f));
+            }
+            p
+        }
         // CR 603.10a: the owners of the per-source exile set are a member-bound
         // look-back referent ⇒ refuse batch-T1.
         PlayerFilter::OwnersOfCardsExiledBySource => member_bound_read(),
@@ -7379,6 +7388,9 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::VotedFor { .. }
+        // CR 115.1: a declared-target read, the same read as
+        // `ControllerRef::TargetPlayer` (no sibling-mutable state).
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::ChosenPlayer { .. } => RwProfile::empty(),
     }
 }

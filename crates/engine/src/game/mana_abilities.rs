@@ -49,7 +49,9 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 ///   checks mana affordability through the full auto-tap witness (CR 601.2g)
 ///   and honors tag-scoped mana via the correct ability index (CR 106.6).
 /// * `Planning` — used by auto-tap source scanning. Delegates to
-///   [`AbilityCost::is_payable_for_activation`] with the known `ability_index`.
+///   [`AbilityCost::is_payable_in`] with the known `ability_index` and
+///   `ObjectLegPayment::Unguided` object legs (the mana-ability payment path
+///   prompts its legs without look-ahead, as in `Current`).
 ///   That function already returns `true` for `AbilityCost::Mana` sub-costs
 ///   (CR 601.2g defers them to the mana payment step), so filter-land / Signet
 ///   costs are treated as payable during planning without duplicating the
@@ -1963,7 +1965,7 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
     // affordability via the auto-tap witness (CR 601.2g) and honors tag-scoped mana
     // via the correct ability index (CR 106.6).
     //
-    // `Planning` — delegates to `is_payable_for_activation(…, Some(ability_index))`. That function
+    // `Planning` — delegates to `is_payable_in(…, Some(ability_index), Unguided)`. That function
     // already returns `true` for `AbilityCost::Mana` sub-costs (CR 601.2g defers
     // them to the mana payment step), so filter-land / Signet costs are treated as
     // payable during planning. All other components (sacrifice, pay life, discard,
@@ -1977,7 +1979,15 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
                 }
             }
             ManaPayabilityMode::Planning => {
-                if !cost.is_payable_for_activation(state, player, source_id, Some(ability_index)) {
+                // Object-using legs are judged as the mana-ability payment
+                // path pays them (unguided), the same as `Current` readiness.
+                if !cost.is_payable_in(
+                    state,
+                    player,
+                    source_id,
+                    Some(ability_index),
+                    super::cost_payability::ObjectLegPayment::Unguided,
+                ) {
                     return false;
                 }
             }

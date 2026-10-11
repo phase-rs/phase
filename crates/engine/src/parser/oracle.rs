@@ -1984,6 +1984,9 @@ fn player_filter_uses_filter_prop(
             target_filter_uses_filter_prop(filter, pred)
         }
         PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(|f| player_filter_uses_filter_prop(f, pred)),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2005,6 +2008,7 @@ fn player_filter_uses_filter_prop(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::ParentObjectTargetOwner => false,
     }
 }

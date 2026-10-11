@@ -1096,11 +1096,17 @@ fn spell_alternative_cost_is_payable(
         }
         // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
         // hand-discard legs must be payable together (one card cannot serve two).
+        // Spell costs prompt their object legs without look-ahead.
         AbilityCost::Composite { costs } => {
             costs.iter().all(|sub_cost| {
                 spell_alternative_cost_is_payable(state, player, object_id, sub_cost)
-            }) && super::cost_payability::discard_legs_jointly_payable(
-                state, player, object_id, None, costs,
+            }) && super::cost_payability::object_cost_legs_jointly_payable(
+                state,
+                player,
+                object_id,
+                None,
+                costs,
+                super::cost_payability::ObjectLegPayment::Unguided,
             )
         }
         other => other.is_payable(state, player, object_id),
@@ -5909,7 +5915,37 @@ pub(crate) fn target_first_activation_defers_interactive_costs_to_payment_bounda
 /// interactive activation-cost component from the serialized residual. Every
 /// completed handler removes one matching leg, so repeated components and a
 /// chosen `OneOf` branch naturally re-enter here until no selection remains.
+///
+/// Legs that use up chosen objects are paid with distinct objects: the residual
+/// must still be jointly payable before anything more is surfaced (a selection
+/// that strands a later leg is refused with its whole action), and a surfaced
+/// prompt offers only the objects that keep the rest payable.
 pub(crate) fn surface_next_unpaid_interactive_activation_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    if let Some(residual) = pending.activation_cost.as_ref() {
+        if !super::cost_payability::activation_residual_jointly_payable(
+            state,
+            player,
+            pending.object_id,
+            pending.ability.context.granting_object,
+            residual,
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "The remaining cost can't be paid with distinct objects".into(),
+            ));
+        }
+    }
+    let surfaced = surface_next_interactive_activation_cost_leg(state, player, pending, events)?;
+    Ok(surfaced.map(|waiting_for| {
+        super::cost_payability::restrict_activation_prompt_to_joint_payment(state, waiting_for)
+    }))
+}
+
+fn surface_next_interactive_activation_cost_leg(
     state: &mut GameState,
     player: PlayerId,
     pending: &mut PendingCast,

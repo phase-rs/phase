@@ -210,9 +210,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 131 — `GameObject::exile_from_stack_linked_source` carries the stamping
- *      incarnation (`ObjectIncarnationRef`, CR 400.7); a v130 peer cannot
- *      decode a set rider. Wire 113 moves with it; no lobby frame names it.
+ * 132 — `GameObject::exile_from_stack_linked_source` carries the stamping
+ *      incarnation (`ObjectIncarnationRef`, CR 400.7); a v131 peer cannot
+ *      decode a set rider. Wire 114 moves with it; no lobby frame names it.
+ * 131 — PlayerFilter gains AnyOf (the union of player sets) and TargetPlayer
+ *      (the first declared player target), carried in an ability's
+ *      player_scope inside GameState — see PROTOCOL_VERSION's own `/// 131`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v130 peer cannot parse
+ *      either tag; the exact-match version check at connect refuses the
+ *      pairing. Wire 113 moves with it.
  * 130 — `GameState::linked_exile_lki` holds one incarnation-bounded
  *      `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
  *      non-empty map. Wire 112 moves with it; no lobby frame names it.
@@ -825,7 +831,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 131;
+export const PROTOCOL_VERSION = 132;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

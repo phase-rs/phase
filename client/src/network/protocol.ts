@@ -106,9 +106,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  113 — GameObject.exile_from_stack_linked_source carries the stamping incarnation
- *       (ObjectIncarnationRef) in game_setup and state_update; a v112 peer cannot decode
- *       a set rider. Bumped with full-game protocol 131.
+ *  114 — GameObject.exile_from_stack_linked_source carries the stamping incarnation
+ *       (ObjectIncarnationRef) in game_setup and state_update; a v113 peer cannot decode
+ *       a set rider. Bumped with full-game protocol 132.
+ *  113 — game_setup and state_update carry GameState whose ability player scopes
+ *       may hold PlayerFilter AnyOf / TargetPlayer. Bumped in lockstep with
+ *       full-game protocol 131.
  *  112 — GameState.linked_exile_lki holds one incarnation-bounded LinkedExileLki per
  *       departure in game_setup and state_update; a v111 peer cannot decode a non-empty
  *       map. Bumped with full-game protocol 130.
@@ -653,7 +656,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 113 as const;
+export const WIRE_PROTOCOL_VERSION = 114 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

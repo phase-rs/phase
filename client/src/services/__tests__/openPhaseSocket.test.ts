@@ -96,11 +96,11 @@ describe("openPhaseSocket", () => {
   it("resolves with serverInfo once ServerHello arrives and sends ClientHello", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 131 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 132 }));
 
     const socket = await promise;
     expect(socket.serverInfo.mode).toBe("Full");
-    expect(socket.serverInfo.protocolVersion).toBe(131);
+    expect(socket.serverInfo.protocolVersion).toBe(132);
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );
@@ -286,7 +286,18 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v130 before it can read the stack-exile rider's incarnation", async () => {
+  it("rejects Full v131 before it can read the stack-exile rider's incarnation", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 131 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v130 before it can read the coordinated player scope", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: 130 }));

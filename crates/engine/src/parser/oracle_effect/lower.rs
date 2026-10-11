@@ -6575,6 +6575,7 @@ fn strip_performed_action_this_way_clause(
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::AllExcept { .. }
+        | PlayerFilter::AnyOf { .. }
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -6590,6 +6591,7 @@ fn strip_performed_action_this_way_clause(
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::TrackedSetPossessor { .. } => return None,
     };
     let (remainder, action) =

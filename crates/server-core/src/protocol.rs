@@ -3348,13 +3348,17 @@ mod tests {
 
     /// The bump this number is at: `GameObject::exile_from_stack_linked_source`
     /// carries the stamping incarnation (`ObjectIncarnationRef`, CR 400.7); a
-    /// v130 peer cannot decode a set rider, so it must be refused before it
-    /// receives v131 state.
+    /// v131 peer cannot decode a set rider, so it must be refused before it
+    /// receives v132 state.
     ///
-    /// v130: `GameState::linked_exile_lki` holds one
-    /// incarnation-bounded `LinkedExileLki` per departure (CR 400.7); a v129 peer
-    /// cannot decode a non-empty map, so it must be refused before it receives
-    /// v130 state.
+    /// v131: `PlayerFilter` gains `AnyOf { filters }` and
+    /// `TargetPlayer`, carried in a resolving or pending ability's `player_scope`
+    /// inside `GameState`; a v130 peer cannot parse either tag, so it must be
+    /// refused before it receives v131 state.
+    ///
+    /// v130: `GameState::linked_exile_lki` holds one incarnation-bounded
+    /// `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
+    /// non-empty map, so it must be refused before it receives v130 state.
     ///
     /// v129: `WaitingFor::LoopShortcut` and
     /// `ShortcutProposal` gained a required `road: OfferRoad`. A v128 peer drops
@@ -3518,8 +3522,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_131_for_stack_exile_rider_incarnation() {
-        assert_eq!(PROTOCOL_VERSION, 131);
+    fn protocol_version_is_132_for_stack_exile_rider_incarnation() {
+        assert_eq!(PROTOCOL_VERSION, 132);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3530,7 +3534,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_131_for_stack_exile_rider_incarnation` stays
+    /// `protocol_version_is_132_for_stack_exile_rider_incarnation` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

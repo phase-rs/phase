@@ -1696,3 +1696,272 @@ fn a_debug_phase_jump_ends_every_lease() {
     assert!(runner.state().stack_bound_reveals.is_empty());
     assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
 }
+
+// ---------------------------------------------------------------------------
+// CR 701.20a + CR 608.2n: the reflexive keeps the hit revealed for its WHOLE
+// resolution. Popping it begins resolution; it leaves the stack and ceases to
+// exist only as the final part of that resolution, so a resolution that pauses
+// for a choice (here the CR 616.1 replacement order) still holds the lease.
+// ---------------------------------------------------------------------------
+
+const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
+const CORPSEJACK_MENACE: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on it instead.";
+const FURNACE: &str = "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.";
+const PLUS_ONE: &str = "If a source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 1 instead.";
+const MURDER: &str = "Destroy target creature.";
+
+fn pass_while_stacked(runner: &mut GameRunner) {
+    for _ in 0..12 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => return,
+        }
+    }
+    panic!("stack never settled: {:?}", runner.state().waiting_for);
+}
+
+/// Answer every CR 616.1 order prompt until the resolution finishes.
+fn finish_replacement_orders(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            return;
+        }
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("order the replacements");
+    }
+    panic!("replacement prompts never ended");
+}
+
+fn assert_paused_mid_resolution(state: &GameState) {
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "reach guard: resolution paused on the CR 616.1 order prompt, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.stack.is_empty(),
+        "reach guard: the reflexive was popped"
+    );
+    assert!(
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "reach guard: the reflexive is still the resolving stack object"
+    );
+}
+
+/// Yuna's Whistle over Forest, Library Beast (MV 4), three spares, with P0's
+/// Bear chosen and Hardened Scales + Corpsejack Menace on P0's side, passed
+/// until the reflexive is resolving and paused on the CR 616.1 order prompt.
+fn whistle_paused_mid_resolution(players: u8) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(players, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    scenario.add_creature_from_oracle(P0, "Corpsejack Menace", 4, 4, CORPSEJACK_MENACE);
+    let whistle = scenario
+        .add_spell_to_hand_from_oracle(P0, "Yuna's Whistle", true, YUNAS_WHISTLE)
+        .id();
+    for spare in ["Spare C", "Spare B", "Spare A"] {
+        scenario
+            .add_spell_to_library_top(P0, spare, false)
+            .as_land();
+    }
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Library Beast", false)
+        .as_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land();
+    let mut runner = scenario.build();
+
+    runner.cast(whistle).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    assert_eq!(
+        zone(runner.state(), hit),
+        Zone::Hand,
+        "reach guard: hit in hand"
+    );
+    choose(&mut runner, TargetRef::Object(bear));
+    assert_eq!(
+        runner.state().stack_bound_reveals.len(),
+        1,
+        "reach guard: the reflexive holds one lease"
+    );
+    pass_while_stacked(&mut runner);
+    assert_paused_mid_resolution(runner.state());
+    (runner, hit, bear)
+}
+
+fn assert_whistle_finished(runner: &GameRunner, hit: ObjectId, bear: ObjectId) {
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "the stack emptied");
+    assert!(
+        state.resolving_stack_entry.is_none(),
+        "reach guard: the reflexive finished resolving"
+    );
+    assert!(
+        matches!(p1p1(state, bear), 9 | 10),
+        "reach guard: Bear got (4+1)*2 or 4*2+1 counters, got {}",
+        p1p1(state, bear)
+    );
+    assert!(state.stack_bound_reveals.is_empty(), "the lease ended");
+    assert_eq!(name_seen_by(state, P1, hit), HIDDEN);
+}
+
+#[test]
+fn whistle_hit_stays_revealed_while_its_reflexive_pauses_mid_resolution() {
+    let (mut runner, hit, bear) = whistle_paused_mid_resolution(2);
+    assert!(
+        runner.state().holds_stack_bound_reveal(hit),
+        "CR 701.20a: the lease spans the reflexive's whole resolution"
+    );
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "CR 701.20a + CR 608.2n: the hit stays revealed until the reflexive finishes resolving"
+    );
+    finish_replacement_orders(&mut runner);
+    assert_whistle_finished(&runner, hit, bear);
+}
+
+#[test]
+fn a_paused_reflexive_keeps_its_lease_across_a_state_round_trip() {
+    let (mut runner, hit, bear) = whistle_paused_mid_resolution(2);
+    round_trip(&mut runner);
+    assert_paused_mid_resolution(runner.state());
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "the restored pause still holds the lease"
+    );
+    finish_replacement_orders(&mut runner);
+    assert_whistle_finished(&runner, hit, bear);
+}
+
+/// A player who neither controls the reflexive nor owns the hit leaves while
+/// the resolution is paused: the lease is untouched (CR 800.4a removes only
+/// what the leaver owns or controls), and still ends with the resolution.
+#[test]
+fn a_bystander_leaving_mid_pause_does_not_end_the_lease() {
+    let (mut runner, hit, bear) = whistle_paused_mid_resolution(3);
+    let p2 = engine::types::player::PlayerId(2);
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes mid-pause");
+    assert_paused_mid_resolution(runner.state());
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "the remaining opponent still sees the hit"
+    );
+    finish_replacement_orders(&mut runner);
+    assert_whistle_finished(&runner, hit, bear);
+}
+
+/// CR 800.4a: the reflexive's controller (the hit's owner) leaves while the
+/// resolution is paused. The hit leaves the game with its owner (CR 400.7: a
+/// new object), so no lease row may outlive it.
+#[test]
+fn the_controller_leaving_mid_pause_ends_the_lease() {
+    let (mut runner, hit, _bear) = whistle_paused_mid_resolution(3);
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes mid-pause");
+    assert!(
+        runner.state().players[0].is_eliminated,
+        "reach guard: P0 left"
+    );
+    assert_ne!(
+        runner.state().objects.get(&hit).map(|object| object.zone),
+        Some(Zone::Hand),
+        "reach guard: the hit left the game with its owner"
+    );
+    assert!(!runner.state().holds_stack_bound_reveal(hit));
+    assert!(runner.state().stack_bound_reveals.is_empty());
+}
+
+/// CR 608.2b: the reflexive's only target is destroyed in response, so it does
+/// not resolve. It still left the stack, so the lease ends with it.
+#[test]
+fn whistle_hit_is_hidden_after_its_reflexive_fizzles_at_resolution() {
+    let (mut runner, hit, bear, extras) =
+        whistle_with_reflexive_on_stack(&[(P1, "Murder", MURDER)]);
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.cast(extras[0]).target_object(bear).commit();
+    pass_while_stacked(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        zone(runner.state(), bear),
+        Zone::Graveyard,
+        "reach guard: the reflexive's target is gone"
+    );
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().stack_bound_reveals.is_empty());
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+/// The class's damage member: Calibrated Blast's reflexive pauses on P1's
+/// CR 616.1 order between two damage replacements. Its bottomed hit stays
+/// publicly revealed (unlocatably, CR 401.2) until the damage resolves.
+#[test]
+fn calibrated_blast_hit_stays_revealed_while_its_reflexive_pauses() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE);
+    scenario.add_enchantment_from_oracle(P0, "Plus One", PLUS_ONE);
+    let blast = scenario
+        .add_spell_to_hand_from_oracle(P0, "Calibrated Blast", true, CALIBRATED_BLAST)
+        .id();
+    scenario
+        .add_spell_to_library_top(P0, "Island", false)
+        .as_land();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Three Drop", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land();
+    let mut runner = scenario.build();
+
+    runner.cast(blast).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    choose(&mut runner, TargetRef::Player(P1));
+    assert!(
+        runner.state().holds_stack_bound_reveal(hit),
+        "reach guard: leased"
+    );
+    pass_while_stacked(&mut runner);
+    assert_paused_mid_resolution(runner.state());
+    assert!(
+        runner.state().holds_stack_bound_reveal(hit),
+        "CR 701.20a: the lease spans the reflexive's whole resolution"
+    );
+    assert_eq!(
+        stack_revealed_seen_by(runner.state(), P1)
+            .into_values()
+            .collect::<Vec<_>>(),
+        vec![vec!["Three Drop".to_string()]],
+        "P1 is still told what was revealed"
+    );
+    finish_replacement_orders(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(
+        matches!(runner.state().players[1].life, 12 | 13),
+        "reach guard: 3 damage doubled and plus 1, in either order; life {}",
+        runner.state().players[1].life
+    );
+    assert!(!runner.state().holds_stack_bound_reveal(hit));
+    assert!(runner.state().stack_bound_reveals.is_empty());
+}

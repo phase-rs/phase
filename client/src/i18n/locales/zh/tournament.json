@@ -1,0 +1,156 @@
+{
+  "page": {
+    "eyebrow": "赛事",
+    "landingTitle": "赛事。",
+    "landingDescription": "创建赛事、使用代码加入，或关注正在进行的赛事。",
+    "detailDescription": "赛事 {{code}}",
+    "backToList": "全部赛事"
+  },
+  "labels": {
+    "code": "代码 {{code}}",
+    "roundOf": "第 {{current}} 轮，共 {{total}} 轮",
+    "created": "创建于 {{date}}",
+    "organizer": "组织者",
+    "entered": "已参赛",
+    "spectating": "观战中",
+    "dropped": "已退赛"
+  },
+  "status": {
+    "Registration": "报名中",
+    "InProgress": "进行中",
+    "Completed": "已结束",
+    "Abandoned": "已中止"
+  },
+  "bracket": {
+    "Swiss": "瑞士轮",
+    "SingleElimination": "单败淘汰"
+  },
+  "arity": {
+    "headToHead": "一对一",
+    "pod": "{{seats}} 人一桌"
+  },
+  "list": {
+    "heading": "公开赛事",
+    "empty": "暂无赛事。",
+    "loading": "正在加载赛事…",
+    "view": "查看",
+    "entrants_one": "{{count}} 名参赛者",
+    "entrants_few": "{{count}} 名参赛者",
+    "entrants_many": "{{count}} 名参赛者",
+    "entrants_other": "{{count}} 名参赛者"
+  },
+  "create": {
+    "heading": "创建赛事",
+    "nameLabel": "赛事名称",
+    "namePlaceholder": "Friday Night Magic",
+    "arityLabel": "每场对局人数",
+    "arityHint": "2 为一对一；4 为标准的指挥官一桌。",
+    "bracketLabel": "对阵形式",
+    "totalRoundsLabel": "轮数",
+    "totalRoundsAuto": "自动",
+    "scoringLabel": "对局积分",
+    "winPointsLabel": "胜",
+    "drawPointsLabel": "平",
+    "lossPointsLabel": "负",
+    "formatLabel": "赛制",
+    "formatNone": "未指定",
+    "matchTypeLabel": "对局",
+    "matchTypeBo3": "三局两胜",
+    "matchTypeBo1": "一局定胜负",
+    "plusRoundsLabel": "额外轮数",
+    "plusRoundsHint": "在自动计算的轮数之上追加（瑞士轮加 N）。仅在“轮数”保持自动时生效。",
+    "submit": "创建赛事",
+    "submitting": "正在创建…"
+  },
+  "join": {
+    "heading": "使用代码加入",
+    "codeLabel": "赛事代码",
+    "codePlaceholder": "输入赛事代码",
+    "displayNameLabel": "显示名称",
+    "displayNamePlaceholder": "你在牌桌上的名字",
+    "submit": "加入",
+    "submitting": "正在加入…",
+    "joined": "你已参加此赛事。"
+  },
+  "detail": {
+    "loading": "正在加载赛事…",
+    "organizerControls": "组织者控制",
+    "startRound": "开始本轮",
+    "startRoundBusy": "正在开始…",
+    "endTournament": "结束赛事",
+    "endTournamentBusy": "正在结束…",
+    "endTournamentConfirm": "结束此赛事？剩余轮次将不再进行。",
+    "drop": "退赛",
+    "dropBusy": "正在退赛…",
+    "dropConfirm": "退出此赛事？你无法重新加入。",
+    "reportResult": "上报结果",
+    "yourPairing": "你的对局",
+    "noPairing": "你在本轮没有对局。"
+  },
+  "standings": {
+    "heading": "排名",
+    "empty": "暂无排名。",
+    "rank": "#",
+    "player": "牌手",
+    "matchPoints": "积分",
+    "matchPointsTitle": "对局积分",
+    "matchesPlayed": "已赛",
+    "matchesPlayedTitle": "已进行的对局数，不含轮空",
+    "byes": "轮空",
+    "byesTitle": "以轮空获得的轮次",
+    "tiebreaks": {
+      "headToHead": {
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "对手的对局胜率",
+        "gameWinPct": "GW%",
+        "gameWinPctTitle": "牌局胜率",
+        "opponentsGameWinPct": "OGW%",
+        "opponentsGameWinPctTitle": "对手的牌局胜率"
+      },
+      "multiplayer": {
+        "matchWinPct": "MW%",
+        "matchWinPctTitle": "对局胜率",
+        "opponentsAvgMatchPoints": "OAMP",
+        "opponentsAvgMatchPointsTitle": "对手的平均对局积分",
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "对手的对局胜率"
+      }
+    }
+  },
+  "pairings": {
+    "heading": "对阵",
+    "empty": "暂无对阵。",
+    "round": "第 {{round}} 轮",
+    "table": "第 {{id}} 桌",
+    "pending": "待定",
+    "versus": "vs"
+  },
+  "outcome": {
+    "bye": "轮空",
+    "forfeit": "认输 — {{winner}}",
+    "decisive": "{{winner}} 获胜",
+    "draw": "平局",
+    "gameWins": "{{name}} {{wins}}"
+  },
+  "report": {
+    "heading": "上报结果",
+    "winnerLabel": "胜者",
+    "drawOption": "平局",
+    "gameWinsLabel": "牌局胜场",
+    "gameWinsFor": "{{name}} 的牌局胜场",
+    "submit": "提交结果",
+    "submitting": "正在提交…",
+    "cancel": "取消"
+  },
+  "errors": {
+    "notOrganizer": "你不是此赛事的组织者。",
+    "notEntered": "你未参加此赛事。",
+    "serverRejected": "服务器拒绝了该请求：{{message}}",
+    "timedOut": "服务器未响应，请重试。",
+    "connectionLost": "与大厅的连接已断开。请检查你的服务器地址。",
+    "aborted": "该请求已取消。",
+    "unsupported": "该请求已发送，但此服务器版本过旧，无法确认。重试前请先查看赛事状态。",
+    "incompatible": "此服务器版本过旧，不支持该对局结构（需要大厅协议 {{needed}}）。未发送任何内容。",
+    "notFound": "没有使用该代码的赛事。"
+  }
+}

@@ -12914,10 +12914,12 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_binding_diverges),
         // CR 109.4 + CR 115.1 + CR 601.2a: the anchor lives on the resolving ability
         // (`targets` / `chosen_players` / `cast_occurrence`).
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. }
         // CR 608.2c: ledgers a RESOLUTION publishes — the zone-change and action
@@ -15567,19 +15569,22 @@ fn evaluate_trigger_condition_with_source(
             | PlayerFilter::OpponentAttackingEnchantedPlayer
             | PlayerFilter::All
             // CR 608.2c: a set-valued "all players except an anchor" population
-            // has no single-player "whose turn" semantic. Fail-closed.
+            // has no single-player "whose turn" semantic. Fail-closed. A union
+            // of player sets is likewise set-valued.
             | PlayerFilter::AllExcept { .. }
+            | PlayerFilter::AnyOf { .. }
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
             | PlayerFilter::PerformedActionThisWay { .. }
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
-            // CR 108.3 + CR 601.2a + CR 608.2c: parent-target-owner, granter-caster
-            // and resolution-scoped chosen-player anchors are effect-resolution
-            // references, not turn-binding predicates — no "whose turn" semantic.
-            // Fail-closed.
+            // CR 108.3 + CR 601.2a + CR 608.2c + CR 115.1: parent-target-owner,
+            // granter-caster, resolution-scoped chosen-player and declared-player-
+            // target anchors are effect-resolution references, not turn-binding
+            // predicates — no "whose turn" semantic. Fail-closed.
             | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::TargetPlayer
             | PlayerFilter::GrantingObjectCaster
             | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is

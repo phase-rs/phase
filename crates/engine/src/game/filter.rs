@@ -2008,34 +2008,91 @@ fn declared_player(
     crate::game::targeting::resolve_live_declared_player(state, ability?, group)
 }
 
+/// CR 115.1 + CR 608.2b: what an ability's first declared player target names
+/// as the ability resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclaredPlayerTarget {
+    /// A declared player target not recorded as illegal: the node's first
+    /// remaining player target, else the root's first declared player slot.
+    Legal(PlayerId),
+    /// CR 608.2b: the first declared player target is illegal, so a part of the
+    /// effect that requires it names nobody.
+    Illegal,
+    /// The ability declared no player target.
+    Undeclared,
+}
+
+impl DeclaredPlayerTarget {
+    /// The named player: `None` both when the declared target is illegal and
+    /// when none was declared.
+    pub(crate) fn player(self) -> Option<PlayerId> {
+        match self {
+            Self::Legal(player) => Some(player),
+            Self::Illegal | Self::Undeclared => None,
+        }
+    }
+}
+
 /// CR 608.2c: resolve the first declared player target without letting a
 /// chained node's most-recent object-target propagation hide an earlier player
-/// slot. Local targets remain the fast path; the flattened resolving root is
-/// the exact fallback used by `ParentTargetSlot` anaphors elsewhere.
-fn target_player_from_ability_or_root(
+/// slot. Local targets remain the fast path; the resolving root's declared
+/// slots are the exact fallback used by `ParentTargetSlot` anaphors elsewhere.
+///
+/// CR 608.2b: the fallback stops at the root's first declared player slot and
+/// answers `Illegal` when the resolution carrier's `illegal_target_slots` stamp
+/// marks it. The local fast path reads the node's first remaining player
+/// target: validation compacts the node's `targets` and keeps only the
+/// positions of pruned entries (`illegal_local_target_slots`), not their kind,
+/// so a node that declared a second player after a pruned one reads that second
+/// player, and a node whose only player was pruned reads the root's fallback.
+pub(crate) fn declared_target_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> DeclaredPlayerTarget {
+    let Some(ability) = ability else {
+        return DeclaredPlayerTarget::Undeclared;
+    };
+    if let Some(player) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(_) => None,
+    }) {
+        return DeclaredPlayerTarget::Legal(player);
+    }
+    let root = crate::game::targeting::resolving_root_ability(state, ability);
+    if std::ptr::eq(root, ability) {
+        return DeclaredPlayerTarget::Undeclared;
+    }
+    // CR 608.2b: "If part of the effect requires information about an illegal
+    // target, it fails to determine any such information." The stamp is a
+    // legality check only on the resolution carrier, and it numbers slots as
+    // `declared_targets_in_chain` does.
+    let checked_at_resolution = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+        .is_some_and(|carrier| std::ptr::eq(carrier, root));
+    crate::game::ability_utils::declared_targets_in_chain(root)
+        .into_iter()
+        .enumerate()
+        .find_map(|(slot, target)| match target {
+            TargetRef::Player(_)
+                if checked_at_resolution && root.illegal_target_slots.contains(&slot) =>
+            {
+                Some(DeclaredPlayerTarget::Illegal)
+            }
+            TargetRef::Player(player) => Some(DeclaredPlayerTarget::Legal(player)),
+            TargetRef::Object(_) => None,
+        })
+        .unwrap_or(DeclaredPlayerTarget::Undeclared)
+}
+
+/// The player [`declared_target_player`] names, for callers that read an
+/// illegal declared target and no declared target alike as naming nobody.
+pub(crate) fn target_player_from_ability_or_root(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
 ) -> Option<PlayerId> {
-    let ability = ability?;
-    ability
-        .targets
-        .iter()
-        .find_map(|target| match target {
-            TargetRef::Player(player) => Some(*player),
-            TargetRef::Object(_) => None,
-        })
-        .or_else(|| {
-            let root = crate::game::targeting::resolving_root_ability(state, ability);
-            if std::ptr::eq(root, ability) {
-                return None;
-            }
-            crate::game::ability_utils::flatten_targets_in_chain(root)
-                .into_iter()
-                .find_map(|target| match target {
-                    TargetRef::Player(player) => Some(player),
-                    TargetRef::Object(_) => None,
-                })
-        })
+    declared_target_player(state, ability).player()
 }
 /// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
 ///
@@ -2295,6 +2352,7 @@ pub(crate) fn player_filter_contains(
         PlayerFilter::OpponentDealtDamage { source, .. } => source.as_deref().is_some_and(recurse),
         PlayerFilter::ControlsCount { filter, .. } => recurse(filter),
         PlayerFilter::TrackedSetPossessor { filter, .. } => recurse(filter),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(|f| player_filter_contains(f, leaf)),
         // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
         // `QuantityExpr` are quantities, which the scope rule on
         // `filter_contains` assigns to the quantity authority.
@@ -2321,6 +2379,7 @@ pub(crate) fn player_filter_contains(
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
@@ -2564,6 +2623,9 @@ fn player_filter_contains_filter_prop(
         PlayerFilter::AllExcept { exclude } => {
             player_filter_contains_filter_prop(exclude, predicate)
         }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(|f| player_filter_contains_filter_prop(f, predicate)),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2585,6 +2647,7 @@ fn player_filter_contains_filter_prop(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
@@ -3490,6 +3553,9 @@ fn rewrite_player_filter_props(
         PlayerFilter::AllExcept { exclude } => {
             rewrite_player_filter_props(exclude, rewrite_node, rewrite, complete)
         }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter_mut()
+            .for_each(|f| rewrite_player_filter_props(f, rewrite_node, rewrite, complete)),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -3511,6 +3577,7 @@ fn rewrite_player_filter_props(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => {}
     }
 }
@@ -5411,7 +5478,12 @@ fn filter_inner_for_object(
                     // whenever this variant appears). CR 109.4: TargetOpponent reads
                     // identically (the opponent constraint lives in the slot).
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
-                        let target_player = target_player_from_ability_or_root(state, ability)
+                        let target_player = match declared_target_player(state, ability) {
+                            DeclaredPlayerTarget::Legal(player) => Some(player),
+                            // CR 608.2b: "Any part of the effect that requires
+                            // that information won't happen", so the filter
+                            // matches no object (never the event player's).
+                            DeclaredPlayerTarget::Illegal => None,
                             // CR 603.2: When no player target was chosen, "that
                             // player" is the triggering event's player. Non-Phase
                             // triggers resolve their player anaphor from event
@@ -5419,7 +5491,10 @@ fn filter_inner_for_object(
                             // Tyrant's "all artifacts that player controls" on a
                             // combat-damage trigger. Mirrors the TriggeringPlayer
                             // arm below; inert outside a trigger.
-                            .or_else(|| crate::game::quantity::triggering_event_player(state));
+                            DeclaredPlayerTarget::Undeclared => {
+                                crate::game::quantity::triggering_event_player(state)
+                            }
+                        };
                         match target_player {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -16894,6 +16969,89 @@ mod tests {
         assert!(
             !super::matches_target_filter(&state, creature, &slot_zero, &ctx),
             "a slot that was an illegal target at resolution matches nothing"
+        );
+    }
+
+    /// CR 608.2b + CR 115.1: for a node that declares no player target of its
+    /// own, when the chain's first declared player slot was an illegal target at
+    /// resolution, "target player" names nobody: neither the next declared
+    /// player slot nor, for "creatures target player controls", the triggering
+    /// event's player. With no player slot declared, that filter still reads the
+    /// event's player (CR 603.2).
+    #[test]
+    fn target_player_stops_at_the_first_declared_player_slot_illegal_at_resolution() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let yours = add_creature(&mut state, PlayerId(0), "Your Creature");
+        let theirs = add_creature(&mut state, PlayerId(1), "Their Creature");
+        // The triggering event names P0, the ability's controller.
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                source,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+        let declares = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                targets,
+                source,
+                PlayerId(0),
+            )
+        };
+        // Declared slots: [Player(1), Player(0)].
+        let root = declares(vec![TargetRef::Player(PlayerId(1))])
+            .sub_ability(declares(vec![TargetRef::Player(PlayerId(0))]));
+        // The reading node declares no target of its own.
+        let reader = declares(Vec::new());
+        let ctx = FilterContext::from_ability(&reader);
+        let target_players_creatures =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+        let matched = |state: &GameState| {
+            [yours, theirs].map(|creature| {
+                super::matches_target_filter(state, creature, &target_players_creatures, &ctx)
+            })
+        };
+
+        install_resolving_root(&mut state, source, root.clone());
+        assert_eq!(
+            target_player_from_ability_or_root(&state, Some(&reader)),
+            Some(PlayerId(1)),
+            "reach guard: an unstamped chain names its first declared player"
+        );
+        assert_eq!(matched(&state), [false, true]);
+
+        let mut stamped = root.clone();
+        stamped.illegal_target_slots = vec![0];
+        install_resolving_root(&mut state, source, stamped);
+        assert_eq!(
+            target_player_from_ability_or_root(&state, Some(&reader)),
+            None,
+            "an illegal first player slot is not replaced by the next player slot"
+        );
+        assert_eq!(
+            matched(&state),
+            [false, false],
+            "an illegal target player is not replaced by the event's player"
+        );
+
+        install_resolving_root(&mut state, source, declares(vec![TargetRef::Object(yours)]));
+        assert_eq!(
+            matched(&state),
+            [true, false],
+            "with no player slot declared, the event's player is read"
         );
     }
 

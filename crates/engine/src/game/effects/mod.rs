@@ -430,6 +430,11 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::AllExcept { exclude } => {
                         !matches_player_scope(state, p.id, exclude, controller, source_id)
                     }
+                    // CR 102.1 + CR 608.2c: predicate form of the union — a
+                    // player matches when any member names it.
+                    PlayerFilter::AnyOf { filters } => filters
+                        .iter()
+                        .any(|f| matches_player_scope(state, p.id, f, controller, source_id)),
                     // CR 102.2 / CR 102.3: "opponent" is a game-topology
                     // relation, not raw player-ID inequality. In team
                     // multiplayer a teammate is neither the controller nor an
@@ -583,6 +588,11 @@ pub(crate) fn matches_player_scope(
                     // (it has the ability in scope). Unreachable here — fail
                     // closed, mirroring the `ParentObjectTargetController` arm.
                     PlayerFilter::ChosenPlayer { .. } => false,
+                    // CR 115.1: the declared-target anchor needs the resolving
+                    // `ResolvedAbility` (for `ability.targets`), which this
+                    // generic scope predicate does not carry; the player_scope
+                    // driver routes it through `speed_effects::players_for_filter`.
+                    PlayerFilter::TargetPlayer => false,
                     // CR 108.3 + CR 109.4: the parent-object-target OWNER anchor
                     // likewise requires `ability.targets` to resolve via
                     // `ability_utils::parent_target_owner`. Resolved in
@@ -7052,6 +7062,7 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::ChosenPlayer { .. }
         // Turn/combat ledgers.
         | PlayerFilter::OpponentLostLife
@@ -7075,6 +7086,10 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         // Behaviour-identical while every arm above is `true`; recursing keeps it
         // from silently disagreeing with its anchor the moment one is not.
         PlayerFilter::AllExcept { exclude } => scope_keeps_scoped_whole_hand_shuffle_local(exclude),
+        // The union keeps the pair local only when every member does.
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .all(scope_keeps_scoped_whole_hand_shuffle_local),
     }
 }
 
@@ -8743,12 +8758,15 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
         // The negation wrapper inherits its inner filter's consumption: an
         // "all except <tracked-set possessor>" scope still needs the set.
         PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
+        // The union needs the set when any member does.
+        PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_references_tracked_set),
     }
 }
 
@@ -15579,7 +15597,9 @@ fn resolve_chain_body(
         let matching_players: Vec<PlayerId> = match scope {
             PlayerFilter::AllExcept { .. }
             | PlayerFilter::ParentObjectTargetController
-            | PlayerFilter::ParentObjectTargetOwner => {
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::AnyOf { .. }
+            | PlayerFilter::TargetPlayer => {
                 // CR 608.2c + CR 109.4 + CR 608.2h: these anchors are all
                 // ability-target references — the `AllExcept` exclude anchor and the
                 // direct `ParentObjectTargetController` / `ParentObjectTargetOwner`
@@ -15590,7 +15610,9 @@ fn resolve_chain_body(
                 // last-known-information lookup over `ability.targets` is
                 // unavailable). Route through the ability-aware
                 // `speed_effects::players_for_filter`, then re-impose APNAP order by
-                // intersecting against the apnap sequence.
+                // intersecting against the apnap sequence. CR 115.1 + CR 101.4:
+                // `AnyOf` resolves every member ability-aware; `TargetPlayer` reads
+                // `ability.targets`.
                 let set =
                     crate::game::effects::speed_effects::players_for_filter(state, scope, ability);
                 apnap.into_iter().filter(|pid| set.contains(pid)).collect()
@@ -20733,6 +20755,9 @@ fn scoped_player_matches_filter(
         PlayerFilter::AllExcept { exclude } => {
             !scoped_player_matches_filter(state, ability, candidate, exclude)
         }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(|f| scoped_player_matches_filter(state, ability, candidate, f)),
         PlayerFilter::OpponentLostLife => {
             crate::game::players::is_opponent(state, controller, candidate)
                 && state
@@ -20770,6 +20795,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
@@ -35167,6 +35193,395 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 115.1 + CR 101.4: an `AnyOf[Controller, TargetPlayer]`
+    /// player scope fans the instruction out to each member seat — the
+    /// declared player target included — through the ability-aware resolver,
+    /// in APNAP order regardless of member order.
+    #[test]
+    fn player_scope_any_of_controller_and_declared_target_fans_out_to_each_seat() {
+        let resolve = |controller: PlayerId, targets: Vec<TargetRef>| {
+            let mut state = GameState::new_two_player(42);
+            for i in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(10 + i),
+                    PlayerId(0),
+                    format!("P0 Library {i}"),
+                    Zone::Library,
+                );
+                create_object(
+                    &mut state,
+                    CardId(20 + i),
+                    PlayerId(1),
+                    format!("P1 Library {i}"),
+                    Zone::Library,
+                );
+            }
+            let mut ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                targets,
+                ObjectId(100),
+                controller,
+            );
+            ability.player_scope = Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+            });
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+            let drawn: Vec<PlayerId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
+                    _ => None,
+                })
+                .collect();
+            (
+                state.players[0].hand.len(),
+                state.players[1].hand.len(),
+                drawn,
+            )
+        };
+
+        // (a) Controller P0, declared target P1: both seats draw.
+        let (p0, p1, _) = resolve(PlayerId(0), vec![TargetRef::Player(PlayerId(1))]);
+        assert_eq!(p0, 1, "reach guard: the controller member draws");
+        assert_eq!(p1, 1, "the declared player target draws too");
+
+        // (b) Controller P1 (non-active), declared target P0: member order is
+        // [P1, P0], but the draws follow APNAP from the active player P0.
+        let (p0, p1, drawn) = resolve(PlayerId(1), vec![TargetRef::Player(PlayerId(0))]);
+        assert_eq!((p0, p1), (1, 1));
+        assert_eq!(drawn, vec![PlayerId(0), PlayerId(1)]);
+
+        // (c) No declared player target: `TargetPlayer` names nobody.
+        let (p0, p1, _) = resolve(PlayerId(0), Vec::new());
+        assert_eq!((p0, p1), (1, 0));
+
+        // (d) The controller is the declared target: one seat, one iteration.
+        let (p0, p1, drawn) = resolve(PlayerId(0), vec![TargetRef::Player(PlayerId(0))]);
+        assert_eq!((p0, p1), (1, 0));
+        assert_eq!(drawn, vec![PlayerId(0)]);
+    }
+
+    /// CR 102.1 + CR 608.2c + CR 115.1: the generic predicate answers `AnyOf`
+    /// by any member, and `TargetPlayer` never (it needs the resolving
+    /// ability, which only the ability-aware resolver carries).
+    #[test]
+    fn matches_player_scope_any_of_is_any_member_and_target_player_is_ability_aware_only() {
+        let state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let matches = |player: PlayerId, scope: &PlayerFilter| {
+            matches_player_scope(&state, player, scope, controller, ObjectId(100))
+        };
+        let controller_only = PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller],
+        };
+        assert!(matches(PlayerId(0), &controller_only), "reach guard");
+        assert!(!matches(PlayerId(1), &controller_only));
+
+        let controller_or_opponent = PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, PlayerFilter::Opponent],
+        };
+        assert!(matches(PlayerId(0), &controller_or_opponent));
+        assert!(matches(PlayerId(1), &controller_or_opponent));
+
+        assert!(!matches(PlayerId(0), &PlayerFilter::TargetPlayer));
+        assert!(!matches(PlayerId(1), &PlayerFilter::TargetPlayer));
+    }
+
+    /// CR 608.2b + CR 115.1: resolved from the stack, an `AnyOf[Controller,
+    /// TargetPlayer]` scope does not name a declared player target that became
+    /// illegal before resolution. A legal creature target keeps the ability
+    /// resolving, so the scoped node falls back to the stack carrier for its
+    /// player target, and that fallback must honour the carrier's legality stamp.
+    #[test]
+    fn player_scope_target_player_skips_a_player_target_illegal_at_resolution() {
+        let resolve = |target_player_has_hexproof: bool| {
+            let mut state = GameState::new_two_player(42);
+            for i in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(10 + i),
+                    PlayerId(0),
+                    format!("P0 Library {i}"),
+                    Zone::Library,
+                );
+                create_object(
+                    &mut state,
+                    CardId(20 + i),
+                    PlayerId(1),
+                    format!("P1 Library {i}"),
+                    Zone::Library,
+                );
+            }
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Ability Source".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Targeted Creature".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            if target_player_has_hexproof {
+                // "You have hexproof" on a permanent P1 controls: P1 is no longer
+                // a legal target of P0's ability.
+                let grantor = create_object(
+                    &mut state,
+                    CardId(3),
+                    PlayerId(1),
+                    "You Have Hexproof Source".to_string(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&grantor).unwrap().static_definitions =
+                    vec![StaticDefinition::new(StaticMode::Hexproof).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    )]
+                    .into();
+                crate::game::layers::flush_layers(&mut state);
+                assert!(
+                    crate::game::static_abilities::player_has_hexproof(&state, PlayerId(1)),
+                    "reach guard: the grant lands on P1"
+                );
+            }
+
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            draw.player_scope = Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+            });
+            // Declared slots: [Player(1), Object(creature)]. The damage node's
+            // player filter is rechecked as the ability resolves.
+            let root = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(
+                ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Any,
+                    },
+                    vec![TargetRef::Object(creature)],
+                    source,
+                    PlayerId(0),
+                )
+                .sub_ability(draw),
+            );
+            state.stack.push_back(StackEntry {
+                id: ObjectId(500),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(root),
+                },
+            });
+
+            let mut events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut events);
+            (
+                state.players[0].hand.len(),
+                state.players[1].hand.len(),
+                state.players[1].life,
+            )
+        };
+
+        // Reach guard: with P1 a legal target, P1 is dealt damage, and both the
+        // controller and the declared player target draw.
+        assert_eq!(resolve(false), (1, 1, 19));
+        // P1 became an illegal target; the creature target keeps the ability
+        // resolving, and only the controller draws.
+        let (p0, p1, p1_life) = resolve(true);
+        assert_eq!(
+            p0, 1,
+            "reach guard: the ability resolved for the controller"
+        );
+        assert_eq!(
+            p1_life, 20,
+            "reach guard: P1 was pruned as an illegal target at resolution"
+        );
+        assert_eq!(
+            p1, 0,
+            "an illegal player target is not named by TargetPlayer"
+        );
+    }
+
+    /// CR 608.2b + CR 603.2: an enters trigger shaped like Assassin Gauntlet's
+    /// ("When this Equipment enters, attach it to up to one target creature you
+    /// control. Tap all creatures target opponent controls."), resolved from the
+    /// stack. When the opponent became an illegal target and the creature target
+    /// keeps the trigger resolving, "creatures target opponent controls" names
+    /// nobody: it does not fall back to the enters event's player, the trigger's
+    /// own controller.
+    #[test]
+    fn target_opponent_mass_tap_taps_nobody_when_the_opponent_target_is_illegal() {
+        let resolve = |opponent_has_hexproof: bool| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Entering Equipment".to_string(),
+                Zone::Battlefield,
+            );
+            let mut creature = |card: u64, controller: PlayerId| {
+                let id = create_object(
+                    &mut state,
+                    CardId(card),
+                    controller,
+                    format!("Creature {card}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            };
+            let targeted = creature(2, PlayerId(0));
+            let yours = creature(3, PlayerId(0));
+            let theirs = creature(4, PlayerId(1));
+            if opponent_has_hexproof {
+                // "You have hexproof" on a permanent P1 controls: P1 is no longer
+                // a legal target of P0's trigger.
+                let grantor = create_object(
+                    &mut state,
+                    CardId(5),
+                    PlayerId(1),
+                    "You Have Hexproof Source".to_string(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&grantor).unwrap().static_definitions =
+                    vec![StaticDefinition::new(StaticMode::Hexproof).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    )]
+                    .into();
+                crate::game::layers::flush_layers(&mut state);
+                assert!(
+                    crate::game::static_abilities::player_has_hexproof(&state, PlayerId(1)),
+                    "reach guard: the grant lands on P1"
+                );
+            }
+
+            // Declared slots: [Object(targeted), Player(1)]. The opponent is the
+            // mass tap's companion player slot.
+            let root = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+                vec![TargetRef::Object(targeted)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent),
+                    ),
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            ));
+            state.stack.push_back(StackEntry {
+                id: ObjectId(500),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(root),
+                    condition: None,
+                    trigger_event: Some(GameEvent::ZoneChanged {
+                        object_id: source,
+                        from: Some(Zone::Hand),
+                        to: Zone::Battlefield,
+                        record: Box::new(ZoneChangeRecord::test_minimal(
+                            source,
+                            Some(Zone::Hand),
+                            Zone::Battlefield,
+                        )),
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+
+            let mut events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut events);
+            let tapped = |id: ObjectId| state.objects[&id].tapped;
+            (
+                state.objects[&targeted]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                [tapped(targeted), tapped(yours)],
+                tapped(theirs),
+            )
+        };
+
+        // Reach guard: with P1 a legal target, P1's creature is tapped and the
+        // controller's are not.
+        assert_eq!(resolve(false), (1, [false, false], true));
+        // P1 became an illegal target; the creature target keeps the trigger
+        // resolving.
+        let (counters, yours, theirs) = resolve(true);
+        assert_eq!(
+            counters, 1,
+            "reach guard: the trigger resolved through its legal creature target"
+        );
+        assert_eq!(
+            yours,
+            [false, false],
+            "an illegal target opponent does not become the enters event's player"
+        );
+        assert!(
+            !theirs,
+            "an illegal target opponent's creatures are not tapped"
+        );
+    }
+
     #[test]
     fn player_scope_discard_then_dark_deal_draws_per_players_discard_count_minus_one() {
         let mut state = GameState::new_two_player(42);
@@ -43848,6 +44263,10 @@ mod tests {
                 }),
                 caused_by: None,
             },
+            PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::Opponent],
+            },
+            PlayerFilter::TargetPlayer,
         ] {
             assert!(
                 is_player_scope_local_continuation(&scoped_move, &scoped_shuffle, &scope),
