@@ -7664,17 +7664,43 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
             .parse(input)?;
         match strip_optional_target_prefix(after_on) {
             (rest, Some(spec)) => Ok((rest, spec)),
-            // CR 601.2c + CR 115.3: "each of <N|X> target …" announces exactly N different
-            // targets for the one instance of "target"; X comes from the cost (CR 107.3a).
-            (_, None) if each_of.is_some() => {
-                let (rest, count) = terminated(
-                    parse_multi_target_count_expr,
-                    (multispace1, peek(tag("target"))),
-                )
-                .parse(after_on)?;
-                Ok((rest, MultiTargetSpec::exact(count)))
+            // CR 115.1a (MagicCompRules.txt:842) + CR 601.2c (:2467):
+            // "[each of ]one or two target …" / "[each of ]one, two, or three
+            // target …" announce a bounded target set (Predictive
+            // Preparations). The stem vocabulary is the shared
+            // `BOUNDED_TARGET_CARDINALITIES` table; the "target …" span stays
+            // unconsumed for the downstream target parse. min is 1, so
+            // CR 115.6 (zero-target legality) does not apply.
+            (_, None) => {
+                for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+                    if let Ok((after_ws, _)) =
+                        terminated(tag::<_, _, OracleError<'_>>(stem), multispace1).parse(after_on)
+                    {
+                        if peek(alt((
+                            tag::<_, _, OracleError<'_>>("target "),
+                            tag("other target "),
+                            tag("another target "),
+                        )))
+                        .parse(after_ws)
+                        .is_ok()
+                        {
+                            return Ok((after_ws, MultiTargetSpec::fixed(min, max)));
+                        }
+                    }
+                }
+                // CR 601.2c + CR 115.3: "each of <N|X> target …" announces exactly N different
+                // targets for the one instance of "target"; X comes from the cost (CR 107.3a).
+                if each_of.is_some() {
+                    let (rest, count) = terminated(
+                        parse_multi_target_count_expr,
+                        (multispace1, peek(tag("target"))),
+                    )
+                    .parse(after_on)?;
+                    Ok((rest, MultiTargetSpec::exact(count)))
+                } else {
+                    Err(oracle_err(input))
+                }
             }
-            (_, None) => Err(oracle_err(input)),
         }
     }) {
         return Some(spec);

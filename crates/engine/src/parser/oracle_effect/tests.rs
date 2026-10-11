@@ -20009,6 +20009,89 @@ fn put_counter_each_of_exact_count_target_is_exactly_multi_targeted() {
     }
 }
 
+/// Predictive Preparations (FRA): "put … counter(s) on [each of ]one or two
+/// target …" and "[each of ]one, two, or three target …" announce a bounded
+/// target set, stamped `fixed(1, 2)` / `fixed(1, 3)`.
+/// CR 115.1a (MagicCompRules.txt:842) + CR 601.2c (:2467) + CR 122.1 (:1180):
+/// the stem vocabulary is the shared `BOUNDED_TARGET_CARDINALITIES` table; min
+/// is 1, so CR 115.6 (zero-target legality) does not apply.
+/// Parity row: the chain, the counter parser, and the counter-placement
+/// recovery agree on the same spec for the same text.
+#[test]
+fn put_counter_each_of_bounded_count_target_is_bounded_multi_targeted() {
+    for (text, spec) in [
+        (
+            "Put a +1/+1 counter on each of one or two target creatures.",
+            MultiTargetSpec::fixed(1, 2),
+        ),
+        (
+            "Put a +1/+1 counter on each of one, two, or three target creatures.",
+            MultiTargetSpec::fixed(1, 3),
+        ),
+        (
+            "Put a +1/+1 counter on each of one or two other target creatures.",
+            MultiTargetSpec::fixed(1, 2),
+        ),
+        (
+            "Put a +1/+1 counter on one or two another target creature.",
+            MultiTargetSpec::fixed(1, 2),
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(def.multi_target, Some(spec.clone()), "{text}");
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::PutCounter {
+                    counter_type: ct,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(_),
+                } if *ct == CounterType::Plus1Plus1
+            ),
+            "{text}: expected a targeted PutCounter, got {:?}",
+            def.effect
+        );
+
+        let lower = text.to_lowercase();
+        let (_, _, parser_spec) =
+            counter::try_parse_put_counter(&lower, text, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("{text}: the counter parser must accept the placement"));
+        assert_eq!(parser_spec, Some(spec), "{text}: counter parser's count");
+        assert_eq!(
+            extract_put_counter_multi_target(text),
+            parser_spec,
+            "{text}: the recovery must agree with the counter parser"
+        );
+    }
+}
+
+/// Negative guards: without the inter-word space ("twotarget") or without the
+/// target article ("one or two creatures") no bounded spec is stamped.
+#[test]
+fn put_counter_bounded_count_without_space_or_article_is_not_multi_targeted() {
+    for text in [
+        "Put a +1/+1 counter on each of one or twotarget creatures.",
+        "Put a +1/+1 counter on each of one or two creatures.",
+    ] {
+        assert_eq!(
+            parse_effect_chain(text, AbilityKind::Spell).multi_target,
+            None,
+            "{text}"
+        );
+        let lower = text.to_lowercase();
+        if let Some((_, _, parser_spec)) =
+            counter::try_parse_put_counter(&lower, text, &mut ParseContext::default())
+        {
+            assert_eq!(parser_spec, None, "{text}: counter parser's count");
+        }
+        assert_eq!(
+            extract_put_counter_multi_target(text),
+            None,
+            "{text}: the recovery must decline"
+        );
+    }
+}
+
 /// Phase 11 Q-3 (iv) (preservation). The "up to" placement, a single-target
 /// placement and a distribution (CR 601.2d) keep their base specs.
 #[test]
