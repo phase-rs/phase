@@ -3346,7 +3346,12 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `WaitingFor::LoopShortcut` and
+    /// The bump this number is at: `GameState::linked_exile_lki` holds one
+    /// incarnation-bounded `LinkedExileLki` per departure (CR 400.7); a v129 peer
+    /// cannot decode a non-empty map, so it must be refused before it receives
+    /// v130 state.
+    ///
+    /// v129: `WaitingFor::LoopShortcut` and
     /// `ShortcutProposal` gained a required `road: OfferRoad`. A v128 peer drops
     /// the key from every frame it re-encodes, so the handshake refuses the
     /// pairing rather than leave the road to the legacy-offer migration's
@@ -3367,9 +3372,6 @@ mod tests {
     /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
-    /// `GameState::linked_exile_lki` holds one incarnation-bounded `LinkedExileLki` per
-    /// departure (CR 400.7); a v129 peer cannot decode a non-empty map, so it must be
-    /// refused before it receives v130 state.
     /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
     /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
     /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
