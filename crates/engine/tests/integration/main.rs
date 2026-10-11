@@ -1260,6 +1260,7 @@ mod prepared_linked_copy_sba;
 mod prepared_state_serde;
 mod primo_unbounded_fractal_counters;
 mod printed_ability_order;
+mod printed_alternative_cost_from_exile;
 mod printed_damage_prevention_survives_turn;
 mod printed_spell_graveyard_triggers;
 mod proctor_of_potential_restriction;
