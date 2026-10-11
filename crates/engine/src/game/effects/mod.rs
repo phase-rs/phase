@@ -35295,6 +35295,149 @@ mod tests {
         assert!(!matches(PlayerId(1), &PlayerFilter::TargetPlayer));
     }
 
+    /// CR 608.2b + CR 115.1: resolved from the stack, an `AnyOf[Controller,
+    /// TargetPlayer]` scope does not name a declared player target that became
+    /// illegal before resolution. A legal creature target keeps the ability
+    /// resolving, so the scoped node falls back to the stack carrier for its
+    /// player target, and that fallback must honour the carrier's legality stamp.
+    #[test]
+    fn player_scope_target_player_skips_a_player_target_illegal_at_resolution() {
+        let resolve = |target_player_has_hexproof: bool| {
+            let mut state = GameState::new_two_player(42);
+            for i in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(10 + i),
+                    PlayerId(0),
+                    format!("P0 Library {i}"),
+                    Zone::Library,
+                );
+                create_object(
+                    &mut state,
+                    CardId(20 + i),
+                    PlayerId(1),
+                    format!("P1 Library {i}"),
+                    Zone::Library,
+                );
+            }
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Ability Source".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Targeted Creature".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            if target_player_has_hexproof {
+                // "You have hexproof" on a permanent P1 controls: P1 is no longer
+                // a legal target of P0's ability.
+                let grantor = create_object(
+                    &mut state,
+                    CardId(3),
+                    PlayerId(1),
+                    "You Have Hexproof Source".to_string(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&grantor).unwrap().static_definitions =
+                    vec![StaticDefinition::new(StaticMode::Hexproof).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    )]
+                    .into();
+                crate::game::layers::flush_layers(&mut state);
+                assert!(
+                    crate::game::static_abilities::player_has_hexproof(&state, PlayerId(1)),
+                    "reach guard: the grant lands on P1"
+                );
+            }
+
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            draw.player_scope = Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+            });
+            // Declared slots: [Player(1), Object(creature)]. The damage node's
+            // player filter is rechecked as the ability resolves.
+            let root = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(
+                ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Any,
+                    },
+                    vec![TargetRef::Object(creature)],
+                    source,
+                    PlayerId(0),
+                )
+                .sub_ability(draw),
+            );
+            state.stack.push_back(StackEntry {
+                id: ObjectId(500),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(root),
+                },
+            });
+
+            let mut events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut events);
+            (
+                state.players[0].hand.len(),
+                state.players[1].hand.len(),
+                state.players[1].life,
+            )
+        };
+
+        // Reach guard: with P1 a legal target, P1 is dealt damage, and both the
+        // controller and the declared player target draw.
+        assert_eq!(resolve(false), (1, 1, 19));
+        // P1 became an illegal target; the creature target keeps the ability
+        // resolving, and only the controller draws.
+        let (p0, p1, p1_life) = resolve(true);
+        assert_eq!(
+            p0, 1,
+            "reach guard: the ability resolved for the controller"
+        );
+        assert_eq!(
+            p1_life, 20,
+            "reach guard: P1 was pruned as an illegal target at resolution"
+        );
+        assert_eq!(
+            p1, 0,
+            "an illegal player target is not named by TargetPlayer"
+        );
+    }
+
     #[test]
     fn player_scope_discard_then_dark_deal_draws_per_players_discard_count_minus_one() {
         let mut state = GameState::new_two_player(42);

@@ -2010,8 +2010,11 @@ fn declared_player(
 
 /// CR 608.2c: resolve the first declared player target without letting a
 /// chained node's most-recent object-target propagation hide an earlier player
-/// slot. Local targets remain the fast path; the flattened resolving root is
-/// the exact fallback used by `ParentTargetSlot` anaphors elsewhere.
+/// slot. Local targets remain the fast path; the resolving root's declared
+/// slots are the exact fallback used by `ParentTargetSlot` anaphors elsewhere.
+/// CR 608.2b: the fallback skips a declared slot the resolution carrier's
+/// `illegal_target_slots` stamp marks, as the validated local copy does by
+/// pruning it.
 pub(crate) fn target_player_from_ability_or_root(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -2029,11 +2032,26 @@ pub(crate) fn target_player_from_ability_or_root(
             if std::ptr::eq(root, ability) {
                 return None;
             }
-            crate::game::ability_utils::flatten_targets_in_chain(root)
+            // CR 608.2b: "If part of the effect requires information about an
+            // illegal target, it fails to determine any such information." The
+            // stamp is a legality check only on the resolution carrier, and it
+            // numbers slots as `declared_targets_in_chain` does.
+            let checked_at_resolution = state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| entry.ability())
+                .is_some_and(|carrier| std::ptr::eq(carrier, root));
+            crate::game::ability_utils::declared_targets_in_chain(root)
                 .into_iter()
-                .find_map(|target| match target {
-                    TargetRef::Player(player) => Some(player),
-                    TargetRef::Object(_) => None,
+                .enumerate()
+                .find_map(|(slot, target)| match target {
+                    TargetRef::Player(player)
+                        if !(checked_at_resolution
+                            && root.illegal_target_slots.contains(&slot)) =>
+                    {
+                        Some(player)
+                    }
+                    TargetRef::Player(_) | TargetRef::Object(_) => None,
                 })
         })
 }

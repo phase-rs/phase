@@ -28474,9 +28474,10 @@ enum TargetRead {
     /// Every read: the question "must this wait for the committed targets?".
     Any,
     /// Only reads target settlement can't bind: a player filter anchored on a
-    /// parent target (`PlayerFilter::ParentObjectTarget*`), which the filter
-    /// matcher resolves without the ability's targets. A rider that reads its
-    /// target this way can't be priced, so it is refused, never priced wrong.
+    /// parent target (`PlayerFilter::ParentObjectTarget*`) or on the declared
+    /// player target (`PlayerFilter::TargetPlayer`), which the filter matcher
+    /// resolves without the ability's targets. A rider that reads its target
+    /// this way can't be priced, so it is refused, never priced wrong.
     Unbindable,
 }
 
