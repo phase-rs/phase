@@ -478,7 +478,7 @@ fn copy_of_a_held_activated_until_exile_put_on_the_stack_after_the_source_left_s
     assert_eq!(
         runner.state().objects[&c1].zone,
         Zone::Exile,
-        "CR 610.3: Angel left before C1 was exiled, so no return is created"
+        "Angel left before C1 was exiled, so emptying the stack does not return C1"
     );
     runner
         .act(GameAction::PassPriority)
