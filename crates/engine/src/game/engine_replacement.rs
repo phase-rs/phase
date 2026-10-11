@@ -165,6 +165,51 @@ pub(crate) fn drain_pending_connive_reentry(
     }
 }
 
+/// CR 121.2 + CR 614.11a: drive every resumable draw instruction to completion
+/// or to its next pause. Returns the new `WaitingFor` when a resumed draw
+/// surfaces a choice, else `None`. Callers check for a Priority wait before
+/// calling; this helper has no entry check of its own.
+///
+/// `resume_draw_sequence` leaves a frame parked and sets `state.waiting_for`
+/// when its next draw surfaces its own choice, so any number of sequential
+/// re-pauses compose — each resume re-addresses the same frame by ID.
+///
+/// A completed draw frame also retires the emptied post-replacement frame it
+/// exposes, so the stack top seen by every caller is the frame that was beneath
+/// the draw's substitute.
+fn resume_active_draw_sequences(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    while let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id) {
+        let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Some(state.waiting_for.clone());
+        }
+        if state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.frame_id == frame_id)
+        {
+            // No frame completed or paused; avoid retrying a stalled frame.
+            break;
+        }
+        // CR 614.11a + CR 121.6b: a draw replaced by a substitute (Dredge's
+        // mill-and-return) dispatched that substitute from a post-replacement
+        // frame installed beneath this draw frame. Its dispatch finished while
+        // the draw frame was on top, so the top-only retirement could not
+        // remove it; the completed draw now exposes it, and it is retired here
+        // rather than at the next priority sweep, so a parked entry MayCost
+        // finds its permanent's `SpellResolution` on top again. The retirement
+        // never exposes another draw frame: a draw has one `MultiDraw` frame (the
+        // stack validator rejects a second one as a split draw authority), and a
+        // nested draw instruction (Teferi's Ageless Insight's "draw two cards
+        // instead") is a sequence inside that frame, which the loop's top
+        // re-read already resumes without any retirement.
+        state.remove_empty_active_post_replacement_frame();
+    }
+    None
+}
+
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
 /// action that can be parked waiting on it.
 ///
@@ -1094,22 +1139,9 @@ fn handle_replacement_choice_inner(
             // if the next unit surfaces its own choice, so an arbitrary number of
             // sequential re-pauses compose — each resume re-addresses the same
             // frame by ID.
-            while matches!(waiting_for, WaitingFor::Priority { .. }) {
-                let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id)
-                else {
-                    break;
-                };
-                let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                    break;
-                }
-                if state
-                    .active_draw_sequence()
-                    .is_some_and(|frame| frame.frame_id == frame_id)
-                {
-                    // No frame completed or paused; avoid retrying a stalled frame.
-                    break;
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = resume_active_draw_sequences(state, events) {
+                    waiting_for = wf;
                 }
             }
 
@@ -1269,12 +1301,20 @@ fn handle_replacement_choice_inner(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())
-                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
-                // owns the unpaid cost suffix.  Do not drain the ordinary
-                // effect rider before that typed root has settled it.
+                // CR 118.12 + CR 605.3b + CR 616.1 + CR 614.12a + CR 608.2c: a
+                // typed cost root that owns the unpaid cost suffix (a mana-source
+                // pause), or that owns an entry whose cost is mid-payment (both
+                // entry-MayCost roots), settles before the ordinary effect rider.
+                // An entry replacement's cost is paid, and the permanent enters,
+                // before the effect's later instructions continue; the nested
+                // resume drains that rider after the entry.
                 && !matches!(
                     state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                    Some(
+                        PendingCostMoveResume::ManaAbilityPayment { .. }
+                            | PendingCostMoveResume::ReplacementMayCost { .. }
+                            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                    )
                 )
             {
                 // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
@@ -1644,6 +1684,26 @@ fn handle_replacement_choice_inner(
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };
+            // CR 121.2 + CR 614.11a + CR 121.6b: a skipped draw inside a draw
+            // instruction that a parked unless-cost or a parked entry MayCost
+            // owns finishes that instruction before the owning payment settles,
+            // pays its later legs or issues its next instruction, mirroring the
+            // delivered arm's ordering. Gated to those parks: the CR 608.3e
+            // teardown below reads only the stack top, so completing an ordinary
+            // effect's draw frame here would expose, then clear, a continuation
+            // that today survives under the frame. Non-cost draws keep their
+            // existing priority-boundary resume.
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(
+                    PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                )
+            ) {
+                if let Some(wf) = resume_active_draw_sequences(state, events) {
+                    return Ok(wf);
+                }
+            }
             let resumed_mana_ability_cost = matches!(
                 state.pending_cost_move_resume,
                 Some(PendingCostMoveResume::ManaAbilityPayment { .. })

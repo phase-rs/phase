@@ -8,7 +8,7 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
-    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, WaitingFor,
+    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnpaidCostSuffix, WaitingFor,
     WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
@@ -1116,6 +1116,8 @@ pub(super) fn handle_unless_payment(
     // mirroring the CR 119.8 analogue (`life_costs::can_pay_life_cost` is the
     // choice-time half; `PayLifeCostResult::Prohibited` is the payment-time half).
     // Only the pay branch is refused; `PayUnlessCost { pay: false }` stays legal.
+    // The authority's fresh entry re-asks the same question on the same cost;
+    // for every arm below it is an idempotent backstop.
     if pay
         && costs::resolution_cost_includes_impossible_event(
             state,
@@ -1256,7 +1258,11 @@ pub(super) fn handle_unless_payment(
                     // `resume_counter_addition_unless_payment`, which settles
                     // it through `finish_successful_unless_payment`) instead of
                     // leaving it orphaned at bare Priority.
-                    PaymentOutcome::Paused { .. } => {
+                    PaymentOutcome::Paused { remaining_cost } => {
+                        debug_assert!(
+                            state.pending_cost_move_resume.is_none(),
+                            "an unless payment parks over a live cost-move root"
+                        );
                         state.pending_cost_move_resume =
                             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
                                 cost: poll_cost.clone(),
@@ -1264,6 +1270,12 @@ pub(super) fn handle_unless_payment(
                                 trigger_event: trigger_event.clone(),
                                 effect_description: effect_description.clone(),
                                 remaining: remaining.clone(),
+                                unpaid_suffix: remaining_cost.map(|cost| {
+                                    Box::new(UnpaidCostSuffix {
+                                        payer: player,
+                                        cost,
+                                    })
+                                }),
                             });
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
@@ -1609,11 +1621,48 @@ pub(super) fn handle_unless_payment(
                     }
                 }
             }
+            // CR 118.3: deterministic effect costs — source counters, fixed mana, a draw by the cost's context-ref player
+            // (Psychic Vortex, Decoy Gambit) — and CR 702.24a `Composite`s of them (cumulative upkeep over an effect-cost
+            // base) are paid by the single resolution payment authority without a prompt. A replacement choice on one
+            // leg parks the payment with the unpaid later legs (CR 118.12), which the resume pays.
+            AbilityCost::EffectCost { .. } | AbilityCost::Composite { .. }
+                if cost.supports_deterministic_effect_cost_payment() =>
+            {
+                match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => payment_failed = true,
+                    PaymentOutcome::Paused { remaining_cost } => {
+                        debug_assert!(
+                            state.pending_cost_move_resume.is_none(),
+                            "an unless payment parks over a live cost-move root"
+                        );
+                        state.pending_cost_move_resume =
+                            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                                cost: poll_cost.clone(),
+                                pending_effect: pending_effect.clone(),
+                                trigger_event: trigger_event.clone(),
+                                effect_description: effect_description.clone(),
+                                remaining: remaining.clone(),
+                                unpaid_suffix: remaining_cost.map(|cost| {
+                                    Box::new(UnpaidCostSuffix {
+                                        payer: player,
+                                        cost,
+                                    })
+                                }),
+                            });
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+            }
             AbilityCost::Composite { .. } => {
-                // CR 702.24a + CR 118.12: A non-all-Mana `Composite`
-                // unless-cost is not yet supported. No current MTG card
-                // produces this shape (cumulative upkeep with mixed
-                // disjunctive sub-costs is empirically Mana-only). Falling
+                // CR 702.24a + CR 118.12: A `Composite` unless-cost that is neither all-Mana nor all deterministic
+                // effect costs (a mixed `Composite`) is not yet supported; no current card produces one. Falling
                 // through to `payment_failed = true` makes the unless-effect
                 // happen, which is the rules-correct fallback for an
                 // unpayable cost (CR 118.12: declining is equivalent).
@@ -1768,32 +1817,6 @@ pub(super) fn handle_unless_payment(
             // CR 118.12a: "unless [target's controller] has [~] deal N damage to
             // them" — the payer takes damage from the ability source instead of
             // the primary effect (Blazing Salvo, Lava Blister, Barbarian Bully).
-            // CR 118.3: Deterministic effect-cost payments use the single
-            // resolution payment authority. Its shared support predicate
-            // covers source counters and fixed mana without a prompt.
-            AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => {
-                match costs::pay_ability_cost_for_resolution(
-                    state,
-                    player,
-                    &cost,
-                    pending_effect.as_ref(),
-                    events,
-                )? {
-                    PaymentOutcome::Paid => {}
-                    PaymentOutcome::Failed { .. } => payment_failed = true,
-                    PaymentOutcome::Paused { .. } => {
-                        state.pending_cost_move_resume =
-                            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-                                cost: poll_cost.clone(),
-                                pending_effect: pending_effect.clone(),
-                                trigger_event: trigger_event.clone(),
-                                effect_description: effect_description.clone(),
-                                remaining: remaining.clone(),
-                            });
-                        return Ok(action_result(events, state.waiting_for.clone()));
-                    }
-                }
-            }
             AbilityCost::EffectCost { effect } => match effect.as_ref() {
                 Effect::DealDamage { .. } => {
                     let mut damage_ability = pending_effect.as_ref().clone();
@@ -1804,25 +1827,6 @@ pub(super) fn handle_unless_payment(
                     if let Err(e) =
                         effects::deal_damage::resolve(state, &damage_ability, events)
                     {
-                        return Err(EngineError::InvalidAction(format!("{e:?}")));
-                    }
-                    if matches!(
-                        state.waiting_for,
-                        WaitingFor::ReplacementChoice { .. }
-                    ) {
-                        return Ok(action_result(events, state.waiting_for.clone()));
-                    }
-                }
-                // CR 118.12a + CR 121.3a: "unless its controller has you draw a
-                // card" (Decoy Gambit) — the payer has the spell's controller
-                // draw instead of the primary bounce. `OriginalController` on
-                // the inner `Draw` target survives via `pending_effect`.
-                Effect::Draw { .. } => {
-                    let mut draw_ability = pending_effect.as_ref().clone();
-                    draw_ability.effect = *effect.clone();
-                    draw_ability.unless_pay = None;
-                    draw_ability.sub_ability = None;
-                    if let Err(e) = effects::draw::resolve(state, &draw_ability, events) {
                         return Err(EngineError::InvalidAction(format!("{e:?}")));
                     }
                     if matches!(
@@ -2055,6 +2059,15 @@ pub(crate) fn finish_successful_unless_payment(
 /// CR 118.12 + CR 605.3b + CR 616.1: Continue an unless payment after its
 /// leading mana component was committed and a Phyrexian-style life replacement
 /// finished. The exact suffix remains a payment, not a completed unless cost.
+///
+/// CR 118.12: a latched resume by rule. It re-enters `handle_unless_payment`
+/// with the suffix after the paid mana prefix of the whole unless cost. That
+/// function's entry re-check and the authority's fresh entry ask the same
+/// CR 614.17b question, which can answer `true` only for a draw or counter leg.
+/// No admitted unless cost puts a draw leg after a mana leaf
+/// (`supports_deterministic_effect_cost_payment`), and no printed or
+/// `expand_per_counter`-synthesized mana-led unless cost carries a counter leg,
+/// so fresh and latched coincide on every shape that reaches here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     state: &mut GameState,
@@ -2522,6 +2535,24 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// mana units rather than a `PaymentOutcome` and swallows `NeedsChoice` in its
 /// `_ =>` fallback.
 ///
+/// A draw leg parks only for a genuine CR 614.1 replacement on one of its draws: Dredge, an optional skip
+/// (CR 614.1b), or a CR 616.1 ordering. A can't-draw or per-turn draw limit is a static clamp that
+/// `draw::allowed_draw_count` applies to each draw and that the authority's fresh entry refuses at choice time
+/// through `costs::resolution_cost_includes_impossible_event` (every drawer's total across the cost's legs), so
+/// it never parks here.
+///
+/// CR 702.24a: each age counter's instruction is a `Composite` leg. A pause leaves the later legs unpaid; they
+/// travel in `unpaid_suffix` with their payer, and this root pays them through the authority's latched entry
+/// (`costs::resume_ability_cost_for_resolution`), parking again, with the checkpoint payload carried forward
+/// unchanged, if a later leg pauses in turn. The paused leg's own remaining draws belong to its active draw
+/// frame (CR 614.11a), never to the suffix. It calls the authority directly rather than re-entering
+/// `handle_unless_payment`, whose live CR 614.17b re-check would re-gate a choice CR 118.12 has already latched.
+///
+/// CR 614.11a: by the time this root runs, the paused instruction has completed.
+/// `engine_replacement` drives the active draw frame to completion before it
+/// drains this root at both the delivered and the prevented boundary, so the
+/// suffix is never issued on top of an unfinished instruction.
+///
 /// The exhaustive `match` on `CostMoveDrainBoundary` is kept as an ELIGIBILITY
 /// ASSERTION, not a verdict producer. It holds `PriorityBoundary` at
 /// `unreachable!` — `drain_pending_cost_move_resume` admits only
@@ -2550,9 +2581,12 @@ pub(super) fn resume_counter_addition_unless_payment(
     boundary: CostMoveDrainBoundary,
 ) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
         pending_effect,
         trigger_event,
-        ..
+        effect_description,
+        remaining,
+        unpaid_suffix,
     }) = state.pending_cost_move_resume.take()
     else {
         unreachable!("counter-addition unless-payment resume requires its typed continuation")
@@ -2567,6 +2601,54 @@ pub(super) fn resume_counter_addition_unless_payment(
         | CostMoveDrainBoundary::ReplacementPrevented { .. } => {}
         CostMoveDrainBoundary::PriorityBoundary => {
             unreachable!("counter-addition unless-payment is not eligible at the priority boundary")
+        }
+    }
+    if let Some(suffix) = unpaid_suffix {
+        let UnpaidCostSuffix {
+            payer,
+            cost: suffix_cost,
+        } = *suffix;
+        match costs::resume_ability_cost_for_resolution(
+            state,
+            payer,
+            &suffix_cost,
+            &pending_effect,
+            events,
+        )? {
+            PaymentOutcome::Paid => {}
+            // CR 616.1 + CR 702.24a: a later leg paused on its own
+            // replacement choice. Park again with the legs still unpaid.
+            PaymentOutcome::Paused { remaining_cost } => {
+                state.pending_cost_move_resume =
+                    Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                        cost,
+                        pending_effect,
+                        trigger_event,
+                        effect_description,
+                        remaining,
+                        unpaid_suffix: remaining_cost
+                            .map(|cost| Box::new(UnpaidCostSuffix { payer, cost })),
+                    });
+                return Ok(state.waiting_for.clone());
+            }
+            // The latched entry never applies the CR 614.17b choice gate, and
+            // every admitted deterministic leg completes on a latched resume: a
+            // draw is clamped as it happens (CR 118.11 + CR 614.17a), fixed mana
+            // deposits what the pipeline allows, and a prevented counter
+            // placement completes as paid (CR 118.11 + CR 118.12). So no admitted
+            // leg returns `Failed` here; one that does is a new leg shape that
+            // forgot the latched policy, hence the assertion. The choice
+            // CR 118.12 latched still stands: settle PAID, loudly.
+            PaymentOutcome::Failed { reason } => {
+                debug_assert!(
+                    false,
+                    "a resumed unless-cost suffix failed at resolution: {reason:?}"
+                );
+                tracing::warn!(
+                    ?reason,
+                    "resumed unless-cost suffix failed; settling PAID per CR 118.12"
+                );
+            }
         }
     }
     finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)

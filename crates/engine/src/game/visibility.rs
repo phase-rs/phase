@@ -1223,6 +1223,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             // is in flight in any of these.
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }

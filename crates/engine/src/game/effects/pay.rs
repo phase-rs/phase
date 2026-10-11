@@ -4,7 +4,7 @@ use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
 use crate::types::ability::{AbilityCost, Effect, QuantityExpr, QuantityRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PayableResource, WaitingFor};
+use crate::types::game_state::{GameState, PayableResource, ResolutionPaymentOrigin, WaitingFor};
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
@@ -72,6 +72,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 118.12: a drained latched remainder or a replayed staged root resumes a
+    // choice already made. Taken once, so only this instruction — the chain's
+    // head — skips the choice gate.
+    let origin = std::mem::take(&mut state.resolving_head_payment_origin);
     let (cost, scale, payer_filter) = match &ability.effect {
         Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
@@ -104,6 +108,19 @@ pub fn resolve(
         && !state.payment_transaction_replay
         && state.payment_transaction.is_none()
     {
+        // CR 118.12: a latched Composite remainder lives only on a transaction
+        // shadow (a top-level Composite always stages, and a remainder exists
+        // only after its root paused inside that transaction), so it is drained
+        // under replay and never reaches `begin`, which would judge it fresh.
+        if !origin.is_fresh_choice() {
+            tracing::warn!(
+                "a latched Composite PayCost head reached payment_transaction::begin; judging it fresh"
+            );
+        }
+        debug_assert!(
+            matches!(origin, ResolutionPaymentOrigin::FreshChoice),
+            "a latched Composite head never opens a staged transaction"
+        );
         return crate::game::payment_transaction::begin(state, ability, events);
     }
 
@@ -127,6 +144,7 @@ pub fn resolve(
             &payment_ability,
             payer,
             &AbilityCost::Mana { cost: scaled },
+            origin,
             events,
         )?;
         return Ok(());
@@ -236,7 +254,7 @@ pub fn resolve(
             )
             .unwrap_or(0);
             let outcome =
-                resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+                resolve_ability_cost_payment(state, &payment_ability, payer, cost, origin, events)?;
             // Gate the stamp on THIS payment's outcome, not the global
             // `cost_payment_failed_flag` — a stale flag from an earlier effect
             // must not suppress the stamp for a payment that succeeded.
@@ -252,7 +270,7 @@ pub fn resolve(
         // `pay_life_as_cost`).
         _ => {
             prepare_pay_cost_life_amount(state, &mut payment_ability, cost);
-            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+            resolve_ability_cost_payment(state, &payment_ability, payer, cost, origin, events)?;
         }
     }
     Ok(())
@@ -299,14 +317,19 @@ pub(crate) fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
 /// perf fix). The authority's outcome maps to the resolution-scope failure
 /// channel (`cost_payment_failed_flag`).
 ///
-/// CR 614.17b: after the counter-placement fold, this pre-gate can also refuse a
-/// `Composite` whose payment would include an event a mandatory can't-effect
-/// forbids, not only one the payer cannot afford.
+/// CR 614.17b + CR 121.2b: every fresh payment, including a transaction-staged
+/// `Composite`, meets the choice gate at `costs::pay_ability_cost_for_resolution`;
+/// this `Composite` pre-gate is bypassed under payment-transaction replay. A
+/// latched head (a prepended remainder or the replayed root) pays through
+/// `costs::resume_ability_cost_for_resolution`; a latched `Composite` head
+/// never reaches the pre-gate, because it drains under
+/// `payment_transaction_replay`.
 fn resolve_ability_cost_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
     payer: PlayerId,
     cost: &AbilityCost,
+    origin: ResolutionPaymentOrigin,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EffectError> {
     if matches!(cost, AbilityCost::Composite { .. })
@@ -319,6 +342,7 @@ fn resolve_ability_cost_payment(
             &costs::PaymentScope::Resolution {
                 ability,
                 cost_move_root: costs::ResolutionCostMoveRoot::EffectPayCost,
+                origin,
             },
         )
     {
@@ -329,7 +353,15 @@ fn resolve_ability_cost_payment(
             },
         });
     }
-    match costs::pay_ability_cost_for_resolution(state, payer, cost, ability, events) {
+    let outcome = match origin {
+        ResolutionPaymentOrigin::FreshChoice => {
+            costs::pay_ability_cost_for_resolution(state, payer, cost, ability, events)
+        }
+        ResolutionPaymentOrigin::LatchedSuffix => {
+            costs::resume_ability_cost_for_resolution(state, payer, cost, ability, events)
+        }
+    };
+    match outcome {
         Ok(outcome @ PaymentOutcome::Paid) => Ok(outcome),
         // CR 616.1: a replacement-effect choice — or an interactive
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
@@ -3981,5 +4013,674 @@ mod tests {
             0,
             "paying 0 life draws 0 cards"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 118.12: a prepended `PayCost` remainder pays through the authority's
+    // latched entry, and the latch belongs to its head alone.
+    // -----------------------------------------------------------------------
+
+    mod latched_remainder {
+        use super::*;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::{
+            AbilityCondition, Comparator, ForwardedResultContext, PlayerFilter, RepeatContinuation,
+            SubAbilityLink,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+        use crate::types::phase::Phase;
+
+        /// Maralen of the Mornsong, verbatim Oracle text: a CR 121.3 can't-draw effect.
+        const MARALEN_ORACLE: &str = "Players can't draw cards.\n\
+            At the beginning of each player's draw step, that player loses 3 life, searches \
+            their library for a card, puts it into their hand, then shuffles.";
+
+        /// Spirit of the Labyrinth, verbatim Oracle text: a CR 121.2b one-card-per-turn limit.
+        const SPIRIT_OF_THE_LABYRINTH_ORACLE: &str =
+            "Each player can't draw more than one card each turn.";
+
+        /// Stinkweed Imp, verbatim Oracle text: Dredge 5 makes each of P0's draws a replacement choice.
+        const STINKWEED_IMP_ORACLE: &str = "Flying\n\
+            Whenever this creature deals combat damage to a creature, destroy that creature.\n\
+            Dredge 5 (If you would draw a card, you may mill five cards instead. If you do, \
+            return this card from your graveyard to your hand.)";
+
+        enum Restriction {
+            Maralen,
+            Spirit,
+        }
+
+        fn draw_cost(count: i32) -> AbilityCost {
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: count },
+                    target: TargetFilter::Controller,
+                }),
+            }
+        }
+
+        fn pay_cost(cost: AbilityCost) -> Effect {
+            Effect::PayCost {
+                cost,
+                scale: None,
+                payer: TargetFilter::Controller,
+            }
+        }
+
+        fn gain_life(amount: i32) -> Effect {
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            }
+        }
+
+        fn two_draw_legs() -> AbilityCost {
+            AbilityCost::Composite {
+                costs: vec![draw_cost(1), draw_cost(1)],
+            }
+        }
+
+        /// "P0 has at least `count` opponents": true on these two-player boards for 1, false for 5.
+        fn at_least_opponents(count: i32) -> AbilityCondition {
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+            }
+        }
+
+        /// PreCombatMain, P0's library staged, the restriction under P1, and (when `dredge`) Stinkweed Imp in
+        /// P0's graveyard. Layers are evaluated after `build()` so every static is live.
+        fn board(restriction: Restriction, dredge: bool) -> (GameRunner, ObjectId) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            if dredge {
+                scenario
+                    .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+                    .from_oracle_text(STINKWEED_IMP_ORACLE);
+            }
+            match restriction {
+                Restriction::Maralen => {
+                    scenario.add_creature_from_oracle(
+                        P1,
+                        "Maralen of the Mornsong",
+                        2,
+                        3,
+                        MARALEN_ORACLE,
+                    );
+                }
+                Restriction::Spirit => {
+                    scenario.add_creature_from_oracle(
+                        P1,
+                        "Spirit of the Labyrinth",
+                        3,
+                        1,
+                        SPIRIT_OF_THE_LABYRINTH_ORACLE,
+                    );
+                }
+            }
+            let mut runner = scenario.build();
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            (runner, source)
+        }
+
+        fn hand_size(state: &GameState) -> usize {
+            state.players[P0.0 as usize].hand.len()
+        }
+
+        fn is_dredge_prompt_for_p0(state: &GameState) -> bool {
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
+        }
+
+        fn decline_dredge(state: &mut GameState) {
+            crate::game::engine::apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+                .expect("declining Dredge is legal");
+        }
+
+        /// CR 118.12 + CR 118.11: the remainder a paused PayCost
+        /// queues pays latched. Under Maralen the draw still reaches the Draw arm (the Dredge prompt is
+        /// its marker), is clamped, and the remainder settles paid.
+        ///
+        /// Revert probe: queueing the remainder `FreshChoice` refuses it before the Draw arm (no prompt,
+        /// flag true).
+        #[test]
+        fn a_prepended_pay_cost_remainder_is_latched() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            // Pre-seeded, so a final `false` is a positive clear by `pay::resolve`.
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched remainder must reach the Draw arm's Dredge prompt"
+            );
+            decline_dredge(state);
+            assert!(
+                !state.cost_payment_failed_flag,
+                "the latched remainder is paid"
+            );
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+            // Reach guard: the same board refuses a fresh choice before the Draw arm.
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let fresh = ResolvedAbility::new(pay_cost(draw_cost(1)), vec![], source, P0);
+            let state = runner.state_mut();
+            crate::game::effects::resolve_ability_chain(state, &fresh, &mut Vec::new(), 0).unwrap();
+            assert!(
+                state.cost_payment_failed_flag,
+                "the fresh PayCost is refused"
+            );
+            assert!(
+                !is_dredge_prompt_for_p0(state),
+                "the fresh gate refuses before the Draw arm"
+            );
+        }
+
+        /// CR 118.12 + CR 121.2b (multi-authority): the latch binds the queued head only.
+        /// The head draws P0's one card; the fresh `PayCost` in its tail is then a separate choice, which
+        /// Spirit of the Labyrinth refuses. Scope: on this board the head's fresh verdict is also false, so
+        /// this row proves the tail is not latched; `a_prepended_pay_cost_remainder_is_latched` owns
+        /// "the head pays latched".
+        ///
+        /// Revert probe: reading the transient without taking it lets the tail pay latched (flag false).
+        #[test]
+        fn a_latched_head_does_not_latch_a_fresh_pay_cost_in_its_tail() {
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                pay_cost(draw_cost(1)),
+                vec![],
+                source,
+                P0,
+            )));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(
+                hand_size(state),
+                hand_before + 1,
+                "the latched head reached the Draw arm and drew"
+            );
+            assert!(
+                state.cost_payment_failed_flag,
+                "the tail's fresh PayCost is refused: P0 already drew this turn (CR 121.2b)"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.active_ability_continuation().is_none());
+        }
+
+        /// CR 118.12 + CR 608.2c: the queued head is unconditional. The root's condition held when
+        /// payment began, so a condition that no longer holds does not skip the latched head, and the
+        /// independent tail stays a fresh choice.
+        ///
+        /// Revert probe: keeping the root's condition on the remainder skips the head. The skipped head
+        /// takes its latch with it, so the tail is still a fresh choice, but it is now P0's first draw this
+        /// turn and Spirit admits it (flag false).
+        #[test]
+        fn an_unconditional_latched_head_runs_even_if_its_root_condition_no_longer_holds() {
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.condition = Some(at_least_opponents(5));
+            let mut tail = ResolvedAbility::new(pay_cost(draw_cost(1)), vec![], source, P0);
+            // An unconditional next instruction, so a skipped head would not also skip it.
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            root.sub_ability = Some(Box::new(tail));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(
+                hand_size(state),
+                hand_before + 1,
+                "the head paid latched and drew"
+            );
+            assert!(
+                state.cost_payment_failed_flag,
+                "the independent tail is a fresh choice and is refused"
+            );
+        }
+
+        /// CR 118.12 + CR 608.2c: `prepend_remaining_pay_cost_before_parked_rider` queues its suffix
+        /// latched ahead of an already-parked fresh rider. The rider record is fresh, so the suffix is spliced
+        /// onto it, and the rider still runs exactly once.
+        ///
+        /// Revert probe: queueing the suffix `FreshChoice` refuses it before the Draw arm.
+        #[test]
+        fn a_remainder_before_a_parked_rider_is_latched_and_the_rider_runs_once() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let ability = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            let rider = ResolvedAbility::new(gain_life(3), vec![], source, P0);
+            let parked = PendingContinuation::new(Box::new(rider), state);
+            state.park_ability_continuation(parked);
+            crate::game::effects::prepend_remaining_pay_cost_before_parked_rider(
+                state,
+                &ability,
+                P0,
+                draw_cost(1),
+            );
+
+            let records: Vec<&PendingContinuation> =
+                state.resolution_stack.ability_continuations().collect();
+            assert_eq!(
+                records.len(),
+                1,
+                "the suffix is spliced onto the fresh rider record"
+            );
+            assert_eq!(
+                records[0].head_payment_origin,
+                ResolutionPaymentOrigin::LatchedSuffix
+            );
+            assert_eq!(records[0].chain.effect, pay_cost(draw_cost(1)));
+            assert_eq!(
+                records[0]
+                    .chain
+                    .sub_ability
+                    .as_ref()
+                    .map(|rider| &rider.effect),
+                Some(&gain_life(3))
+            );
+
+            state.cost_payment_failed_flag = true;
+            let mut events = Vec::new();
+            crate::game::effects::drain_pending_continuation(state, &mut events);
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched suffix must reach the Draw arm's Dredge prompt"
+            );
+            decline_dredge(state);
+            assert!(
+                !state.cost_payment_failed_flag,
+                "the latched suffix is paid"
+            );
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the parked rider runs exactly once"
+            );
+        }
+
+        /// CR 118.12 + CR 608.2c: a latched head survives the forwarded-result prune. The
+        /// remainder inherits the root's empty forwarded result, and its tail depends on it, so the drain
+        /// prunes the tail; the head itself does not depend on it, so the latch travels with it.
+        ///
+        /// Revert probe: not installing the latch in the prune arm gates the head fresh (no prompt, flag
+        /// true).
+        #[test]
+        fn a_latched_head_survives_the_forwarded_result_prune() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+                targets: vec![],
+                object_incarnations: vec![],
+            }));
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::ParentTarget,
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                P0,
+            )));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+
+            // Reach guard: the drain takes the prune arm, and the head survives the prune.
+            let chain = state
+                .active_ability_continuation()
+                .expect("the remainder is queued")
+                .chain
+                .clone();
+            assert!(crate::game::effects::bound_result_is_empty(&chain));
+            assert!(crate::game::effects::ability_chain_depends_on_missing_forward_result(&chain));
+            assert!(
+                !crate::game::effects::effect_chain_depends_on_missing_forward_result(
+                    &chain.effect
+                )
+            );
+
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched head must reach the Draw arm's Dredge prompt"
+            );
+            decline_dredge(state);
+            assert!(!state.cost_payment_failed_flag, "the latched head is paid");
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+        }
+
+        /// CR 118.12 + CR 608.2c: a later instruction prepended while a latched record is the
+        /// active continuation is parked as its own record above it, never spliced ahead of the latched head.
+        /// It still resolves first; the latched record drains right after it, still latched.
+        ///
+        /// Revert probe: splicing onto the latched record hands its latch to the new head, so the PayCost
+        /// tail is gated fresh (no prompt, flag true).
+        #[test]
+        fn a_later_prepend_parks_above_a_latched_record() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let ability = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &ability,
+                P0,
+                draw_cost(1),
+            );
+            crate::game::effects::prepend_to_pending_continuation(
+                state,
+                ResolvedAbility::new(gain_life(10), vec![], source, P0),
+            );
+
+            let records: Vec<&PendingContinuation> =
+                state.resolution_stack.ability_continuations().collect();
+            assert_eq!(records.len(), 2, "the later head is its own record");
+            let (latched, later) = (records[0], records[1]);
+            assert_eq!(later.chain.effect, gain_life(10));
+            assert_eq!(
+                later.head_payment_origin,
+                ResolutionPaymentOrigin::FreshChoice
+            );
+            assert_eq!(latched.chain.effect, pay_cost(draw_cost(1)));
+            assert_eq!(
+                latched.head_payment_origin,
+                ResolutionPaymentOrigin::LatchedSuffix
+            );
+
+            state.cost_payment_failed_flag = true;
+            let mut events = Vec::new();
+            crate::game::effects::drain_pending_continuation(state, &mut events);
+            let first_life_change = events
+                .iter()
+                .find(|event| matches!(event, GameEvent::LifeChanged { .. }));
+            assert!(
+                matches!(
+                    first_life_change,
+                    Some(GameEvent::LifeChanged { amount: 10, .. })
+                ),
+                "the later head resolves first, got {first_life_change:?}"
+            );
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched record drains next and reaches the Draw arm's Dredge prompt"
+            );
+            decline_dredge(state);
+            assert!(!state.cost_payment_failed_flag, "the latched head is paid");
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert_eq!(runner.life(P0), life_before + 10);
+            assert!(runner.state().active_ability_continuation().is_none());
+        }
+
+        /// A latched remainder whose root carries an "instead" override that holds on this board: the
+        /// override resolves `override_effect` in place of the head, then its own `override_tail`.
+        fn queue_remainder_replaced_by_an_override(
+            state: &mut GameState,
+            source: ObjectId,
+            override_effect: Effect,
+            override_tail: Effect,
+        ) {
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let mut override_clause = ResolvedAbility::new(override_effect, vec![], source, P0);
+            override_clause.condition = Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(at_least_opponents(1)),
+            });
+            override_clause.sub_ability = Some(Box::new(ResolvedAbility::new(
+                override_tail,
+                vec![],
+                source,
+                P0,
+            )));
+            root.sub_ability = Some(Box::new(override_clause));
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+        }
+
+        /// CR 118.12 + CR 614.17b (skipped head): the latch binds to the queued head node, not to
+        /// the first `PayCost` the walker reaches. Here the walker's live "instead" swap replaces the head,
+        /// so the head pays nothing, and the `PayCost` in the override's tail is a separate, fresh choice
+        /// that Maralen refuses. Scope: the root's own not-swap verdict is not carried onto the remainder
+        /// (a recorded gap); this row pins only that a head the walker replaces keeps its latch from the
+        /// tail.
+        ///
+        /// Revert probe: reading the latch at chain-body entry without taking it leaves it for the tail,
+        /// which then pays latched: the draw is clamped and the flag stays false.
+        #[test]
+        fn a_replaced_latched_head_does_not_latch_the_pay_cost_in_its_tail() {
+            // Reach guard: the walker swaps the head and reaches the tail. P0 has not drawn this turn, so
+            // Spirit admits the tail's fresh choice.
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                gain_life(3),
+                pay_cost(draw_cost(1)),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(hand_size(state), hand_before + 1, "the tail drew");
+            assert!(!state.cost_payment_failed_flag);
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the override replaced the head"
+            );
+
+            let (mut runner, source) = board(Restriction::Maralen, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                gain_life(3),
+                pay_cost(draw_cost(1)),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                state.cost_payment_failed_flag,
+                "the tail's PayCost is a fresh choice, and Maralen refuses it"
+            );
+            assert_eq!(hand_size(state), hand_before);
+            assert!(state.active_ability_continuation().is_none());
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the override replaced the head"
+            );
+        }
+
+        /// CR 118.12 + CR 614.17b (paying override; helper-contract fixture mirroring
+        /// `a_replaced_latched_head_does_not_latch_the_pay_cost_in_its_tail`): when the "instead" override
+        /// that replaces a latched head pays a cost itself, that payment takes the head's place in the node
+        /// but not its latch. Nobody chose to pay it, so it is a fresh choice that Maralen refuses.
+        ///
+        /// Revert probe: dropping `!head_was_swapped` from the effect loop's hand-back hands the latch to
+        /// the swapped-in `PayCost`, which then pays latched: the draw is clamped and the flag stays false.
+        #[test]
+        fn a_paying_override_of_a_latched_head_does_not_inherit_its_latch() {
+            // Reach guard: the walker swaps the head for the paying override and runs its tail. P0 has not
+            // drawn this turn, so Spirit admits the override's fresh choice.
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                pay_cost(draw_cost(1)),
+                gain_life(3),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(hand_size(state), hand_before + 1, "the override drew");
+            assert!(!state.cost_payment_failed_flag);
+            assert_eq!(runner.life(P0), life_before + 3, "the override's tail ran");
+
+            let (mut runner, source) = board(Restriction::Maralen, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                pay_cost(draw_cost(1)),
+                gain_life(3),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                state.cost_payment_failed_flag,
+                "the override's PayCost is a fresh choice, and Maralen refuses it"
+            );
+            assert_eq!(hand_size(state), hand_before);
+            assert!(state.active_ability_continuation().is_none());
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the override replaced the head and its tail ran"
+            );
+        }
+
+        /// CR 118.12 + CR 608.2c (root-only gates): the remainder is one already-admitted
+        /// instruction. The root's repeat count and repeat-until loop belong to their own parked frames, so
+        /// the drained remainder resolves once: its latched draw is P0's only draw, and nothing re-runs it.
+        ///
+        /// Revert probe: keeping either repeat on the remainder re-runs it; each repeat is a fresh choice
+        /// Spirit refuses (flag true).
+        #[test]
+        fn a_remainder_does_not_inherit_its_roots_repeat() {
+            type AddRepeat = fn(&mut ResolvedAbility);
+            let repeats: [(&str, AddRepeat); 2] = [
+                ("repeat_for", |root| {
+                    root.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
+                }),
+                ("repeat_until", |root| {
+                    root.repeat_until = Some(RepeatContinuation::WhileCondition {
+                        condition: Box::new(at_least_opponents(1)),
+                        max_iterations: Some(2),
+                    });
+                }),
+            ];
+            for (label, add_repeat) in repeats {
+                let (mut runner, source) = board(Restriction::Spirit, false);
+                let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+                add_repeat(&mut root);
+                let state = runner.state_mut();
+                let hand_before = hand_size(state);
+                crate::game::effects::prepend_remaining_pay_cost_continuation(
+                    state,
+                    &root,
+                    P0,
+                    draw_cost(1),
+                );
+                crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+                assert_eq!(
+                    hand_size(state),
+                    hand_before + 1,
+                    "{label}: the head drew once"
+                );
+                assert!(
+                    !state.cost_payment_failed_flag,
+                    "{label}: the remainder was not re-run as a fresh choice"
+                );
+                assert!(state.active_ability_continuation().is_none());
+            }
+        }
+
+        /// CR 118.12 + CR 608.2c (root-only gates): the root's player fan-out is not inherited. The
+        /// remainder is the head node itself, so it pays latched and reaches the Draw arm under Maralen.
+        ///
+        /// Revert probe: keeping `player_scope` fans the remainder out into per-player legs, each a node of
+        /// its own; the head's latch stays with the head, so the leg is gated fresh (no prompt, flag true).
+        #[test]
+        fn a_remainder_does_not_inherit_its_roots_player_fan_out() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.player_scope = Some(PlayerFilter::Controller);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched head must reach the Draw arm's Dredge prompt"
+            );
+            decline_dredge(state);
+            assert!(!state.cost_payment_failed_flag, "the latched head is paid");
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+        }
     }
 }

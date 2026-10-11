@@ -3282,6 +3282,156 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     );
 }
 
+/// CR 608.2c + CR 614.12a + CR 616.1: an effect puts the Mimeoplasm forced-cost witness onto the
+/// battlefield and then gains 3 life. Its accepted two-card exile cost pauses on a redirect choice for each
+/// card, and the effect's next instruction waits until both exiles and the entry have completed.
+///
+/// Revert probe: without the rider exclusion for the exile carrier, the life gain resolves after the first
+/// redirect answer — before the second cost exile is even paid — and precedes the entry.
+#[test]
+fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature_to_graveyard(P0, "First Mimeoplasm Witness", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "Second Mimeoplasm Witness", 3, 3)
+        .id();
+    let mimeoplasm = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Mimeoplasm Forced-Cost Witness",
+            5,
+            5,
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+        )
+        .id();
+    for name in ["First Mimeoplasm Redirect", "Second Mimeoplasm Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    let mut runner = scenario.build();
+    let mut forced_cost_only =
+        runner.state().objects[&mimeoplasm].replacement_definitions[0].clone();
+    // As in the test above: strip only the independent copy/counter branch.
+    forced_cost_only.execute = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mimeoplasm)
+        .expect("Mimeoplasm witness exists")
+        .replacement_definitions = vec![forced_cost_only].into();
+
+    let entry_then_life = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::SpecificObject { id: mimeoplasm },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    ));
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &entry_then_life, &mut events, 0)
+        .expect("the effect pauses on the witness's entry replacement");
+
+    let entry_and_life_order = |events: &[GameEvent]| -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == mimeoplasm => Some("entry"),
+                GameEvent::LifeChanged { .. } => Some("life"),
+                _ => None,
+            })
+            .collect()
+    };
+    let frame_kinds = |state: &GameState| -> Vec<engine::types::resolution::FrameKind> {
+        state
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect()
+    };
+
+    // Accept the cost, then answer the first card's redirect.
+    for _ in 0..2 {
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the replacement answer is legal");
+        events.extend(result.events);
+    }
+    let state = runner.state();
+    assert_eq!(state.objects[&first].zone, Zone::Hand);
+    assert_eq!(state.objects[&second].zone, Zone::Graveyard);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the second card's redirect prompt is open, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.objects[&mimeoplasm].zone,
+        Zone::Hand,
+        "no premature entry"
+    );
+    assert_eq!(
+        state.players[0].life, 20,
+        "the effect's next instruction waits"
+    );
+    assert_eq!(
+        frame_kinds(state),
+        vec![
+            engine::types::resolution::FrameKind::AbilityContinuation,
+            engine::types::resolution::FrameKind::ChangeZone,
+        ],
+        "the enclosing effect's frames are still live"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the second redirect answer is legal");
+    events.extend(result.events);
+
+    let state = runner.state();
+    assert_eq!(entry_and_life_order(&events), vec!["entry", "life"]);
+    assert_eq!(state.players[0].life, 23);
+    assert_eq!(state.objects[&second].zone, Zone::Hand);
+    assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "got {:?}",
+        frame_kinds(state)
+    );
+}
+
 #[test]
 fn self_return_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
     let mut scenario = GameScenario::new();

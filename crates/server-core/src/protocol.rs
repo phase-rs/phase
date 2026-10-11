@@ -3361,6 +3361,13 @@ mod tests {
     /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
+    /// `PendingCostMoveResume::CounterAdditionUnlessPayment` gains `unpaid_suffix`
+    /// (`UnpaidCostSuffix`, CR 118.12 + CR 702.24a) and `PendingContinuation` gains
+    /// `head_payment_origin` (`ResolutionPaymentOrigin`, CR 614.17a); a v128 peer drops
+    /// both keys silently, so it must be refused before it receives v129 state.
+    /// `PendingCostMoveResume::ReplacementMayCostInnerChoice` (an accepted entry
+    /// MayCost parked while its leg's own replacement choice is answered,
+    /// CR 614.12a + CR 614.11a) is a new variant a v128 peer cannot decode.
     /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
     /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
     /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
@@ -3502,8 +3509,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_128_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 128);
+    fn protocol_version_is_129_for_draw_cost_resumption() {
+        assert_eq!(PROTOCOL_VERSION, 129);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3514,7 +3521,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_128_for_declared_player_reference` stays
+    /// `protocol_version_is_129_for_draw_cost_resumption` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

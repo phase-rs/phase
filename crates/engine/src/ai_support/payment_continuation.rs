@@ -701,6 +701,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::SacrificeForCost { pending: None, .. }
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
@@ -956,6 +957,7 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::SacrificeForCost { pending: None, .. })
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
+        | Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })

@@ -132,7 +132,10 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      FilterProp::AttachedTo and makes retarget picks positional (reserved as
 //      v119 and then v121 while under review; it landed after v126).
 // +57: v128 adds the TargetFilter::DeclaredPlayer reference.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 57;
+// +58: v129 adds the paused-payment carriers: `CounterAdditionUnlessPayment.unpaid_suffix`
+// (`UnpaidCostSuffix`), `PendingContinuation.head_payment_origin` and
+// `PendingCostMoveResume::ReplacementMayCostInnerChoice`.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 58;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -215,7 +218,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +54: wire 108 moves with full-game v126 for the zone-change record's arrival identity.
 // +55: wire 109 moves with full-game v127 for the FilterProp::AttachedTo reshape.
 // +56: wire 110 moves with full-game v128 for TargetFilter::DeclaredPlayer.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 56;
+// +57: wire 111 moves with full-game v129 for the paused-payment carriers.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 57;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

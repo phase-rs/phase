@@ -3638,12 +3638,14 @@ pub(crate) fn resume_mana_ability_root(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     match resume {
+        // CR 118.12 + CR 605.3b: the paused root resumes a choice its fresh
+        // entry already gated.
         ManaAbilityResume::EffectPayCost {
             payer,
             return_to,
             ability,
             cost,
-        } => match super::costs::pay_ability_cost_for_resolution(
+        } => match super::costs::resume_ability_cost_for_resolution(
             state,
             payer,
             cost.as_ref(),
@@ -4247,7 +4249,7 @@ where
             }
         }
         // Self-contained components (Untap, Exert, PayEnergy, self-ReturnToHand,
-        // EffectCost) delegate to the single-authority cost payer.
+        // non-draw EffectCost) delegate to the single-authority cost payer.
         Some(c) if is_self_contained_mana_subcost(c) => {
             if matches!(
                 super::costs::pay_ability_cost_for_activation(
@@ -4434,12 +4436,26 @@ fn mill_for_mana_cost(
 /// is paid interactively via the `CollectEvidenceChoice` prompt that
 /// `advance_mana_ability_activation` surfaces before mana production (CR 701.59),
 /// so it is a no-op in the cost-payment match rather than a delegated payment.
+///
+/// A draw `EffectCost` is excluded. CR 605.3b: a mana ability resolves
+/// immediately, so a delegated component may pause only when the cost payer
+/// leaves the activation's `Cast` cost-move root for this cursor to adopt (the
+/// self-`ReturnToHand` move does). The `Draw` leg pauses on a replacement choice
+/// (Dredge) with no such root. It is also never part of a mana ability: CR 605.1a
+/// disqualifies any ability whose cost moves a card from a library, so
+/// `is_mana_ability` already rejects it and this exclusion keeps a direct
+/// resolution call from reaching the delegated payer. A refused component falls
+/// through to the cost payer's "Unsupported mana ability cost" error.
+///
+/// The put-counter `EffectCost` stays admitted because Wall of Roots pays
+/// through it, but it does not yet meet that contract: a CR 616.1 replacement
+/// choice on its counter placement pauses without a `Cast` root.
 fn is_self_contained_mana_subcost(cost: &AbilityCost) -> bool {
     match cost {
+        AbilityCost::EffectCost { effect } => !matches!(effect.as_ref(), Effect::Draw { .. }),
         AbilityCost::Untap
         | AbilityCost::Exert
         | AbilityCost::PayEnergy { .. }
-        | AbilityCost::EffectCost { .. }
         | AbilityCost::ReturnToHand {
             filter: Some(TargetFilter::SelfRef),
             ..
@@ -8505,6 +8521,136 @@ mod tests {
             Some(1),
             "the -0/-1 counter cost was paid onto Wall of Roots"
         );
+    }
+
+    /// CR 605.3b + CR 605.1a: the delegation gate refuses a draw `EffectCost`,
+    /// whose replacement-choice pause leaves no `Cast` root for the mana-ability
+    /// cursor, and keeps admitting every component that existing mana abilities
+    /// delegate (the kinds named in the predicate's doc).
+    #[test]
+    fn self_contained_mana_subcost_refuses_a_draw_effect_cost() {
+        let draw_cost = AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        assert!(
+            !is_self_contained_mana_subcost(&draw_cost),
+            "a draw cost can pause without an activation root, so it must not be delegated"
+        );
+
+        let delegated_kinds = [
+            AbilityCost::Untap,
+            AbilityCost::Exert,
+            AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::SelfRef),
+                from_zone: None,
+            },
+            // Wall of Roots: put-counter-on-self.
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: CounterType::PowerToughness {
+                        power: 0,
+                        toughness: -1,
+                    },
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }),
+            },
+            // Braid of Fire class: fixed mana produced as a cost.
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                }),
+            },
+            // Pentad Prism class: a fixed self-RemoveCounter.
+            AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                target: None,
+                selection: crate::types::ability::CounterCostSelection::SingleObject,
+            },
+        ];
+        for cost in &delegated_kinds {
+            assert!(
+                is_self_contained_mana_subcost(cost),
+                "{cost:?} must stay delegated to the single cost authority"
+            );
+        }
+    }
+
+    /// CR 605.1a + CR 605.3b: an `Add {G}` ability whose cost draws a card is not
+    /// a mana ability, and a direct resolution through the mana fast path refuses
+    /// the draw component instead of delegating it. The library and mana pool are
+    /// untouched, so nothing was paid or produced.
+    #[test]
+    fn a_draw_effect_cost_is_refused_on_the_mana_ability_path() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Draw-Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        });
+        assert!(
+            !is_mana_ability(&def),
+            "CR 605.1a: a draw cost moves a card from a library"
+        );
+
+        let library_before = state.players[0].library.len();
+        assert_eq!(
+            library_before, 1,
+            "reach guard: the draw has a card to take"
+        );
+        let mut events = Vec::new();
+        let result = resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None);
+
+        assert!(
+            result.is_err(),
+            "the draw component must be refused, not delegated"
+        );
+        assert_eq!(state.players[0].library.len(), library_before);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
     }
 
     /// CR 107.14: Aether Hub class — `{T}, Pay {E}: Add {C}`. The `PayEnergy`

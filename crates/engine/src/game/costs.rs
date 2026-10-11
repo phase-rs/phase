@@ -49,7 +49,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
-    PendingCostMoveResume, WaitingFor,
+    PendingCostMoveResume, ResolutionPaymentOrigin, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -65,6 +65,7 @@ use super::engine::EngineError;
 use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use super::replacement::ReplacementResult;
 use super::speed::{effective_speed, set_speed};
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::ResolvedAbility;
@@ -221,13 +222,47 @@ pub(crate) enum PaymentScope<'a> {
     /// separately (`player`), so the right player's resources are deducted; only
     /// the `QuantityExpr` resolution reads the un-swapped controller. See the
     /// per-arm comments at those call sites.
+    ///
+    /// The CR 614.17b choice gate runs once at the entry
+    /// (`pay_ability_cost_for_resolution_with_cost_move_root`) for a fresh
+    /// payment; a latched resume skips it. `origin` is the regime the leg arms
+    /// read through [`PaymentScope::prevented_event_refuses_payment`]: on a
+    /// latched resume every leg completes a prevented event as paid
+    /// (CR 118.11 + CR 118.12).
     Resolution {
         ability: &'a ResolvedAbility,
         cost_move_root: ResolutionCostMoveRoot,
+        origin: ResolutionPaymentOrigin,
     },
 }
 
 impl PaymentScope<'_> {
+    /// CR 614.17b + CR 118.11 + CR 118.12: whether a cost leg whose event a
+    /// can't-effect forbids refuses the payment.
+    ///
+    /// Choosing to pay is refused (CR 614.17b) — at activation, where the leg's
+    /// own arm is the only gate, and on a fresh resolution choice. A latched
+    /// resume continues a choice already made (CR 118.12): the prevented event
+    /// is an action modified by an effect, and the cost has still been paid
+    /// (CR 118.11).
+    ///
+    /// The `Effect::Draw` arm deliberately does not consult this: its fresh
+    /// refusal is the joint CR 121.2b measure across every leg, which only the
+    /// entry gate can see.
+    fn prevented_event_refuses_payment(&self) -> bool {
+        match self {
+            PaymentScope::Activation { .. }
+            | PaymentScope::Resolution {
+                origin: ResolutionPaymentOrigin::FreshChoice,
+                ..
+            } => true,
+            PaymentScope::Resolution {
+                origin: ResolutionPaymentOrigin::LatchedSuffix,
+                ..
+            } => false,
+        }
+    }
+
     /// CR 201.5a: the granter stamped on the ability whose cost is being paid.
     fn granting_object(
         &self,
@@ -479,6 +514,7 @@ fn effect_pay_cost_mana_resume(
     let PaymentScope::Resolution {
         ability,
         cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        ..
     } = scope
     else {
         return None;
@@ -611,6 +647,24 @@ pub(crate) fn resume_replacement_may_cost_move(
     super::engine_replacement::handle_replacement_choice(state, 0, events)
 }
 
+/// CR 614.12a + CR 614.11a + CR 118.12: Resume an accepted entry MayCost once
+/// the replacement choice on its paused leg's own event has settled — for a
+/// draw leg, the whole draw instruction and its substitute's work included.
+/// Restoring the accepted outer replacement re-enters its paid-resume branch,
+/// which pays the latched remainder and finishes the entry.
+pub(crate) fn resume_replacement_may_cost_after_inner_choice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { outer_replacement }) =
+        state.pending_cost_move_resume.take()
+    else {
+        unreachable!("the dispatcher matched this typed continuation")
+    };
+    state.pending_replacement = Some(*outer_replacement);
+    super::engine_replacement::handle_replacement_choice(state, 0, events)
+}
+
 pub fn pay_ability_cost_for_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -660,8 +714,9 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     }
 }
 
-/// CR 118.12: Pay an ability's cost during the resolution of an
-/// `Effect::PayCost`. `ability` is the payer-adjusted clone (see
+/// CR 118.12 + CR 614.17b: a fresh resolution payment — the payer's choice to
+/// pay; the choice gate applies. Pays an ability's cost during the resolution
+/// of an `Effect::PayCost`. `ability` is the payer-adjusted clone (see
 /// [`PaymentScope::Resolution`]); `payer` is its resolved controller.
 pub(crate) fn pay_ability_cost_for_resolution(
     state: &mut GameState,
@@ -670,12 +725,56 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    pay_effect_pay_cost_root(
+        state,
+        payer,
+        cost,
+        ability,
+        ResolutionPaymentOrigin::FreshChoice,
+        events,
+    )
+}
+
+/// CR 118.12: resume the unpaid legs of a payment whose choice is already
+/// latched — a parked unless-payment suffix, a paused mana-source
+/// `EffectPayCost` root, a prepended `PayCost` remainder, or a replayed staged
+/// transaction root. Never applies the CR 614.17b choice gate; each draw is
+/// still clamped as it happens (CR 118.11 + CR 614.17a), and a prevented
+/// counter event completes as paid (CR 118.11 + CR 118.12).
+pub(crate) fn resume_ability_cost_for_resolution(
+    state: &mut GameState,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_effect_pay_cost_root(
+        state,
+        payer,
+        cost,
+        ability,
+        ResolutionPaymentOrigin::LatchedSuffix,
+        events,
+    )
+}
+
+/// The `Effect::PayCost` root shared by the fresh and the latched entry: pays
+/// through the authority, then stamps the completed life component.
+fn pay_effect_pay_cost_root(
+    state: &mut GameState,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+    origin: ResolutionPaymentOrigin,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
     let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
         cost,
         ability,
         ResolutionCostMoveRoot::EffectPayCost,
+        origin,
         events,
     )?;
     // CR 118.1 + CR 119.4b: `effects::pay` records a concrete life component
@@ -698,6 +797,7 @@ pub(crate) fn pay_ability_cost_for_replacement_may_cost(
     payer: PlayerId,
     cost: &AbilityCost,
     ability: &ResolvedAbility,
+    origin: ResolutionPaymentOrigin,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     pay_ability_cost_for_resolution_with_cost_move_root(
@@ -706,6 +806,7 @@ pub(crate) fn pay_ability_cost_for_replacement_may_cost(
         cost,
         ability,
         ResolutionCostMoveRoot::ReplacementMayCost,
+        origin,
         events,
     )
 }
@@ -716,8 +817,25 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
     cost: &AbilityCost,
     ability: &ResolvedAbility,
     cost_move_root: ResolutionCostMoveRoot,
+    origin: ResolutionPaymentOrigin,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    // CR 614.17b + CR 121.2b: "If an event can't happen, a player can't choose
+    // to pay a cost that includes that event." Every fresh resolution payment,
+    // singleton or `Composite`, meets this one choice gate before any leg is
+    // paid. A latched payment already passed it (CR 118.12). The origin is
+    // carried into the scope so a latched resume's legs complete prevented
+    // events as paid (CR 118.11).
+    match origin {
+        ResolutionPaymentOrigin::FreshChoice => {
+            if resolution_cost_includes_impossible_event(state, payer, cost, ability) {
+                return Ok(payment_failed(
+                    "CR 614.17b: the cost includes an event that can't happen",
+                ));
+            }
+        }
+        ResolutionPaymentOrigin::LatchedSuffix => {}
+    }
     pay_ability_cost_inner(
         state,
         payer,
@@ -727,6 +845,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
         &PaymentScope::Resolution {
             ability,
             cost_move_root,
+            origin,
         },
         Some(cost),
     )
@@ -1382,11 +1501,11 @@ fn pay_ability_cost_inner(
         // carries out the instructions specified". (NOT CR 118.3, which is the
         // resources rule and says nothing about an effect-as-cost.) Resolve the
         // effect on the source before the ability's own effect fires. The shared
-        // support predicate admits only deterministic source-counter and
-        // fixed-mana forms, so the effect shape itself asks the payer nothing.
-        // A replacement on the resulting event can still require a player
-        // choice, which parks the payment as `Paused` in the `PutCounter` arm
-        // below.
+        // support predicate admits only deterministic source-counter, fixed-mana
+        // and context-ref draw forms, so the effect shape itself asks the payer
+        // nothing. A replacement on the resulting event can still require a
+        // player choice, which parks the payment as `Paused` in the `PutCounter`
+        // and `Draw` arms below. A draw cost is one instruction of its printed size.
         AbilityCost::EffectCost { effect } => {
             use crate::types::ability::Effect;
             match effect.as_ref() {
@@ -1397,12 +1516,20 @@ fn pay_ability_cost_inner(
                 } => {
                     let count = resolve_cost_quantity(state, count, player, source_id, scope);
                     // CR 614.17b: "If an event can't happen, a player can't
-                    // choose to pay a cost that includes that event" — a
-                    // prevented counter placement pays none of this cost. The
-                    // shared add primitive reports both a delivered and
-                    // prevented event as complete because effect resolution
-                    // needs that distinction only for continuation; payment must
-                    // reject the prevented case before executing it.
+                    // choose to pay a cost that includes that event." Whether a
+                    // prevented placement refuses this payment depends on the
+                    // regime (`PaymentScope::prevented_event_refuses_payment`):
+                    // - Activation: this in-arm refusal is the only CR 614.17b
+                    //   gate (see below).
+                    // - Fresh resolution choice: the entry gate
+                    //   (`resolution_cost_includes_impossible_event`) already
+                    //   refused the choice; this refusal is defense in depth.
+                    // - Latched resume (CR 118.12 + CR 118.11): the choice was
+                    //   already made, so the prevented placement is an action
+                    //   modified by an effect and the cost has still been paid.
+                    //   `add_counter_with_replacement` reports `Prevented` as a
+                    //   completed instruction, and the `Composite` continues with
+                    //   its later legs.
                     //
                     // The gate is `replacement::mandatory_prevention_applies`
                     // (CR 614.17: "some effects state that something can't
@@ -1422,20 +1549,20 @@ fn pay_ability_cost_inner(
                     // (CR 118.12). The two legs partition the space; they do not
                     // disagree.
                     //
-                    // CR 614.17b + CR 119.8 (analogue): the CHOICE is refused upstream at every
-                    // RESOLUTION-scope site that consumes
-                    // `resolution_cost_includes_impossible_event`, but that predicate is never
-                    // consulted at `PaymentScope::Activation` — `is_payable_for_activation` admits
-                    // every `EffectCost` unconditionally, and `can_pay` dry-runs this arm — so here
-                    // it is the only CR 614.17b gate an activated counter cost meets.
-                    let prevented = self_counter_placement_is_prohibited(
-                        state,
-                        player,
-                        source_id,
-                        counter_type.clone(),
-                        counter_cost_count(count),
-                    );
-                    if prevented {
+                    // The predicate `resolution_cost_includes_impossible_event` is never
+                    // consulted at `PaymentScope::Activation` — `is_payable_for_activation`
+                    // admits every `EffectCost` unconditionally, and `can_pay` dry-runs this
+                    // arm — so here it is the only CR 614.17b gate an activated counter cost
+                    // meets. The preview runs only when the regime refuses.
+                    if scope.prevented_event_refuses_payment()
+                        && self_counter_placement_is_prohibited(
+                            state,
+                            player,
+                            source_id,
+                            counter_type.clone(),
+                            resolved_cost_count(count),
+                        )
+                    {
                         return Ok(payment_failed(
                             "Counter-placement cost prevented by a replacement effect",
                         ));
@@ -1445,7 +1572,7 @@ fn pay_ability_cost_inner(
                         player,
                         source_id,
                         counter_type.clone(),
-                        counter_cost_count(count),
+                        resolved_cost_count(count),
                         events,
                     ) {
                         return Ok(PaymentOutcome::Paused {
@@ -1506,6 +1633,66 @@ fn pay_ability_cost_inner(
                         // CR 602.1a: an activation cost belongs to an activated ability,
                         // which has no triggered identity to record.
                         PaymentScope::Activation { .. } => {}
+                    }
+                }
+                // CR 118.1 + CR 121.1: a draw performed as a cost, by the cost's
+                // context-ref player. Psychic Vortex's cumulative upkeep draws for
+                // its controller. Decoy Gambit's "unless its controller has you
+                // draw a card" is CR 118.12a grammar whose payer (the creature's
+                // controller) has the spell's original controller draw, so payer
+                // and drawer differ (CR 121.3a).
+                Effect::Draw {
+                    count,
+                    target: target @ (TargetFilter::Controller | TargetFilter::OriginalController),
+                } => {
+                    let requested = resolved_cost_count(resolve_cost_quantity(
+                        state, count, player, source_id, scope,
+                    ));
+                    let drawer = match scope {
+                        PaymentScope::Resolution { ability, .. } => {
+                            super::effects::resolve_player_for_context_ref(state, ability, target)
+                        }
+                        // An activated ability's controller and original
+                        // controller are both the activating player.
+                        PaymentScope::Activation { .. } => Some(player),
+                    };
+                    // CR 608.2b + CR 608.2c: a drawer reference that names no player draws nothing, as in
+                    // `draw::resolve`. `Controller` and `OriginalController` are context refs that always name
+                    // one, so this only guards the resolver's general contract.
+                    let Some(drawer) = drawer else {
+                        return Ok(PaymentOutcome::Paid);
+                    };
+                    // CR 614.17b + CR 121.3 + CR 121.2b: a drawer who can't draw
+                    // every card this cost includes can't choose to pay it.
+                    //
+                    // Activation scope only. At resolution the fresh-payment gate at the authority's entry refuses
+                    // the choice before any leg is paid (every drawer's total across a `Composite`, CR 121.2b), and
+                    // a latched resume must not re-gate (CR 118.12). `is_payable_for_activation` admits every
+                    // `EffectCost` and `can_pay` dry-runs this arm, so here it is the only CR 614.17b gate an
+                    // activated draw cost meets, mirroring the `PutCounter` arm above.
+                    if matches!(scope, PaymentScope::Activation { .. })
+                        && super::effects::draw::allowed_draw_count(state, drawer, requested)
+                            < requested
+                    {
+                        return Ok(payment_failed(
+                            "CR 614.17b: the drawer can't draw every card this cost includes",
+                        ));
+                    }
+                    // CR 121.2 + CR 121.2a: one instruction of the printed size; its instruction-level replacement
+                    // consult sees `requested` (Alms Collector applies to a two-card cost). CR 121.3 + CR 121.4: no
+                    // library clamp — an empty-library draw is recorded for the CR 704.5b state-based action.
+                    // CR 118.11 + CR 118.12: a replaced, skipped or prevented draw still pays. CR 614.11a +
+                    // CR 616.1: on a pause the active draw frame owns the rest of THIS instruction, and an enclosing
+                    // `Composite` (CR 702.24a repetition) owns the later legs, so nothing is handed back here.
+                    // CR 118.5: a zero-card cost issues no instruction. No `EffectResolved` is emitted: paying a
+                    // cost is not an effect resolving, matching the sibling arms.
+                    if requested > 0 {
+                        match super::effects::draw::start_draw_sequence(state, drawer, requested, events) {
+                            ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
+                            ReplacementResult::NeedsChoice(_) => {
+                                return Ok(PaymentOutcome::Paused { remaining_cost: None });
+                            }
+                        }
                     }
                 }
                 // CR 118.3 + CR 701.26a: tapping one determined permanent (the granter, or the
@@ -1587,12 +1774,13 @@ fn pay_ability_cost_inner(
         // counters" replacement effects still apply, mirroring the
         // `EffectCost`/`PutCounter` arm's use of the sibling
         // `effects::counters::add_counter_with_replacement` above. A
-        // replacement that PREVENTS the addition (Solemnity) is a genuinely
-        // FAILED payment here, not a paused one: unlike effect resolution
-        // (where "prevented" and "applied" both just mean the pending item is
-        // resolved), a cost that silently gives zero counters must not be
-        // mistaken for having actually been paid, or Ward's deterrent is
-        // bypassed for free.
+        // replacement that PREVENTS the addition (Solemnity) refuses the
+        // CHOICE to pay — at activation and on a fresh resolution choice — so
+        // Ward's deterrent is never bypassed for free: a player can't choose a
+        // cost that silently gives zero counters (CR 614.17b). Once the choice
+        // is latched (CR 118.12), a prevention arriving later is an action
+        // modified by an effect and the leg completes as paid (CR 118.11);
+        // `PaymentScope::prevented_event_refuses_payment` owns that split.
         //
         // CR 614.17b is the rule ("if an event can't happen, a player can't
         // choose to pay a cost that includes that event"). The gate that reaches
@@ -1611,8 +1799,8 @@ fn pay_ability_cost_inner(
         // `engine_payment_choices::resume_counter_addition_unless_payment`
         // (CR 118.12). Same partition as the `EffectCost`/`PutCounter` cost
         // arm. `resolution_cost_includes_impossible_event` refuses the CHOICE
-        // at every site that consumes it, so this refusal is defense in depth
-        // for the CR 614.17a mid-window case rather than the only gate.
+        // at every site that consumes it, so on a fresh resolution choice this
+        // refusal is defense in depth rather than the only gate.
         AbilityCost::GetPlayerCounters {
             counter_kind,
             count,
@@ -1622,9 +1810,11 @@ fn pay_ability_cost_inner(
             ) {
                 super::effects::player_counter::PlayerCounterAdditionOutcome::Applied => {}
                 super::effects::player_counter::PlayerCounterAdditionOutcome::Prevented => {
-                    return Ok(payment_failed(
-                        "Player-counter cost prevented by a replacement effect",
-                    ));
+                    if scope.prevented_event_refuses_payment() {
+                        return Ok(payment_failed(
+                            "Player-counter cost prevented by a replacement effect",
+                        ));
+                    }
                 }
                 super::effects::player_counter::PlayerCounterAdditionOutcome::NeedsChoice => {
                     return Ok(PaymentOutcome::Paused {
@@ -2271,16 +2461,17 @@ fn self_counter_placement_is_prohibited(
     })
 }
 
-/// CR 118.5 + CR 702.24a: how many counters a resolution-time counter cost
-/// places, from its resolved `QuantityExpr`.
+/// CR 107.1b: the single clamp of a resolved effect-cost count — counters a
+/// counter cost places, or cards a draw cost draws — from its resolved
+/// `QuantityExpr` (CR 118.5 + CR 702.24a).
 ///
 /// CR 107.1b: "If a calculation that would determine the result of an effect
 /// yields a negative number, zero is used instead, unless that effect doubles,
 /// triples, or sets to a specific value a player's life total or the power
-/// and/or toughness of a creature or creature card." A counter count is in
-/// none of those exception classes, so a negative resolved quantity places
-/// ZERO counters — never its magnitude, which would turn a cost that performs
-/// no event into one that places counters the rules never asked for.
+/// and/or toughness of a creature or creature card." A counter or card count is
+/// in none of those exception classes, so a negative resolved quantity performs
+/// ZERO events — never its magnitude, which would turn a cost that performs no
+/// event into one that places counters or draws cards the rules never asked for.
 ///
 /// The resolver really can hand this function a negative value: `fold_compose`
 /// evaluates `QuantityExpr::Offset` as an unfloored `inner + offset` and
@@ -2297,9 +2488,56 @@ fn self_counter_placement_is_prohibited(
 /// (`pay_ability_cost_inner`) must preview the SAME count: if they disagree, a
 /// count the predicate reads as 0 short-circuits both previews to
 /// `Applied { count: 0 }`, the pay branch is offered, and the payment then
-/// refuses it — the exact offered-then-rejected defect CR 614.17b forbids.
-fn counter_cost_count(resolved: i32) -> u32 {
+/// refuses it — the exact offered-then-rejected defect CR 614.17b forbids. The
+/// draw cost's choice-time arm and pay arm share it for the same reason.
+fn resolved_cost_count(resolved: i32) -> u32 {
     u32::try_from(resolved.max(0)).unwrap_or(0)
+}
+
+/// CR 614.17b + CR 121.2b + CR 121.3 + CR 121.3a: true when every drawer can draw the TOTAL its draw legs
+/// demand. "The player can't pay a cost that includes drawing multiple cards" under a one-card limit, so the
+/// legs of one cost are summed per drawer — keyed on the drawer, never the payer (Decoy Gambit: the payer
+/// has the spell's caster draw). Nested `Composite`s are flattened; a `OneOf` is not a draw leg here and is
+/// judged by the calling predicate's own `OneOf` arm. A zero total is always
+/// drawable (CR 118.5: such a cost includes no draw). The draw-leg counterpart of
+/// `cost_payability::discard_legs_jointly_payable`.
+fn draw_legs_are_drawable(
+    state: &GameState,
+    legs: &[AbilityCost],
+    ability: &ResolvedAbility,
+) -> bool {
+    use crate::types::ability::Effect;
+    let mut leaves = Vec::new();
+    for leg in legs {
+        flatten_cost_components(leg, &mut leaves);
+    }
+    let mut totals: Vec<(PlayerId, u32)> = Vec::new();
+    for leaf in &leaves {
+        // Non-draw legs are outside the question; their own arms judge them.
+        let AbilityCost::EffectCost { effect } = leaf else {
+            continue;
+        };
+        let Effect::Draw {
+            count,
+            target: target @ (TargetFilter::Controller | TargetFilter::OriginalController),
+        } = effect.as_ref()
+        else {
+            continue;
+        };
+        // CR 608.2b + CR 608.2c: a drawer reference that names no player demands no draw.
+        let Some(drawer) = super::effects::resolve_player_for_context_ref(state, ability, target)
+        else {
+            continue;
+        };
+        let cards = resolved_cost_count(resolve_quantity_with_targets(state, count, ability));
+        match totals.iter_mut().find(|(player, _)| *player == drawer) {
+            Some((_, total)) => *total = total.saturating_add(cards),
+            None => totals.push((drawer, cards)),
+        }
+    }
+    totals.iter().all(|&(drawer, total)| {
+        super::effects::draw::allowed_draw_count(state, drawer, total) >= total
+    })
 }
 
 /// CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
@@ -2342,7 +2580,7 @@ pub(crate) fn resolution_cost_includes_impossible_event(
                     payer,
                     ability.source_id,
                     counter_type.clone(),
-                    counter_cost_count(resolved),
+                    resolved_cost_count(resolved),
                 )
             }
             // CR 118.1: producing mana performs no counter placement, so nothing to prohibit.
@@ -2350,7 +2588,26 @@ pub(crate) fn resolution_cost_includes_impossible_event(
                 produced: crate::types::ability::ManaProduction::Fixed { .. },
                 ..
             } => false,
-            // `supports_effect_cost_payment` refuses every other effect-cost shape upstream.
+            // CR 614.17b + CR 121.3 + CR 121.3a: a can't-draw effect refuses the
+            // choice to pay a draw cost. The test is keyed on the DRAWER, never on
+            // `payer`: CR 121.3a applies the refusal to the player who would draw
+            // even when another player makes the choice (Decoy Gambit: the payer is
+            // the creature's controller, the drawer is the spell's caster).
+            //
+            // CR 121.2b: "the player can't pay a cost that includes drawing multiple cards" under a
+            // one-card-per-turn limit, so the leaf's count — ONE instruction's size — is measured whole. A
+            // `Composite` of legs is measured across all its legs by the `Composite` arm below. This differs from
+            // `draw::resolve`'s "up to" doctrine (refuse only when nothing can be drawn): an up-to effect may
+            // shrink, a fixed cost cannot.
+            //
+            // CR 118.5: a zero-card cost includes no draw, so it is never refused.
+            Effect::Draw {
+                target: TargetFilter::Controller | TargetFilter::OriginalController,
+                ..
+            } => !draw_legs_are_drawable(state, std::slice::from_ref(cost), ability),
+            // `supports_effect_cost_payment` admits exactly the three shapes above
+            // (source counters, fixed mana, a context-ref draw) and refuses every
+            // other effect-cost shape upstream.
             // CR 614.17b: this arm swallows ANY widening of that predicate, not just a further
             // counter-placing one, so admitting any new effect-cost shape owes a matching arm
             // here in the same change — otherwise the new shape answers "no impossible event"
@@ -2367,9 +2624,13 @@ pub(crate) fn resolution_cost_includes_impossible_event(
         // whichever direction it is copied.
         // CR 614.17b: every component must be paid, so a cost that INCLUDES an impossible
         // component is itself unchoosable.
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .any(|c| resolution_cost_includes_impossible_event(state, payer, c, ability)),
+        AbilityCost::Composite { costs } => {
+            costs
+                .iter()
+                .any(|c| resolution_cost_includes_impossible_event(state, payer, c, ability))
+                // CR 121.2b: draw legs that are each drawable can still exceed a per-turn limit together.
+                || !draw_legs_are_drawable(state, costs, ability)
+        }
         // CR 614.17b + CR 118.12a: exactly one option is paid, so the cost is unchoosable
         // only if EVERY option includes an impossible event.
         // Only the offending index is refused at the pick; whether the WHOLE disjunctive
@@ -2578,6 +2839,10 @@ fn can_pay_resolution(
         // AND its chosen hand-discard legs are jointly payable (CR 601.2h: one
         // physical card cannot satisfy two legs, so a per-leg check alone would
         // let the first leg pay and the second fail — a partial payment).
+        // CR 614.17b + CR 121.2b: draw legs are likewise judged jointly per drawer, keeping this payability
+        // authority consistent with `resolution_cost_includes_impossible_event` (the top-level
+        // `Effect::PayCost` `Composite` is refused at the authority's fresh entry, because its pay.rs
+        // pre-gate is bypassed under payment-transaction replay).
         AbilityCost::Composite { costs } => {
             costs
                 .iter()
@@ -2589,6 +2854,7 @@ fn can_pay_resolution(
                     ability.context.granting_object,
                     costs,
                 )
+                && draw_legs_are_drawable(state, costs, ability)
         }
         // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
         // choice is made interactively via `UnlessPaymentChooseCost`; the
@@ -2674,6 +2940,7 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaCostShard};
 
     const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
 
     #[test]
     fn half_life_activation_lock_fixes_only_explicit_typed_leaf() {
@@ -3872,6 +4139,7 @@ mod tests {
         let scope = PaymentScope::Resolution {
             ability: &ability,
             cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+            origin: ResolutionPaymentOrigin::FreshChoice,
         };
 
         // (i) Waterbend at Resolution → Failed (was a silent no-op `Paid`).
@@ -3991,6 +4259,7 @@ mod tests {
         let scope = PaymentScope::Resolution {
             ability: &ability,
             cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+            origin: ResolutionPaymentOrigin::FreshChoice,
         };
 
         // (v) + (vi) CLEAN board: the instrument fires only on the prohibition,
@@ -4144,6 +4413,536 @@ mod tests {
         );
     }
 
+    /// Maralen of the Mornsong, verbatim Oracle text: a CR 121.3 can't-draw effect.
+    const MARALEN_ORACLE: &str = "Players can't draw cards.\n\
+        At the beginning of each player's draw step, that player loses 3 life, searches \
+        their library for a card, puts it into their hand, then shuffles.";
+
+    /// Stinkweed Imp, verbatim Oracle text: Dredge 5 makes every individual
+    /// draw a replacement choice while the library holds five or more cards.
+    const STINKWEED_IMP_ORACLE: &str = "Flying\n\
+        Whenever this creature deals combat damage to a creature, destroy that creature.\n\
+        Dredge 5 (If you would draw a card, you may mill five cards instead. If you do, \
+        return this card from your graveyard to your hand.)";
+
+    fn draw_effect_cost(count: i32) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: count },
+                target: TargetFilter::Controller,
+            }),
+        }
+    }
+
+    /// CR 614.17b + CR 121.3: "If an event can't happen, a player can't choose
+    /// to pay a cost that includes that event" — for a draw cost at
+    /// `PaymentScope::Activation`. As with the counter cost above, activation
+    /// never consults `resolution_cost_includes_impossible_event`, so the gate
+    /// inside the `Draw` pay arm is the only refusal available.
+    ///
+    /// Revert probe: dropping that gate lets (iii) report `Paid` under Maralen.
+    #[test]
+    fn activation_draw_cost_under_cant_draw_is_refused() {
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["Top", "Second", "Third"]);
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        let cost = draw_effect_cost(1);
+
+        // (i) Reach guard: the draw cost is payable before the prohibition exists.
+        assert!(
+            can_pay_activation(&scenario.state, source, &cost),
+            "an unprohibited draw cost must be payable at activation"
+        );
+
+        // (ii) Paying it draws one card for the activating player.
+        let mut paid_state = scenario.state.clone();
+        let hand_before = paid_state.players[P0.0 as usize].hand.len();
+        let paid = pay_ability_cost_for_activation(
+            &mut paid_state,
+            P0,
+            source,
+            &cost,
+            Some(0),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(paid, Ok(PaymentOutcome::Paid)),
+            "an unprohibited draw cost must pay, got {paid:?}"
+        );
+        assert_eq!(
+            paid_state.players[P0.0 as usize].hand.len(),
+            hand_before + 1,
+            "paying a draw cost must draw the card"
+        );
+
+        scenario.add_creature_from_oracle(P0, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+
+        // (iii) Under a can't-draw effect the cost can't be chosen.
+        assert!(
+            !can_pay_activation(&scenario.state, source, &cost),
+            "a draw cost must be unpayable while its drawer can't draw"
+        );
+        let refused = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            source,
+            &cost,
+            Some(0),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Err(EngineError::ActionNotAllowed(_))),
+            "a can't-draw effect must refuse the draw cost, got {refused:?}"
+        );
+    }
+
+    /// Spirit of the Labyrinth, verbatim Oracle text: a CR 121.2b one-card-per-turn limit for every player.
+    const SPIRIT_OF_THE_LABYRINTH_ORACLE: &str =
+        "Each player can't draw more than one card each turn.";
+
+    /// Narset, Parter of Veils, verbatim Oracle text (Scryfall form, real U+2212 minus): a CR 121.2b
+    /// one-card-per-turn limit on the controller's opponents only.
+    const NARSET_PARTER_OF_VEILS_ORACLE: &str = "Each opponent can't draw more than one card each turn.\n\
+        \u{2212}2: Look at the top four cards of your library. You may reveal a noncreature, nonland card from \
+        among them and put it into your hand. Put the rest on the bottom of your library in a random order.";
+
+    /// A resolution ability controlled by P0 whose effect is never read by the draw-cost predicates.
+    fn draw_cost_ability(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            P0,
+        )
+    }
+
+    /// CR 702.24a + CR 121.2 + CR 614.11a: a pause on one leg hands back only the later legs; the paused
+    /// instruction's own remaining draws belong to the active draw frame.
+    #[test]
+    fn a_paused_draw_leg_hands_back_only_later_legs() {
+        let draw_one = draw_effect_cost(1);
+        let rows = [
+            (
+                AbilityCost::Composite {
+                    costs: vec![draw_one.clone(), draw_one.clone(), draw_one.clone()],
+                },
+                Some(AbilityCost::Composite {
+                    costs: vec![draw_one.clone(), draw_one.clone()],
+                }),
+            ),
+            // A one-leg tail collapses to its leaf.
+            (
+                AbilityCost::Composite {
+                    costs: vec![draw_one.clone(), draw_one.clone()],
+                },
+                Some(draw_one.clone()),
+            ),
+            // One three-card instruction: the frame owns its remaining draws, nothing is handed back.
+            (draw_effect_cost(3), None),
+            (draw_one, None),
+        ];
+        for (cost, expected_suffix) in rows {
+            let mut scenario = GameScenario::new();
+            scenario.with_library_top(P0, &["L1", "L2", "L3", "L4", "L5", "L6", "L7"]);
+            scenario
+                .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+                .from_oracle_text(STINKWEED_IMP_ORACLE);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            let ability = draw_cost_ability(source);
+
+            let outcome = pay_ability_cost_for_resolution(
+                &mut scenario.state,
+                P0,
+                &cost,
+                &ability,
+                &mut Vec::new(),
+            );
+
+            let Ok(PaymentOutcome::Paused { remaining_cost }) = outcome else {
+                panic!("Dredge must pause the first draw of {cost:?}, got {outcome:?}");
+            };
+            assert!(
+                matches!(
+                    scenario.state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ),
+                "the pause is the Dredge replacement choice"
+            );
+            assert_eq!(
+                remaining_cost, expected_suffix,
+                "the pause hands back exactly the later legs of {cost:?}"
+            );
+            if cost == draw_effect_cost(3) {
+                assert!(
+                    scenario.state.active_draw_sequence().is_some(),
+                    "the paused three-card instruction's remaining draws stay with its draw frame"
+                );
+            }
+        }
+    }
+
+    /// CR 614.17b + CR 121.2b: draw legs that are each drawable are judged together against a one-card limit,
+    /// by both the choice-time predicate and the payability authority. A non-draw leg between two draw legs
+    /// neither drops nor double-counts them.
+    #[test]
+    fn draw_legs_are_judged_together_under_a_per_turn_limit() {
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Spirit of the Labyrinth",
+            3,
+            1,
+            SPIRIT_OF_THE_LABYRINTH_ORACLE,
+        );
+        let ability = draw_cost_ability(source);
+        let state = &scenario.state;
+        let draw_one = draw_effect_cost(1);
+        let mana_one = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+
+        // Reach guard: one draw is within the limit.
+        let one_leg = AbilityCost::Composite {
+            costs: vec![draw_one.clone()],
+        };
+        assert!(!resolution_cost_includes_impossible_event(
+            state, P0, &one_leg, &ability
+        ));
+        assert!(can_pay_resolution(state, P0, &one_leg, &ability));
+
+        let two_legs = AbilityCost::Composite {
+            costs: vec![draw_one.clone(), draw_one.clone()],
+        };
+        assert!(
+            resolution_cost_includes_impossible_event(state, P0, &two_legs, &ability),
+            "two one-card legs can't be chosen under a one-card limit"
+        );
+        assert!(
+            !can_pay_resolution(state, P0, &two_legs, &ability),
+            "two one-card legs can't be paid under a one-card limit"
+        );
+
+        // Reach guard: a non-draw leg adds nothing to the drawer's total.
+        let draw_and_mana = AbilityCost::Composite {
+            costs: vec![draw_one.clone(), mana_one.clone()],
+        };
+        assert!(!resolution_cost_includes_impossible_event(
+            state,
+            P0,
+            &draw_and_mana,
+            &ability
+        ));
+        // The mana leg's own arm answers false, so only the aggregate can make this true.
+        let draw_mana_draw = AbilityCost::Composite {
+            costs: vec![draw_one.clone(), mana_one, draw_one],
+        };
+        assert!(
+            resolution_cost_includes_impossible_event(state, P0, &draw_mana_draw, &ability),
+            "draw legs separated by a non-draw leg are still summed"
+        );
+    }
+
+    /// CR 121.3a + CR 121.2b: the aggregate is keyed on the DRAWER (the ability's controller here), never on
+    /// the payer. Narset limits only her controller's opponents.
+    #[test]
+    fn draw_legs_are_summed_per_drawer_not_per_payer() {
+        let two_legs = AbilityCost::Composite {
+            costs: vec![draw_effect_cost(1), draw_effect_cost(1)],
+        };
+        for (narset_controller, expected_impossible) in [(P1, true), (P0, false)] {
+            let mut scenario = GameScenario::new();
+            scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+            scenario.with_library_top(P1, &["M1", "M2", "M3"]);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            scenario.add_planeswalker_from_oracle(
+                narset_controller,
+                "Narset, Parter of Veils",
+                "Narset",
+                5,
+                NARSET_PARTER_OF_VEILS_ORACLE,
+            );
+            let ability = draw_cost_ability(source);
+
+            assert_eq!(
+                resolution_cost_includes_impossible_event(&scenario.state, P1, &two_legs, &ability),
+                expected_impossible,
+                "payer P1, drawer P0, Narset controlled by {narset_controller:?}"
+            );
+        }
+    }
+
+    /// CR 118.5: a zero-card draw total includes no draw, so it is drawable even under a can't-draw effect.
+    #[test]
+    fn a_zero_card_draw_total_is_drawable() {
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario.add_creature_from_oracle(P0, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+        let ability = draw_cost_ability(source);
+
+        // Reach guard: Maralen is live, so a one-card draw is not drawable.
+        assert!(!draw_legs_are_drawable(
+            &scenario.state,
+            &[draw_effect_cost(1)],
+            &ability
+        ));
+        assert!(
+            draw_legs_are_drawable(&scenario.state, &[draw_effect_cost(0)], &ability),
+            "a zero-card draw cost includes no draw"
+        );
+    }
+
+    /// CR 118.5 + CR 614.17b: the fresh resolution entry's choice gate admits a zero-card draw cost under a
+    /// can't-draw effect, because such a cost includes no draw event.
+    ///
+    /// Revert probe: making `draw_legs_are_drawable` treat a zero total as undrawable fails the Draw0 row.
+    #[test]
+    fn a_zero_card_draw_cost_is_paid_fresh_under_a_cant_draw_effect() {
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario.add_creature_from_oracle(P1, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+        let ability = draw_cost_ability(source);
+
+        // Reach guard: the board refuses a fresh one-card draw cost.
+        let mut refused_state = scenario.state.clone();
+        let refused = pay_ability_cost_for_resolution(
+            &mut refused_state,
+            P0,
+            &draw_effect_cost(1),
+            &ability,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Ok(PaymentOutcome::Failed { .. })),
+            "a fresh one-card draw cost must be refused under Maralen, got {refused:?}"
+        );
+
+        let paid = pay_ability_cost_for_resolution(
+            &mut scenario.state,
+            P0,
+            &draw_effect_cost(0),
+            &ability,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(paid, Ok(PaymentOutcome::Paid)),
+            "a zero-card draw cost includes no draw, so the fresh gate admits it, got {paid:?}"
+        );
+    }
+
+    /// CR 118.12 + CR 614.17b + CR 118.11: on one board, the fresh entry refuses a draw cost its drawer can't
+    /// draw, while the latched entry resumes a choice already made: it settles `Paid` and the draw is
+    /// clamped as it happens.
+    ///
+    /// Revert probe: pointing `resume_ability_cost_for_resolution` at the fresh entry makes the latched row
+    /// `Failed`.
+    #[test]
+    fn the_latched_entry_does_not_regate_a_chosen_payment() {
+        for maralen in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            if maralen {
+                scenario.add_creature_from_oracle(
+                    P1,
+                    "Maralen of the Mornsong",
+                    2,
+                    3,
+                    MARALEN_ORACLE,
+                );
+            }
+            let ability = draw_cost_ability(source);
+            let cost = draw_effect_cost(1);
+            let hand_before = scenario.state.players[P0.0 as usize].hand.len();
+
+            let mut fresh_state = scenario.state.clone();
+            let fresh = pay_ability_cost_for_resolution(
+                &mut fresh_state,
+                P0,
+                &cost,
+                &ability,
+                &mut Vec::new(),
+            );
+            let fresh_hand_delta = fresh_state.players[P0.0 as usize].hand.len() - hand_before;
+            if !maralen {
+                // Reach guard: without a can't-draw effect the fresh entry pays and draws.
+                assert!(matches!(fresh, Ok(PaymentOutcome::Paid)), "got {fresh:?}");
+                assert_eq!(
+                    fresh_hand_delta, 1,
+                    "an unrestricted draw cost draws its card"
+                );
+                continue;
+            }
+            assert!(
+                matches!(fresh, Ok(PaymentOutcome::Failed { .. })),
+                "the fresh entry refuses a draw its drawer can't draw, got {fresh:?}"
+            );
+            assert_eq!(fresh_hand_delta, 0, "a refused choice pays nothing");
+
+            let latched = resume_ability_cost_for_resolution(
+                &mut scenario.state,
+                P0,
+                &cost,
+                &ability,
+                &mut Vec::new(),
+            );
+            assert!(
+                matches!(latched, Ok(PaymentOutcome::Paid)),
+                "the latched entry never re-gates a choice already made, got {latched:?}"
+            );
+            assert_eq!(
+                scenario.state.players[P0.0 as usize].hand.len(),
+                hand_before,
+                "the latched draw is clamped by the can't-draw effect as it happens"
+            );
+        }
+    }
+
+    /// CR 614.17b + CR 118.12 + CR 118.11: both prevented-event legs — a counter on the source and a
+    /// counter on the payer — are refused as a CHOICE (the fresh entry fails the whole `Composite` and pays
+    /// nothing), while a latched resume completes the prevented leg as paid and still pays the later
+    /// mana leg. Class coverage: no printed resolution `Composite` carries a `GetPlayerCounters` leg, so
+    /// its latched production entries are reached here through the shared authority.
+    ///
+    /// Revert probe: making `PaymentScope::prevented_event_refuses_payment` return `true` for
+    /// `LatchedSuffix` turns every Solemnity + latched row `Failed` with no red mana.
+    #[test]
+    fn a_latched_resume_completes_a_prevented_counter_event() {
+        use crate::types::ability::{ManaContribution, ManaProduction};
+        use crate::types::mana::{ManaColor, ManaType};
+        use crate::types::player::PlayerCounterKind;
+
+        let probe_counter = CounterType::Generic("probe".to_string());
+        let red_mana_leg = AbilityCost::EffectCost {
+            effect: Box::new(Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }),
+        };
+        let prevented_legs = [
+            (
+                "player counter",
+                AbilityCost::GetPlayerCounters {
+                    counter_kind: PlayerCounterKind::Poison,
+                    count: 1,
+                },
+            ),
+            (
+                "source counter",
+                AbilityCost::EffectCost {
+                    effect: Box::new(Effect::PutCounter {
+                        counter_type: probe_counter.clone(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    }),
+                },
+            ),
+        ];
+
+        for (leg_name, leg) in prevented_legs {
+            let is_player_leg = matches!(leg, AbilityCost::GetPlayerCounters { .. });
+            let cost = AbilityCost::Composite {
+                costs: vec![leg, red_mana_leg.clone()],
+            };
+            assert!(
+                supported_at_resolution(&cost),
+                "{leg_name}: the composite must be a resolution-payable shape"
+            );
+            for solemnity in [false, true] {
+                let mut scenario = GameScenario::new();
+                let source = scenario
+                    .add_enchantment_from_oracle(P0, "Counter Cost Source", "")
+                    .id();
+                if solemnity {
+                    scenario.add_enchantment_from_oracle(
+                        P0,
+                        "Solemnity",
+                        "Players can't get counters.\n\
+                         Counters can't be put on artifacts, creatures, enchantments, or lands.",
+                    );
+                }
+                let ability = draw_cost_ability(source);
+
+                for latched in [false, true] {
+                    let mut state = scenario.state.clone();
+                    let outcome = if latched {
+                        resume_ability_cost_for_resolution(
+                            &mut state,
+                            P0,
+                            &cost,
+                            &ability,
+                            &mut Vec::new(),
+                        )
+                    } else {
+                        pay_ability_cost_for_resolution(
+                            &mut state,
+                            P0,
+                            &cost,
+                            &ability,
+                            &mut Vec::new(),
+                        )
+                    };
+                    let red_mana = state.players[P0.0 as usize]
+                        .mana_pool
+                        .count_color(ManaType::Red);
+                    let poison =
+                        state.players[P0.0 as usize].player_counter(&PlayerCounterKind::Poison);
+                    let source_counters = state.objects[&source]
+                        .counters
+                        .get(&probe_counter)
+                        .copied()
+                        .unwrap_or(0);
+                    let placed_counters = if is_player_leg {
+                        poison
+                    } else {
+                        source_counters
+                    };
+                    let row = format!("{leg_name}, solemnity={solemnity}, latched={latched}");
+
+                    if !solemnity {
+                        // Reach guard: without the prohibition both entries pay both legs, so
+                        // the counter leg genuinely executes on this path.
+                        assert!(
+                            matches!(outcome, Ok(PaymentOutcome::Paid)),
+                            "{row}: {outcome:?}"
+                        );
+                        assert_eq!(red_mana, 1, "{row}: the mana leg is paid");
+                        assert_eq!(
+                            placed_counters, 1,
+                            "{row}: the counter leg places its counter"
+                        );
+                        continue;
+                    }
+                    assert_eq!(placed_counters, 0, "{row}: Solemnity prevents the counter");
+                    if latched {
+                        assert!(
+                            matches!(outcome, Ok(PaymentOutcome::Paid)),
+                            "{row}: a latched prevented counter completes as paid, got {outcome:?}"
+                        );
+                        assert_eq!(red_mana, 1, "{row}: the later mana leg is still paid");
+                    } else {
+                        assert!(
+                            matches!(outcome, Ok(PaymentOutcome::Failed { .. })),
+                            "{row}: the fresh choice is refused, got {outcome:?}"
+                        );
+                        assert_eq!(red_mana, 0, "{row}: a refused choice pays nothing");
+                    }
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Resolution-scope `AbilityCost::TapCreatures` payment bounds.
     //
@@ -4196,6 +4995,7 @@ mod tests {
             &PaymentScope::Resolution {
                 ability,
                 cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+                origin: ResolutionPaymentOrigin::FreshChoice,
             },
             None,
         )
@@ -4679,6 +5479,7 @@ mod tests {
                 &PaymentScope::Resolution {
                     ability: &ability,
                     cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+                    origin: ResolutionPaymentOrigin::FreshChoice,
                 },
             );
             assert_eq!(

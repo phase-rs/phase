@@ -106,6 +106,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  111 — game_setup and state_update carry GameState, whose parked unless-cost
+ *       resume now carries its unpaid legs (unpaid_suffix) and whose queued
+ *       continuations carry a PayCost remainder's payment origin
+ *       (head_payment_origin), and whose pending cost-move resume gains the
+ *       ReplacementMayCostInnerChoice variant. A v110 peer drops the keys silently
+ *       and cannot decode the variant, so first contact rejects the skew. Bumped
+ *       with full-game protocol 129.
  *  109 — game_setup and state_update carry GameState, whose attachment filters
  *       are now one AttachedTo prop with a tagged `to` referent in place of the
  *       AttachedToSource / AttachedToRecipient / AttachedToPlayer tags. Both
@@ -634,7 +641,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 110 as const;
+export const WIRE_PROTOCOL_VERSION = 111 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

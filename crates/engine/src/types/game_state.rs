@@ -2853,6 +2853,40 @@ pub struct PendingContinuation {
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) player_scope_queue_end: bool,
+    /// CR 118.12: how this chain's head `Effect::PayCost` enters the payment
+    /// authority. `LatchedSuffix` only for the unpaid remainder that
+    /// `effects::prepend_remaining_pay_cost_continuation` /
+    /// `prepend_remaining_pay_cost_before_parked_rider` queue after a paused
+    /// payment, and only for the head: `drain_pending_continuation` hands it to
+    /// `GameState::resolving_head_payment_origin`, the chain walker binds it to
+    /// the head node, and `effects::pay::resolve` takes it once. Legacy saves
+    /// default to `FreshChoice`.
+    #[serde(
+        default,
+        skip_serializing_if = "ResolutionPaymentOrigin::is_fresh_choice"
+    )]
+    pub(crate) head_payment_origin: ResolutionPaymentOrigin,
+}
+
+/// CR 118.12 + CR 614.17b: how a resolution-time payment enters the single
+/// payment authority. A fresh payment is the payer's choice to pay, which a
+/// cost including an impossible event can't be (CR 614.17b). A latched payment
+/// resumes legs of a choice already made: a later can't-effect cannot unmake
+/// it (CR 614.17a), it still clamps each event as it happens (CR 118.11), and
+/// a prevented counter placement completes as paid. The origin travels into
+/// `costs::PaymentScope::Resolution`, where the leg arms read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ResolutionPaymentOrigin {
+    #[default]
+    FreshChoice,
+    LatchedSuffix,
+}
+
+impl ResolutionPaymentOrigin {
+    /// Serde skip predicate: a fresh head is the default and is not serialized.
+    pub(crate) fn is_fresh_choice(&self) -> bool {
+        matches!(self, Self::FreshChoice)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2898,6 +2932,7 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            head_payment_origin: ResolutionPaymentOrigin::FreshChoice,
         }
     }
 
@@ -2922,6 +2957,7 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            head_payment_origin: ResolutionPaymentOrigin::FreshChoice,
         }
     }
 }
@@ -8077,6 +8113,8 @@ pub enum WardSacrificePaymentResume {
 /// choice. `Cast` resumes a cast or activation after its next object is
 /// delivered. `ReplacementMayCost` keeps the outer optional replacement parked
 /// while an inner MayCost move finishes through the replacement pipeline.
+/// `ReplacementMayCostInnerChoice` keeps it parked while a paused leg's own
+/// event replacement choice owns `pending_replacement`.
 /// `Foretell` records the special action until its replacement-aware exile move
 /// has been delivered or prevented. `ManaAbilityPayment` owns the exact
 /// activation and unpaid payment cursor until the move has settled.
@@ -8139,6 +8177,20 @@ pub enum PendingCostMoveResume {
         /// cost move is delivered or prevented.
         outer_replacement: Option<Box<PendingReplacement>>,
     },
+    /// CR 614.12a + CR 616.1 + CR 614.11a: an accepted entry `MayCost` whose
+    /// payment paused on a replacement choice that belongs to one of its legs'
+    /// own events — a Dredge or skip on a draw leg (CR 702.52a), a CR 616.1
+    /// ordering on a discarded card. That inner record owns
+    /// `pending_replacement` and its event's unfinished work (for a draw, the
+    /// active `MultiDraw` frame); this record retains only the outer optional
+    /// replacement, whose `may_cost_remaining` carries the unpaid later legs.
+    /// It resumes after the inner event — the whole draw instruction included —
+    /// has settled, and before the enclosing effect's next instruction
+    /// (CR 608.2c). Unlike `ReplacementMayCost`, it owns no leg cursor and is
+    /// built with the outer in hand.
+    ReplacementMayCostInnerChoice {
+        outer_replacement: Box<PendingReplacement>,
+    },
     Foretell {
         player: PlayerId,
         object_id: ObjectId,
@@ -8190,11 +8242,14 @@ pub enum PendingCostMoveResume {
     },
     /// CR 118.12 + CR 122.1 + CR 616.1: A counter-addition unless-cost paused
     /// on a replacement choice. Covers Ward's player-counter payment and the
-    /// source-counter `EffectCost` used by cumulative upkeep. The resume reads
+    /// deterministic `EffectCost` shapes: the source counter used by cumulative
+    /// upkeep, and the draw cost (Psychic Vortex, Decoy Gambit). The resume reads
     /// `pending_effect` and `trigger_event` to settle the parked payment
-    /// instead of orphaning the pending ability; `cost`, `effect_description`
-    /// and `remaining` complete the serialized checkpoint payload and are read
-    /// on no resume path. CR 118.12: BOTH replacement
+    /// instead of orphaning the pending ability, and `unpaid_suffix` to pay the
+    /// legs of the cost not yet paid. `cost`, `effect_description`
+    /// and `remaining` complete the serialized checkpoint payload, are read on
+    /// no resume path, and are carried forward unchanged when the resume parks
+    /// again. CR 118.12: BOTH replacement
     /// outcomes complete the payment — the "if they don't" clause checks whether
     /// the player chose to pay, "regardless of what events actually occurred",
     /// and this record's mere existence IS that choice (it is constructed only
@@ -8211,6 +8266,12 @@ pub enum PendingCostMoveResume {
         effect_description: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+        /// CR 702.24a + CR 118.12: the legs of the cost not yet paid when the payment paused — a `Composite`
+        /// tail, or its single last leg. `None` when the pause came on the last leg, which is every pause of a
+        /// cost performed as a single event. A leg's own unfinished instruction is owned by the active draw frame
+        /// (CR 614.11a), never by this suffix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unpaid_suffix: Option<Box<UnpaidCostSuffix>>,
     },
     /// CR 701.9b + CR 118.12 + CR 616.1: a RANDOM unless-discard that paused on
     /// a replacement choice (Library of Leng, Madness) partway through its batch.
@@ -8265,6 +8326,7 @@ impl PendingCostMoveResume {
             // replacement (CR 614.1).
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
@@ -8292,6 +8354,18 @@ pub struct RandomDiscardUnlessPaymentResume {
     /// Picks still owed after the paused card settles.
     #[serde(default)]
     pub remaining_count: u32,
+}
+
+/// CR 118.12 + CR 702.24a + CR 616.1: the unpaid legs of an unless
+/// effect-cost whose payment paused on a replacement choice, and the payer who
+/// owes it. A remainder is not resumable without its payer, which the parked
+/// unless-payment does not otherwise record. Boxed for the
+/// `game_state_size.rs` stack budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnpaidCostSuffix {
+    pub payer: PlayerId,
+    #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
+    pub cost: AbilityCost,
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
@@ -8926,6 +9000,7 @@ fn visit_cost_move_resume_events(
         PendingCostMoveResume::Cast { .. }
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::ActivationMillPayment { .. }
@@ -22167,6 +22242,14 @@ declare_game_state! {
     #[serde(skip)]
     pub resolving_continuation_attach_host: Option<AttachTarget>,
 
+    /// Execution-local view of the drained continuation's `head_payment_origin`,
+    /// or of a replayed transaction root (`payment_transaction::replay`). The
+    /// chain walker takes it as it enters the chain's first node and hands it
+    /// back only to that node's own `PayCost` step, where `effects::pay::resolve`
+    /// takes it once; no later node can see it. Never serialized.
+    #[serde(skip)]
+    pub(crate) resolving_head_payment_origin: ResolutionPaymentOrigin,
+
     /// Execution-local view of the active generated player-scope continuation.
     /// The serialized authority lives on `PendingContinuation`; every pause
     /// re-parks it before control returns to callers.
@@ -28688,6 +28771,7 @@ impl GameState {
             payment_transaction_replay: false,
             payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
+            resolving_head_payment_origin: ResolutionPaymentOrigin::FreshChoice,
             resolving_player_scope_linked_exile: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
@@ -31712,6 +31796,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         payment_transaction_replay: _,
         payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
+        resolving_head_payment_origin: _,
         resolving_player_scope_linked_exile: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
@@ -46914,6 +46999,47 @@ mod tests {
             deserialized.active_spend_only_on_x_count, None,
             "deserialized active_spend_only_on_x_count must be None"
         );
+    }
+
+    /// CR 118.12: a continuation record without `head_payment_origin` (every save written before the field
+    /// existed, and every fresh record, which skips it) deserializes as a fresh choice; a latched record
+    /// round-trips latched.
+    ///
+    /// Revert probe: dropping `skip_serializing_if` writes the key for a fresh record; dropping
+    /// `serde(default)` fails to read the legacy record.
+    #[test]
+    fn a_legacy_pending_continuation_without_a_payment_origin_is_fresh() {
+        let state = GameState::new_two_player(7);
+        let chain = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let fresh = PendingContinuation::new(Box::new(chain), &state);
+        let fresh_json = serde_json::to_value(&fresh).unwrap();
+        assert!(
+            fresh_json.get("head_payment_origin").is_none(),
+            "a fresh head is the default and is not serialized: {fresh_json}"
+        );
+        let legacy: PendingContinuation = serde_json::from_value(fresh_json).unwrap();
+        assert_eq!(
+            legacy.head_payment_origin,
+            ResolutionPaymentOrigin::FreshChoice
+        );
+
+        let mut latched = fresh;
+        latched.head_payment_origin = ResolutionPaymentOrigin::LatchedSuffix;
+        let latched_json = serde_json::to_string(&latched).unwrap();
+        let restored: PendingContinuation = serde_json::from_str(&latched_json).unwrap();
+        assert_eq!(
+            restored.head_payment_origin,
+            ResolutionPaymentOrigin::LatchedSuffix
+        );
+        assert_eq!(restored, latched);
     }
 }
 

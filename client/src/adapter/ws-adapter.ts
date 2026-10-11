@@ -210,6 +210,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 129 — Paused cost payments: the parked unless-cost resume
+ *      (CounterAdditionUnlessPayment) gains unpaid_suffix, the unpaid legs and
+ *      their payer, and PendingContinuation gains head_payment_origin, which
+ *      marks a queued PayCost remainder as a payment already chosen. A v128 peer
+ *      drops both silently. The pending cost-move resume also gains
+ *      ReplacementMayCostInnerChoice, an accepted entry MayCost parked while its
+ *      leg's own replacement choice is answered, which a v128 peer cannot decode.
+ *      P2P moves in lockstep to wire 111.
  * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
  *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
  *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
@@ -804,7 +812,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 128;
+export const PROTOCOL_VERSION = 129;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -90,6 +90,7 @@ fn abandon_pending_spell_casts(
             | PendingCostMoveResume::SacrificeForCost { pending: None, .. }
             | PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }

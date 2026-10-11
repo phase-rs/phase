@@ -6,6 +6,9 @@
 //! against its shadow. Every materialization starts from that base and runs the
 //! normal resolution/action pipeline; no second payment implementation lives
 //! here.
+//!
+//! A staged root is a fresh payment choice at `begin` and a latched re-entry on
+//! every replay (CR 118.12).
 
 use crate::game::effects;
 use crate::game::engine::{self, EngineError};
@@ -13,8 +16,8 @@ use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, GameState, ResolutionPaymentTransaction, ResolutionPaymentTranscriptEntry,
-    ResolvingTriggerContext,
+    ActionResult, GameState, ResolutionPaymentOrigin, ResolutionPaymentTransaction,
+    ResolutionPaymentTranscriptEntry, ResolvingTriggerContext,
 };
 use crate::types::log::GameLogEntry;
 
@@ -37,13 +40,24 @@ fn replay_error(error: EffectError) -> EngineError {
     ))
 }
 
-/// The transaction boundary owns only the Composite PayCost instruction. All
-/// outgoing chain edges stay on the durable root so the ordinary chain walker
-/// can resume them after the payment commits or aborts.
+/// The transaction boundary owns only the Composite PayCost instruction, already
+/// admitted by its condition. All outgoing chain edges stay on the durable root
+/// so the ordinary chain walker can resume them after the payment commits or
+/// aborts.
 fn payment_only_root(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut payment = ability.clone();
     payment.sub_ability = None;
     payment.else_ability = None;
+    // CR 608.2c + CR 118.12: the chain walker evaluated this instruction's
+    // condition, in its own resolution context, before `pay::resolve` opened the
+    // transaction; that evaluation is the fresh one. The shadow re-materializes
+    // only the payment and must not ask again: at `begin` its depth-0 entry has
+    // reset the resolution-local state the condition may read, and on `replay`
+    // canonical state may have changed through an outside-transaction action
+    // such as another player's concession (CR 104.3a + CR 800.4a). A false
+    // verdict there would skip the payment and settle the choice as paid, or
+    // strand the recorded answers.
+    payment.condition = None;
     payment
 }
 
@@ -83,6 +97,7 @@ fn returned_to_base_waiting(
 /// The caller has not yet committed any payment mutation. The root is replayed
 /// on a shadow with the transient staging guard set, so the shadow uses the
 /// ordinary payment authority and cannot recursively create another descriptor.
+/// The root is judged fresh here, once; `replay` re-materializes it latched.
 pub(crate) fn begin(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -166,8 +181,17 @@ fn replay(
     let mut buffered_events = Vec::new();
     let mut buffered_log_entries: Vec<GameLogEntry> = Vec::new();
     let payment_root = payment_only_root(&transaction.root);
-    effects::resolve_ability_chain(&mut shadow, &payment_root, &mut buffered_events, 0)
-        .map_err(replay_error)?;
+    // CR 118.12 + CR 614.17a: `begin` judged the root's choice fresh; every
+    // replay re-materializes that choice against canonical state, which
+    // outside-transaction actions such as another player's concession
+    // (CR 104.3a + CR 800.4a) can change. Re-gating would unpay a choice
+    // already made, so the root pays through the latched entry. Each event is
+    // still clamped as it happens.
+    shadow.resolving_head_payment_origin = ResolutionPaymentOrigin::LatchedSuffix;
+    let root_outcome =
+        effects::resolve_ability_chain(&mut shadow, &payment_root, &mut buffered_events, 0);
+    shadow.resolving_head_payment_origin = ResolutionPaymentOrigin::FreshChoice;
+    root_outcome.map_err(replay_error)?;
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
     // Keep the replay guard live while transcript actions drain the suspended
     // continuation. A remaining Composite must use the ordinary sequential
@@ -2039,5 +2063,224 @@ mod tests {
             1,
             "the restored EventContextAmount drives the same life payment"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 608.2c + CR 118.12: the staged shadow re-materializes only the payment
+    // the chain walker already admitted; it never re-evaluates the root's
+    // condition.
+    // -----------------------------------------------------------------------
+
+    mod staged_root_condition {
+        use super::*;
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::ability::{Comparator, QuantityRef};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+
+        /// Stinkweed Imp, verbatim Oracle text: Dredge 5 makes each of P0's draws a replacement choice.
+        const STINKWEED_IMP_ORACLE: &str = "Flying\n\
+            Whenever this creature deals combat damage to a creature, destroy that creature.\n\
+            Dredge 5 (If you would draw a card, you may mill five cards instead. If you do, \
+            return this card from your graveyard to your hand.)";
+
+        const LIBRARY: [&str; 12] = [
+            "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10", "L11", "L12",
+        ];
+
+        fn draw_cost() -> AbilityCost {
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }),
+            }
+        }
+
+        fn two_draw_payment(source: ObjectId) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::PayCost {
+                    cost: AbilityCost::Composite {
+                        costs: vec![draw_cost(), draw_cost()],
+                    },
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )
+        }
+
+        fn gain_life(source: ObjectId, amount: i32) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )
+        }
+
+        fn opponents_at_least(count: i32) -> AbilityCondition {
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+            }
+        }
+
+        fn hand_size(state: &GameState) -> usize {
+            state.players[P0.0 as usize].hand.len()
+        }
+
+        /// Three players, every library staged, Stinkweed Imp in P0's graveyard, layers evaluated.
+        fn three_player_dredge_board() -> (GameRunner, ObjectId) {
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            for player in 0..3 {
+                scenario.with_library_top(PlayerId(player), &LIBRARY);
+            }
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            scenario
+                .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+                .from_oracle_text(STINKWEED_IMP_ORACLE);
+            let mut runner = scenario.build();
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            (runner, source)
+        }
+
+        /// CR 608.2c + CR 118.12 + CR 104.3a + CR 800.4a: another player's concession falsifies the staged
+        /// root's own condition between `begin` and `replay`. The walker already admitted the instruction,
+        /// so the replayed payment still resumes and every recorded answer still applies.
+        ///
+        /// Revert probe: keeping `condition` in `payment_only_root` makes the replay skip the payment, so the
+        /// first decline is rejected ("replacement choice has no pending replacement") and the transaction
+        /// stays live.
+        #[test]
+        fn a_concession_that_falsifies_the_staged_roots_condition_does_not_wedge_the_payment() {
+            let (mut runner, source) = three_player_dredge_board();
+            let condition = opponents_at_least(2);
+            let mut root = two_draw_payment(source);
+            root.condition = Some(condition.clone());
+            root.sub_ability = Some(Box::new(gain_life(source, 3)));
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+
+            effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(
+                state.payment_transaction.is_some(),
+                "the walker staged the payment"
+            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == P0
+            ));
+            assert!(effects::evaluate_condition(&condition, state, &root));
+
+            let concession = engine::apply(
+                state,
+                PlayerId(2),
+                GameAction::Concede {
+                    player_id: PlayerId(2),
+                },
+            );
+            assert!(concession.is_ok(), "{concession:?}");
+            assert!(
+                !effects::evaluate_condition(&condition, state, &root),
+                "the concession flipped the condition's input on canonical state"
+            );
+            assert!(matches!(
+                project(state).waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == P0
+            ));
+
+            for leg in 1..=2 {
+                let decline = engine::apply(state, P0, GameAction::ChooseReplacement { index: 1 });
+                assert!(decline.is_ok(), "decline {leg}: {decline:?}");
+            }
+            assert_eq!(
+                hand_size(state),
+                hand_before + 2,
+                "both draw legs were paid"
+            );
+            assert!(!state.cost_payment_failed_flag);
+            assert!(state.payment_transaction.is_none());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the rider runs exactly once"
+            );
+        }
+
+        /// CR 608.2c: the walker still refuses a staged root whose condition is false from the start, before
+        /// `pay::resolve`, so no transaction opens.
+        #[test]
+        fn a_staged_root_whose_condition_is_false_never_opens_a_transaction() {
+            let (mut runner, source) = three_player_dredge_board();
+            let mut root = two_draw_payment(source);
+            root.condition = Some(opponents_at_least(3));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(state.payment_transaction.is_none());
+            assert_eq!(hand_size(state), hand_before);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+        }
+
+        fn previous_amount_at_least(count: i32) -> AbilityCondition {
+            AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+                channel: Default::default(),
+            }
+        }
+
+        /// GainLife 2 → PayCost{Composite[Draw 1, Draw 1]} (gated on the previous amount) → GainLife 7, by
+        /// P0 on an unrestricted two-player board. Returns (hand delta, life delta, transaction left).
+        fn resolve_gated_staged_payment(threshold: i32) -> (usize, i32, bool) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &LIBRARY);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            let mut runner = scenario.build();
+            let mut payment = two_draw_payment(source);
+            payment.condition = Some(previous_amount_at_least(threshold));
+            payment.sub_ability = Some(Box::new(gain_life(source, 7)));
+            let mut root = gain_life(source, 2);
+            root.sub_ability = Some(Box::new(payment));
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(!state.cost_payment_failed_flag);
+            let hand_delta = hand_size(state) - hand_before;
+            let transaction_left = state.payment_transaction.is_some();
+            (hand_delta, runner.life(P0) - life_before, transaction_left)
+        }
+
+        /// CR 608.2c + CR 118.12: `begin`'s shadow resolves the payment at depth 0, where the resolution-local
+        /// state its condition reads has been reset. The walker's admission stands, so both legs are paid.
+        ///
+        /// Revert probe: keeping `condition` in `payment_only_root` makes the shadow skip the payment and
+        /// `begin` commit it as a synchronous success with nothing drawn (hand +0).
+        #[test]
+        fn a_staged_payment_honours_a_condition_read_from_the_previous_instruction() {
+            assert_eq!(
+                resolve_gated_staged_payment(1),
+                (2, 9, false),
+                "the admitted payment draws both legs, then the rider runs"
+            );
+            // Negative sibling: the walker refuses a false condition (2 < 5) and skips the payment's rider.
+            assert_eq!(resolve_gated_staged_payment(5), (0, 2, false));
+        }
     }
 }
