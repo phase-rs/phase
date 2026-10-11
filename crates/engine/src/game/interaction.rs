@@ -13,8 +13,9 @@ use crate::ai_support::{
     FilterPipeline, TacticalClass,
 };
 use crate::analysis::decision_template::{
-    declaration_conforms, AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionTemplate,
-    IterationCount, PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+    declaration_conforms, recorded_answer, AnnouncementSubject, DecisionGroupKey, DecisionKind,
+    DecisionTemplate, IterationCount, PinnedDecision, Ranking, ReplayMode, TargetPin,
+    TargetSchedule,
 };
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
@@ -288,9 +289,9 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::UntapChoice { .. } => HumanResponseModel::DirectChoices,
         WaitingFor::BetweenGamesSideboard { .. } => HumanResponseModel::SideboardPartition,
-        WaitingFor::ManaPayment { .. } | WaitingFor::ManaSourceSelection { .. } => {
-            HumanResponseModel::DirectChoices
-        }
+        WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. } => HumanResponseModel::DirectChoices,
         WaitingFor::LoopShortcut { .. } => HumanResponseModel::LoopShortcut,
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
@@ -393,6 +394,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         ),
         WaitingFor::ManaPayment { .. }
         | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::UnlessPayment { .. }
@@ -2168,7 +2170,7 @@ fn mana_payment_direct_actions(
     let total_upper_bound = actions
         .len()
         .checked_add(tapped_for_mana.len())
-        .and_then(|count| count.checked_add(pool.mana_pool.mana.len()))
+        .and_then(|count| count.checked_add(pool.mana_pool.total()))
         .and_then(|count| count.checked_add(convoke_upper_bound))
         .and_then(|count| count.checked_add(delve_upper_bound))
         .and_then(|count| count.checked_add(2))
@@ -2188,8 +2190,7 @@ fn mana_payment_direct_actions(
     );
     actions.extend(
         pool.mana_pool
-            .mana
-            .iter()
+            .units()
             .filter(|unit| unit.pip_id.0 != 0)
             .map(|unit| {
                 if pinned.contains(&unit.pip_id) {
@@ -2300,6 +2301,20 @@ fn direct_choice_projection(
                 .map(|selection| GameAction::ActivateManaSource { selection })
                 .collect::<Vec<_>>();
             actions.push(GameAction::BackToManaPayment);
+            actions
+        }
+        // CR 605.3a + CR 733.1: the window's moves are the mana activations and
+        // withdrawing the pending activation.
+        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+            if *player != semantic_owner {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            let mut actions =
+                super::mana_sources::activatable_mana_actions_for_player(state, *player);
+            if actions.len() >= MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+            actions.push(GameAction::CancelCast);
             actions
         }
         WaitingFor::PrecastCopyShortcutOffer {
@@ -3602,7 +3617,7 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             // and no per-iteration creature is latched, so the pin states no answer to publish.
             PinnedDecision::ConvokeTaps { .. } => {}
             // CR 603.3b trigger ordering under the static replay mode, not a loop-shortcut
-            // per-iteration decision — and the one variant with no `slot`.
+            // per-iteration decision, so this projection publishes nothing for it.
             PinnedDecision::Order { .. } => {}
         }
     }
@@ -3730,6 +3745,7 @@ fn loop_shortcut_projection(
     let WaitingFor::LoopShortcut {
         schema,
         certificate,
+        road,
         ..
     } = waiting_for
     else {
@@ -3760,14 +3776,15 @@ fn loop_shortcut_projection(
     }
     let count = match schema.iteration_count {
         crate::analysis::decision_template::IterationCount::Fixed(suggested) => {
-            // CR 732.2a: the picker's ceiling is the offer's own CR 704 bound, never the raw
-            // global safety limit — a count above it would specify a sequence containing an
-            // elimination, which is a conditional action. The engine owns this number; the
-            // frontend renders it. An unnarrowed offer states `MAX_SHORTCUT_CYCLES`; a bounded
-            // offer states less. Either way this is the offer's own bound, clamped at the same
-            // authority.
+            // CR 732.2a: the picker's ceiling is the capacity this offer published — what the
+            // declare handler will accept — never the CR 704 threshold its producer measured and
+            // never the raw global safety limit. A count above it would specify a sequence
+            // containing an elimination, which is a conditional action. The engine owns this
+            // number; the frontend renders it. An offer that measured no threshold carries a
+            // capacity at `MAX_SHORTCUT_CYCLES`; one that measured a smaller threshold carries
+            // less.
             //
-            // CR 704.5a: `elimination_bounds` returns `0` to mean "no legal repetition exists and
+            // CR 704.5a: `elimination_cascade` returns `0` to mean "no legal repetition exists and
             // the caller must not offer". A published offer carrying `0` is an authority
             // violation, not a number to repair — clamping it to `1` renders a one-iteration
             // offer whose single iteration eliminates a player mid-proposal. Reject it in EVERY
@@ -3783,23 +3800,23 @@ fn loop_shortcut_projection(
             // restored dump into an engine panic.
             //
             // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has THREE call sites:
-            // `interactive_loop_bridge` and `try_offer_object_growth_shortcut` pass
-            // `MAX_SHORTCUT_CYCLES`, while `certified_bounded_cycle_offer` passes a NARROWED
-            // `max_iterations` — which cannot be `0` either, because that producer refuses
-            // outright unless `(1..MAX_SHORTCUT_CYCLES).contains(&max_iterations)`. The
-            // per-viewer projection in `game/visibility.rs` only re-projects an existing
-            // schema's value; and
-            // `ShortcutDecisionSchema::default().max_iterations == default_max_iterations()
-            // == MAX_SHORTCUT_CYCLES` (`analysis/decision_template.rs`), which is also the
-            // `#[serde(default)]` for a pre-bound save. The only way `0`
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has THREE call sites and
+            // derives every capacity itself: `interactive_loop_bridge` and the unbounded
+            // recorded offer measure no threshold, so theirs is
+            // `MAX_SHORTCUT_CYCLES`, while `bounded_offer_tail` hands it a measured
+            // threshold that cannot be `0` — that producer refuses outright unless the reduction
+            // measured one of at least 1. The per-viewer projection in
+            // `game/visibility.rs` only re-projects an existing schema's pair; and
+            // `ShortcutDecisionSchema::default()` seeds the capacity at `MAX_SHORTCUT_CYCLES`
+            // (`analysis/decision_template.rs`), which is also its `#[serde(default)]` for a save
+            // carrying no capacity key. The only way `0`
             // arrives is a LOADED/PERSISTED authority that explicitly serializes it. This
             // guard is therefore the fail-closed twin of item E: a latent hole shut before
             // it opens.
-            if schema.max_iterations == 0 {
+            if schema.deliverable_capacity == 0 {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
-            let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES);
+            let max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES);
             InteractionShortcutCountSpec::Fixed {
                 min: 1,
                 max,
@@ -3811,12 +3828,13 @@ fn loop_shortcut_projection(
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
-    // state their consequence instead of standing alone. It is published only by the producer
-    // that measured one (`certified_bounded_cycle_offer`); every other mint carries `None`, as
+    // state their consequence instead of standing alone. It is published only by
+    // `bounded_offer_tail`, for a ring period and a recorded loss period alike; every other mint
+    // carries `None`, as
     // does every save written before the field existed. The other authority the magnitudes
     // need — a FINITE count — is `count` above, and the two coincide by construction rather
-    // than by luck: the bounded producer both narrows `max_iterations` and mints
-    // `Fixed(max_iterations)`.
+    // than by luck: that same producer mints a `Fixed` VARIANT, which is what selects the finite
+    // arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
     let per_cycle = certificate.per_cycle.clone();
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -3908,21 +3926,27 @@ fn loop_shortcut_projection(
                 )
             }
             DecisionPointKind::MayChoice => {
-                candidates.extend([
-                    LoopShortcutCandidateValue::May(
-                        crate::analysis::decision_template::MayChoiceOption::Take,
-                    ),
-                    LoopShortcutCandidateValue::May(
-                        crate::analysis::decision_template::MayChoiceOption::Decline,
-                    ),
-                ]);
+                // CR 732.2a: a recorded take performs the confirmed period's own answer, so its
+                // "may" is stated as fixed and neither answer is offered.
+                let fixed = *road == crate::analysis::loop_check::OfferRoad::RecordedPeriod;
+                if !fixed {
+                    candidates.extend([
+                        LoopShortcutCandidateValue::May(
+                            crate::analysis::decision_template::MayChoiceOption::Take,
+                        ),
+                        LoopShortcutCandidateValue::May(
+                            crate::analysis::decision_template::MayChoiceOption::Decline,
+                        ),
+                    ]);
+                }
+                let answers = u32::from(!fixed);
                 (
                     InteractionShortcutPointKind::MayChoice,
-                    1,
-                    1,
+                    answers,
+                    answers,
                     true,
                     false,
-                    false,
+                    fixed,
                 )
             }
             DecisionPointKind::UnlessBreak => {
@@ -4773,6 +4797,7 @@ fn selection_projection(
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::ManaPayment { .. }
         | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         | WaitingFor::AssistChoosePlayer { .. }
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseXValue { .. }
@@ -10579,7 +10604,12 @@ fn materialize_number_response(
 fn materialize_loop_shortcut_response(
     interaction_id: &InteractionId,
     projection: &LoopShortcutProjection,
-    proposer: PlayerId,
+    // CR 732.2a: the proposer, the certified period and the offer's own published declaration,
+    // carried as ONE value because the seat the minted template is OWNED by and the seat the aim
+    // walk measures against must be the same one.
+    aim: crate::analysis::decision_template::AimContext<'_>,
+    // CR 732.2a: the answers the offer's confirmed period recorded; `None` off a recorded offer.
+    recorded: Option<&[PinnedDecision]>,
     authoritative_schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
     authoritative_state: &GameState,
     response: &InteractionResponse,
@@ -10655,9 +10685,16 @@ fn materialize_loop_shortcut_response(
                         color: *color,
                     });
                 }
+                // CR 732.2a: the confirmed period's own answer is the one its take performs.
+                InteractionShortcutPointKind::MayChoice => {
+                    let answer = recorded
+                        .and_then(|recorded| recorded_answer(recorded, &point.slot))
+                        .filter(|pin| matches!(pin, PinnedDecision::MayChoice { .. }))
+                        .ok_or(InteractionReasonCode::InvalidAuthorityState)?;
+                    decisions.push(answer.clone());
+                }
                 InteractionShortcutPointKind::Targets
                 | InteractionShortcutPointKind::Mode
-                | InteractionShortcutPointKind::MayChoice
                 | InteractionShortcutPointKind::UnlessBreak => {
                     return Err(InteractionReasonCode::InvalidAuthorityState);
                 }
@@ -10817,7 +10854,7 @@ fn materialize_loop_shortcut_response(
         .map(|point| point.slot.source.clone())
         .collect::<Vec<_>>();
     let template = (!projection.points.is_empty()).then(|| DecisionTemplate {
-        owner: proposer,
+        owner: aim.proposer,
         decisions,
         replay: ReplayMode::Scheduled {
             count: count.clone(),
@@ -10830,15 +10867,24 @@ fn materialize_loop_shortcut_response(
         // 0, so an index-0-only check would accept a declaration whose driven image leaves the
         // offer's published legal set at an index the count reaches. The helper's precondition
         // — a count already bounded — is discharged here by the count-spec projection, which
-        // computes `max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` and admits only that
+        // computes `max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES)` and admits only that
         // window.
         //
         // The `required` slot list is still not derived here: `declaration_conforms` derives it
         // from the SAME `authoritative_schema` this site already passed.
+        //
+        // CR 732.2a: the preview and the submit paths share this chokepoint, so both answer the
+        // aim question the same way, and a failure here is this entry's `ConstraintUnsatisfied`
+        // rather than the declare handler's priority handback. Of
+        // `InteractionShortcutDecision`'s three variants, `AcceptSuggested` and `Fixed` both fall
+        // through the pin loop above into this call — so the suggestion-count route is validated
+        // here too — while `Decline` returns before any pin is read and reaches no conjunct.
         if !declaration_conforms(
             authoritative_schema,
             template,
             crate::game::engine::shortcut_validated_range(&count, Some(template)),
+            aim.clone(),
+            recorded,
             authoritative_state,
         ) {
             return Err(InteractionReasonCode::ConstraintUnsatisfied);
@@ -11264,7 +11310,12 @@ fn materialize_response(
         HumanResponseModel::LoopShortcut => {
             let projection = loop_shortcut_projection(&filtered_state.waiting_for)?;
             let WaitingFor::LoopShortcut {
-                proposer, schema, ..
+                proposer,
+                schema,
+                certificate,
+                declaration,
+                period,
+                ..
             } = &authoritative_state.waiting_for
             else {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
@@ -11279,7 +11330,12 @@ fn materialize_response(
             return materialize_loop_shortcut_response(
                 interaction_id,
                 &projection,
-                *proposer,
+                crate::analysis::decision_template::AimContext {
+                    proposer: *proposer,
+                    per_cycle: certificate.per_cycle.as_ref(),
+                    published: declaration.as_ref(),
+                },
+                period.recorded_answers(),
                 schema,
                 authoritative_state,
                 completed.as_ref().unwrap_or(response),
@@ -11900,6 +11956,123 @@ mod tests {
                 .values()
                 .map(|view| view.cards.len())
                 .sum::<usize>()),
+        );
+    }
+    /// CR 732.2a — **the picker's ceiling is the DELIVERABLE CAPACITY, never the CR 704 threshold
+    /// the offer's producer measured.** The capacity is the highest count an accept may legally
+    /// specify: the declare handler refuses any `Fixed(n)` above it, so a picker publishing the
+    /// measurement would offer a count that handler then hands back.
+    ///
+    /// THREE ARMS, because only one of them can discriminate WHICH field is read:
+    ///
+    /// * ⓐ THE DISCRIMINATING ARM — the two published answers differ BELOW the budget, so
+    ///   `.min(MAX_SHORTCUT_CYCLES)` cannot mask a swap. No producer mints this pair
+    ///   (`build_shortcut_schema` derives the capacity as `measured.min(budget)`, which is the
+    ///   measurement itself whenever it fits); it is the loaded/persisted authority the
+    ///   zero-capacity guard above exists for, and it is the only board on which reading the
+    ///   measured field is observable at all.
+    /// * ⓑ the production-reachable boundary — a threshold ABOVE the budget, whose capacity is
+    ///   therefore the budget. The pair a real above-budget board carries.
+    /// * ⓒ the hostile sibling — `UntilLethal` publishes NO finite ceiling, stated on the
+    ///   SUGGESTION's variant rather than on `is_bounded()`: an un-narrowed object-growth offer
+    ///   measures no threshold and still publishes a finite ceiling, so the two are not the same
+    ///   question.
+    ///
+    /// REVERT-PROBE: read `measured_repetition_bound` in place of `deliverable_capacity` ⇒ ⓐ's
+    /// `max` is the measurement and FAILS, while ⓑ stays green under the `.min(..)`. Key ⓒ's arm
+    /// on `is_bounded()` instead of on the variant ⇒ ⓒ publishes a finite ceiling and FAILS.
+    #[test]
+    fn the_picker_publishes_the_deliverable_capacity_and_never_the_measured_threshold() {
+        use crate::analysis::decision_template::ShortcutDecisionSchema;
+        use crate::analysis::loop_check::{LoopCertificate, OfferRoad, WinKind};
+        use crate::analysis::resource::BoardDelta;
+
+        let viewer = PlayerId(0);
+        let offer_at = |iteration_count: IterationCount, measured: Option<u32>, capacity: u32| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::LoopShortcut {
+                proposer: viewer,
+                predicted_winner: Some(viewer),
+                certificate: LoopCertificate {
+                    unbounded: Vec::new(),
+                    win_kind: WinKind::LethalDamage,
+                    mandatory: false,
+                    residual_board_delta: BoardDelta::default(),
+                    per_cycle: None,
+                },
+                schema: ShortcutDecisionSchema {
+                    iteration_count,
+                    measured_repetition_bound: measured,
+                    deliverable_capacity: capacity,
+                    ..Default::default()
+                },
+                declaration: None,
+                road: OfferRoad::Ring,
+                period: Default::default(),
+            };
+            bind_interaction_authority(&mut state, InteractionSessionId("picker-ceiling".into()))
+                .expect("a valid interaction authority binding");
+            let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+            let view = derive_viewer_interaction(&state, &filtered, viewer);
+            let [opportunity] = view.opportunities.as_slice() else {
+                panic!(
+                    "the proposer holds exactly one opportunity at its own offer; got {}",
+                    view.opportunities.len()
+                );
+            };
+            let InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Shortcut { count, .. },
+                ..
+            } = &opportunity.response
+            else {
+                panic!("a loop-shortcut offer publishes a shortcut schema");
+            };
+            *count
+        };
+
+        // ⓐ measured 40 against a capacity of 12.
+        let discriminating = offer_at(IterationCount::Fixed(40), Some(40), 12);
+        let InteractionShortcutCountSpec::Fixed { max, .. } = discriminating else {
+            panic!("BOARD CLASS: this arm publishes a finite ceiling");
+        };
+        assert!(
+            max < MAX_SHORTCUT_CYCLES,
+            "BOARD CLASS: the ceiling this arm pins sits strictly below the budget, so the \
+             picker's own `.min(..)` cannot be what produced it; got {max}"
+        );
+        assert_eq!(
+            discriminating,
+            InteractionShortcutCountSpec::Fixed {
+                min: 1,
+                max: 12,
+                suggested: 12,
+            },
+            "CR 732.2a: the ceiling is the capacity (12), and an over-capacity suggestion (40) is \
+             clamped down to it rather than published"
+        );
+
+        // ⓑ the production-reachable pair: a threshold above the budget, capacity at the budget.
+        assert_eq!(
+            offer_at(
+                IterationCount::Fixed(MAX_SHORTCUT_CYCLES),
+                Some(MAX_SHORTCUT_CYCLES + 2),
+                MAX_SHORTCUT_CYCLES,
+            ),
+            InteractionShortcutCountSpec::Fixed {
+                min: 1,
+                max: MAX_SHORTCUT_CYCLES,
+                suggested: MAX_SHORTCUT_CYCLES,
+            },
+            "CR 732.2a: above the budget the deliverable capacity IS the budget, and the picker \
+             publishes it"
+        );
+
+        // ⓒ the hostile sibling: a measured threshold beside an `UntilLethal` suggestion still
+        //   publishes no finite ceiling, because the finite arm is chosen on the VARIANT.
+        assert_eq!(
+            offer_at(IterationCount::UntilLethal, Some(12), 12),
+            InteractionShortcutCountSpec::UntilLethal,
+            "CR 732.2a: `UntilLethal` names no count, so there is no ceiling to publish"
         );
     }
 }

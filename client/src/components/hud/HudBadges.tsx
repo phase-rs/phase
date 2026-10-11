@@ -556,14 +556,12 @@ export function UnboundedBadge({
   // ceiling for the open window, names that ceiling instead of an unbounded glyph.
   const bound = state === undefined ? boundedRepetitions : null;
   const collapse: FamilyCollapseState = state ?? { type: "Unscheduled" };
-  // A `Committed` scheduled collapse is an accepted-but-unapplied bound, and N is named at the
-  // next step/phase end by the loop's CONTROLLER — who is NOT necessarily the seat this badge sits
-  // on: the row is keyed by the engine's attribution player, which for `Life`/`DamageDealt`/
-  // `LibraryDelta`/`Poison` axes is the victim, and the badge also renders on opponent HUDs. The
-  // engine now publishes that controller as `collapse.data.prompted`, so the copy can address the
-  // seat that will actually be asked, and falls back to the passive voice for everyone else.
-  // `Conditional` promises no bound at all, which is why it keeps its own copy in both voices.
-  // The window itself is CR 732.2c's advance to the shortcut's ending point; this only reports
+  // A scheduled collapse's N is named at the next step/phase end by the loop's CONTROLLER — who
+  // is NOT necessarily the seat this badge sits on: the row is keyed by the engine's attribution
+  // player, which for `Life`/`DamageDealt`/`LibraryDelta`/`Poison` axes is the victim, and the
+  // badge also renders on opponent HUDs. The engine publishes that controller as
+  // `collapse.data.prompted`, so the copy can address the seat that will actually be asked, and
+  // falls back to the passive voice for everyone else. The window itself is CR 732.2c's advance to the shortcut's ending point; this only reports
   // what the engine says is pending.
   //
   // `usePlayerId()` is the RAW seat, mirroring `useTurnStatus`'s documented rule — `prompted` is a
@@ -593,14 +591,10 @@ export function UnboundedBadge({
       case "Mixed":
         return t("badges.unboundedMixedTooltip", { resource });
       case "Scheduled":
-        return collapse.data.certainty === "Committed"
-          ? t(you ? "badges.unboundedScheduledYouTooltip" : "badges.unboundedScheduledTooltip", {
-              resource,
-            })
-          : t(
-              you ? "badges.unboundedConditionalYouTooltip" : "badges.unboundedConditionalTooltip",
-              { resource },
-            );
+        return t(
+          you ? "badges.unboundedConditionalYouTooltip" : "badges.unboundedConditionalTooltip",
+          { resource },
+        );
     }
   })();
   return (
@@ -626,12 +620,10 @@ export function UnboundedBadge({
               case "Unscheduled":
               case "Mixed":
                 return "∞";
-              // The GLYPH is not person-dependent: `∞→N` / `∞→?` says what will land, not who is
-              // asked. Only the tooltip changes voice.
+              // The GLYPH is not person-dependent: `∞→?` says what may land, not who is asked.
+              // Only the tooltip changes voice.
               case "Scheduled":
-                return collapse.data.certainty === "Committed"
-                  ? t("badges.unboundedScheduledGlyph")
-                  : t("badges.unboundedConditionalGlyph");
+                return t("badges.unboundedConditionalGlyph");
             }
           })()}
         </span>

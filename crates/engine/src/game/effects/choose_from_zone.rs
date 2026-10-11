@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::IndexedRandom; // rand 0.9: `choose_multiple` on `[T]` lives here.
 
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -802,7 +803,7 @@ pub(crate) fn resolve_random_in_chain(
     // CR 608.2d (override): the game selects `count` distinct cards at random.
     let clamped = count.min(cards.len());
     let picked: Vec<ObjectId> = cards
-        .choose_multiple(&mut state.rng, clamped)
+        .choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
         .copied()
         .collect();
     ability.set_unpinned_targets(picked.iter().map(|&id| TargetRef::Object(id)).collect());
@@ -1260,7 +1261,7 @@ pub(crate) fn drain_active_per_player_zone_choice(
     };
     let (ability, mut cursor) = PerPlayerCursor::of(pending);
 
-    // CR 603.7 + CR 608.2c: The FIRST resolution of this per-player iteration
+    // CR 608.2c: The FIRST resolution of this per-player iteration
     // STARTS a fresh chosen-card set — even when that first player declines (an
     // empty "up to one" pick). It must NOT extend or inherit an earlier
     // producer's tracked set: Breach the Multiverse mills first (publishing a
@@ -1505,7 +1506,7 @@ fn collect_player_zone_cards(
         .collect()
 }
 
-/// CR 608.2c + CR 608.2d + CR 603.7: Resolve the candidate card pool for a
+/// CR 608.2c + CR 608.2d: Resolve the candidate card pool for a
 /// tracked-set pick.
 ///
 /// Priority order (the `Legacy` provenance; every other
@@ -4321,7 +4322,7 @@ mod tests {
         assert!(exiled.contains(&plain_sorcery));
     }
 
-    /// CR 603.7 + CR 608.2c (MED #4093): the FIRST resolution of a per-player
+    /// CR 608.2c (MED #4093): the FIRST resolution of a per-player
     /// `ChooseFromZone` iteration must rebind a fresh (possibly empty) chain
     /// tracked set EVEN when that first player declines. Otherwise an earlier
     /// same-chain producer's tracked set stays bound, and a downstream

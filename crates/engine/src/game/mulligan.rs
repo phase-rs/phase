@@ -5,6 +5,7 @@ use crate::types::actions::MulliganChoice;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::format::{DealOrder, FreeRevealMulligan, GameFormat, ZoneScope};
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{
     GameState, MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase,
     MulliganDeclaration, MulliganDeclarationKind, OpeningHandBottomReason, PendingBeginGameAbility,
@@ -89,7 +90,7 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     // Shuffle every player's library.
     let GameState { players, rng, .. } = &mut *state;
     for player in players.iter_mut() {
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
     }
 
     let deals: Vec<(PlayerId, usize)> = state
@@ -1014,7 +1015,7 @@ fn shuffle_library_of(state: &mut GameState, player: PlayerId) {
         .iter_mut()
         .find(|p| p.id == holder)
         .expect("player exists");
-    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng);
+    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng.draw(RandomDraw::Placement));
 }
 
 /// The living seats in `seat_order`, starting at the active player, so every

@@ -16,9 +16,8 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::phase::Phase;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 /// The modifier wording is The Deck of Many Things'; the two rows are chosen so
 /// the bands are distinguishable by life delta alone.
@@ -42,7 +41,7 @@ fn a_modifier_clamped_zero_result_selects_the_or_less_row() {
     let state = committed.state_mut();
     state.rng_seed = 6;
     state.rng_word_pos = 0;
-    state.rng = ChaCha20Rng::seed_from_u64(6);
+    state.rng = GameRng::seed_from_u64(6);
     let outcome = committed.resolve();
 
     // REACH-GUARD, and the direct proof of the premise: the emitted result is
@@ -88,7 +87,7 @@ fn an_unclamped_high_result_still_selects_the_other_row() {
     let state = committed.state_mut();
     state.rng_seed = 15;
     state.rng_word_pos = 0;
-    state.rng = ChaCha20Rng::seed_from_u64(15);
+    state.rng = GameRng::seed_from_u64(15);
     let outcome = committed.resolve();
 
     let result = outcome.events().iter().find_map(|event| match event {

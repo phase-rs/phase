@@ -122,6 +122,7 @@ pub mod object_state;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
+pub mod period_confirm;
 // Tests for `archenemy` live in a sibling file (declared here, not in
 // `archenemy.rs`, so `archenemy.rs` stays implementation-only).
 #[cfg(test)]
@@ -152,6 +153,13 @@ pub fn staged_payment_shadow_for_test(
 ) -> crate::types::game_state::GameState {
     payment_transaction::project(state)
 }
+pub(crate) mod play_trace;
+#[cfg(any(test, feature = "test-support"))]
+pub use play_trace::{
+    install_plays_for_tests, play_trace_view, AnswerOptionality, CarriedView, CostMove, EntryKind,
+    NamedSpan, NamingCause, PeriodReach, PlayLocus, PlayTraceView, PromptClass, SpanSource,
+    TraceEntry,
+};
 pub mod preview;
 pub mod printed_cards;
 pub mod priority;

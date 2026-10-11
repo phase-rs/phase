@@ -22,6 +22,7 @@
 //! `synthesize_planechase` stamps `trigger_zones = [Zone::Command]` onto them
 //! (CR 113.6b), which makes `trigger_opts_in_to_command_zone` admit them.
 
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 
 use rand::Rng;
@@ -159,7 +160,7 @@ pub fn roll_planar_die(
     events: &mut Vec<GameEvent>,
 ) -> PlanarDieFace {
     // CR 901.3a: 4 blank / 1 Planeswalker / 1 chaos.
-    let face = match state.rng.random_range(1..=6) {
+    let face = match state.rng.draw(RandomDraw::Outcome).random_range(1..=6) {
         1 => PlanarDieFace::Planeswalk,
         2 => PlanarDieFace::Chaos,
         _ => PlanarDieFace::Blank,

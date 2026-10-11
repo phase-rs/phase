@@ -15,9 +15,10 @@
 
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef, Effect,
-    ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
+    CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
+    SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
+    TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -845,14 +846,74 @@ fn live_taps_for_mana_output(
     )
 }
 
+/// The live label is one list, so a yield read from the paid object shows the
+/// largest candidate's yield, the same one the capacity reads.
 fn resolved_mana_ability_for_live_output(
     state: &GameState,
     source_id: ObjectId,
     player: PlayerId,
     ability_def: &AbilityDefinition,
 ) -> ResolvedAbility {
-    let ability = super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+    let ability = match &*ability_def.effect {
+        Effect::Mana { produced, .. } => {
+            largest_sizing_resolution(state, produced, ability_def, source_id, player)
+                .map(|(resolved, _)| resolved)
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| {
+        super::ability_utils::build_resolved_from_def(ability_def, source_id, player)
+    });
     mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+}
+
+/// CR 608.2h + CR 118.3: The resolutions a mana ability is sized by before it
+/// is activated: one per object its cost could be paid with, each bound as the
+/// cost-paid object its yield may read, or the single unbound resolution when
+/// the cost chooses no object.
+fn sizing_resolutions(
+    state: &GameState,
+    ability: &AbilityDefinition,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ResolvedAbility> {
+    let resolved = super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+    let Some(candidates) =
+        mana_abilities::cost_paid_object_candidates(state, controller, object_id, ability)
+    else {
+        return vec![resolved];
+    };
+    candidates
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| {
+            let mut bound = resolved.clone();
+            bound.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
+            bound
+        })
+        .collect()
+}
+
+/// The sizing resolution that adds the most mana, with that amount.
+fn largest_sizing_resolution(
+    state: &GameState,
+    produced: &ManaProduction,
+    ability: &AbilityDefinition,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Option<(ResolvedAbility, u32)> {
+    sizing_resolutions(state, ability, object_id, controller)
+        .into_iter()
+        .map(|resolved| {
+            let gross =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, &resolved)
+                    .len() as u32;
+            (resolved, gross)
+        })
+        .max_by_key(|(_, gross)| *gross)
 }
 
 fn live_mana_output_units(
@@ -916,6 +977,7 @@ pub(crate) fn preflight_tap_land_action(
     let waiting_player = match &state.waiting_for {
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
+        | WaitingFor::ManaAbilityManaPayment { player, .. }
         | WaitingFor::UnlessPayment { player, .. } => *player,
         _ => {
             return Err(EngineError::ActionNotAllowed(
@@ -1179,7 +1241,7 @@ pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
 /// fails the whole-tree check and is correctly rejected, so its `Discard`
 /// prompt is never bypassed. It stays off the auto-tap path and remains
 /// reachable only through
-/// `has_activatable_non_tap_mana_ability_for_payment`'s manual-payment flow.
+/// `has_activatable_player_choice_mana_ability_for_payment`'s manual-payment flow.
 ///
 /// The tree is additionally ARITY-BOUNDED: exactly one self-sacrifice leaf and
 /// at most one `{T}` leaf, counted over the FLATTENED tree, with no nested
@@ -2113,12 +2175,9 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
-                let resolved =
-                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-                let gross = super::effects::mana::resolve_mana_types_for_ability(
-                    produced, state, &resolved,
-                )
-                .len() as u32;
+                let gross =
+                    largest_sizing_resolution(state, produced, ability, object_id, controller)
+                        .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate this ability —
                 // gross output overstates what a filter land actually adds.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
@@ -2164,7 +2223,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 /// **manually** during cost payment?" — not "could auto-tap alone cover this?".
 ///
 /// This is a read-only feasibility scan. Auto-payment must continue to use
-/// [`max_mana_yield`] / [`is_active_tap_mana_ability`] because the auto-tap
+/// [`is_active_tap_mana_ability`] because the auto-tap
 /// simulator can't auto-sacrifice or auto-discard.
 //
 // CR 117.1d: A player may activate a mana ability whenever a rule or effect
@@ -2247,12 +2306,9 @@ pub(crate) fn feasible_mana_capacity(
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
-                let resolved =
-                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-                let gross = super::effects::mana::resolve_mana_types_for_ability(
-                    produced, state, &resolved,
-                )
-                .len() as u32;
+                let gross =
+                    largest_sizing_resolution(state, produced, ability, object_id, controller)
+                        .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate. Non-mana cost
                 // components (Sacrifice / Discard / PayLife / Exile) have no
                 // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
@@ -2284,10 +2340,12 @@ pub(crate) fn feasible_mana_capacity(
 }
 
 /// CR 117.1d + CR 601.2g: True when cost payment can involve a currently
-/// activatable non-tap mana ability that auto-tap cannot choose for the player
-/// (Treasure/Spawn/KCI-style sacrifice mana, unrestricted discard mana,
-/// pay-life mana abilities, etc.).
-pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
+/// activatable mana ability that auto-tap cannot activate for the player: a
+/// non-tap ability (Treasure/Spawn/KCI-style sacrifice mana, unrestricted
+/// discard mana, pay-life mana abilities, etc.), or a `{T}` ability whose cost
+/// asks the player to choose an object (Phyrexian Tower's sacrifice, Holdout
+/// Settlement's tapped creature).
+pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
     state: &GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
@@ -2307,11 +2365,15 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 return false;
             }
-            // Tap-cost and unambiguous self-sacrifice abilities (Gold, Treasure)
-            // need no player choice, so `is_active_tap_mana_ability` already
-            // covers them on the auto-tap path — only ambiguous non-tap costs
-            // (KCI's "Sacrifice an artifact", discard, pay-life) belong here.
-            if has_tap_component(&ability.cost)
+            // Choice-free tap-cost and unambiguous self-sacrifice abilities
+            // (Sol Ring, Gold, Treasure) are already covered by
+            // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
+            // chooses an object (CR 605.3a) belongs here with the ambiguous
+            // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
+            if (has_tap_component(&ability.cost)
+                && !mana_abilities::cost_requires_object_choice(
+                    state, controller, object_id, ability,
+                ))
                 || has_unambiguous_self_sacrifice_component(&ability.cost)
             {
                 return false;
@@ -2340,7 +2402,7 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
 /// castability gate's colored-shard coverage check (issue #583 / #1234).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ActivatableManaProfileKind {
     Exact(Vec<ManaType>),
     AnyOneColor { count: u32, options: Vec<ManaType> },
@@ -2501,12 +2563,28 @@ fn activatable_mana_profiles_for_object(
             ) {
                 return None;
             }
-            let resolved =
-                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-            profile_kind_from_production(state, object_id, controller, produced, &resolved)
-                .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
-                .map(|kind| ActivatableManaProfile { object_id, kind })
+            // Candidates whose yields match are one profile, since the shard
+            // backtracker branches on every profile.
+            let mut kinds: Vec<ActivatableManaProfileKind> = Vec::new();
+            for kind in sizing_resolutions(state, ability, object_id, controller)
+                .iter()
+                .filter_map(|resolved| {
+                    profile_kind_from_production(state, object_id, controller, produced, resolved)
+                        .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
+                })
+            {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+            }
+            Some(
+                kinds
+                    .into_iter()
+                    .map(|kind| ActivatableManaProfile { object_id, kind })
+                    .collect::<Vec<_>>(),
+            )
         })
+        .flatten()
         .collect()
 }
 
@@ -2610,39 +2688,81 @@ fn group_profiles_by_object(
     grouped.into_iter().collect()
 }
 
+/// CR 106.1 + CR 601.2g: The colored shards one activation can cover, with the
+/// units it places there, leaving later sources the remainder; an application
+/// placing none is the caller's skip.
 fn profile_applications(
     profile: &ActivatableManaProfileKind,
     requirements: &[Vec<ManaType>],
 ) -> Vec<(Vec<Vec<ManaType>>, u32)> {
-    match profile {
+    // Interchangeable units beyond the shard count can only be surplus.
+    let placeable = |count: &u32| (*count as usize).min(requirements.len());
+    let unit_lists: Vec<Vec<&[ManaType]>> = match profile {
         ActivatableManaProfileKind::Exact(types) => {
-            let mut remaining = requirements.to_vec();
-            for mana_type in types {
-                let Some(pos) = remaining.iter().position(|opts| opts.contains(mana_type)) else {
-                    return Vec::new();
-                };
-                remaining.remove(pos);
-            }
-            vec![(remaining, types.len() as u32)]
+            vec![types.iter().map(std::slice::from_ref).collect()]
         }
         ActivatableManaProfileKind::AnyOneColor { count, options } => options
             .iter()
-            .flat_map(|&color| {
-                combination_assignments(*count, std::slice::from_ref(&color), requirements)
-            })
+            .map(|color| vec![std::slice::from_ref(color); placeable(count)])
             .collect(),
         ActivatableManaProfileKind::AnyCombination { count, options } => {
-            combination_assignments(*count, options, requirements)
+            vec![vec![options.as_slice(); placeable(count)]]
         }
         ActivatableManaProfileKind::CombinationChoices(choices) => choices
             .iter()
-            .flat_map(|choice| {
-                profile_applications(
-                    &ActivatableManaProfileKind::Exact(choice.clone()),
-                    requirements,
-                )
-            })
+            .map(|choice| choice.iter().map(std::slice::from_ref).collect())
             .collect(),
+    };
+    let mut applications = Vec::new();
+    for units in &unit_lists {
+        place_units(units, requirements.to_vec(), 0, 0, &mut applications);
+    }
+    applications.retain(|(_, consumed)| *consumed > 0);
+    applications
+}
+
+/// CR 106.4 + CR 107.4b: Each unit takes a remaining shard one of its types
+/// pays; a unit no remaining shard takes is surplus that still pays generic
+/// mana, so only placed units are consumed.
+fn place_units(
+    units: &[&[ManaType]],
+    requirements: Vec<Vec<ManaType>>,
+    from: usize,
+    consumed: u32,
+    applications: &mut Vec<(Vec<Vec<ManaType>>, u32)>,
+) {
+    let Some((unit, rest)) = units.split_first().filter(|_| !requirements.is_empty()) else {
+        if !applications
+            .iter()
+            .any(|(remaining, placed)| *placed == consumed && *remaining == requirements)
+        {
+            applications.push((requirements, consumed));
+        }
+        return;
+    };
+    // An identical next unit takes only later shards, so each placement set is
+    // enumerated once rather than once per ordering.
+    let next_from = |index: usize| if rest.first() == Some(unit) { index } else { 0 };
+    let mut placed = false;
+    for (index, payment_options) in requirements.iter().enumerate().skip(from) {
+        if payment_options
+            .iter()
+            .any(|mana_type| unit.contains(mana_type))
+        {
+            placed = true;
+            let mut remaining = requirements.clone();
+            remaining.remove(index);
+            place_units(
+                rest,
+                remaining,
+                next_from(index),
+                consumed + 1,
+                applications,
+            );
+        }
+    }
+    if !placed {
+        place_units(rest, requirements, next_from(from), consumed, applications);
     }
 }
 
@@ -2674,43 +2794,6 @@ fn assign_profiles_to_requirements(
     None
 }
 
-/// CR 106.1 + CR 601.2g: Enumerate the colored shards one flexible source can
-/// cover, allowing later sources to cover the remainder. A one-mana
-/// `AnyOneColor` source must not be rejected simply because the spell has two
-/// colored shards; Relic of Legends plus a dual land is the common case.
-fn combination_assignments(
-    count: u32,
-    options: &[ManaType],
-    requirements: &[Vec<ManaType>],
-) -> Vec<(Vec<Vec<ManaType>>, u32)> {
-    if requirements.is_empty() {
-        // All shards are covered; any leftover `count` is simply surplus mana
-        // the player never produces (or lets drain). Rejecting over-production
-        // here would falsely mark e.g. a power-3 combination source as unable
-        // to pay a two-shard cost.
-        return vec![(Vec::new(), 0)];
-    }
-    if count == 0 {
-        return vec![(requirements.to_vec(), 0)];
-    }
-    let mut applications = Vec::new();
-    for (index, payment_options) in requirements.iter().enumerate() {
-        for &color in payment_options {
-            if !options.contains(&color) {
-                continue;
-            }
-            let mut next_requirements = requirements.to_vec();
-            next_requirements.remove(index);
-            for (remaining, inner) in
-                combination_assignments(count - 1, options, &next_requirements)
-            {
-                applications.push((remaining, 1 + inner));
-            }
-        }
-    }
-    applications
-}
-
 fn assign_profiles_to_shards(
     profiles: &[ActivatableManaProfile],
     shards: &[ManaCostShard],
@@ -2730,9 +2813,9 @@ fn assign_profiles_to_shards(
 /// activating currently legal mana abilities (non-tap sources like Vivi
 /// Ornitier's {0} combination mana, unrestricted discard mana, etc.).
 ///
-/// Returns `(covered, consumed_pips)` where `consumed_pips` is the total mana
-/// produced by activations used for shard coverage — callers must subtract
-/// this from generic capacity to avoid double-counting one activation.
+/// Returns `(covered, consumed_pips)` where `consumed_pips` counts the units
+/// applied to shards — callers must subtract this from generic capacity to
+/// avoid double-counting one activation.
 pub(crate) fn can_cover_shards_with_activatable_mana(
     state: &GameState,
     player: PlayerId,
@@ -2909,8 +2992,8 @@ fn land_mana_options(
 /// as it does a `{T}` cost (Gold's "Sacrifice this token: Add one mana of
 /// any color" sits alongside Treasure's `{T}, Sacrifice this artifact`).
 /// Single authority shared by `scan_mana_abilities` (which builds per-color
-/// `ManaSourceOption` rows) and `max_mana_yield` (which sums total output) so
-/// the two never diverge on which abilities count as mana sources.
+/// `ManaSourceOption` rows) and `max_mana_yield` so the two never diverge on
+/// which abilities count as mana sources.
 fn is_active_tap_mana_ability(
     state: &GameState,
     object_id: ObjectId,
@@ -6453,5 +6536,114 @@ mod tests {
             !source_is_snow(&state, ObjectId(0)),
             "the ObjectId(0) sentinel (and any absent object) is not a snow source",
         );
+    }
+}
+
+#[cfg(test)]
+mod paid_object_label_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    /// `member` on P0's battlefield with `others` placed there before it.
+    fn board(member: &str, others: &[&str]) -> (GameRunner, ObjectId) {
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        for name in others {
+            scenario.add_real_card(P0, name, Zone::Battlefield, db);
+        }
+        let id = scenario.add_real_card(P0, member, Zone::Battlefield, db);
+        (scenario.build(), id)
+    }
+
+    /// The produced-mana label of each of `member`'s mana actions, with
+    /// `others` placed on the battlefield before it.
+    fn labels(member: &str, others: &[&str]) -> Vec<Vec<ManaType>> {
+        let (runner, id) = board(member, others);
+        let state = runner.state();
+        let gates = mana_abilities::ManaActivationGates::compute(state);
+        let auras = taps_for_mana_trigger_sources(state);
+        current_mana_source_options(state, P0, id, &auras, &gates)
+            .iter()
+            .map(|option| {
+                live_mana_output_for_option(state, P0, option)
+                    .into_iter()
+                    .map(|unit| unit.mana_type)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// CR 608.2h: Priest of Yawgmoth ("{T}, Sacrifice an artifact: Add an
+    /// amount of {B} equal to the sacrificed artifact's mana value.") labels its
+    /// action with the largest yield its sacrifice could pay for: Ashnod's
+    /// Altar's {B}{B}{B}, not the earlier Memnite's nothing.
+    #[test]
+    fn paid_object_yield_labels_the_largest_candidate() {
+        assert_eq!(
+            labels("Priest of Yawgmoth", &["Ashnod's Altar"]),
+            vec![vec![ManaType::Black; 3]]
+        );
+        assert_eq!(
+            labels("Priest of Yawgmoth", &["Memnite", "Ashnod's Altar"]),
+            vec![vec![ManaType::Black; 3]]
+        );
+    }
+
+    /// CR 608.2h: Priest of Yawgmoth's yield is the mana value of the artifact
+    /// its cost sacrifices: 3 beside Ashnod's Altar (mana cost {3}), 0 beside
+    /// only a Memnite (mana cost {0}).
+    #[test]
+    fn max_mana_yield_reads_the_sacrificed_artifacts_mana_value() {
+        let yielded = |others: &[&str]| {
+            let (runner, priest) = board("Priest of Yawgmoth", others);
+            max_mana_yield(runner.state(), priest, P0)
+        };
+        assert_eq!(yielded(&["Ashnod's Altar"]), 3);
+        assert_eq!(yielded(&["Memnite"]), 0);
+    }
+
+    /// The castability profiles of `member`, with `others` placed on the
+    /// battlefield before it.
+    fn profiles(member: &str, others: &[&str]) -> Vec<ActivatableManaProfileKind> {
+        let (runner, id) = board(member, others);
+        activatable_mana_profiles_for_object(runner.state(), id, P0, None)
+            .into_iter()
+            .map(|profile| profile.kind)
+            .collect()
+    }
+
+    /// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
+    /// yields the same mana whichever creature it sacrifices, so twenty
+    /// victims are one profile for the shard backtracker.
+    #[test]
+    fn paid_object_independent_yield_is_one_profile() {
+        assert_eq!(profiles("Phyrexian Altar", &["Grizzly Bears"; 20]).len(), 1);
+    }
+
+    /// CR 608.2h: Food Chain's yield reads the exiled creature's mana value, so
+    /// Grizzly Bears (a yield of 3) and Hill Giant (a yield of 5) stay distinct profiles.
+    #[test]
+    fn paid_object_dependent_yields_stay_distinct_profiles() {
+        let kinds = profiles("Food Chain", &["Grizzly Bears", "Hill Giant"]);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        let counts: Vec<u32> = kinds
+            .iter()
+            .map(|kind| match kind {
+                ActivatableManaProfileKind::AnyOneColor { count, .. } => *count,
+                other => panic!("unexpected profile {other:?}"),
+            })
+            .collect();
+        assert_eq!(counts, vec![3, 5]);
+    }
+
+    /// CR 608.2h: Food Chain ("Exile a creature you control: Add X mana of any
+    /// one color, where X is 1 plus the exiled creature's mana value.") labels
+    /// each color with 1 plus Grizzly Bears' mana value.
+    #[test]
+    fn exiled_creature_yield_labels_each_color() {
+        let labels = labels("Food Chain", &["Grizzly Bears"]);
+        assert_eq!(labels.len(), 5, "{labels:?}");
+        assert!(labels.iter().all(|label| label.len() == 3), "{labels:?}");
     }
 }

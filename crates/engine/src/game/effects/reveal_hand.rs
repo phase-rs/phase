@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -131,7 +132,7 @@ pub fn resolve(
 
     let mut hand = full_hand;
     if random {
-        hand.shuffle(&mut state.rng);
+        hand.shuffle(state.rng.draw(RandomDraw::Outcome));
     }
     // CR 701.20a: If a count is specified, reveal only that many cards.
     if let Some(count_expr) = &count {

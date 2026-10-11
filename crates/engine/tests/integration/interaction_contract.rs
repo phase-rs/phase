@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use engine::analysis::decision_template::{
-    DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
+    ChoicePoint, DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount,
+    ShortcutDecisionSchema,
 };
 use engine::game::derived_views::{derive_filtered_views, ClientGameStateRef};
 use engine::game::engine::apply;
@@ -2978,28 +2979,28 @@ fn trigger_sequence_materializes_arbitrary_permutations_larger_than_four() {
     );
 }
 
-/// NEW-1 — a published CR 732.2a offer carrying `max_iterations: 0` is REJECTED, not
+/// NEW-1 — a published CR 732.2a offer carrying a deliverable capacity of `0` is REJECTED, not
 /// clamped. `elimination_bounds` returns `0` to mean "no legal repetition exists and the
 /// caller must not offer" (CR 704.5a), so repairing it to `1` would render a
 /// one-iteration offer whose single iteration eliminates a player mid-proposal.
 ///
-/// LATENT, NOT LIVE: no in-tree producer can emit `0` here — `build_shortcut_schema`'s two
-/// call sites both pass `MAX_SHORTCUT_CYCLES`, the per-viewer projection copies an existing
-/// value, and both `Default` and the `#[serde(default)]` resolve to the cap. Hand-assigning
-/// `max_iterations: 0` IS the loaded/persisted-authority seat, which is exactly the shape a
-/// restored dump can carry. This row is therefore a latent-hole guard, not a live-bug
-/// reproduction.
+/// LATENT, NOT LIVE: no in-tree producer can emit `0` here — `build_shortcut_schema` derives
+/// every capacity from either the engine's budget or a measured threshold its producer already
+/// refused at zero, the per-viewer projection copies an existing pair, and both `Default` and the
+/// `#[serde(default)]` resolve to the budget. Hand-assigning a zero capacity IS the
+/// loaded/persisted-authority seat, which is exactly the shape a restored dump can carry. This
+/// row is therefore a latent-hole guard, not a live-bug reproduction.
 ///
 /// REVERT-PROBE, and note the FAILURE MODE: delete
-/// `if schema.max_iterations == 0 { return Err(..) }` ⇒ post-edit `max` is
+/// `if schema.deliverable_capacity == 0 { return Err(..) }` ⇒ post-edit `max` is
 /// `0u32.min(1000) == 0`, so `suggested.clamp(1, 0)` trips `Ord::clamp`'s
 /// `assert!(min <= max)` and **PANICS** (`min > max. min = 1, max = 0`). That assert is a
 /// PLAIN assert, so it survives release — the guard is load-bearing against an engine
 /// panic on a malformed restored dump, not merely against a bad offer. The probe flips RED
 /// by panic, not by a value mismatch.
 #[test]
-fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
-    let shortcut_state = |max_iterations: u32| {
+fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
+    let shortcut_state = |deliverable_capacity: u32| {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::LoopShortcut {
             proposer: P0,
@@ -3013,10 +3014,12 @@ fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema {
                 iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
-                max_iterations,
+                deliverable_capacity,
                 ..Default::default()
             },
             declaration: None,
+            road: engine::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         };
         bind(&mut state, "loop-zero-bound");
         state
@@ -3025,7 +3028,7 @@ fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
     // ── PAIRED CONTROL, first: the byte-identical schema at the DEFAULT bound projects a
     //    shortcut schema. Without this the rejection below could be the whole window being
     //    unsupported for an unrelated reason.
-    let control = shortcut_state(ShortcutDecisionSchema::default().max_iterations);
+    let control = shortcut_state(ShortcutDecisionSchema::default().deliverable_capacity);
     let control_view = priority_view(&control);
     let InteractionOpportunityResponse::Schema {
         spec: InteractionResponseSpec::Shortcut { .. },
@@ -3034,33 +3037,33 @@ fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
     else {
         panic!(
             "control: the same window at the default bound must project a shortcut schema, \
-             else this row's rejection is not attributable to `max_iterations`"
+             else this row's rejection is not attributable to the capacity"
         );
     };
 
-    // ── SUBJECT: the only variable is `max_iterations: 0`.
+    // ── SUBJECT: the only variable is a deliverable capacity of `0`.
     let subject = shortcut_state(0);
     assert_eq!(
         priority_view(&subject).availability,
         InteractionAvailability::Unsupported {
             reason: InteractionReasonCode::InvalidAuthorityState,
         },
-        "CR 704.5a: `max_iterations == 0` means NO legal repetition exists, so the offer is \
+        "CR 704.5a: a capacity of `0` means NO legal repetition exists, so the offer is \
          an authority violation to reject — not a number to clamp back up to 1"
     );
 }
 
-/// CR-12 — the picker's ceiling is the offer's OWN narrowed CR 732.2a bound, never the
-/// raw global safety limit. Before this row the file only ever asserted the default bound,
-/// so a projection that ignored `max_iterations` entirely would have stayed green.
+/// CR-12 — the picker's ceiling is the capacity the offer published, never the raw global
+/// safety limit. Before this row the file only ever asserted the default capacity, so a
+/// projection that ignored it entirely would have stayed green.
 ///
-/// Disclosed: an over-bound `suggested` is CLAMPED, not rejected. That is correct —
-/// `suggested` is a hint, `max_iterations` is the authority.
+/// Disclosed: an over-ceiling `suggested` is CLAMPED, not rejected. That is correct —
+/// `suggested` is a hint, the capacity is the authority.
 ///
-/// REVERT-PROBE: change `let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` back to
-/// `MAX_SHORTCUT_CYCLES` ⇒ `max` becomes the global cap ⇒ this assertion FAILS.
+/// REVERT-PROBE: change `let max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES)` back
+/// to `MAX_SHORTCUT_CYCLES` ⇒ `max` becomes the global cap ⇒ this assertion FAILS.
 #[test]
-fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
+fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
     let mut state = GameState::new_two_player(42);
     state.waiting_for = WaitingFor::LoopShortcut {
         proposer: P0,
@@ -3073,20 +3076,24 @@ fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
             per_cycle: None,
         },
         schema: engine::analysis::decision_template::ShortcutDecisionSchema {
-            // A NARROWED bound, i.e. what `elimination_bounds` produces on a real board.
+            // A NARROWED offer, i.e. what a producer that measured a threshold on a real board
+            // publishes: the measured threshold and the capacity derived from it.
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(9),
-            max_iterations: 3,
+            measured_repetition_bound: Some(3),
+            deliverable_capacity: 3,
             ..Default::default()
         },
         declaration: None,
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        period: Default::default(),
     };
     bind(&mut state, "loop-narrowed-bound");
 
     // Reach-guard: the narrowed bound really is BELOW the global cap, else `min(..)` and
     // the global cap coincide and the row cannot discriminate.
     assert!(
-        3 < ShortcutDecisionSchema::default().max_iterations,
-        "reach-guard: the narrowed bound must be strictly below the global cap"
+        3 < ShortcutDecisionSchema::default().deliverable_capacity,
+        "reach-guard: the narrowed capacity must be strictly below the global cap"
     );
 
     let view = priority_view(&state);
@@ -3128,6 +3135,8 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             ..Default::default()
         },
         declaration: None,
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        period: Default::default(),
     };
     bind(&mut state, "loop-count");
     let view = priority_view(&state);
@@ -3173,21 +3182,15 @@ fn preview_period_delta() -> engine::analysis::resource::ResourceVector {
     delta
 }
 
-/// A `LoopShortcut` offer stated exactly the way `certified_bounded_cycle_offer` states one:
-/// `Fixed(max_iterations)` as the suggestion and the same number as the ceiling, with the
+/// A `LoopShortcut` offer stated the way a producer states one: whatever CR 704 threshold it
+/// measured, with the capacity derived from it exactly as `build_shortcut_schema` derives it, the
 /// measured period on the certificate, and no announced decision point.
 fn preview_offer(
     iteration_count: IterationCount,
-    max_iterations: u32,
+    measured: Option<u32>,
     per_cycle: Option<engine::analysis::resource::ResourceVector>,
 ) -> GameState {
-    preview_offer_with_points(
-        iteration_count,
-        max_iterations,
-        per_cycle,
-        Vec::new(),
-        Vec::new(),
-    )
+    preview_offer_with_points(iteration_count, measured, per_cycle, Vec::new(), Vec::new())
 }
 
 /// The same offer carrying announced decision points and the period's per-slot life charge.
@@ -3198,7 +3201,7 @@ fn preview_offer(
 /// schema; a declaration here would stage a state the producer cannot emit.
 fn preview_offer_with_points(
     iteration_count: IterationCount,
-    max_iterations: u32,
+    measured: Option<u32>,
     per_cycle: Option<engine::analysis::resource::ResourceVector>,
     points: Vec<DecisionPoint>,
     victim_slot: Vec<(DecisionSlot, i64)>,
@@ -3218,28 +3221,41 @@ fn preview_offer_with_points(
                 declarable_victims: Vec::new(),
                 victim_slot,
                 seat_life_charge: Vec::new(),
+                cleanup: None,
             }),
         },
         schema: ShortcutDecisionSchema {
             iteration_count,
-            max_iterations,
+            measured_repetition_bound: measured,
+            deliverable_capacity: measured.map_or(
+                ShortcutDecisionSchema::default().deliverable_capacity,
+                |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
+            ),
             points,
             ..Default::default()
         },
         declaration: None,
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        period: Default::default(),
     };
     bind(&mut state, "loop-preview");
     state
 }
 
-/// The announcement slots the synthetic preview offers speak through — one source, indexed,
-/// the shape `certified_bounded_cycle_offer` publishes.
-fn preview_slot(index: u8) -> DecisionSlot {
+/// The slots the synthetic preview offers speak through — one source, the shape
+/// `certified_bounded_cycle_offer` publishes.
+///
+/// It takes BOTH axes because its callers use both: most pair it with successive CR 601.2c
+/// announcements on that one source (the INSTANCE axis), while others pair it with that
+/// source's `ManaColor`, `Mode`, `UnlessBreak`, `ConvokeTaps` or `MayChoice` point (the
+/// CHOICE axis). One parameter could not have said which a call meant.
+fn preview_slot(point: ChoicePoint, index: u8) -> DecisionSlot {
     DecisionSlot {
         source: engine::types::game_state::YieldTarget::AllCopies {
             card_id: CardId(9001),
             trigger_description: None,
         },
+        point,
         index,
     }
 }
@@ -3250,7 +3266,7 @@ fn preview_slot(index: u8) -> DecisionSlot {
 fn player_targets_point(index: u8, seats: &[PlayerId]) -> DecisionPoint {
     let bound = u32::from(!seats.is_empty());
     DecisionPoint {
-        slot: preview_slot(index),
+        slot: preview_slot(ChoicePoint::AnnouncedTarget, index),
         kind: DecisionPointKind::Targets {
             legal_targets: seats.iter().copied().map(TargetRef::Player).collect(),
             min_targets: bound,
@@ -3368,7 +3384,7 @@ fn loop_shortcut_preview_states_the_finished_magnitude_for_the_declared_count() 
     let at = |n: u32| {
         let offer = shortcut_offer_of(&preview_offer(
             IterationCount::Fixed(n),
-            n,
+            Some(n),
             Some(preview_period_delta()),
         ));
         let InteractionShortcutCountSpec::Fixed { suggested, .. } = offer.count else {
@@ -3419,7 +3435,7 @@ fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
     assert!(
         !shortcut_preview_of(&preview_offer(
             IterationCount::Fixed(4),
-            4,
+            Some(4),
             Some(preview_period_delta()),
         ))
         .is_empty(),
@@ -3430,7 +3446,7 @@ fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
     // ── No measured period: every mint except the bounded one carries `per_cycle: None`,
     //    as does every save written before that field existed.
     assert_eq!(
-        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), 4, None)),
+        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), Some(4), None)),
         Vec::new(),
         "an offer that states no per-period signature has nothing to multiply"
     );
@@ -3441,7 +3457,7 @@ fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
     assert_eq!(
         shortcut_preview_of(&preview_offer(
             IterationCount::UntilLethal,
-            4,
+            Some(4),
             Some(preview_period_delta()),
         )),
         Vec::new(),
@@ -3460,7 +3476,11 @@ fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
          family fold cancelling them — not an empty vector arriving empty"
     );
     assert_eq!(
-        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), 4, Some(inert))),
+        shortcut_preview_of(&preview_offer(
+            IterationCount::Fixed(4),
+            Some(4),
+            Some(inert)
+        )),
         Vec::new(),
         "a period that nets to nothing on every family publishes no element at any count"
     );
@@ -3915,12 +3935,15 @@ fn respond_window_on(
                 decisions,
                 replay: ReplayMode::Scheduled { count },
                 key: DecisionGroupKey::from_sources(
-                    &[preview_slot(0).source],
+                    &[preview_slot(ChoicePoint::AnnouncedTarget, 0).source],
                     DecisionKind::LoopChoice,
                 ),
             }),
             per_cycle,
             shortened_by: None,
+            published_declaration: None,
+            road: engine::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         },
     };
     bind(&mut state, "respond-declared");
@@ -4011,6 +4034,7 @@ fn respond_period(
         declarable_victims: Vec::new(),
         victim_slot,
         seat_life_charge: Vec::new(),
+        cleanup: None,
     }
 }
 
@@ -4114,7 +4138,7 @@ fn declared_amounts(element: &InteractionShortcutPreview) -> Vec<u32> {
 fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the_declaration() {
     const COUNT: u32 = 6;
     const STARTS: [u32; 2] = [0, 2];
-    let slot = preview_slot(0);
+    let slot = preview_slot(ChoicePoint::AnnouncedTarget, 0);
     let announced = [R_FIRST, R_SECOND];
 
     // ── LEG 1 — IT FIRES. One losing seat, charged through this very slot, and the
@@ -4384,9 +4408,13 @@ fn the_declared_allocation_belongs_to_the_first_announced_target_decision() {
         IterationCount::Fixed(COUNT),
         Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
         vec![
-            piecewise_pin(preview_slot(0), &FIRST_STARTS, &seat_subjects(&first_order)),
             piecewise_pin(
-                preview_slot(1),
+                preview_slot(ChoicePoint::AnnouncedTarget, 0),
+                &FIRST_STARTS,
+                &seat_subjects(&first_order),
+            ),
+            piecewise_pin(
+                preview_slot(ChoicePoint::AnnouncedTarget, 1),
                 &SECOND_STARTS,
                 &seat_subjects(&second_order),
             ),
@@ -4462,7 +4490,9 @@ fn the_declared_allocation_belongs_to_the_first_announced_target_decision() {
 /// and says so.
 #[test]
 fn the_allocation_group_is_the_allocated_decisions_own_published_group() {
-    use engine::analysis::decision_template::{DecisionSlot, MayChoiceOption, PinnedDecision};
+    use engine::analysis::decision_template::{
+        ChoicePoint, DecisionSlot, MayChoiceOption, PinnedDecision,
+    };
     use engine::types::game_state::YieldTarget;
 
     const COUNT: u32 = 6;
@@ -4473,15 +4503,18 @@ fn the_allocation_group_is_the_allocated_decisions_own_published_group() {
         Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
         vec![
             PinnedDecision::MayChoice {
-                slot: DecisionSlot::may(YieldTarget::ThisObject {
-                    source_id: ObjectId(9_317),
-                    incarnation: Some(1),
-                    trigger_description: None,
-                }),
+                slot: DecisionSlot::first(
+                    YieldTarget::ThisObject {
+                        source_id: ObjectId(9_317),
+                        incarnation: Some(1),
+                        trigger_description: None,
+                    },
+                    ChoicePoint::MayGate,
+                ),
                 take: MayChoiceOption::Take,
             },
             piecewise_pin(
-                preview_slot(0),
+                preview_slot(ChoicePoint::AnnouncedTarget, 0),
                 &STARTS,
                 &seat_subjects(&[R_FIRST, R_SECOND]),
             ),
@@ -4528,7 +4561,7 @@ fn the_allocation_group_is_the_allocated_decisions_own_published_group() {
 ///
 /// # Both legs are latent in production, and that is stated rather than implied
 ///
-/// Both `DecisionSlot::may` call sites build their source through `object_decision_source`,
+/// Both `ChoicePoint::MayGate` call sites build their source through `object_decision_source`,
 /// which constructs a live-object source unconditionally, so leg A's card-identity branch is
 /// wired rather than exercised today; leg B's production reachability is unmeasured. Neither is
 /// a reason to leave the branch's behaviour untested — the branch is judged on what it does when
@@ -4543,7 +4576,7 @@ fn the_allocation_group_is_the_allocated_decisions_own_published_group() {
 #[test]
 fn an_unstatable_optional_decision_is_skipped_and_a_lone_unstatable_target_states_nothing() {
     use engine::analysis::decision_template::{
-        DecisionSlot, MayChoiceOption, PinnedDecision, TargetPin,
+        ChoicePoint, DecisionSlot, MayChoiceOption, PinnedDecision, TargetPin,
     };
     use engine::types::game_state::YieldTarget;
 
@@ -4560,7 +4593,7 @@ fn an_unstatable_optional_decision_is_skipped_and_a_lone_unstatable_target_state
         trigger_description: None,
     };
     let targets_first = piecewise_pin(
-        preview_slot(0),
+        preview_slot(ChoicePoint::AnnouncedTarget, 0),
         &STARTS,
         &seat_subjects(&[R_FIRST, R_SECOND]),
     );
@@ -4571,7 +4604,7 @@ fn an_unstatable_optional_decision_is_skipped_and_a_lone_unstatable_target_state
             vec![
                 targets_first.clone(),
                 PinnedDecision::MayChoice {
-                    slot: DecisionSlot::may(source),
+                    slot: DecisionSlot::first(source, ChoicePoint::MayGate),
                     take: MayChoiceOption::Take,
                 },
             ],
@@ -4637,7 +4670,7 @@ fn an_unstatable_optional_decision_is_skipped_and_a_lone_unstatable_target_state
             IterationCount::Fixed(COUNT),
             Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
             vec![PinnedDecision::Targets {
-                slot: preview_slot(0),
+                slot: preview_slot(ChoicePoint::AnnouncedTarget, 0),
                 targets: vec![TargetPin::ByIdentity(source)],
             }],
         )
@@ -4696,7 +4729,8 @@ fn an_unstatable_optional_decision_is_skipped_and_a_lone_unstatable_target_state
 #[test]
 fn a_scheduled_step_carrying_a_next_episode_tail_still_states_this_drive() {
     use engine::analysis::decision_template::{
-        DecisionSlot, MayChoiceOption, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+        ChoicePoint, DecisionSlot, MayChoiceOption, PinnedDecision, Ranking, TargetPin,
+        TargetSchedule,
     };
     use engine::types::game_state::YieldTarget;
 
@@ -4715,7 +4749,7 @@ fn a_scheduled_step_carrying_a_next_episode_tail_still_states_this_drive() {
             Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
             vec![
                 PinnedDecision::Targets {
-                    slot: preview_slot(0),
+                    slot: preview_slot(ChoicePoint::AnnouncedTarget, 0),
                     targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
                         step(STARTS[0], &[R_FIRST]),
                         step(STARTS[1], second_step),
@@ -4724,11 +4758,14 @@ fn a_scheduled_step_carrying_a_next_episode_tail_still_states_this_drive() {
                 // A SECOND decision, so "the rest of the walk survives" is a fact this row can
                 // see: a refusal returns from the walk and takes this point with it.
                 PinnedDecision::MayChoice {
-                    slot: DecisionSlot::may(YieldTarget::ThisObject {
-                        source_id: ObjectId(9_318),
-                        incarnation: Some(1),
-                        trigger_description: None,
-                    }),
+                    slot: DecisionSlot::first(
+                        YieldTarget::ThisObject {
+                            source_id: ObjectId(9_318),
+                            incarnation: Some(1),
+                            trigger_description: None,
+                        },
+                        ChoicePoint::MayGate,
+                    ),
                     take: MayChoiceOption::Take,
                 },
             ],
@@ -4831,7 +4868,7 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
             count.clone(),
             Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
             vec![PinnedDecision::Targets {
-                slot: preview_slot(0),
+                slot: preview_slot(ChoicePoint::AnnouncedTarget, 0),
                 targets: vec![TargetPin::Scheduled(schedule)],
             }],
         ))
@@ -4902,7 +4939,7 @@ fn a_step_announced_at_the_declared_count_takes_a_zero_length_segment() {
         IterationCount::Fixed(COUNT),
         Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
         vec![piecewise_pin(
-            preview_slot(0),
+            preview_slot(ChoicePoint::AnnouncedTarget, 0),
             &STARTS,
             &seat_subjects(&[R_FIRST, R_SECOND]),
         )],
@@ -4963,7 +5000,7 @@ fn an_order_only_declaration_publishes_its_announcement_order_and_no_magnitude()
             count,
             Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
             vec![piecewise_pin(
-                preview_slot(0),
+                preview_slot(ChoicePoint::AnnouncedTarget, 0),
                 &STARTS,
                 &seat_subjects(&[R_FIRST, R_SECOND]),
             )],
@@ -5057,7 +5094,8 @@ fn an_order_only_declaration_publishes_its_announcement_order_and_no_magnitude()
 #[test]
 fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
     use engine::analysis::decision_template::{
-        DecisionSlot, MayChoiceOption, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+        ChoicePoint, DecisionSlot, MayChoiceOption, PinnedDecision, Ranking, TargetPin,
+        TargetSchedule,
     };
     use engine::types::game_state::YieldTarget;
 
@@ -5069,11 +5107,14 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
     let stated =
         |slot: DecisionSlot| piecewise_pin(slot, &STARTS, &seat_subjects(&[R_FIRST, R_SECOND]));
     let optional = || PinnedDecision::MayChoice {
-        slot: DecisionSlot::may(YieldTarget::ThisObject {
-            source_id: ObjectId(9_401),
-            incarnation: Some(1),
-            trigger_description: None,
-        }),
+        slot: DecisionSlot::first(
+            YieldTarget::ThisObject {
+                source_id: ObjectId(9_401),
+                incarnation: Some(1),
+                trigger_description: None,
+            },
+            ChoicePoint::MayGate,
+        ),
         take: MayChoiceOption::Take,
     };
     let window = |decisions: Vec<PinnedDecision>| {
@@ -5088,9 +5129,9 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
     // ── The paired positive, once: the same three decisions all stated. Both legs are compared
     //    against it, and it is also what a wrongly-skipped FIRST decision would publish.
     let whole = window(vec![
-        stated(preview_slot(0)),
+        stated(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
         PinnedDecision::Targets {
-            slot: preview_slot(1),
+            slot: preview_slot(ChoicePoint::AnnouncedTarget, 1),
             targets: vec![TargetPin::Player(R_DRAINED)],
         },
         optional(),
@@ -5120,8 +5161,8 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
     //    the last board below cannot refuse for want of a publishable arrangement.
     let optional_first = window(vec![
         optional(),
-        stated(preview_slot(0)),
-        stated(preview_slot(1)),
+        stated(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+        stated(preview_slot(ChoicePoint::AnnouncedTarget, 1)),
     ]);
     assert_eq!(
         kinds(&optional_first),
@@ -5171,8 +5212,8 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
 
         // ── LATER: the domain is already the first decision's, so the skip moves nothing.
         let skipped = window(vec![
-            stated(preview_slot(0)),
-            unstatable(preview_slot(1)),
+            stated(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 1)),
             optional(),
         ]);
         assert_eq!(
@@ -5199,8 +5240,8 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
         //    sequence is refused. This board is the positive above with its two announced-target
         //    decisions swapped, so a skipping producer publishes here.
         let refused = window(vec![
-            unstatable(preview_slot(0)),
-            stated(preview_slot(1)),
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+            stated(preview_slot(ChoicePoint::AnnouncedTarget, 1)),
             optional(),
         ]);
         assert!(
@@ -5214,7 +5255,10 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
         // ── NO SUCCESSOR: the same hole with no other announced-target decision anywhere. No
         //    domain exists for the skip to move, so the refusal above is not owed and the
         //    responder keeps every statement the declaration can still make.
-        let alone = window(vec![unstatable(preview_slot(0)), optional()]);
+        let alone = window(vec![
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+            optional(),
+        ]);
         assert_eq!(
             kinds(&alone),
             vec![InteractionShortcutPointKind::MayChoice],
@@ -5236,9 +5280,9 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
         // ── FIRST, THEN AGAIN LATER: the second hole is behind the fixed domain and settles for
         //    itself alone; the first one's debt is still owed at the end of the walk.
         let twice = window(vec![
-            unstatable(preview_slot(0)),
-            stated(preview_slot(1)),
-            unstatable(preview_slot(2)),
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+            stated(preview_slot(ChoicePoint::AnnouncedTarget, 1)),
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 2)),
         ]);
         assert!(
             twice.points.is_empty() && twice.declared.is_none(),
@@ -5250,9 +5294,9 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
         // ── Its paired positive, ONE decision apart: the same board with the leading hole
         //    stated, so the trailing hole is not what refuses above.
         let trailing = window(vec![
-            stated(preview_slot(0)),
-            stated(preview_slot(1)),
-            unstatable(preview_slot(2)),
+            stated(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+            stated(preview_slot(ChoicePoint::AnnouncedTarget, 1)),
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 2)),
         ]);
         assert_eq!(
             kinds(&trailing),
@@ -5272,8 +5316,8 @@ fn an_unstatable_target_decision_refuses_only_when_the_skip_moves_the_domain() {
         //    over, so the stated decision behind the hole would still inherit its domain.
         let after_optional = window(vec![
             optional(),
-            unstatable(preview_slot(0)),
-            stated(preview_slot(1)),
+            unstatable(preview_slot(ChoicePoint::AnnouncedTarget, 0)),
+            stated(preview_slot(ChoicePoint::AnnouncedTarget, 1)),
         ]);
         assert!(
             after_optional.points.is_empty() && after_optional.declared.is_none(),
@@ -5321,7 +5365,7 @@ fn a_pin_stating_nothing_publishes_no_point_and_disturbs_nothing_beside_it() {
     };
     let stated = || {
         piecewise_pin(
-            preview_slot(0),
+            preview_slot(ChoicePoint::AnnouncedTarget, 0),
             &STARTS,
             &seat_subjects(&[R_FIRST, R_SECOND]),
         )
@@ -5350,20 +5394,20 @@ fn a_pin_stating_nothing_publishes_no_point_and_disturbs_nothing_beside_it() {
     // ── The same decision with two statement-less pins on either side of it.
     let sandwiched = window(vec![
         PinnedDecision::ManaColor {
-            slot: preview_slot(1),
+            slot: preview_slot(ChoicePoint::ManaColor, 0),
             color: ManaColor::Blue,
         },
         PinnedDecision::Mode {
-            slot: preview_slot(3),
+            slot: preview_slot(ChoicePoint::Mode, 0),
             indices: vec![0],
         },
         stated(),
         PinnedDecision::UnlessBreak {
-            slot: preview_slot(4),
+            slot: preview_slot(ChoicePoint::UnlessBreak, 0),
             pay: UnlessPaymentOption::Pay,
         },
         PinnedDecision::ConvokeTaps {
-            slot: preview_slot(2),
+            slot: preview_slot(ChoicePoint::ConvokeTaps, 0),
         },
     ]);
     assert_eq!(
@@ -5410,7 +5454,7 @@ fn the_respond_side_projection_publishes_nothing_for_a_redacted_declaration() {
             zone,
         );
         let pin = PinnedDecision::Targets {
-            slot: preview_slot(0),
+            slot: preview_slot(ChoicePoint::AnnouncedTarget, 0),
             targets: vec![TargetPin::ByIdentity(
                 engine::types::game_state::YieldTarget::ThisObject {
                     source_id: card,
@@ -5468,7 +5512,9 @@ fn the_respond_side_projection_publishes_nothing_for_a_redacted_declaration() {
 /// `PayloadTooLarge` assertion fails.
 #[test]
 fn an_oversized_declared_sequence_is_charged_rather_than_emitted() {
-    use engine::analysis::decision_template::{DecisionSlot, MayChoiceOption, PinnedDecision};
+    use engine::analysis::decision_template::{
+        ChoicePoint, DecisionSlot, MayChoiceOption, PinnedDecision,
+    };
 
     /// Below the ceiling with the spec charge applied.
     const ACCEPTED_POINTS: u32 = 1_000;
@@ -5478,11 +5524,14 @@ fn an_oversized_declared_sequence_is_charged_rather_than_emitted() {
     let answered = |count: u32| -> Vec<PinnedDecision> {
         (0..count)
             .map(|index| PinnedDecision::MayChoice {
-                slot: DecisionSlot::may(engine::types::game_state::YieldTarget::ThisObject {
-                    source_id: ObjectId(u64::from(index) + 9_000),
-                    incarnation: Some(1),
-                    trigger_description: None,
-                }),
+                slot: DecisionSlot::first(
+                    engine::types::game_state::YieldTarget::ThisObject {
+                        source_id: ObjectId(u64::from(index) + 9_000),
+                        incarnation: Some(1),
+                        trigger_description: None,
+                    },
+                    ChoicePoint::MayGate,
+                ),
                 take: MayChoiceOption::Take,
             })
             .collect()
@@ -5663,13 +5712,14 @@ fn the_respond_side_points_and_declared_default_when_absent_and_are_omitted_when
 /// A window whose three count axes are all DISTINCT — the only shape that can separate the
 /// `min`, `suggested` and `max` seeds from one another.
 ///
-/// Every offer the engine mints today has `suggested == max` (the bounded producer builds its
-/// schema from one number), so a real board cannot tell those two seeds apart. `max_iterations`
-/// stays below the engine's own cycle ceiling so the staged window is the one published.
+/// Every offer the engine mints today has `suggested == max` (the bounded producer's suggestion
+/// is narrowed to its own capacity), so a real board cannot tell those two seeds apart. The
+/// measured threshold stays below the engine's own cycle ceiling so the staged window is the one
+/// published.
 fn separating_window() -> GameState {
     preview_offer(
         IterationCount::Fixed(500),
-        999,
+        Some(999),
         Some(preview_period_delta()),
     )
 }
@@ -5704,7 +5754,7 @@ fn the_published_preview_always_states_the_count_window_endpoints() {
 
     let collapsed = shortcut_offer_of(&preview_offer(
         IterationCount::Fixed(1),
-        1,
+        Some(1),
         Some(preview_period_delta()),
     ));
     for offer in [&separating, &collapsed] {
@@ -5776,7 +5826,7 @@ fn the_published_preview_thins_its_interior_and_stops_at_the_element_cap() {
     for width in [1u32, 2] {
         let narrow = shortcut_offer_of(&preview_offer(
             IterationCount::Fixed(width),
-            width,
+            Some(width),
             Some(preview_period_delta()),
         ));
         let InteractionShortcutCountSpec::Fixed {
@@ -5804,7 +5854,7 @@ fn the_published_preview_thins_its_interior_and_stops_at_the_element_cap() {
     assert!(
         shortcut_preview_of(&preview_offer(
             IterationCount::UntilLethal,
-            999,
+            Some(999),
             Some(preview_period_delta()),
         ))
         .is_empty(),
@@ -5883,7 +5933,7 @@ fn every_published_element_states_the_canonical_split_of_its_own_count() {
     // the remainder.
     let offer = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         Some(preview_period_delta()),
         vec![player_targets_point(0, &seats)],
         Vec::new(),
@@ -5935,7 +5985,7 @@ fn every_published_element_states_the_canonical_split_of_its_own_count() {
     //    masquerading as "no split".
     let lone = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(3),
-        4,
+        Some(4),
         Some(preview_period_delta()),
         vec![player_targets_point(0, &[P1])],
         Vec::new(),
@@ -5953,7 +6003,7 @@ fn every_published_element_states_the_canonical_split_of_its_own_count() {
     // ── HOSTILE: TWO `Targets` points. The allocation's domain is the FIRST in published order.
     let paired = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(3),
-        4,
+        Some(4),
         Some(preview_period_delta()),
         vec![
             player_targets_point(0, &[P0, P1]),
@@ -6003,7 +6053,7 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
     // ── PAIRED POSITIVE, first: a Targets point with candidates publishes a split everywhere.
     let allocated = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(3),
-        4,
+        Some(4),
         Some(preview_period_delta()),
         vec![player_targets_point(0, &[P1, PlayerId(2)])],
         Vec::new(),
@@ -6021,10 +6071,10 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
     //    separate this from "no points at all".
     let may_only = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(3),
-        4,
+        Some(4),
         Some(preview_period_delta()),
         vec![DecisionPoint {
-            slot: preview_slot(0),
+            slot: preview_slot(ChoicePoint::MayGate, 0),
             kind: DecisionPointKind::MayChoice,
         }],
         Vec::new(),
@@ -6053,10 +6103,10 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
     charged.life.insert(P1, -rate);
     let empty_point = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(3),
-        4,
+        Some(4),
         Some(charged),
         vec![player_targets_point(0, &[])],
-        vec![(preview_slot(0), rate)],
+        vec![(preview_slot(ChoicePoint::AnnouncedTarget, 0), rate)],
     ));
     let point = empty_point
         .points
@@ -6092,7 +6142,7 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
     //    point holding a candidate exists, and the allocation is still empty.
     let later_candidates = shortcut_offer_of(&preview_offer_with_points(
         IterationCount::Fixed(3),
-        4,
+        Some(4),
         Some(preview_period_delta()),
         vec![
             player_targets_point(0, &[]),
@@ -6160,10 +6210,10 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
     let offer_at = |life: Vec<(PlayerId, i64)>, charge: i64| {
         shortcut_offer_of(&preview_offer_with_points(
             IterationCount::Fixed(3),
-            4,
+            Some(4),
             Some(period(life)),
             vec![player_targets_point(0, &seats)],
-            vec![(preview_slot(0), charge)],
+            vec![(preview_slot(ChoicePoint::AnnouncedTarget, 0), charge)],
         ))
     };
     // The magnitude production announces for a charged slot, derived here the way
@@ -6457,10 +6507,10 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         card_id: CardId(9001),
         trigger_description: None,
     };
-    let slot = |index| DecisionSlot {
-        source: source.clone(),
-        index,
-    };
+    // Six distinct choice points on ONE source. The parameter names WHICH CHOICE, which is
+    // this row's subject stated directly: before the typed point the six were told apart only
+    // by six ordinals, and the number carried the kind half.
+    let slot = |point| DecisionSlot::first(source.clone(), point);
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
         proposer: P0,
         predicted_winner: Some(P0),
@@ -6473,11 +6523,13 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         },
         schema: ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(2),
-            // No narrowed CR 732.2a bound — `Default` carries the global cap.
-            max_iterations: ShortcutDecisionSchema::default().max_iterations,
+            // This producer measured no CR 704 threshold — `Default` carries the absence and
+            // a capacity at the global cap.
+            measured_repetition_bound: None,
+            deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
             points: vec![
                 DecisionPoint {
-                    slot: slot(0),
+                    slot: slot(ChoicePoint::AnnouncedTarget),
                     kind: DecisionPointKind::Targets {
                         legal_targets: vec![TargetRef::Object(target), TargetRef::Player(P1)],
                         min_targets: 1,
@@ -6486,13 +6538,13 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
                     },
                 },
                 DecisionPoint {
-                    slot: slot(1),
+                    slot: slot(ChoicePoint::ConvokeTaps),
                     kind: DecisionPointKind::ConvokeTaps {
                         tappable: vec![target],
                     },
                 },
                 DecisionPoint {
-                    slot: slot(2),
+                    slot: slot(ChoicePoint::Mode),
                     kind: DecisionPointKind::Mode {
                         available_modes: vec![0, 2],
                         min_modes: 1,
@@ -6501,15 +6553,15 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
                     },
                 },
                 DecisionPoint {
-                    slot: slot(3),
+                    slot: slot(ChoicePoint::MayGate),
                     kind: DecisionPointKind::MayChoice,
                 },
                 DecisionPoint {
-                    slot: slot(4),
+                    slot: slot(ChoicePoint::UnlessBreak),
                     kind: DecisionPointKind::UnlessBreak,
                 },
                 DecisionPoint {
-                    slot: slot(5),
+                    slot: slot(ChoicePoint::ManaColor),
                     kind: DecisionPointKind::ManaColor {
                         color: ManaColor::Blue,
                     },
@@ -6518,8 +6570,44 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             convoke_tappable_count: 1,
         },
         declaration: None,
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        period: Default::default(),
     };
     bind(runner.state_mut(), "loop-point-kinds");
+
+    // ── R9 leg 6: six choice points on ONE source stay six, and the POINT is what says so.
+    //    Re-grounded from the ordinal: the slots must be pairwise distinct, each slot's
+    //    `point` must be the one its own `kind` names, and every one of them is instance `0`
+    //    — its original subject stated directly instead of through a number.
+    let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+        panic!("reach-guard: the board parks on the loop-shortcut offer");
+    };
+    let published: Vec<&DecisionSlot> = schema.points.iter().map(|point| &point.slot).collect();
+    assert_eq!(
+        published.len(),
+        6,
+        "reach-guard: six points publish, so 'pairwise distinct' is a claim about six slots"
+    );
+    let distinct: std::collections::BTreeSet<&DecisionSlot> = published.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        published.len(),
+        "six choice points on one source are six distinct slots: {published:?}"
+    );
+    for point in &schema.points {
+        assert_eq!(
+            point.slot.point,
+            point_of_published_kind(&point.kind),
+            "each slot names the choice its own published kind means: {:?}",
+            point.kind
+        );
+        assert_eq!(
+            point.slot.index, 0,
+            "each is the FIRST instance of its own class on this source, so the ordinal \
+             carries no part of the kind: {:?}",
+            point.slot
+        );
+    }
 
     let view = priority_view(runner.state());
     let InteractionOpportunityResponse::Schema {
@@ -6654,6 +6742,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             incarnation: Some(incarnation),
             trigger_description: None,
         },
+        point: ChoicePoint::AnnouncedTarget,
         index: 0,
     };
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
@@ -6668,7 +6757,8 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         },
         schema: ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(2),
-            max_iterations: ShortcutDecisionSchema::default().max_iterations,
+            measured_repetition_bound: None,
+            deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::Targets {
@@ -6682,6 +6772,8 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             convoke_tappable_count: 0,
         },
         declaration: None,
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        period: Default::default(),
     };
     bind(runner.state_mut(), "r2f-human-seat-pin");
 
@@ -7928,8 +8020,24 @@ fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
 // the until-lethal withdrawal, the wire charge, serde additivity, and the progress window.
 // ═════════════════════════════════════════════════════════════════════════════════════════
 
-/// One staged loop-shortcut offer whose points are exactly `kinds`, each on its own slot index
-/// over a live battlefield creature read at its CURRENT incarnation (CR 400.7).
+/// CR 732.2a: which [`ChoicePoint`] a PUBLISHED point's own kind names. Written here rather
+/// than imported so the rows compare the engine's published slot against an independent
+/// statement of the pairing instead of against the producer's own copy of it.
+fn point_of_published_kind(kind: &DecisionPointKind) -> ChoicePoint {
+    match kind {
+        DecisionPointKind::Targets { .. } => ChoicePoint::AnnouncedTarget,
+        DecisionPointKind::MayChoice => ChoicePoint::MayGate,
+        DecisionPointKind::ConvokeTaps { .. } => ChoicePoint::ConvokeTaps,
+        DecisionPointKind::Mode { .. } => ChoicePoint::Mode,
+        DecisionPointKind::UnlessBreak => ChoicePoint::UnlessBreak,
+        DecisionPointKind::ManaColor { .. } => ChoicePoint::ManaColor,
+    }
+}
+
+/// One staged loop-shortcut offer whose points are exactly `kinds`, each on its own slot over
+/// a live battlefield creature read at its CURRENT incarnation (CR 400.7). Each slot's CHOICE
+/// POINT comes from its own published kind, and its ordinal counts instances WITHIN that
+/// point — so two points of different kinds are two slots without either reserving a number.
 ///
 /// The slot source is a live battlefield object for the reason
 /// [`loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_seat`] records
@@ -7939,21 +8047,30 @@ fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
 fn stage_sequenced_offer(
     label: &str,
     iteration_count: IterationCount,
-    max_iterations: u32,
+    measured: Option<u32>,
     kinds: Vec<DecisionPointKind>,
 ) -> (engine::game::scenario::GameRunner, Vec<DecisionSlot>) {
     let mut scenario = GameScenario::new_n_player(4, 42);
     let source = scenario.add_creature(P0, "P4 Ability Source", 1, 1).id();
     let mut runner = scenario.build();
     let incarnation = runner.state().objects[&source].incarnation;
-    let slots: Vec<DecisionSlot> = (0..kinds.len())
-        .map(|index| DecisionSlot {
-            source: engine::types::game_state::YieldTarget::ThisObject {
-                source_id: source,
-                incarnation: Some(incarnation),
-                trigger_description: None,
-            },
-            index: index as u8,
+    let mut seen: std::collections::BTreeMap<ChoicePoint, u8> = std::collections::BTreeMap::new();
+    let slots: Vec<DecisionSlot> = kinds
+        .iter()
+        .map(|kind| {
+            let point = point_of_published_kind(kind);
+            let index = seen.entry(point).or_insert(0);
+            let slot = DecisionSlot {
+                source: engine::types::game_state::YieldTarget::ThisObject {
+                    source_id: source,
+                    incarnation: Some(incarnation),
+                    trigger_description: None,
+                },
+                point,
+                index: *index,
+            };
+            *index += 1;
+            slot
         })
         .collect();
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
@@ -7968,7 +8085,13 @@ fn stage_sequenced_offer(
         },
         schema: ShortcutDecisionSchema {
             iteration_count,
-            max_iterations,
+            // The pair a producer publishes: `None` is an offer that measured nothing, which is
+            // what keeps `handle_declare_shortcut`'s `UntilLethal` arm reachable below.
+            measured_repetition_bound: measured,
+            deliverable_capacity: measured.map_or(
+                ShortcutDecisionSchema::default().deliverable_capacity,
+                |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
+            ),
             points: slots
                 .iter()
                 .cloned()
@@ -7978,6 +8101,8 @@ fn stage_sequenced_offer(
             convoke_tappable_count: 0,
         },
         declaration: None,
+        road: engine::analysis::loop_check::OfferRoad::Ring,
+        period: Default::default(),
     };
     bind(runner.state_mut(), label);
     (runner, slots)
@@ -8071,7 +8196,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
     let (runner, slots) = stage_sequenced_offer(
         "p4-coherence-fixed",
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         vec![victims_point(1, 1), DecisionPointKind::MayChoice],
     );
     let view = priority_view(runner.state());
@@ -8213,7 +8338,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
     let (wide_runner, _) = stage_sequenced_offer(
         "p4-coherence-wide",
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         vec![victims_point(1, 2)],
     );
     let wide_view = priority_view(wide_runner.state());
@@ -8274,7 +8399,7 @@ fn p4_row_4_hostile_allocations_are_refused_each_at_its_own_guard() {
     let (runner, _) = stage_sequenced_offer(
         "p4-hostile-allocations",
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         vec![victims_point(1, 1)],
     );
     let view = priority_view(runner.state());
@@ -8377,7 +8502,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
     let (runner, slots) = stage_sequenced_offer(
         "p4-announce-one",
         IterationCount::UntilLethal,
-        6,
+        Some(6),
         vec![victims_point(1, 1)],
     );
     let view = priority_view(runner.state());
@@ -8444,7 +8569,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
     let (fixed_runner, fixed_slots) = stage_sequenced_offer(
         "p4-announce-one-fixed",
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         vec![victims_point(1, 1)],
     );
     let fixed_view = priority_view(fixed_runner.state());
@@ -8606,7 +8731,7 @@ fn p4_row_8_the_amounts_field_is_additive_on_the_wire() {
     let (runner, _) = stage_sequenced_offer(
         "p4-serde-additivity",
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         vec![victims_point(1, 1)],
     );
     let view = priority_view(runner.state());
@@ -8649,7 +8774,7 @@ fn p4_row_9_a_sequenced_pin_publishes_progress_inside_its_own_window() {
     let (runner, _) = stage_sequenced_offer(
         "p4-progress-window",
         IterationCount::Fixed(6),
-        6,
+        Some(6),
         vec![victims_point(1, 1)],
     );
     let view = priority_view(runner.state());
@@ -8817,6 +8942,142 @@ pub(crate) fn f4_offer_board() -> (GameState, PlayerId) {
     );
 
     (state, proposer)
+}
+
+/// The committed UNTARGETED 4p drain at its CR 732.2a offer beat, restored and driven exactly as
+/// [`f4_offer_board`] restores and drives the allocated one, with the interaction authority BOUND.
+///
+/// Its offer publishes no charged victim slot, so there is no aim for a witness declaration to
+/// re-point and the producer's two published numbers coincide there — which is what makes this
+/// board the EQUAL-leg control for the row below rather than a second copy of the same class.
+///
+/// The proposer-only opportunity assertion is this helper's own liveness control, for the reason
+/// [`f4_offer_board`] states.
+fn untargeted_offer_board() -> (GameState, PlayerId) {
+    use std::io::Read;
+
+    let gz: &[u8] = include_bytes!("../fixtures/dina_noff_turn5_4p.json.gz");
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("the tracked fixture inflates to UTF-8 JSON");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&json).expect("the dump envelope parses as JSON");
+    let mut state = serde_json::from_value::<engine::types::game_state::PersistedGameState>(
+        envelope["gameState"].clone(),
+    )
+    .expect("the dump deserializes through the production decoder")
+    .into_game_state()
+    .expect("the persisted snapshot satisfies the checked restore contract");
+    state.loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
+
+    // The untargeted class's own drive policy, reused rather than restated: this board raises
+    // CR 603.3b trigger-ordering beats the allocated class's policy never sees, and a second copy
+    // of a drive-to-offer walk is a second policy to keep in step with the producer.
+    crate::loop_shortcut::drive_to_bounded_offer(&mut state, 600)
+        .expect("the drive must reach the CR 732.2a bounded offer on this committed 4p drain");
+    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
+        panic!(
+            "the drive must reach the CR 732.2a bounded offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    bind_interaction_authority(
+        &mut state,
+        InteractionSessionId("interaction-contract-untargeted-count-pair".to_string()),
+    )
+    .expect("the interaction authority binds over the live offer");
+    assert_eq!(
+        viewer_interaction(&state, proposer).opportunities.len(),
+        1,
+        "liveness control: the bound offer beat publishes the proposer's own opportunity"
+    );
+    (state, proposer)
+}
+
+/// **ROW 10 — CR 732.2a: the count picker's `max` and `suggested` are two numbers, and the
+/// projection carries them apart.**
+///
+/// `max` is the ceiling the declare handler enforces — what SOME legal declaration may specify,
+/// CR 732.2a's existential. `suggested` is the count the offer's OWN published declaration drives.
+/// Before this phase every bounded producer set both from one integer, so nothing downstream could
+/// show the pair was really two; the separation is a property of the producer, and this row is what
+/// verifies the projection was already carrying both rather than collapsing them.
+///
+/// **Nothing in `game/interaction.rs` changes for this row and that is the claim.** The count spec
+/// already carries `min`/`suggested`/`max` separately and the per-viewer wrap already copies all
+/// three; a row that needed an edit there would be a row about a projection bug instead.
+///
+/// # The two legs, in ONE invocation
+///
+/// The ALLOCATED class publishes a charged victim slot, so a witness declaration can re-aim it
+/// after the first crossing and exhibit a longer cascade than the offer's own declaration drives —
+/// the pair DIFFERS. The UNTARGETED class publishes no charged slot, so there is no aim to move and
+/// the two COINCIDE. Both are asserted, so neither leg is satisfied by a difference that exists
+/// everywhere or by an equality that does.
+///
+/// # Reach guards, asserted before the claim
+///
+/// Both legs assert the spec is the `Fixed` variant and that `max` is strictly positive, so an
+/// `UntilLethal` projection or a zeroed authority fails rather than passing by absence; and
+/// `suggested` is asserted inside `[min, max]`, which is the window the picker renders.
+///
+/// # Discrimination
+///
+/// Have the producer set both fields from one integer — which is what it did before this phase —
+/// and the allocated leg's strict inequality FAILS while the untargeted leg stays green. Publish
+/// the witness count as the suggestion too and the untargeted leg still passes while the allocated
+/// leg's `suggested < max` becomes an equality and fails.
+#[test]
+fn the_count_pickers_ceiling_and_suggestion_are_two_numbers() {
+    let (allocated, allocated_proposer) = f4_offer_board();
+    let (untargeted, untargeted_proposer) = untargeted_offer_board();
+
+    let pair = |state: &GameState, proposer: PlayerId, label: &str| -> (u32, u32, u32) {
+        let view = viewer_interaction(state, proposer);
+        let (count, _) = f4_published(&view);
+        let InteractionShortcutCountSpec::Fixed {
+            min,
+            max,
+            suggested,
+        } = &count
+        else {
+            panic!("[{label}] a bounded offer projects a `Fixed` count window, got {count:?}");
+        };
+        let (min, max, suggested) = (*min, *max, *suggested);
+        assert!(
+            max > 0,
+            "[{label}] REACH-GUARD: a zeroed ceiling is an authority violation, not a number to \
+             compare against"
+        );
+        assert!(
+            min <= suggested && suggested <= max,
+            "[{label}] REACH-GUARD: the suggestion must lie inside the window the picker renders; \
+             got min {min}, suggested {suggested}, max {max}"
+        );
+        (min, suggested, max)
+    };
+
+    // ── THE DIFFER LEG — the allocated class, whose charged slot a witness can re-aim.
+    let (_, allocated_suggested, allocated_max) =
+        pair(&allocated, allocated_proposer, "allocated class");
+    assert!(
+        allocated_suggested < allocated_max,
+        "CR 732.2a: the ceiling is what SOME legal declaration may specify and the suggestion is \
+         what the offer's OWN declaration drives, so on a board where re-aiming the charged slot \
+         reaches a later crossing the two are different numbers; got suggested \
+         {allocated_suggested} vs max {allocated_max}"
+    );
+
+    // ── THE EQUAL LEG, in this same invocation — the untargeted class has no aim to move.
+    let (_, untargeted_suggested, untargeted_max) =
+        pair(&untargeted, untargeted_proposer, "untargeted class");
+    assert_eq!(
+        untargeted_suggested, untargeted_max,
+        "with no charged victim slot there is no aim for a witness to re-point, so the offer's own \
+         declaration IS the widest one and the two published numbers coincide — which is what \
+         keeps the leg above from being an artefact of the projection rather than of the producer"
+    );
 }
 
 /// The offer's own published count window and preview list, read off the projection under test.
@@ -8995,13 +9256,17 @@ fn an_authored_split_is_previewed_per_declared_seat() {
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
     let (count_spec, published) = f4_published(&view);
-    let InteractionShortcutCountSpec::Fixed { max, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
+    // count this offer's own declaration may legally specify. The window's `max` is what SOME
+    // legal declaration may specify, which is a different declaration; this row's claim is not
+    // about which count is legal.
+    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
     assert!(
-        point.candidate_ids.len() > 1 && max > 2,
+        point.candidate_ids.len() > 1 && suggested > 2,
         "reach-guard: an UNEQUAL split over MORE THAN ONE announced candidate is what makes a \
-         per-seat attribution observable at all; candidates={} max={max}",
+         per-seat attribution observable at all; candidates={} suggested={suggested}",
         point.candidate_ids.len()
     );
 
@@ -9010,7 +9275,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             &state,
             proposer,
             &interaction_id,
-            max,
+            suggested,
             f4_pins(&points, allocation),
         );
         assert_eq!(
@@ -9023,7 +9288,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             .shortcut_preview
             .expect("a confirmable authored declaration carries its previewed element");
         assert_eq!(
-            element.count, max,
+            element.count, suggested,
             "the element states the count it was declared at"
         );
         assert_eq!(
@@ -9058,8 +9323,8 @@ fn an_authored_split_is_previewed_per_declared_seat() {
 
     let canonical = published
         .iter()
-        .find(|element| element.count == max)
-        .expect("the window's own ceiling is always published")
+        .find(|element| element.count == suggested)
+        .expect("the producer seeds its element set with the window's suggestion")
         .clone();
     assert!(
         invariant(&canonical)
@@ -9070,10 +9335,10 @@ fn an_authored_split_is_previewed_per_declared_seat() {
         canonical.entries
     );
 
-    let unequal = element(&[(0, max - 1), (1, 1)]);
-    let reordered = element(&[(1, max - 1), (0, 1)]);
-    let first_only = element(&[(0, max)]);
-    let second_only = element(&[(1, max)]);
+    let unequal = element(&[(0, suggested - 1), (1, 1)]);
+    let reordered = element(&[(1, suggested - 1), (0, 1)]);
+    let first_only = element(&[(0, suggested)]);
+    let second_only = element(&[(1, suggested)]);
 
     assert_ne!(
         reordered.entries, unequal.entries,
@@ -9155,12 +9420,16 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 
     // ── LEG 1's PAIRED POSITIVE: the same declaration WITH its partition stated.
+    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
+    // count this offer's own declaration may legally specify. The window's `max` is what SOME
+    // legal declaration may specify, which is a different declaration; this row's claim is not
+    // about which count is legal.
     let partitioned = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        max,
-        f4_pins(&points, &[(0, max)]),
+        suggested,
+        f4_pins(&points, &[(0, suggested)]),
     );
     assert_eq!(partitioned.status, InteractionPreviewStatus::Confirmable);
     assert!(
@@ -9172,7 +9441,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 
     // ── LEG 1: the same pin, its partition cleared.
-    let unpartitioned: Vec<InteractionShortcutPin> = f4_pins(&points, &[(0, max)])
+    let unpartitioned: Vec<InteractionShortcutPin> = f4_pins(&points, &[(0, suggested)])
         .into_iter()
         .map(|mut pin| {
             if pin.group == point.group {
@@ -9181,7 +9450,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
             pin
         })
         .collect();
-    let preview = f4_preview(&state, proposer, &interaction_id, max, unpartitioned);
+    let preview = f4_preview(&state, proposer, &interaction_id, suggested, unpartitioned);
     assert_eq!(
         preview.status,
         InteractionPreviewStatus::Confirmable,
@@ -9740,11 +10009,15 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
     let (count_spec, _published) = f4_published(&view);
-    let InteractionShortcutCountSpec::Fixed { max, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
+    // count this offer's own declaration may legally specify. The window's `max` is what SOME
+    // legal declaration may specify, which is a different declaration; this row's claim is not
+    // about which count is legal.
+    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
     assert!(
-        point.candidate_ids.len() > 1 && max > 2,
+        point.candidate_ids.len() > 1 && suggested > 2,
         "reach-guard: the duplicate-id and subset shapes need more than one announced candidate"
     );
 
@@ -9754,8 +10027,8 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
         &state,
         proposer,
         &interaction_id,
-        max,
-        f4_pins(&points, &[(0, max - 1), (1, 1)]),
+        suggested,
+        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
     );
     assert_eq!(legal.status, InteractionPreviewStatus::Confirmable);
     assert!(
@@ -9769,17 +10042,17 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     let refusals: Vec<(&str, Vec<InteractionShortcutPin>, InteractionReasonCode)> = vec![
         (
             "sum below the declared count",
-            f4_pins(&points, &[(0, max - 1)]),
+            f4_pins(&points, &[(0, suggested - 1)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
             "a zero segment",
-            f4_pins(&points, &[(0, max), (1, 0)]),
+            f4_pins(&points, &[(0, suggested), (1, 0)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
             "a duplicate choice id",
-            f4_pins(&points, &[(0, max - 1), (0, 1)]),
+            f4_pins(&points, &[(0, suggested - 1), (0, 1)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
@@ -9794,7 +10067,7 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
                             choice_ids: vec![unknown_id.clone()],
                             amounts: vec![AmountAssignment {
                                 choice_id: unknown_id.clone(),
-                                amount: max,
+                                amount: suggested,
                             }],
                         }
                     } else {
@@ -9811,7 +10084,7 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     ];
 
     for (name, pins, reason) in refusals {
-        let preview = f4_preview(&state, proposer, &interaction_id, max, pins);
+        let preview = f4_preview(&state, proposer, &interaction_id, suggested, pins);
         assert_eq!(
             preview.status,
             InteractionPreviewStatus::Rejected { reason },
@@ -9922,13 +10195,17 @@ fn both_preview_entry_points_answer_with_the_same_shortcut_element() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let (count_spec, _published) = f4_published(&view);
-    let InteractionShortcutCountSpec::Fixed { max, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
+    // count this offer's own declaration may legally specify. The window's `max` is what SOME
+    // legal declaration may specify, which is a different declaration; this row's claim is not
+    // about which count is legal.
+    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
     let request = f4_request(
         &interaction_id,
-        max,
-        f4_pins(&points, &[(0, max - 1), (1, 1)]),
+        suggested,
+        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
     );
 
     let answered = preview_interaction(&state, proposer, &request);
@@ -9966,7 +10243,11 @@ fn the_shortcut_preview_payload_is_additive_on_the_wire() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let (count_spec, _published) = f4_published(&view);
-    let InteractionShortcutCountSpec::Fixed { max, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
+    // count this offer's own declaration may legally specify. The window's `max` is what SOME
+    // legal declaration may specify, which is a different declaration; this row's claim is not
+    // about which count is legal.
+    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
 
@@ -9974,15 +10255,15 @@ fn the_shortcut_preview_payload_is_additive_on_the_wire() {
         &state,
         proposer,
         &interaction_id,
-        max,
-        f4_pins(&points, &[(0, max - 1), (1, 1)]),
+        suggested,
+        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
     );
     let refused = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        max,
-        f4_pins(&points, &[(0, max - 1)]),
+        suggested,
+        f4_pins(&points, &[(0, suggested - 1)]),
     );
     assert!(matches!(
         refused.status,
@@ -10150,21 +10431,21 @@ fn targets_template(
 /// Each call stages its OWN offer: a declaration consumes it, so one runner cannot serve a
 /// second leg.
 ///
-/// ⚠ `max_iterations` is a parameter and not a constant because
-/// `handle_declare_shortcut` refuses `UntilLethal` outright on a NARROWED bound, before any
-/// pin is read. An until-lethal leg staged that way lands on `Priority` for a reason with
-/// nothing to do with the pin, and every leg then agrees.
+/// ⚠ the measured threshold is a parameter and not a constant because
+/// `handle_declare_shortcut` refuses `UntilLethal` outright on an offer whose producer MEASURED
+/// one, before any pin is read. An until-lethal leg staged that way lands on `Priority` for a
+/// reason with nothing to do with the pin, and every leg then agrees.
 fn declare_targets_verdict(
     label: &str,
     count: IterationCount,
-    max_iterations: u32,
+    measured: Option<u32>,
     positions: (u32, u32),
     targets: Vec<engine::analysis::decision_template::TargetPin>,
 ) -> WaitingFor {
     let (mut runner, slots) = stage_sequenced_offer(
         label,
         count.clone(),
-        max_iterations,
+        measured,
         vec![victims_point(positions.0, positions.1)],
     );
     let template = targets_template(&slots[0], count.clone(), targets);
@@ -10204,7 +10485,8 @@ fn accepted(verdict: &WaitingFor) -> bool {
 /// subject.
 #[test]
 fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_declare_ingress() {
-    let unbounded = ShortcutDecisionSchema::default().max_iterations;
+    // An offer whose producer measured nothing: the shape the `UntilLethal` legs below need.
+    let unbounded: Option<u32> = None;
 
     let hostile = declare_targets_verdict(
         "p10-row1-hostile",
@@ -10264,7 +10546,13 @@ fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_decla
 fn p10_row_2_every_schedule_arm_refuses_a_step_naming_more_than_its_head() {
     // One expression per leg, differing from its paired positive in exactly one axis.
     let verdict = |label: &str, positions: (u32, u32), pin| {
-        declare_targets_verdict(label, IterationCount::Fixed(1), 6, positions, vec![pin])
+        declare_targets_verdict(
+            label,
+            IterationCount::Fixed(1),
+            Some(6),
+            positions,
+            vec![pin],
+        )
     };
     let p2 = PlayerId(2);
     let p3 = PlayerId(3);
@@ -10362,7 +10650,7 @@ fn p10_row_2b_the_clause_reads_every_declared_pin_position() {
     let p2 = PlayerId(2);
     let p3 = PlayerId(3);
     let verdict = |label: &str, positions: (u32, u32), targets| {
-        declare_targets_verdict(label, IterationCount::Fixed(1), 6, positions, targets)
+        declare_targets_verdict(label, IterationCount::Fixed(1), Some(6), positions, targets)
     };
 
     let two_fat = verdict(
@@ -10426,7 +10714,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
     let (runner, slots) = stage_sequenced_offer(
         "p10-row7-load",
         IterationCount::Fixed(3),
-        6,
+        Some(6),
         vec![victims_point(1, 1)],
     );
     let mut carrying = runner.state().clone();
@@ -10447,6 +10735,9 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             template: Some(declared),
             per_cycle: None,
             shortened_by: None,
+            published_declaration: None,
+            road: engine::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         },
     };
     let wire = serde_json::to_string(&carrying).expect("serialize the pending proposal");
@@ -10484,7 +10775,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
     let declared_now = declare_targets_verdict(
         "p10-row7-declare",
         IterationCount::Fixed(1),
-        6,
+        Some(6),
         (1, 1),
         vec![constant_of(&[P1, p2])],
     );
@@ -10495,7 +10786,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
     let truncated = declare_targets_verdict(
         "p10-row7-positive",
         IterationCount::Fixed(1),
-        6,
+        Some(6),
         (1, 1),
         vec![constant_of(&[P1])],
     );

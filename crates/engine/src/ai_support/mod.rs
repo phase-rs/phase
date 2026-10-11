@@ -2976,6 +2976,7 @@ fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
+        | WaitingFor::ManaAbilityManaPayment { player, .. }
         | WaitingFor::UnlessPayment { player, .. } => Some(*player),
         _ => None,
     }

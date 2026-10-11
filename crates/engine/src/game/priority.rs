@@ -162,8 +162,12 @@ pub(crate) fn handle_priority_pass_with_limit(
             // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
             // run of identical token triggers collapses into one step that
             // consumes K entries (Tier 3); otherwise exactly one entry resolves.
+            let traced = super::play_trace::stack_before_resolution(state);
             let consumed =
                 super::stack::resolve_next_with_limit(state, events, stack_resolution_limit);
+            if let Some(before) = traced {
+                super::play_trace::record_resolutions(state, &before, consumed);
+            }
 
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth

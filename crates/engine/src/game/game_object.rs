@@ -1683,7 +1683,7 @@ pub struct GameObject {
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
-/// (types/game_state.rs) — the §5.2c 137-field partition. `GameObject` deliberately
+/// (types/game_state.rs). `GameObject` deliberately
 /// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
 /// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
 /// destructure: adding a field breaks the build until it is classified into a

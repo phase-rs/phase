@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 
 use rand::Rng;
@@ -72,7 +73,9 @@ fn flip_through_replacement(
     }
 
     // CR 705.1: flip each coin with the game's seeded RNG.
-    let results: Vec<bool> = (0..count).map(|_| state.rng.random_bool(0.5)).collect();
+    let results: Vec<bool> = (0..count)
+        .map(|_| state.rng.draw(RandomDraw::Outcome).random_bool(0.5))
+        .collect();
 
     if count == 1 {
         let won = results[0];
@@ -935,8 +938,6 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
 
     /// Build Ral, Monsoon Mage as a battlefield permanent with a back face so
     /// `enter_transformed` has a face to flip to (CR 712.8e).
@@ -1060,7 +1061,7 @@ mod tests {
     fn ral_wins_flip_and_accepts_exile_returns_transformed() {
         let mut state = GameState::new_two_player(0);
         // Seed 0 → first `random_bool(0.5)` is a WIN.
-        state.rng = ChaCha20Rng::seed_from_u64(0);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(0);
         let ral = setup_ral(&mut state);
 
         let ability = build_resolved_from_def(&ral_trigger_definition(), ral, PlayerId(0));
@@ -1122,7 +1123,7 @@ mod tests {
     #[test]
     fn ral_wins_flip_and_declines_exile_stays_front_face() {
         let mut state = GameState::new_two_player(0);
-        state.rng = ChaCha20Rng::seed_from_u64(0);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(0);
         let ral = setup_ral(&mut state);
 
         let ability = build_resolved_from_def(&ral_trigger_definition(), ral, PlayerId(0));
@@ -1158,7 +1159,7 @@ mod tests {
     fn ral_loses_flip_takes_one_damage() {
         let mut state = GameState::new_two_player(1);
         // Seed 1 → first `random_bool(0.5)` is a LOSS.
-        state.rng = ChaCha20Rng::seed_from_u64(1);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(1);
         let ral = setup_ral(&mut state);
         let initial_life = state.players[0].life;
 
@@ -1229,8 +1230,6 @@ mod tests {
         use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
         use crate::types::identifiers::CardId;
         use crate::types::player::PlayerId;
-        use rand::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
 
         const KRARK_TRIGGER: &str = "Whenever you cast an instant or sorcery spell, flip a coin. \
             If you lose the flip, return that spell to its owner's hand. \
@@ -1240,7 +1239,7 @@ mod tests {
         let execute = trig_def.execute.as_ref().expect("Krark trigger execute");
 
         let mut state = GameState::new_two_player(0);
-        state.rng = ChaCha20Rng::seed_from_u64(0);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(0);
 
         let krark_id = create_object(
             &mut state,
@@ -1322,8 +1321,6 @@ mod tests {
         use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
         use crate::types::identifiers::CardId;
         use crate::types::player::PlayerId;
-        use rand::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
 
         const KRARK_TRIGGER: &str = "Whenever you cast an instant or sorcery spell, flip a coin. \
             If you lose the flip, return that spell to its owner's hand. \
@@ -1333,7 +1330,7 @@ mod tests {
         let execute = trig_def.execute.as_ref().expect("Krark trigger execute");
 
         let mut state = GameState::new_two_player(1);
-        state.rng = ChaCha20Rng::seed_from_u64(1);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(1);
 
         let krark_id = create_object(
             &mut state,
@@ -1481,7 +1478,7 @@ mod tests {
         // CR 705.2: P1 (the opponent) casts the spell; P0 controls the flip
         // source. The `CoinFlipped` must be recorded for P1, the flipper.
         let mut state = GameState::new_two_player(0);
-        state.rng = ChaCha20Rng::seed_from_u64(0);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(0);
         let source = create_object(
             &mut state,
             CardId(1),
@@ -1522,7 +1519,7 @@ mod tests {
         // (here: the caster P1 loses 3 life) must fire — driven by P1's result.
         // Seed 1 → first flip is a LOSS (mirrors `ral_loses_flip_takes_one_damage`).
         let mut state = GameState::new_two_player(1);
-        state.rng = ChaCha20Rng::seed_from_u64(1);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(1);
         let source = create_object(
             &mut state,
             CardId(1),
@@ -1587,7 +1584,7 @@ mod tests {
         // 2-player game records exactly 2 flips, one per player — NOT a single
         // controller flip.
         let mut state = GameState::new_two_player(7);
-        state.rng = ChaCha20Rng::seed_from_u64(7);
+        state.rng = crate::types::game_state::GameRng::seed_from_u64(7);
         let source = create_object(
             &mut state,
             CardId(1),
@@ -1861,8 +1858,6 @@ mod tests {
         use crate::types::ability::CoinFlipResult;
         use crate::types::actions::GameAction;
         use crate::types::phase::Phase;
-        use rand::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
 
         // Parse the real card and lift its encounter-trigger execute body: the
         // each-player-sacrifice root (`player_scope`), the flip sub-ability, and
@@ -1900,7 +1895,7 @@ mod tests {
 
         // Prime iteration 1's flip as a LOSS (seed 1 → first flip loses). Nothing
         // else draws the RNG before the flip, so this survives to the flip.
-        runner.state_mut().rng = ChaCha20Rng::seed_from_u64(1);
+        runner.state_mut().rng = crate::types::game_state::GameRng::seed_from_u64(1);
         let mut events = Vec::new();
         resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
             .expect("initial resolution must set up the first sacrifice choice");
@@ -1966,7 +1961,7 @@ mod tests {
         );
         // Prime iteration 2's flip as a WIN (seed 0 → first flip wins) just before
         // the action that performs the sacrifices and resumes into the flip.
-        runner.state_mut().rng = ChaCha20Rng::seed_from_u64(0);
+        runner.state_mut().rng = crate::types::game_state::GameRng::seed_from_u64(0);
         assert_eq!(
             sacrifice_first(&mut runner),
             vec![true],

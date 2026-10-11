@@ -39,7 +39,7 @@
 //!
 //! | Type | before boxing | after | ceiling |
 //! |---|---:|---:|---:|
-//! | `GameState` | 30,112 | 13,680 | 14,336 |
+//! | `GameState` | 30,112 | 14,208 | 14,336 |
 //! | `StackEntry` | 5,336 | 344 | 768 |
 //! | `PendingCast` | 6,632 | 1,376 | 1,792 |
 //! | `PendingTrigger` | 6,000 | 744 | 1,024 |
@@ -56,6 +56,8 @@
 //! (`steps_started_this_turn`, `next_extra_phase_id`, `last_added_phase_ids`)
 //! landed together; none of those fields is a large rarely-populated one, so
 //! the ceiling moved to 13,840.next_multiple_of(256) + 256 = 14,336.
+//! `GameState` now measures 14,208 B on x86_64-unknown-linux-gnu, under the
+//! 14,336 ceiling.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.

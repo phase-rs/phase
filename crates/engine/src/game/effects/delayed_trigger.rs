@@ -62,6 +62,9 @@ pub fn resolve(
     // pattern and documents the same hazard: a decision that must be taken
     // before a binder erases its discriminator.
     let condition_expects_referent_move = condition_names_referent_zone_change(&condition);
+    // CR 603.7a: the origin is the parsed condition and effect, before any binder rewrites them,
+    // so each resolution of one creating ability makes the same delayed ability.
+    let parsed_origin = (condition.clone(), (*effect_def.effect).clone());
 
     // CR 603.7 + CR 608.2c: Resolve the most-recent tracked set once, up front,
     // so the tracked-set CONDITION rewrite runs BEFORE the single-target
@@ -692,6 +695,14 @@ pub fn resolve(
     // CR 400.7: bind the delayed self-transform to the source's creation-time
     // incarnation; a later re-entry must not be restamped when the trigger fires.
     delayed_ability.set_source_incarnation_recursive(source.map(|object| object.incarnation));
+
+    let (origin_condition, origin_effect) = parsed_origin;
+    delayed_ability.delayed_origin = crate::game::triggers::delayed_ability_origin(
+        state,
+        ability.source_id,
+        origin_condition,
+        origin_effect,
+    );
 
     // CR 603.7b: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
@@ -2145,6 +2156,109 @@ mod tests {
              installs"
             );
         }
+    }
+
+    /// CR 603.7a: two resolutions of one creating ability make the same delayed ability, whatever
+    /// object each binds.
+    #[test]
+    fn delayed_origin_is_read_before_the_creation_bindings() {
+        let mut state = GameState::new_two_player(42);
+        let new_object = |state: &mut GameState, card: u64, zone| {
+            crate::game::zones::create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Object {card}"),
+                zone,
+            )
+        };
+        let source = new_object(&mut state, 1, Zone::Battlefield);
+        state.objects.get_mut(&source).unwrap().base_printed_ref =
+            Some(crate::types::card::PrintedCardRef {
+                oracle_id: "creator".to_string(),
+                face_name: "Creator".to_string(),
+            });
+        for card in [2, 3] {
+            let bound = new_object(&mut state, card, Zone::Battlefield);
+            let ability = ResolvedAbility::new(
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                        filter: TargetFilter::ParentTarget,
+                    },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+                vec![crate::types::ability::TargetRef::Object(bound)],
+                source,
+                PlayerId(0),
+            );
+            resolve(&mut state, &ability, &mut Vec::new()).expect("resolution must not error");
+        }
+        let [first, second] = &state.delayed_triggers[..] else {
+            panic!(
+                "reach: both resolutions install: {:?}",
+                state.delayed_triggers.len()
+            );
+        };
+        assert_ne!(
+            first.condition, second.condition,
+            "reach: each installed condition is bound to its own object"
+        );
+        assert!(first.ability.delayed_origin.is_some());
+        assert_eq!(first.ability.delayed_origin, second.ability.delayed_origin);
+    }
+
+    /// CR 603.7a: an installer that builds its delayed ability directly is identified by it too.
+    #[test]
+    fn install_stamps_the_origin_of_an_unstamped_delayed_ability() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creator".to_string(),
+            Zone::Battlefield,
+        );
+        let creator = crate::types::card::PrintedCardRef {
+            oracle_id: "creator".to_string(),
+            face_name: "Creator".to_string(),
+        };
+        state.objects.get_mut(&source).unwrap().base_printed_ref = Some(creator.clone());
+        let condition = DelayedTriggerCondition::AtNextPhase { phase: Phase::End };
+        let effect = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        crate::game::triggers::install_delayed_trigger(
+            &mut state,
+            DelayedTrigger::new(
+                condition.clone(),
+                Box::new(ResolvedAbility::new(
+                    effect.clone(),
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                PlayerId(0),
+                source,
+                true,
+            ),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            state.delayed_triggers[0].ability.delayed_origin,
+            Some(Box::new(crate::types::ability::DelayedAbilityOrigin {
+                creator,
+                condition,
+                effect,
+            }))
+        );
     }
 
     /// V15 — CR 701.17c: a delayed trigger snapshotting a mill's

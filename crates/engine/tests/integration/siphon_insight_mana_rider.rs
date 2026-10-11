@@ -568,7 +568,11 @@ fn colorless_requirement_case(
                 ability_index: 0,
             })
             .expect("a Swamp taps for {B}");
-        let pip_id = runner.state().players[0].mana_pool.mana[0].pip_id;
+        let pip_id = runner.state().players[0]
+            .mana_pool
+            .unit_at(0)
+            .unwrap()
+            .pip_id;
         runner
             .act(GameAction::SpendPoolMana { pip_id })
             .expect("black mana may be pinned to {C} under any type");

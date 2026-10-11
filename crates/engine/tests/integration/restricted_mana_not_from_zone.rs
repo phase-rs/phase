@@ -252,7 +252,7 @@ fn karolina_restriction_drives_the_production_cast_payment_pipeline() {
         ] {
             assert_eq!(pool.count_color(color), 1);
         }
-        assert!(pool.mana.iter().all(|unit| {
+        assert!(pool.units().all(|unit| {
             unit.restrictions == vec![ManaRestriction::CannotCastSpellFromZone(Zone::Hand)]
         }));
         (game, spell)

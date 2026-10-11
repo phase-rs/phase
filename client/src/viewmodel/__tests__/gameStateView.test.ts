@@ -1089,6 +1089,7 @@ const PARTITION_FIXTURES: Record<
   PayCost: NO_TARGET_REF_LEGAL_SET,
   BlightChoice: NO_TARGET_REF_LEGAL_SET,
   PayManaAbilityMana: NO_TARGET_REF_LEGAL_SET,
+  ManaAbilityManaPayment: NO_TARGET_REF_LEGAL_SET,
   ChooseManaColor: NO_TARGET_REF_LEGAL_SET,
   CollectEvidenceChoice: NO_TARGET_REF_LEGAL_SET,
   HarmonizeTapChoice: NO_TARGET_REF_LEGAL_SET,

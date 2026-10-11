@@ -187,6 +187,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::CostTypeChoice { .. }
         | WaitingFor::BlightChoice { .. }
         | WaitingFor::PayManaAbilityMana { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         | WaitingFor::ChooseManaColor { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
@@ -345,8 +346,11 @@ pub(crate) fn capture_library_search_card_view(
 
 /// Which of the three viewer-visible pin carriers is asking, so the `slot.source` leg of
 /// [`pins_name_hidden_source`] runs only where it guards something. Carrier 1 co-publishes the
-/// identical `DecisionSlot` unredacted beside its own schema, so dropping the declaration for it
-/// would hide nothing that arm hands over anyway; carriers 2 and 3 publish NO schema.
+/// same `DecisionSlot.source` unredacted beside its own schema, as `schema.points[].slot.source`,
+/// so dropping the declaration for it would hide nothing that arm hands over anyway; carriers 2
+/// and 3 publish NO schema. Grounded on the SOURCE because that is the axis the leg itself reads
+/// — a pin and the point it answers need not be whole-slot equal, since a declaration may pin a
+/// choice the schema publishes under a different [`ChoicePoint`] on one source.
 ///
 /// Private, and an ARGUMENT to the one predicate rather than a second predicate: splitting
 /// `pins_name_hidden_source` in two would mint the second hidden-information authority this
@@ -366,22 +370,17 @@ enum PinCarrier {
 /// object this viewer may not see drops the entire pin vector.
 ///
 /// THE SINGLE AUTHORITY for that decision. It is keyed on `[PinnedDecision]` rather than on
-/// `DecisionTemplate` because this engine has THREE viewer-visible carriers of that same vector,
+/// `DecisionTemplate` because this engine has several viewer-visible carriers of that same vector,
 /// and a per-carrier copy of the predicate is exactly what let them drift before:
 ///
 /// 1. `WaitingFor::LoopShortcut.declaration.decisions` — the proposer-facing offer.
 /// 2. `WaitingFor::RespondToShortcut.proposal.template.decisions` — the responder-facing copy.
 ///    `game::engine::handle_declare_shortcut` moves the identical template verbatim onto
 ///    `ShortcutProposal.template` one state transition later, where every responder and spectator
-///    reads it.
-/// 3. `GameState::last_loop_action_sequence[].pins` — the recorded loop period. It is serialized
-///    whenever non-empty (`skip_serializing_if = "Vec::is_empty"`, not `skip`) and has no other
-///    redaction seam. Its three writers (the `game::engine::record_loop_pin` call sites: a
-///    mana-ability tap cost, a mana-color choice, a proliferate target) can only name battlefield
-///    permanents and seats today, so that call redacts nothing on any board the engine currently
-///    mints — it is wired so a fourth writer cannot open the leak silently.
+///    reads it. `ShortcutProposal.published_declaration.decisions` rides the same proposal to the
+///    same readers, carrying the declaration carrier 1 publishes.
 ///
-/// `GameState::decision_templates` is the fourth carrier and deliberately does NOT route here: it
+/// `GameState::decision_templates` is one more carrier and deliberately does NOT route here: it
 /// is redacted wholesale by the private-access retain
 /// (`filtered.decision_templates.retain(|t| can_view_private_for_player(t.owner))` — CR 723.4, the
 /// SAME predicate carriers 1 and 2 apply), so a template this viewer may not privately view is
@@ -457,10 +456,13 @@ fn pins_name_hidden_source(
     // identity gets a compile-time visit here instead of leaking silently.
     //
     // `slot` IS inspected, and only on the carriers where inspecting it guards something.
-    // `PinCarrier::OfferWithSchema` skips the leg: that arm co-publishes the identical
-    // `DecisionSlot` unredacted as `schema.points[].slot`, so dropping the declaration there
-    // would hide nothing the same arm hands over anyway, and it would start dropping offers from
-    // their own proposer for no gain. `PinCarrier::PinsOnly` runs it: carriers 2 and 3 publish NO
+    // `PinCarrier::OfferWithSchema` skips the leg: that arm co-publishes the same
+    // `DecisionSlot.source` unredacted as `schema.points[].slot.source`, so dropping the
+    // declaration there would hide nothing the same arm hands over anyway, and it would start
+    // dropping offers from their own proposer for no gain. The SOURCE is the right ground, and
+    // the only one available: this leg calls `slot_source_hidden`, which reads
+    // `slot.source` and nothing else, and a pin need not be whole-slot equal to the point it
+    // answers now that the slot carries a typed choice point. `PinCarrier::PinsOnly` runs it: carriers 2 and 3 publish NO
     // schema, so the slot's source reaches the viewer with no other seam to drop it. Naming the
     // decision each answer belongs to is exactly what a responder-facing render of the answered
     // decisions does, which is what turns a latent exposure into a rendered one.
@@ -481,10 +483,10 @@ fn pins_name_hidden_source(
         PinnedDecision::Targets { slot, targets } => {
             slot_source_hidden(slot) || targets.iter().any(&pin_hidden)
         }
-        // The one variant with no `slot`: its `source` is the value leg's own subject and is
-        // already inspected on every carrier.
-        PinnedDecision::Order { source, .. } => source_hidden(source),
-        PinnedDecision::Mode { slot, .. }
+        // Every variant carries a slot, so every carrier's source reaches the one
+        // slot-keyed test — no variant is an exception to it.
+        PinnedDecision::Order { slot, .. }
+        | PinnedDecision::Mode { slot, .. }
         | PinnedDecision::MayChoice { slot, .. }
         | PinnedDecision::UnlessBreak { slot, .. }
         | PinnedDecision::ConvokeTaps { slot }
@@ -1142,15 +1144,25 @@ pub(crate) fn identity_projection_for_unseated_viewer(
 /// DETECTION ONLY. `analysis`'s boundary collapse is the shortcut being TAKEN
 /// (CR 732.2c) and runs on authoritative state; it must never call this. And this is
 /// deliberately NOT [`filter_state_for_viewer`], which additionally clears
-/// rules-execution carriers, zeroes the RNG whose word position the offer hook compares,
-/// and RETAINS `cards_drawn_this_turn` only for the players the viewer holds private
+/// rules-execution carriers, zeroes the RNG, and RETAINS `cards_drawn_this_turn` only for the players the viewer holds private
 /// access to — deleting every opponent's entry from the very journal an instructed-
 /// departure certificate reads. This wrapper is structurally incapable of that strip: it
 /// clones and then applies leaves through an `ObjectId`-keyed map that no `GameState`
 /// journal is reachable from.
 pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> GameState {
+    proposer_hidden_view_as_of(state, state, proposer)
+}
+
+/// [`proposer_hidden_view`] of `state`, blanking what `proposer` may not look at in
+/// `projection_source` — the board a detection drive started from, so a card the drive moves
+/// stays blank in every frame it reaches.
+pub(crate) fn proposer_hidden_view_as_of(
+    projection_source: &GameState,
+    state: &GameState,
+    proposer: PlayerId,
+) -> GameState {
     let mut view = state.clone();
-    for (obj_id, projection) in identity_projection_for_viewer(state, proposer) {
+    for (obj_id, projection) in identity_projection_for_viewer(projection_source, proposer) {
         match projection {
             IdentityProjection::Hidden => hide_card(&mut view, obj_id),
             IdentityProjection::FaceDownRedacted => {
@@ -1272,6 +1284,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         Some(viewer) => crate::game::payment_transaction::project_for_viewer(state, viewer),
         None => crate::game::payment_transaction::project_without_viewer(state),
     };
+    filtered.play_trace = None;
     let viewer_knows = |object_id: ObjectId| {
         viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
     };
@@ -1451,7 +1464,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // The provenance journal contains exact source identities, restrictions,
     // and cost-recipient relationships. It is server authority and must not
     // expose one player's mana history to another viewer.
-    filtered.resolved_rules_journal = Default::default();
+    filtered.reset_resolved_rules_journal();
     // Delayed-trigger allocation and firing receipts are server authority.
     // Server transport serializes this filtered state directly, so clear every
     // root carrier here as well as in the dedicated WASM client projection.
@@ -1506,7 +1519,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // word offset would give an attacker the keystream alignment for free. Zero
     // it so no viewer snapshot carries either the seed or its stream position.
     filtered.rng_word_pos = 0;
-    filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
+    filtered.rng = crate::types::game_state::GameRng::seed_from_u64(0);
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
 
@@ -1865,10 +1878,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
 
     // A target object is hidden from this viewer iff it sits in a private zone whose
     // owner the viewer can't privately view AND it isn't otherwise revealed/peeked.
-    // Hoisted above the CR 732.2a/b blocks below because all THREE pin carriers
-    // (`LoopShortcut.declaration`, `RespondToShortcut.proposal.template`,
-    // `last_loop_action_sequence[].pins`) must answer "may this viewer see that object?" the
-    // same way; a per-arm copy is what let the first two drift apart.
+    // Hoisted above the CR 732.2a/b blocks below because every pin carrier
+    // (`LoopShortcut.declaration`, `RespondToShortcut.proposal.{template, published_declaration}`)
+    // must answer "may this viewer see that object?" the same way; a per-arm copy is what let them
+    // drift apart.
     let target_hidden = |id: ObjectId| -> bool {
         state.objects.get(&id).is_some_and(|obj| {
             matches!(obj.zone, Zone::Hand | Zone::Library)
@@ -1892,9 +1905,13 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref certificate,
         ref schema,
         ref declaration,
+        road,
+        period: _,
     } = state.waiting_for
     {
-        if !can_view_private_for_player(proposer) {
+        let (schema, declaration) = if can_view_private_for_player(proposer) {
+            (schema.clone(), declaration.clone())
+        } else {
             use crate::analysis::decision_template::{
                 DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
             };
@@ -1973,23 +1990,31 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     PinCarrier::OfferWithSchema,
                 )
             });
-            filtered.waiting_for = WaitingFor::LoopShortcut {
-                proposer,
-                predicted_winner,
-                certificate: certificate.clone(),
-                declaration,
-                schema: ShortcutDecisionSchema {
+            (
+                ShortcutDecisionSchema {
                     iteration_count: schema.iteration_count.clone(),
-                    // CR 732.2a: the count bound is derived from PUBLIC board state (life,
-                    // poison, library sizes over the living players), so it carries through
-                    // the per-viewer projection unredacted — only hidden-info legal targets
-                    // are rewritten above.
-                    max_iterations: schema.max_iterations,
+                    // CR 732.2a: BOTH published answers are derived from PUBLIC board state
+                    // (life, poison, library sizes over the living players) and the engine's own
+                    // budget, so the pair carries through the per-viewer projection unredacted —
+                    // only hidden-info legal targets are rewritten above.
+                    measured_repetition_bound: schema.measured_repetition_bound,
+                    deliverable_capacity: schema.deliverable_capacity,
                     points,
                     convoke_tappable_count,
                 },
-            };
-        }
+                declaration,
+            )
+        };
+        // CR 732.2a: a confirmed period is the engine's own replay script, so no viewer receives it.
+        filtered.waiting_for = WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            certificate: certificate.clone(),
+            declaration,
+            road,
+            period: Default::default(),
+            schema,
+        };
     }
 
     // CR 732.2b: the RESPONDER-facing copy of the very declaration redacted above.
@@ -2002,24 +2027,30 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // (`player`), because the offer's declaration is the proposer's hidden information and every
     // seat but theirs — the current responder, the queued ones, and spectators — receives this
     // same projection.
+    //
+    // The declaration the offer published rides the same proposal carrying the pin vector the
+    // `LoopShortcut` block redacts, so it takes the same guard and the same predicate, each field
+    // asked about its own pins.
     if let WaitingFor::RespondToShortcut { proposal, .. } = &mut filtered.waiting_for {
-        if !can_view_private_for_player(proposal.proposer)
-            && proposal.template.as_ref().is_some_and(|t| {
-                pins_name_hidden_source(&t.decisions, &target_hidden, PinCarrier::PinsOnly)
-            })
-        {
-            proposal.template = None;
+        if !can_view_private_for_player(proposal.proposer) {
+            let names_hidden =
+                |template: Option<&crate::analysis::decision_template::DecisionTemplate>| {
+                    template.is_some_and(|t| {
+                        pins_name_hidden_source(&t.decisions, &target_hidden, PinCarrier::PinsOnly)
+                    })
+                };
+            if names_hidden(proposal.template.as_ref()) {
+                proposal.template = None;
+            }
+            if names_hidden(proposal.published_declaration.as_ref()) {
+                proposal.published_declaration = None;
+            }
         }
     }
 
-    // CR 732.2a: the THIRD carrier of the same pin vector — the recorded loop period, which
-    // serializes whenever non-empty and has no other redaction seam. All-or-nothing per recorded
-    // step, for the reason spelled on `pins_name_hidden_source`: a half-shown period states a
-    // sequence that was never played.
-    for step in &mut filtered.last_loop_action_sequence {
-        if pins_name_hidden_source(&step.pins, &target_hidden, PinCarrier::PinsOnly) {
-            step.pins.clear();
-        }
+    // CR 732.2a: the proposal carries the offer's confirmed period, which no viewer receives.
+    if let WaitingFor::RespondToShortcut { proposal, .. } = &mut filtered.waiting_for {
+        proposal.period = Default::default();
     }
 
     if let WaitingFor::DigChoice {
@@ -3755,10 +3786,10 @@ fn redact_hidden_library_identity_carriers(
             .copied()
             .collect();
         if !hidden.is_empty() {
-            for members in filtered.tracked_object_sets.values_mut() {
+            for (_, members) in filtered.tracked_object_sets.iter_mut() {
                 members.retain(|id| !hidden.contains(id));
             }
-            for causes in filtered.tracked_set_member_causes.values_mut() {
+            for (_, causes) in filtered.tracked_set_member_causes.iter_mut() {
                 causes.retain(|id, _| !hidden.contains(id));
             }
         }
@@ -4278,7 +4309,10 @@ mod tests {
         // offset hands an attacker the keystream alignment for free, so the
         // filter must redact the stream position as well as the seed.
         for _ in 0..5 {
-            state.rng.next_u32();
+            state
+                .rng
+                .draw(crate::types::game_state::RandomDraw::Outcome)
+                .next_u32();
         }
         state.capture_rng_word_pos();
         let source_word_pos = state.rng_word_pos;
@@ -4928,7 +4962,8 @@ mod tests {
     #[test]
     fn filters_other_players_decision_templates() {
         use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+            ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+            PinnedDecision, ReplayMode,
         };
         use crate::types::game_state::YieldTarget;
 
@@ -4940,7 +4975,7 @@ mod tests {
             DecisionTemplate {
                 owner,
                 decisions: vec![PinnedDecision::Order {
-                    source: src.clone(),
+                    slot: DecisionSlot::first(src.clone(), ChoicePoint::TriggerOrder),
                     pos: 0,
                 }],
                 replay: ReplayMode::Static,
@@ -4984,7 +5019,8 @@ mod tests {
     #[test]
     fn r1j_a_controlling_player_sees_the_controlled_seats_decision_template() {
         use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+            ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+            PinnedDecision, ReplayMode,
         };
         use crate::types::game_state::YieldTarget;
 
@@ -4997,7 +5033,7 @@ mod tests {
         let template = DecisionTemplate {
             owner: controlled,
             decisions: vec![PinnedDecision::Order {
-                source: src.clone(),
+                slot: DecisionSlot::first(src.clone(), ChoicePoint::TriggerOrder),
                 pos: 0,
             }],
             replay: ReplayMode::Static,
@@ -9568,8 +9604,8 @@ mod tests {
         ) -> Vec<crate::analysis::decision_template::PinnedDecision>,
     ) -> GameState {
         use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionPoint, DecisionPointKind, DecisionSlot,
-            DecisionTemplate, IterationCount, ReplayMode, ShortcutDecisionSchema,
+            ChoicePoint, DecisionGroupKey, DecisionKind, DecisionPoint, DecisionPointKind,
+            DecisionSlot, DecisionTemplate, IterationCount, ReplayMode, ShortcutDecisionSchema,
         };
         let mut state = GameState::new_two_player(42);
         let hidden = create_object(
@@ -9579,7 +9615,7 @@ mod tests {
             "Secret Card".to_string(),
             Zone::Hand,
         );
-        let slot = DecisionSlot::target(slot_source(hidden));
+        let slot = DecisionSlot::first(slot_source(hidden), ChoicePoint::AnnouncedTarget);
         state.waiting_for = WaitingFor::LoopShortcut {
             proposer: D5H_PROPOSER,
             predicted_winner: None,
@@ -9592,7 +9628,8 @@ mod tests {
             },
             schema: ShortcutDecisionSchema {
                 iteration_count: IterationCount::Fixed(3),
-                max_iterations: 3,
+                measured_repetition_bound: Some(3),
+                deliverable_capacity: 3,
                 points: vec![DecisionPoint {
                     slot: slot.clone(),
                     kind: DecisionPointKind::Targets {
@@ -9612,6 +9649,8 @@ mod tests {
                 },
                 key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
             }),
+            road: crate::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         };
         state
     }
@@ -9741,16 +9780,6 @@ mod tests {
     /// that survives because only *some* of its pins name hidden objects states a proposal that
     /// was never made.
     ///
-    /// # The multi-pin shape is the ORDINARY production shape, not an exotic one
-    ///
-    /// `game::engine::record_loop_pin` appends up to three pins onto ONE `LoopActionContext.pins`
-    /// in temporal order — a mana-ability tap-cost `Targets` pin (`index: 0`), a `ManaColor` pin
-    /// (`index: 1`), then a proliferate `Targets` pin — and `game::engine::build_recast_template`
-    /// clones that very vector (`decisions = ctx.pins.clone()`) into the offer's declaration
-    /// before pushing a `ConvokeTaps` pin. A public pin sitting ahead of a hidden one is therefore
-    /// exactly what those producers mint; this row builds `[ManaColor, Targets{hidden}]`, i.e.
-    /// pins 2 and 3 of that production sequence.
-    ///
     /// # Non-vacuity / discrimination
     ///
     /// The PUBLIC pin is FIRST, so an implementation that stops at the first pin — `all(..)`, or a
@@ -9766,14 +9795,19 @@ mod tests {
     /// row in `game::visibility::tests` stays green; restored ⇒ it passes.
     #[test]
     fn d5h2_a_public_pin_ahead_of_a_hidden_one_still_drops_the_whole_declaration() {
-        use crate::analysis::decision_template::{PinnedDecision, TargetPin};
+        use crate::analysis::decision_template::{
+            ChoicePoint, DecisionSlot, PinnedDecision, TargetPin,
+        };
         use crate::types::mana::ManaColor;
 
         // ── the hostile arm: pin 1 carries no identity, pin 2 names the hidden hand card ──
         let hidden_state = d5h_offer_decisions(|hidden, slot| {
             vec![
+                // CR 608.2d: a colour choice is not the announcement the helper publishes, so it
+                // mints its own slot from that source at its own point; the `Targets` sibling
+                // below does mean the published choice and keeps the helper's slot.
                 PinnedDecision::ManaColor {
-                    slot: slot.clone(),
+                    slot: DecisionSlot::first(slot.source.clone(), ChoicePoint::ManaColor),
                     color: ManaColor::Blue,
                 },
                 PinnedDecision::Targets {
@@ -9979,8 +10013,8 @@ mod tests {
         ) -> Vec<crate::analysis::decision_template::PinnedDecision>,
     ) -> GameState {
         use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
-            ReplayMode,
+            ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+            IterationCount, ReplayMode,
         };
         let mut state = GameState::new_two_player(42);
         let hidden = create_object(
@@ -9997,8 +10031,16 @@ mod tests {
             "Open Permanent".to_string(),
             Zone::Battlefield,
         );
-        let slot = DecisionSlot::target(slot_source(hidden, permanent));
+        let slot = DecisionSlot::first(slot_source(hidden, permanent), ChoicePoint::MayGate);
         let decisions = decisions(hidden, &slot);
+        let declaration = DecisionTemplate {
+            owner: D5H_PROPOSER,
+            decisions,
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(3),
+            },
+            key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
+        };
         state.waiting_for = WaitingFor::RespondToShortcut {
             player: D5H_VIEWER,
             remaining_players: Vec::new(),
@@ -10008,16 +10050,12 @@ mod tests {
                 count: IterationCount::Fixed(3),
                 unbounded: Vec::new(),
                 win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
-                template: Some(DecisionTemplate {
-                    owner: D5H_PROPOSER,
-                    decisions,
-                    replay: ReplayMode::Scheduled {
-                        count: IterationCount::Fixed(3),
-                    },
-                    key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
-                }),
+                template: Some(declaration.clone()),
                 per_cycle: None,
                 shortened_by: None,
+                published_declaration: Some(declaration),
+                road: crate::analysis::loop_check::OfferRoad::Ring,
+                period: Default::default(),
             },
         };
         state
@@ -10028,8 +10066,16 @@ mod tests {
         state: &GameState,
         viewer: PlayerId,
     ) -> Option<crate::analysis::decision_template::DecisionTemplate> {
+        projected_proposal(state, viewer).template
+    }
+
+    /// The proposal AS PROJECTED for `viewer`.
+    fn projected_proposal(
+        state: &GameState,
+        viewer: PlayerId,
+    ) -> crate::analysis::loop_check::ShortcutProposal {
         match filter_state_for_viewer(state, viewer).waiting_for {
-            WaitingFor::RespondToShortcut { proposal, .. } => proposal.template,
+            WaitingFor::RespondToShortcut { proposal, .. } => proposal,
             other => panic!("the fixture parks on the CR 732.2b respond window, got {other:?}"),
         }
     }
@@ -10095,6 +10141,25 @@ mod tests {
             "CR 732.2b: a slot naming an object this viewer may not see drops the ENTIRE \
              template on a carrier that publishes no schema to re-state it"
         );
+        let WaitingFor::RespondToShortcut { proposal, .. } = &hidden_state.waiting_for else {
+            unreachable!("the fixture parks on the respond window");
+        };
+        assert!(
+            proposal.template.is_some() && proposal.published_declaration.is_some(),
+            "reach-guard: the unprojected proposal carries both declarations"
+        );
+        assert!(
+            projected_proposal(&hidden_state, D5H_PROPOSER)
+                .published_declaration
+                .is_some(),
+            "the proposer's own projection keeps the published declaration"
+        );
+        assert_eq!(
+            projected_proposal(&hidden_state, D5H_VIEWER).published_declaration,
+            None,
+            "CR 732.2b: the published declaration carries the same pins and is dropped with the \
+             template"
+        );
 
         // ── leg 2, REFUSED: the same declaration whose slot names a battlefield permanent ──
         let visible_state = d5h_proposal_decisions(
@@ -10116,15 +10181,24 @@ mod tests {
             d5h_projected_template(&visible_state, D5H_VIEWER).is_some(),
             "and it is genuinely present, not two matching `None`s"
         );
+        assert!(
+            projected_proposal(&visible_state, D5H_VIEWER)
+                .published_declaration
+                .is_some(),
+            "and so is the published declaration beside it"
+        );
     }
 
     /// **Carrier 1 is UNCHANGED: an offer whose own schema co-publishes the slot still hands its
     /// declaration to a non-proposer.**
     ///
     /// This is the member the repair must REFUSE to admit, and it is what makes the extension
-    /// carrier-scoped rather than global. The offer arm re-states the identical `DecisionSlot`
-    /// as `schema.points[].slot`, unredacted, so dropping the declaration for it would hide
-    /// nothing that same arm hands over — and would start dropping offers for no gain.
+    /// carrier-scoped rather than global. The offer arm re-states the same `DecisionSlot.source`
+    /// as `schema.points[].slot.source`, unredacted, so dropping the declaration for it would
+    /// hide nothing that same arm hands over — and would start dropping offers for no gain. The
+    /// SOURCE is the axis both the predicate and the assertion below read; the pin here answers a
+    /// CR 603.5 "may" while the schema publishes a CR 601.2c announcement, so the two slots
+    /// deliberately do NOT coincide whole.
     ///
     /// # Non-vacuity / discrimination
     ///
@@ -10139,7 +10213,7 @@ mod tests {
     #[test]
     fn the_offer_carrier_keeps_a_declaration_whose_slot_source_its_schema_copublishes() {
         use crate::analysis::decision_template::{
-            DecisionPointKind, MayChoiceOption, PinnedDecision,
+            ChoicePoint, DecisionPointKind, DecisionSlot, MayChoiceOption, PinnedDecision,
         };
         use crate::types::game_state::YieldTarget;
 
@@ -10150,15 +10224,18 @@ mod tests {
         };
 
         let state = d5h_offer_decisions_slotted(hidden_slot, |_hidden, slot| {
+            // CR 603.5. The helper leaves the CHOICE closed — it hard-codes its published kind as
+            // `Targets` — so a pin that means a different choice mints its own slot from the
+            // helper's source rather than cloning a slot whose point it does not mean.
             vec![PinnedDecision::MayChoice {
-                slot: slot.clone(),
+                slot: DecisionSlot::first(slot.source.clone(), ChoicePoint::MayGate),
                 take: MayChoiceOption::Take,
             }]
         });
         let (declaration, schema) = d5h_projected_offer(&state, D5H_VIEWER);
         let kept = declaration.as_ref().expect(
             "CR 732.2b: carrier 1 keeps its declaration — the slot leg is skipped where the \
-             offer's own schema re-states the identical `DecisionSlot` unredacted",
+             offer's own schema re-states the same `DecisionSlot.source` unredacted",
         );
         let PinnedDecision::MayChoice { slot, .. } = &kept.decisions[0] else {
             panic!(
@@ -10210,100 +10287,6 @@ mod tests {
             d5h_projected_declaration(&value_state, D5H_VIEWER).is_none(),
             "carrier 1's VALUE leg is untouched by this repair: a pin naming the hidden card \
              still drops the whole declaration"
-        );
-    }
-
-    /// **The recorded loop period is the third carrier, and it publishes no schema either.**
-    ///
-    /// `last_loop_action_sequence` serializes whenever non-empty and has no other redaction
-    /// seam, so a recorded step whose pin's slot names a hidden-zone source leaks that identity
-    /// to every viewer. Same carrier value, same all-or-nothing per recorded step.
-    ///
-    /// # Non-vacuity / discrimination
-    ///
-    /// The recorded pin is a `ManaColor`, whose value leg answers `false` unconditionally, so
-    /// the clear can come from the slot leg alone. The paired positive is the same step one slot
-    /// source apart, asserted to keep its pin — a clearer that emptied every step would satisfy
-    /// the negative and fail it. Both arms assert the step still EXISTS, so "the sequence
-    /// vanished" cannot pass for "the pins were cleared".
-    #[test]
-    fn a_recorded_loop_step_whose_pin_slot_names_a_hidden_source_is_cleared() {
-        use crate::analysis::decision_template::{DecisionSlot, PinnedDecision};
-        use crate::types::game_state::{BuybackUsage, LoopAction, LoopActionContext, YieldTarget};
-        use crate::types::mana::ManaColor;
-
-        let recorded = |source: fn(ObjectId, ObjectId) -> YieldTarget| {
-            let mut state = GameState::new_two_player(42);
-            let hidden = create_object(
-                &mut state,
-                CardId(4242),
-                D5H_PROPOSER,
-                "Secret Card".to_string(),
-                Zone::Hand,
-            );
-            let permanent = create_object(
-                &mut state,
-                CardId(4243),
-                D5H_PROPOSER,
-                "Open Permanent".to_string(),
-                Zone::Battlefield,
-            );
-            state.last_loop_action_sequence = vec![LoopActionContext {
-                card_id: CardId(4242),
-                controller: D5H_PROPOSER,
-                action: LoopAction::Recast {
-                    from_zone: Zone::Hand,
-                    uses_buyback: BuybackUsage::Used,
-                },
-                convoke: None,
-                pins: vec![PinnedDecision::ManaColor {
-                    slot: DecisionSlot::target(source(hidden, permanent)),
-                    color: ManaColor::Blue,
-                }],
-            }];
-            state
-        };
-        let projected_pins = |state: &GameState| -> Vec<PinnedDecision> {
-            let filtered = filter_state_for_viewer(state, D5H_VIEWER);
-            let [step] = filtered.last_loop_action_sequence.as_slice() else {
-                panic!("the recorded sequence keeps its single step through the projection");
-            };
-            step.pins.clone()
-        };
-
-        let hidden_state = recorded(|hidden, _permanent| YieldTarget::ThisObject {
-            source_id: hidden,
-            incarnation: Some(1),
-            trigger_description: None,
-        });
-        assert!(
-            matches!(
-                hidden_state.last_loop_action_sequence[0].pins.as_slice(),
-                [PinnedDecision::ManaColor { .. }]
-            ),
-            "reach-guard: the UNPROJECTED step really carries one pin, and it is the variant \
-             whose VALUE leg answers `false` unconditionally"
-        );
-        assert!(
-            projected_pins(&hidden_state).is_empty(),
-            "CR 732.2a: a recorded step whose pin's slot names an object this viewer may not \
-             see is cleared — the recorded period has no other redaction seam"
-        );
-
-        let visible_state = recorded(|_hidden, permanent| YieldTarget::ThisObject {
-            source_id: permanent,
-            incarnation: Some(1),
-            trigger_description: None,
-        });
-        assert_eq!(
-            projected_pins(&visible_state),
-            visible_state.last_loop_action_sequence[0].pins,
-            "the same step on a public permanent keeps its pin — without this arm a clearer \
-             that emptied every step would pass the negative above"
-        );
-        assert!(
-            !projected_pins(&visible_state).is_empty(),
-            "and it is genuinely kept, not two matching empties"
         );
     }
 

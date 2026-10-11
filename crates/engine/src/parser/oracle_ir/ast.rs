@@ -1265,7 +1265,7 @@ pub(crate) enum TargetedImperativeAst {
         /// the targeting pipeline.
         selection: BounceSelection,
     },
-    /// CR 400.7 + CR 611.2c: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
+    /// CR 400.7: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.
     /// Lowers to `Effect::BounceAll`, not `Effect::Bounce`, so the runtime
     /// resolver iterates every matching permanent instead of prompting for one.

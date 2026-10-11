@@ -2367,6 +2367,15 @@ pub fn fallback_action(
                 payment: plan.clone(),
             })
         }
+        // CR 605.3a + CR 733.1: activate an issued mana ability toward the pending
+        // one's mana cost; with none issued, withdraw the pending activation.
+        WaitingFor::ManaAbilityManaPayment { .. } => issued(|action| {
+            matches!(
+                action,
+                GameAction::ActivateAbility { .. } | GameAction::TapLandForMana { .. }
+            )
+        })
+        .or_else(|| issued(|action| matches!(action, GameAction::CancelCast))),
 
         // Mana ability sub-costs: these are not pending-cast states but
         // carry PendingManaAbility, so CancelCast is not valid here.
@@ -2634,7 +2643,13 @@ pub(crate) fn score_candidates_with_session(
     // via the per-worker `state.rng` re-seed.
     let base_seed = crate::planner::quick_state_hash(state)
         .wrapping_add(state.rng_seed)
-        .wrapping_add(state.rng.clone().next_u64());
+        .wrapping_add(
+            state
+                .rng
+                .clone()
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
+        );
 
     let mut acc: Vec<(GameAction, f64)> = Vec::new();
     let mut positions: std::collections::HashMap<GameActionKey, usize> =
@@ -6536,6 +6551,8 @@ mod tests {
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
+            road: engine::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         };
 
         assert_eq!(
@@ -8138,7 +8155,13 @@ mod tests {
         // while the targeted PUBLIC permanent's identity stays pinned.
         let base_seed = crate::planner::quick_state_hash(&state)
             .wrapping_add(state.rng_seed)
-            .wrapping_add(state.rng.clone().next_u64());
+            .wrapping_add(
+                state
+                    .rng
+                    .clone()
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u64(),
+            );
         let seed = base_seed.wrapping_add(crate::determinize::splitmix64(0));
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let sampled = crate::determinize::determinize_opponents(&state, PlayerId(0), &mut rng);
@@ -8254,7 +8277,13 @@ mod tests {
         // Negate is resampled OUT of the world the per-sample search evaluates.
         let base_seed = crate::planner::quick_state_hash(&state)
             .wrapping_add(state.rng_seed)
-            .wrapping_add(state.rng.clone().next_u64());
+            .wrapping_add(
+                state
+                    .rng
+                    .clone()
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u64(),
+            );
         let seed = base_seed.wrapping_add(crate::determinize::splitmix64(0));
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let sampled = crate::determinize::determinize_opponents(&state, PlayerId(0), &mut rng);

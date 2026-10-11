@@ -204,7 +204,7 @@ impl Board {
     }
 
     fn pool(&self) -> usize {
-        self.state().players[0].mana_pool.mana.len()
+        self.state().players[0].mana_pool.total()
     }
 
     fn activate(&mut self) -> Result<ActionResult, engine::game::engine::EngineError> {
@@ -308,7 +308,23 @@ fn board_snapshot(state: &GameState) -> serde_json::Value {
         "battlefield": serde_json::to_value(&state.battlefield).unwrap(),
         "pending_activations": serde_json::to_value(&state.pending_activations).unwrap(),
         "lands_tapped_for_mana": serde_json::to_value(&state.lands_tapped_for_mana).unwrap(),
-        "last_loop_action_sequence": serde_json::to_value(&state.last_loop_action_sequence).unwrap(),
+        "play_trace": format!(
+            "{:?}",
+            engine::game::play_trace_view(state).map(|view| view.entries)
+        ),
+    })
+}
+
+/// How many plays of `source`'s abilities the window's trace records (CR 602.2a).
+fn activation_plays(state: &GameState, source: ObjectId) -> usize {
+    use engine::game::{EntryKind, PlayLocus};
+    engine::game::play_trace_view(state).map_or(0, |view| {
+        view.entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry.kind, EntryKind::Play { locus: PlayLocus::Activate(id, _), .. } if id == source)
+            })
+            .count()
     })
 }
 
@@ -505,7 +521,7 @@ fn a_bare_loyalty_cost_is_untouched_by_reductions() {
         })
         .expect("the loyalty ability must activate");
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         5,
         "no mana paid"
     );
@@ -939,19 +955,14 @@ fn an_x_lock_election_records_its_loop_step_exactly_once() {
         6,
     );
     board.activate().expect("legal");
-    assert!(
-        board.state().last_loop_action_sequence.is_empty(),
-        "not accepted before its cost locks"
-    );
     board
         .runner
         .act(GameAction::ChooseX { value: 2 })
         .expect("a legal X");
     assert_eq!(board.outcome_totals(), vec![1, 2]);
-    assert!(board.state().last_loop_action_sequence.is_empty());
     board.elect(0).expect("legal");
     assert!(board.on_stack());
-    assert_eq!(board.state().last_loop_action_sequence.len(), 1);
+    assert_eq!(activation_plays(board.state(), board.source), 1);
 
     // Without an election the X lock itself accepts, once.
     let mut board = loop_board(
@@ -960,13 +971,12 @@ fn an_x_lock_election_records_its_loop_step_exactly_once() {
         6,
     );
     board.activate().expect("legal");
-    assert!(board.state().last_loop_action_sequence.is_empty());
     board
         .runner
         .act(GameAction::ChooseX { value: 2 })
         .expect("a legal X");
     assert!(board.on_stack());
-    assert_eq!(board.state().last_loop_action_sequence.len(), 1);
+    assert_eq!(activation_plays(board.state(), board.source), 1);
 }
 
 /// CR 601.2h + CR 733.1 + CR 733.2: the X-lock reversal reverses the ENTIRE
@@ -990,20 +1000,6 @@ fn an_x_lock_reversal_restores_the_mana_undo_window_and_the_loop_period() {
         );
         let land = land.expect("the land");
         board.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
-        // An accumulating loop period for this controller: an accepted
-        // activation would APPEND to it.
-        let card_id = board.state().objects[&board.source].card_id;
-        board.runner.state_mut().last_loop_action_sequence =
-            vec![engine::types::game_state::LoopActionContext {
-                card_id,
-                controller: P0,
-                action: engine::types::game_state::LoopAction::Activate {
-                    source_id: board.source,
-                    ability_index: board.ability_index,
-                },
-                convoke: None,
-                pins: Vec::new(),
-            }];
         // A real manual mana-ability activation, through the engine-authored
         // selection.
         let (_, _, grouped) = engine::ai_support::legal_actions_full(board.state());
@@ -1068,7 +1064,7 @@ fn an_x_lock_reversal_restores_the_mana_undo_window_and_the_loop_period() {
 
     // Control: the default order is accepted, exactly once.
     let (mut board, _) = build();
-    let steps = board.state().last_loop_action_sequence.len();
+    let steps = activation_plays(board.state(), board.source);
     board.activate().expect("legal");
     board
         .runner
@@ -1077,7 +1073,7 @@ fn an_x_lock_reversal_restores_the_mana_undo_window_and_the_loop_period() {
     let result = board.elect(0).expect("legal");
     assert_eq!(result.disposition, ActionDisposition::Applied);
     assert!(board.on_stack());
-    assert_eq!(board.state().last_loop_action_sequence.len(), steps + 1);
+    assert_eq!(activation_plays(board.state(), board.source), steps + 1);
     assert!(
         !board.state().lands_tapped_for_mana.contains_key(&P0),
         "the accepted activation closed the mana-undo window"
@@ -1404,15 +1400,11 @@ fn loop_board(modifiers: &[Modifier], text: &'static str, pool: usize) -> Board 
 fn an_elected_activation_seeds_its_loop_step_once_after_the_election() {
     let mut board = loop_board(&[Modifier::Grounds, Modifier::Unfloored(2)], TOKEN_MAKER, 5);
     board.activate().expect("legal");
-    assert!(
-        board.state().last_loop_action_sequence.is_empty(),
-        "the prompt accepted nothing"
-    );
     board.elect(1).expect("legal");
     assert_eq!(
-        board.state().last_loop_action_sequence.len(),
+        activation_plays(board.state(), board.source),
         1,
-        "the resumed token-making activation seeds exactly one loop step"
+        "the elected activation is one play"
     );
 }
 
@@ -1420,22 +1412,30 @@ fn an_elected_activation_seeds_its_loop_step_once_after_the_election() {
 #[test]
 fn an_elected_activation_appends_its_loop_step_exactly_once() {
     let mut board = loop_board(&[Modifier::Grounds, Modifier::Unfloored(2)], TOKEN_MAKER, 5);
-    let card_id = board.state().objects[&board.source].card_id;
-    board.runner.state_mut().last_loop_action_sequence =
-        vec![engine::types::game_state::LoopActionContext {
-            card_id,
-            controller: P0,
-            action: engine::types::game_state::LoopAction::Activate {
-                source_id: board.source,
-                ability_index: board.ability_index,
-            },
-            convoke: None,
-            pins: Vec::new(),
-        }];
     board.activate().expect("legal");
-    assert_eq!(board.state().last_loop_action_sequence.len(), 1);
+    assert_eq!(activation_plays(board.state(), board.source), 1);
+    assert_eq!(election_answers(board.state()), 0);
     board.elect(0).expect("legal");
-    assert_eq!(board.state().last_loop_action_sequence.len(), 2);
+    assert_eq!(activation_plays(board.state(), board.source), 1);
+    assert_eq!(election_answers(board.state()), 1);
+}
+
+fn election_answers(state: &GameState) -> usize {
+    use engine::game::EntryKind;
+    engine::game::play_trace_view(state).map_or(0, |view| {
+        view.entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    EntryKind::Answer {
+                        action: GameAction::OrderCostReductions { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    })
 }
 
 /// A reversal leaves the loop period exactly as it was.
@@ -1449,7 +1449,7 @@ fn a_reversed_activation_records_no_loop_step() {
     board.activate().expect("legal");
     let result = board.elect(1).expect("a legal election");
     assert_eq!(result.disposition, ActionDisposition::Reversed);
-    assert!(board.state().last_loop_action_sequence.is_empty());
+    assert_eq!(activation_plays(board.state(), board.source), 0);
 }
 
 /// The placement authority names the entry its caller just pushed, even when an

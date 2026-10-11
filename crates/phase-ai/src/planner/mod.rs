@@ -321,7 +321,7 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
             id.hash(&mut hasher);
         }
         player.mana_pool.total().hash(&mut hasher);
-        for unit in &player.mana_pool.mana {
+        for unit in player.mana_pool.units() {
             unit.color.hash(&mut hasher);
         }
     }

@@ -37,7 +37,7 @@ use super::oracle_nom::target::{parse_type_filter_word, parse_type_phrase};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_target_with_ctx,
-    parse_type_phrase_folding,
+    parse_type_phrase_folding, parse_type_phrase_union,
 };
 use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
@@ -8948,6 +8948,11 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
         return None;
     }
 
+    let mut scope = filter.clone();
+    scope.properties = props.clone();
+    if let Some(union) = parse_type_phrase_union(qualifier.trim(), &scope) {
+        return Some(union);
+    }
     apply_damage_source_qualifier(&mut filter, &mut props, qualifier.trim());
 
     if !props.is_empty() {
@@ -29803,5 +29808,67 @@ mod as_enters_at_random_selection_tests {
             "Lydari Elephant",
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod damage_source_union {
+    use super::*;
+    use crate::types::mana::ManaColor;
+
+    fn you_control_legs(filter: &TargetFilter) -> Vec<&TypedFilter> {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected an Or union, got {filter:?}");
+        };
+        filters
+            .iter()
+            .map(|leg| match leg {
+                TargetFilter::Typed(typed) => {
+                    assert_eq!(typed.controller, Some(ControllerRef::You), "{leg:?}");
+                    typed
+                }
+                other => panic!("expected a Typed leg, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// CR 609.7: Mechanized Warfare's "red or artifact source you control" is a
+    /// red source or an artifact source, both controlled by the shield's controller.
+    #[test]
+    fn color_or_type_source_is_both_kinds() {
+        let filter = parse_damage_source_subject_filter("red or artifact source you control")
+            .expect("subject parses");
+        let legs = you_control_legs(&filter);
+        assert!(legs[0].properties.contains(&FilterProp::HasColor {
+            color: ManaColor::Red
+        }));
+        assert!(!legs[0].type_filters.contains(&TypeFilter::Artifact));
+        assert!(legs[1].type_filters.contains(&TypeFilter::Artifact));
+    }
+
+    /// CR 609.7: Pyromancer's Swath's "instant or sorcery source you control" is
+    /// an instant or a sorcery, not one subtype named "Instant or sorcery".
+    #[test]
+    fn type_or_type_source_is_both_kinds() {
+        let filter = parse_damage_source_subject_filter("instant or sorcery source you control")
+            .expect("subject parses");
+        let legs = you_control_legs(&filter);
+        assert!(legs[0].type_filters.contains(&TypeFilter::Instant));
+        assert!(legs[1].type_filters.contains(&TypeFilter::Sorcery));
+    }
+
+    /// A single-kind qualifier keeps the reader's own arm.
+    #[test]
+    fn single_kind_source_keeps_its_subtype() {
+        let filter =
+            parse_damage_source_subject_filter("giant source you control").expect("subject parses");
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected Typed, got {filter:?}");
+        };
+        assert_eq!(
+            typed.type_filters,
+            vec![TypeFilter::Subtype("Giant".to_string())]
+        );
+        assert_eq!(typed.controller, Some(ControllerRef::You));
     }
 }

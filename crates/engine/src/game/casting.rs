@@ -3662,6 +3662,29 @@ fn has_exile_cast_permission(
         } else {
             exile_cast_permission_source(state, player, obj.id).is_some()
         }
+        || own_exile_cast_permission(state, obj, player)
+}
+
+/// CR 604.6 + CR 113.6f: a card's own "You may cast this card from exile"
+/// functions while it is in exile; its owner may cast it there (CR 109.5 +
+/// CR 108.4a).
+fn own_exile_cast_permission(state: &GameState, obj: &GameObject, player: PlayerId) -> bool {
+    obj.zone == Zone::Exile
+        && obj.owner == player
+        && active_static_definitions(state, obj).any(|definition| {
+            matches!(
+                definition.mode,
+                StaticMode::GraveyardCastPermission {
+                    play_mode: CardPlayMode::Cast,
+                    frequency: CastFrequency::Unlimited,
+                    extra_cost: None,
+                    enters_with_counter: None,
+                    graveyard_destination_replacement: None,
+                    required_cast_keyword: None,
+                    pool: GraveyardPermissionPool::OwnGraveyard,
+                }
+            ) && matches!(definition.affected, Some(TargetFilter::SelfRef))
+        })
 }
 
 /// CR 305.9 + CR 300.2a: an object that is both a land and another card type can be
@@ -7720,7 +7743,7 @@ mod pool_payability_tests {
             "the public predicate must reuse the exact production pool-payment authority"
         );
         let mut unfunded = scenario.state.clone();
-        unfunded.players[caster.0 as usize].mana_pool.mana.clear();
+        unfunded.players[caster.0 as usize].mana_pool.clear();
         assert!(
             !spell_cost_is_payable_from_pool(&unfunded, caster, spell),
             "removing only pool coverage makes the exact predicate false"
@@ -21393,7 +21416,7 @@ pub(crate) fn has_manual_mana_ability_for_spell_payment(
 ) -> bool {
     let spell_meta = build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+    super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
         state,
         player,
         Some(source_id),
@@ -21890,7 +21913,7 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
     // mana ability that requires a manual choice can make the cast reachable.
     // Do not re-estimate tap-cost or unambiguous self-sacrifice sources here:
     // their resource dependencies belong exclusively to the exact probe.
-    if !super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+    if !super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
         state,
         player,
         source_id,
@@ -22474,7 +22497,7 @@ fn cleanup_unused_convoke_payments(
     }
 
     if let Some(player_data) = state.players.iter_mut().find(|p| p.id == player) {
-        player_data.mana_pool.mana.retain(|unit| {
+        player_data.mana_pool.retain_shapes(|unit| {
             !(unit.is_convoke_payment() && unused_sources.contains(&unit.source_id))
         });
     }
@@ -27852,8 +27875,7 @@ pub fn handle_cancel_cast(
     for player in &mut state.players {
         player
             .mana_pool
-            .mana
-            .retain(|unit| !unit.is_convoke_payment());
+            .retain_shapes(|unit| !unit.is_convoke_payment());
     }
     if let Some(obj) = state.objects.get_mut(&pending.object_id) {
         obj.convoked_creatures.clear();

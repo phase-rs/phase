@@ -1303,10 +1303,7 @@ fn add_pool(runner: &mut GameRunner, player: PlayerId, kinds: &[ManaType]) {
 fn pool_count(runner: &GameRunner, player: PlayerId, kind: ManaType) -> usize {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.color == kind)
-        .count()
+        .count_color(kind)
 }
 
 fn put_on_library_top(runner: &mut GameRunner, id: ObjectId, owner: PlayerId) {
@@ -1707,7 +1704,7 @@ fn tibalt_emblem_any_color_mana_casts_opponents_gg_card() {
     assert_eq!(zone(&runner, gg), Zone::Battlefield);
     assert_eq!(runner.state().objects[&gg].controller, P0);
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         1,
         "two of the three mana paid the {{G}}{{G}}"
     );

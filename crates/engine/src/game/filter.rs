@@ -14750,7 +14750,9 @@ mod tests {
         let mut causes = std::collections::HashMap::new();
         causes.insert(sacrificed, ThisWayCause::Sacrificed);
         causes.insert(exiled, ThisWayCause::Exiled);
-        state.tracked_set_member_causes.insert(populated, causes);
+        state
+            .tracked_set_member_causes
+            .insert(populated, causes.into_iter().collect());
         // The shadowing empty set that previously broke sentinel resolution.
         let empty = crate::types::identifiers::TrackedSetId(8);
         state.tracked_object_sets.insert(empty, Vec::new());
@@ -14779,7 +14781,9 @@ mod tests {
         state.tracked_object_sets.insert(bound, vec![member]);
         let mut causes = std::collections::HashMap::new();
         causes.insert(member, ThisWayCause::Exiled);
-        state.tracked_set_member_causes.insert(bound, causes);
+        state
+            .tracked_set_member_causes
+            .insert(bound, causes.into_iter().collect());
         // Chain and later sets exist but must be ignored for a concrete id.
         let later = crate::types::identifiers::TrackedSetId(9);
         state.tracked_object_sets.insert(later, Vec::new());

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 
 use rand::Rng;
@@ -876,7 +877,10 @@ pub(crate) fn discard_at_random(
         if remaining.is_empty() {
             break;
         }
-        let index = state.rng.random_range(0..remaining.len());
+        let index = state
+            .rng
+            .draw(RandomDraw::Outcome)
+            .random_range(0..remaining.len());
         let obj_id = remaining.swap_remove(index);
         let object = state
             .objects

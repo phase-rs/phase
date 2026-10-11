@@ -85,6 +85,32 @@ describe("ManaPaymentUI", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
+  it("renders the mana ability payment window without a Pay button and cancels it", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "ManaAbilityManaPayment",
+        data: { player: 0, pending_mana_ability: {} },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    expect(screen.getByText("Payment is still pending. Tap permanents or cancel this action.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
   it("shows the convoke payment hint during convoke mana payment", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const spellObj = stackSpellObject(

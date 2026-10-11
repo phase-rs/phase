@@ -104,7 +104,7 @@ fn ordinary_battlefield_ability_unaffected() {
         .expect("an ordinary battlefield-activated ability must still activate");
 
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         1,
         "the mana ability resolved: {{G}} in the pool",
     );

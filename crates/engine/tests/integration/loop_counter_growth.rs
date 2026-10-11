@@ -216,16 +216,8 @@ fn live_charge_growth_off_never_marks() {
     );
 }
 
-/// A FREE, voluntarily-repeatable activation that creates a token AND grows a `+1/+1` counter.
-///
-/// BOTH CLAUSES ARE LOAD-BEARING, and the token one is not decoration. `apply_action`'s
-/// `ActivateAbility` arm bootstraps `last_loop_action_sequence` ONLY when the activated ability
-/// `creates_token` (or when a period for the same controller is already open); any other
-/// activation CLEARS it. Mana activations arm it through the separate
-/// `record_mana_loop_action_step` path. So a counter-only activation can never open a period, and
-/// the CR 732.2a offer — which requires a non-empty sequence — is unreachable without a carrier.
-/// The `+1/+1` growth therefore rides a token-creating activation, which is also a realistic
-/// shape: a token engine whose creature grows as it works.
+/// A FREE, voluntarily-repeatable activation that creates a token AND grows a `+1/+1` counter: a
+/// token engine whose creature grows as it works.
 const PLUS1_TOKEN_ENGINE: &str =
     "{0}: Create a 1/1 colorless Servo artifact creature token. Put a +1/+1 counter on this creature.";
 
@@ -268,27 +260,8 @@ fn drive_plus1_token_engine_to_declared_offer() -> (GameRunner, ObjectId) {
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
 
-    // THE DRIVING SHAPE — two constraints, both MEASURED by building the fixture that violates
-    // them and watching it fail, not inferred from the code:
-    //
-    // 1. It must be an ACTIVATION, not a trigger cascade. `try_offer_object_growth_shortcut`
-    //    requires a non-empty `last_loop_action_sequence` whose every step is
-    //    `is_voluntarily_repeatable()` (CR 601.2a / CR 602.2 / CR 605.3a — casting, activating, and
-    //    mana abilities are each a voluntary choice at priority; the helper's own annotation names
-    //    all three). A trigger cascade drives itself and records no
-    //    action sequence, so it reaches only the Path-C silent mark — which registers no backing
-    //    set at all. The cascade version of this fixture grew its counters and then sat at
-    //    `Priority` with no offer.
-    // 2. The activation must CREATE A TOKEN. `apply_action`'s `ActivateAbility` arm opens a period
-    //    only for a token-creating ability (or continues one already open for this controller);
-    //    every other activation CLEARS the sequence. A `{0}: Put a +1/+1 counter on this creature.`
-    //    version therefore also sat at `Priority` — each activation wiped the very sequence the
-    //    offer needs. Mana activations arm it by a different path entirely
-    //    (`record_mana_loop_action_step`).
-    //
-    // So the reachable production shape for a `+1/+1` ∞ display registration is a counter growth
-    // riding a token-creating or mana-producing carrier. That is a real constraint on the class,
-    // worth stating: it is why no such fixture existed to reuse.
+    // THE DRIVING SHAPE: an ACTIVATION, a voluntary choice at priority (CR 602.2), whose repeat
+    // the play trace names as a period.
     let ability_index = runner
         .state()
         .objects

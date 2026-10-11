@@ -2365,7 +2365,7 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
     )
     .unwrap();
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "CR 709.5e: the copied left half's {{1}} unlock cost must consume the mana"
     );
@@ -3202,8 +3202,7 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
         .find(|p| p.id == PlayerId(0))
         .unwrap()
         .mana_pool
-        .mana
-        .len();
+        .total();
     assert_eq!(
         pool_left, 0,
         "the restricted mana must be spent on the unlock"
@@ -4359,7 +4358,8 @@ fn persistent_order_template(
     card_id: u64,
 ) -> crate::analysis::decision_template::DecisionTemplate {
     use crate::analysis::decision_template::{
-        DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+        PinnedDecision, ReplayMode,
     };
     use crate::types::game_state::YieldTarget;
     let src = YieldTarget::AllCopies {
@@ -4369,7 +4369,7 @@ fn persistent_order_template(
     DecisionTemplate {
         owner,
         decisions: vec![PinnedDecision::Order {
-            source: src.clone(),
+            slot: DecisionSlot::first(src.clone(), ChoicePoint::TriggerOrder),
             pos: 0,
         }],
         replay: ReplayMode::Static,
@@ -6277,8 +6277,7 @@ fn tapped_lands_produce_distinct_pip_ids() {
 
     let ids: Vec<u64> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id.0)
         .collect();
     assert_eq!(ids.len(), 3, "three taps must float three pool units");
@@ -7934,7 +7933,9 @@ fn gamble_searches_to_hand_then_discards_random_card() {
     discard_pool.push(target);
     let expected_discard = {
         let mut rng = state.rng.clone();
-        let index = rng.random_range(0..discard_pool.len());
+        let index = rng
+            .draw(crate::types::game_state::RandomDraw::Outcome)
+            .random_range(0..discard_pool.len());
         discard_pool[index]
     };
 

@@ -175,7 +175,7 @@ fn the_notary_hobbits_mana_ability_scales_with_halflings_controlled() {
         pool.count_color(ManaType::Colorless),
         3,
         "expected {{C}} equal to the number of Halflings controlled (3); pool = {:?}",
-        pool.mana,
+        pool,
     );
     assert_eq!(
         pool.total(),

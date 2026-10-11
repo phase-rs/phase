@@ -1,10 +1,9 @@
 /**
  * The ∞ badge and the engine-owned collapse state behind it.
  *
- * DATA SOURCE IS LABELLED PER ROW. Three engine goldens are imported here and each carries
+ * DATA SOURCE IS LABELLED PER ROW. Two engine goldens are imported here and each carries
  * exactly one `unbounded_families` row on player 0:
- *   - `unbounded-token-wire.json`    → `tokens`,  `Scheduled(Conditional)` ⇒ `∞→?`
- *   - `unbounded-counter-wire.json`  → `counters`, `Scheduled(Committed)`  ⇒ `∞→N`
+ *   - `unbounded-token-wire.json`    → `tokens`,  `Scheduled` ⇒ `∞→?`
  *   - `unbounded-declined-wire.json` → `counters`, `Unscheduled`           ⇒ bare `∞`
  * Every multi-family, cross-player or empty case is COMPOSED against the exported prop contract
  * and says so.
@@ -22,7 +21,6 @@ import type { DerivedViews, UnboundedFamilyView } from "../../../adapter/types.t
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
-import counterWire from "../../../test/fixtures/unbounded-counter-wire.json";
 import declinedWire from "../../../test/fixtures/unbounded-declined-wire.json";
 import tokenWire from "../../../test/fixtures/unbounded-token-wire.json";
 import { UnboundedBadge } from "../HudBadges.tsx";
@@ -34,14 +32,10 @@ const PLAIN_TOKENS = "Unbounded tokens (∞)";
 // says "you" only when that seat IS the viewer AND the viewer is not spectating; otherwise it
 // keeps the passive voice, because the row is keyed by the ATTRIBUTION player, which for a
 // victim-attributed axis is the victim, and the badge also renders on opponent HUDs.
-const COMMITTED_COUNTERS =
-  "Unbounded counters (∞) — collapse pending; a finite amount will be chosen";
+const CONDITIONAL_COUNTERS = "Unbounded counters (∞) — collapse pending; this may stay unbounded";
 const CONDITIONAL_TOKENS = "Unbounded tokens (∞) — collapse pending; this may stay unbounded";
-const COMMITTED_COUNTERS_YOU = "Unbounded counters (∞) — collapse pending; you'll name the count";
 const CONDITIONAL_TOKENS_YOU =
   "Unbounded tokens (∞) — collapse pending; this may stay unbounded, and you'll name the count if it doesn't";
-const COMMITTED_TOKENS_YOU = "Unbounded tokens (∞) — collapse pending; you'll name the count";
-const COMMITTED_TOKENS = "Unbounded tokens (∞) — collapse pending; a finite amount will be chosen";
 const MIXED_COUNTERS =
   "Unbounded counters (∞) — part of this group has a pending collapse; part remains unbounded";
 const PLAIN_COUNTERS = "Unbounded counters (∞)";
@@ -84,15 +78,12 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
   const boundedTokens = (bound: number) =>
     `tokens from a detected loop, bounded at ${bound} repetitions`;
 
-  it("U1/M2-d: the token golden's CONDITIONAL collapse renders ∞→?, and the counter golden's COMMITTED one renders ∞→N", () => {
-    // GOLDEN-DRIVEN, both halves — the family and its state are read out of regenerated engine
-    // goldens, never authored here. The pair IS the discriminator: same badge component, two real
-    // engine frames, two different glyphs. A component that mapped every `Scheduled` to the
-    // scheduled glyph passes the second half and fails the first; one that never renders `∞→N`
-    // fails the second.
+  it("U1/M2-d: the token golden's CONDITIONAL collapse renders ∞→?", () => {
+    // GOLDEN-DRIVEN — the family and its state are read out of a regenerated engine golden, never
+    // authored here. U2's declined golden is the matched negative.
     //
-    // BOTH LABELS ARE SECOND-PERSON, and the HONEST BOUND for that is worth stating: both goldens
-    // carry `prompted: 0`, and the default test viewer is seat 0, so this fixture pins "the viewer
+    // THE LABEL IS SECOND-PERSON, and the HONEST BOUND for that is worth stating: the golden
+    // carries `prompted: 0`, and the default test viewer is seat 0, so this fixture pins "the viewer
     // really is the seat that will be asked ⇒ address them" and NOTHING about the divergent case.
     // It CANNOT witness a prompted seat that differs from the badge's seat — the token golden's
     // only axis is `TokensCreated`, an aggregate axis that attributes to its own controller, so
@@ -103,15 +94,6 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     const conditional = screen.getByLabelText(CONDITIONAL_TOKENS_YOU);
     expect(conditional).toBeInTheDocument();
     expect(conditional.textContent).toContain("∞→?");
-    expect(conditional.textContent).not.toContain("∞→N");
-
-    // MATCHED POSITIVE, from the REAL kilo dump's `DriveSequence` accept — the only Committed
-    // frame in the suite.
-    cleanup();
-    seed(counterWire as unknown as DerivedViews);
-    const committed = screen.getByLabelText(COMMITTED_COUNTERS_YOU);
-    expect(committed).toBeInTheDocument();
-    expect(committed.textContent).toContain("∞→N");
   });
 
   it("U2/M2-d: the DECLINED golden renders a bare ∞ — the badge stops promising", () => {
@@ -119,7 +101,7 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     // stash is gone. It is the regression this whole change exists for — the old badge kept
     // promising `∞→N` here.
     //
-    // MUTATION COVERAGE: an engine change that makes `scheduled_display_axes` read
+    // MUTATION COVERAGE: an engine change that makes `accepted_collapse_axes` read
     // `unbounded_resources` instead of the stash regenerates this golden as `Scheduled` and reds
     // the `not.toContain("∞→")` line below.
     seed(declinedWire as unknown as DerivedViews);
@@ -137,13 +119,13 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     // voice, and an omitted seat renders the third person for everyone (pinned by U9).
     seed({
       unbounded_families: [
-        fam("tokens", { type: "Scheduled", data: { certainty: "Conditional" } }),
-        fam("counters", { type: "Scheduled", data: { certainty: "Committed" } }),
+        fam("tokens", { type: "Scheduled", data: {} }),
+        fam("counters", { type: "Scheduled", data: {} }),
       ],
     } as DerivedViews);
     expect(screen.getAllByLabelText(/Unbounded/)).toHaveLength(2);
     expect(screen.getByLabelText(CONDITIONAL_TOKENS).textContent).toContain("∞→?");
-    expect(screen.getByLabelText(COMMITTED_COUNTERS).textContent).toContain("∞→N");
+    expect(screen.getByLabelText(CONDITIONAL_COUNTERS).textContent).toContain("∞→?");
   });
 
   it("U3b/absent: no family channel ⇒ no badge, and the same frame with one ⇒ a badge", () => {
@@ -158,7 +140,7 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     expect(screen.getByLabelText(PLAIN_TOKENS)).toBeInTheDocument();
   });
 
-  it("M1-e/Mixed: a mixed family renders a bare ∞ — never ∞→N, never ∞→?", () => {
+  it("M1-e/Mixed: a mixed family renders a bare ∞, never ∞→?", () => {
     // COMPOSED for the `Mixed` frame (its engine reachability is proven by
     // `derived_views::tests::mixed_family_is_not_scheduled` and
     // `two_controllers_draining_one_victim_do_not_cross_schedule`), and GOLDEN-DRIVEN for the
@@ -175,11 +157,11 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     expect(mixed.textContent).toContain("∞");
     expect(mixed.textContent).not.toContain("∞→");
 
-    // MATCHED POSITIVE from the REAL kilo golden: the badge CAN render `∞→N`, so the negatives
+    // MATCHED POSITIVE from the REAL token golden: the badge CAN render `∞→?`, so the negatives
     // above are not satisfied by a component that renders a bare `∞` for everything.
     cleanup();
-    seed(counterWire as unknown as DerivedViews);
-    expect(screen.getByLabelText(COMMITTED_COUNTERS_YOU).textContent).toContain("∞→N");
+    seed(tokenWire as unknown as DerivedViews);
+    expect(screen.getByLabelText(CONDITIONAL_TOKENS_YOU).textContent).toContain("∞→?");
   });
 
   it("U4/viewer: another seat's SCHEDULED family does not schedule this seat's badge", () => {
@@ -191,7 +173,7 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
       unbounded_families: [
         fam("tokens", { type: "Unscheduled" }, 0),
         // `prompted` omitted — this row tests the SEAT FILTER, not the voice.
-        fam("tokens", { type: "Scheduled", data: { certainty: "Committed" } }, 1),
+        fam("tokens", { type: "Scheduled", data: {} }, 1),
       ],
     } as DerivedViews);
     expect(screen.getAllByLabelText(/Unbounded/)).toHaveLength(1);
@@ -204,11 +186,11 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     cleanup();
     seed({
       unbounded_families: [
-        fam("tokens", { type: "Scheduled", data: { certainty: "Committed" } }, 0),
+        fam("tokens", { type: "Scheduled", data: {} }, 0),
         fam("tokens", { type: "Unscheduled" }, 1),
       ],
     } as DerivedViews);
-    expect(screen.getByLabelText(/collapse pending; a finite amount will be chosen/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/collapse pending; this may stay unbounded/)).toBeInTheDocument();
   });
 
   it("U8/agency: the badge addresses the prompted seat, and only the prompted seat", () => {
@@ -226,18 +208,18 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
       useMultiplayerStore.setState({ activePlayerId: 0 });
     });
     seed({
-      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed", prompted: 2 } }, 0)],
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { prompted: 2 } }, 0)],
     } as DerivedViews);
-    expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
-    expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
+    expect(screen.getByLabelText(CONDITIONAL_TOKENS)).toBeInTheDocument();
+    expect(screen.queryByLabelText(CONDITIONAL_TOKENS_YOU)).toBeNull();
 
     // MATCHED POSITIVE: same row, same viewer, prompted seat is now the viewer.
     cleanup();
     seed({
-      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed", prompted: 0 } }, 0)],
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { prompted: 0 } }, 0)],
     } as DerivedViews);
-    expect(screen.getByLabelText(COMMITTED_TOKENS_YOU)).toBeInTheDocument();
-    expect(screen.queryByLabelText(COMMITTED_TOKENS)).toBeNull();
+    expect(screen.getByLabelText(CONDITIONAL_TOKENS_YOU)).toBeInTheDocument();
+    expect(screen.queryByLabelText(CONDITIONAL_TOKENS)).toBeNull();
   });
 
   it("U9/ambiguous: an omitted prompted seat reads third person even for the viewer", () => {
@@ -250,10 +232,10 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
       useMultiplayerStore.setState({ activePlayerId: 0 });
     });
     seed({
-      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed" } }, 0)],
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: {} }, 0)],
     } as DerivedViews);
-    expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
-    expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
+    expect(screen.getByLabelText(CONDITIONAL_TOKENS)).toBeInTheDocument();
+    expect(screen.queryByLabelText(CONDITIONAL_TOKENS_YOU)).toBeNull();
   });
 
   it("U10/spectator: a spectator reads third person even when the prompted seat equals their resolved id", () => {
@@ -270,10 +252,10 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
       useGameStore.setState({ gameMode: "spectate" });
     });
     seed({
-      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed", prompted: 0 } }, 0)],
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { prompted: 0 } }, 0)],
     } as DerivedViews);
-    expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
-    expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
+    expect(screen.getByLabelText(CONDITIONAL_TOKENS)).toBeInTheDocument();
+    expect(screen.queryByLabelText(CONDITIONAL_TOKENS_YOU)).toBeNull();
   });
 
   it("F1/F1b: a badge with no ∞ row behind it states the engine's published repetition bound, and states the one it was given", () => {

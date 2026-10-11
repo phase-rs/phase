@@ -138,10 +138,7 @@ fn emiel_the_blessed_doubles_counters_on_the_entering_unicorn() {
     let outcome = runner.cast(entering_unicorn).accept_optional().resolve();
 
     assert!(
-        outcome.state().players[P0.0 as usize]
-            .mana_pool
-            .mana
-            .is_empty(),
+        outcome.state().players[P0.0 as usize].mana_pool.is_empty(),
         "reach-guard: accepting Emiel's optional payment must consume the supplied green mana"
     );
     assert_eq!(
@@ -187,10 +184,7 @@ fn emiel_the_blessed_keeps_one_counter_on_a_nonunicorn() {
     let outcome = runner.cast(entering_cat).accept_optional().resolve();
 
     assert!(
-        outcome.state().players[P0.0 as usize]
-            .mana_pool
-            .mana
-            .is_empty(),
+        outcome.state().players[P0.0 as usize].mana_pool.is_empty(),
         "reach-guard: accepting Emiel's optional payment must consume the supplied green mana"
     );
     assert_eq!(

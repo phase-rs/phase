@@ -13,8 +13,8 @@ use engine::types::actions::GameAction;
 use engine::types::casting_costs::{ActivationCostLock, ActivationCostLockPoint};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, CostResume, ManaChoice, PersistedGameState,
-    PersistedRestoreFinalization, WaitingFor,
+    AbilityActivationRecord, ActivationTargetFact, CostResume, GameState, ManaChoice,
+    PersistedGameState, PersistedRestoreFinalization, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -466,19 +466,9 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
     mana(&mut s, P0, 1);
     let mut r = s.build();
     r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
-    let card_id = r.state().objects[&src].card_id;
-    r.state_mut().last_loop_action_sequence = vec![engine::types::game_state::LoopActionContext {
-        card_id,
-        controller: P0,
-        action: engine::types::game_state::LoopAction::Activate {
-            source_id: src,
-            ability_index: 0,
-        },
-        convoke: None,
-        pins: Vec::new(),
-    }];
     tap_land_for_mana(&mut r, land);
     let before = state_without_revision(&r);
+    let trace_before = trace_entries(r.state());
     act(
         &mut r,
         GameAction::ActivateAbility {
@@ -494,8 +484,31 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
         .expect("a reversal is a result");
     assert!(!result.disposition.is_applied());
     assert_same_state(&before, &state_without_revision(&r), "after the reversal");
+    assert_eq!(
+        trace_entries(r.state()),
+        trace_before,
+        "the window's trace is as it was"
+    );
     act(&mut r, GameAction::UntapLandForMana { object_id: land })
         .expect("the mana-undo window survived the reversal");
+}
+
+/// The window's recorded plays and answers.
+fn trace_entries(state: &GameState) -> Option<Vec<engine::game::TraceEntry>> {
+    engine::game::play_trace_view(state).map(|view| view.entries)
+}
+
+/// How many plays of `source`'s abilities the window's trace records (CR 602.2a).
+fn activation_plays(state: &GameState, source: ObjectId) -> usize {
+    use engine::game::{EntryKind, PlayLocus};
+    trace_entries(state).map_or(0, |entries| {
+        entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry.kind, EntryKind::Play { locus: PlayLocus::Activate(id, _), .. } if id == source)
+            })
+            .count()
+    })
 }
 
 /// H1-4: a reversed activation spends nothing, including Hojo's once-per-turn
@@ -576,9 +589,6 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
     let mut r = s.build();
     r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
     tap_land_for_mana(&mut r, land);
-    // The manual land tap opened this controller's loop period; an accepted
-    // activation appends one step to it.
-    let period = r.state().last_loop_action_sequence.len();
 
     act(
         &mut r,
@@ -588,11 +598,6 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
         },
     )
     .expect("Hojo makes {3} cost {1}");
-    assert_eq!(
-        r.state().last_loop_action_sequence.len(),
-        period,
-        "not accepted before its cost locks"
-    );
     assert!(
         r.state().lands_tapped_for_mana.contains_key(&P0),
         "the window stays open until the lock"
@@ -605,20 +610,16 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
     )
     .expect("targets settle, and the lock runs");
     assert_eq!(
-        r.state().last_loop_action_sequence.len(),
-        period + 1,
-        "accepted exactly once, at the settlement lock"
+        activation_plays(r.state(), src),
+        1,
+        "the activation is one play"
     );
     assert!(
         !r.state().lands_tapped_for_mana.contains_key(&P0),
         "accepting closed the mana-undo window"
     );
     finish(&mut r, &[]);
-    assert_eq!(
-        r.state().last_loop_action_sequence.len(),
-        period + 1,
-        "and not again"
-    );
+    assert_eq!(activation_plays(r.state(), src), 1, "and not again");
 }
 
 /// HIGH 2's election twin: the settlement election accepts nothing at its
@@ -654,16 +655,12 @@ fn a_settlement_election_accepts_the_activation_once_on_its_resume() {
     )
     .unwrap();
     select_own_and_reach_the_election(&mut r, own);
-    assert!(
-        r.state().last_loop_action_sequence.is_empty(),
-        "the settlement prompt accepted nothing"
-    );
     elect_total(&mut r, 1).expect("the election resumes");
     finish(&mut r, &[]);
     assert_eq!(
-        r.state().last_loop_action_sequence.len(),
+        activation_plays(r.state(), src),
         1,
-        "accepted once, on resume"
+        "the elected activation is one play"
     );
 }
 
@@ -1882,7 +1879,6 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
     b.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
     let bear = b.bear.unwrap();
     start(&mut b);
-    assert!(b.runner.state().last_loop_action_sequence.is_empty());
     act(
         &mut b.runner,
         GameAction::SelectTargets {
@@ -1897,10 +1893,6 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
         ),
         "reach guard: the division prompt"
     );
-    assert!(
-        b.runner.state().last_loop_action_sequence.is_empty(),
-        "the division comes before the lock: nothing accepted yet"
-    );
     act(
         &mut b.runner,
         GameAction::DistributeAmong {
@@ -1909,9 +1901,9 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
     )
     .expect("the split");
     assert_eq!(
-        b.runner.state().last_loop_action_sequence.len(),
+        activation_plays(b.runner.state(), b.src),
         1,
-        "accepted exactly once, at the settlement lock after the split"
+        "the divided activation is one play after the split"
     );
     assert_route(&mut b, "R9 divided, accepted", 4);
 }

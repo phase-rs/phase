@@ -137,7 +137,7 @@ fn molecule_man_accepted_miracle_cast_uses_granted_zero_cost() {
         other => panic!("expected Spell on stack, got {other:?}"),
     }
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "granted miracle {{0}} must not require mana payment"
     );
 }

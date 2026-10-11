@@ -28,6 +28,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
 };
@@ -36,8 +37,6 @@ use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 const BREECHES: &str = "Menace\nWhenever you cast your second spell each turn, you may sacrifice an artifact. If you do, flip a coin. When you win the flip, copy that spell. You may choose new targets for the copy. When you lose the flip, Breeches deals damage equal to that spell's mana value to any target.";
 
@@ -247,7 +246,7 @@ fn krark_inline_flip_branches_still_fold() {
 /// `seed`; seed 0 wins, seed 1 loses (mirrors flip_coin.rs's seed convention).
 fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
     let mut state = GameState::new_two_player(seed);
-    state.rng = ChaCha20Rng::seed_from_u64(seed);
+    state.rng = GameRng::seed_from_u64(seed);
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
 

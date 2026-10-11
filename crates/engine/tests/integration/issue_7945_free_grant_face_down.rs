@@ -51,7 +51,7 @@ fn is_face_down(runner: &GameRunner, object: ObjectId) -> bool {
 }
 
 fn pool_size(runner: &GameRunner, player: usize) -> usize {
-    runner.state().players[player].mana_pool.mana.len()
+    runner.state().players[player].mana_pool.total()
 }
 
 /// The dangerous state from the live report: the doomed creature carries

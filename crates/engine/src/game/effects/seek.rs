@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -63,7 +64,7 @@ pub fn resolve(
     }
 
     // Randomly select from matching cards
-    matching.shuffle(&mut state.rng);
+    matching.shuffle(state.rng.draw(RandomDraw::Outcome));
     let pick_count = count.min(matching.len());
 
     // CR 614.6: route every sought card through the zone-change pipeline

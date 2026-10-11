@@ -85,7 +85,10 @@ fn throne_mana_casts_only_monocolored_spells_of_its_chosen_color() {
             .expect("Throne mana ability must resolve")
             .waiting_for;
         assert!(matches!(waiting, WaitingFor::Priority { .. }));
-        let pool = &runner.state().players[P0.0 as usize].mana_pool.mana;
+        let pool: Vec<_> = runner.state().players[P0.0 as usize]
+            .mana_pool
+            .units()
+            .collect();
         assert_eq!(pool.len(), 4, "Throne must produce four mana");
         assert!(
             pool.iter()
@@ -172,15 +175,13 @@ fn throne_draw_activation_uses_only_its_chosen_color_in_auto_and_manual_payment(
         draw_payment_state(&[ManaType::Red, ManaType::Red, ManaType::Red, ManaType::Blue]);
     let blue_pip = state.players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .find(|unit| unit.color == ManaType::Blue)
         .expect("manual pool has a blue unit")
         .pip_id;
     let red_pip = state.players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .find(|unit| unit.color == ManaType::Red)
         .expect("manual pool has a red unit")
         .pip_id;
@@ -247,12 +248,13 @@ fn throne_draw_activation_uses_only_its_chosen_color_in_auto_and_manual_payment(
         "the draw must consume exactly two library cards"
     );
     assert_eq!(
-        player.mana_pool.mana.len(),
+        player.mana_pool.total(),
         1,
         "only the ineligible blue mana may remain after paying {{3}} with red mana"
     );
     assert_eq!(
-        player.mana_pool.mana[0].pip_id, blue_pip,
+        player.mana_pool.unit_at(0).unwrap().pip_id,
+        blue_pip,
         "the red pinned mana must be consumed rather than silently abandoned"
     );
 }
@@ -339,8 +341,7 @@ fn throne_draw_auto_tap_uses_only_chosen_color_sources() {
     assert!(
         mixed_runner.state().players[P0.0 as usize]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .any(|unit| unit.color == ManaType::Blue),
         "the unspent blue byproduct must remain in the pool"
     );

@@ -530,8 +530,19 @@ fn cube_source_sizes_refill_without_replacement_and_empty_or_missing_stay_bounde
         );
         let mut expected_rng = runner.state().rng.clone();
         let mut direct_rng = runner.state().rng.clone();
-        assert!(boosters::open_pack(&runner.state().booster_shelf, &mut direct_rng).is_none());
-        assert_eq!(direct_rng.next_u64(), expected_rng.next_u64());
+        assert!(boosters::open_pack(
+            &runner.state().booster_shelf,
+            direct_rng.draw(engine::types::game_state::RandomDraw::Outcome)
+        )
+        .is_none());
+        assert_eq!(
+            direct_rng
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
+            expected_rng
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u64()
+        );
         let outcome = runner.cast(tutor).resolve();
         outcome.assert_zone(&[tutor], Zone::Graveyard);
         assert!(outcome.events().iter().any(|event| matches!(
@@ -609,7 +620,16 @@ fn restoring_a_cube_game_rebuilds_its_shelf_without_advancing_the_game_rng() {
     let mut before = restored.rng.clone();
     rehydrate_game_from_card_db(&mut restored, &db);
     rehydrate_game_from_card_db(&mut restored, &db);
-    assert_eq!(restored.rng.clone().next_u64(), before.next_u64());
+    assert_eq!(
+        restored
+            .rng
+            .clone()
+            .draw(engine::types::game_state::RandomDraw::Outcome)
+            .next_u64(),
+        before
+            .draw(engine::types::game_state::RandomDraw::Outcome)
+            .next_u64()
+    );
     let mut original = runner;
     let mut restored = GameRunner::from_state(restored);
     for _ in 0..2 {

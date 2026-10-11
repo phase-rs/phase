@@ -1,15 +1,14 @@
 /**
- * ∞-channel cross-seam pin. Both JSON files are ENGINE-EMITTED by
- * `combo_infinite_pile::real_4p_object_growth_accept_writes_infinite_pile` and
- * `kilo_live_offer_from_real_dump::kilo_accept_marks_pentad_charge_as_unbounded_display_target`,
- * each driving a REAL 4-player dump through the REAL APNAP accept. Regenerate with
+ * ∞-channel cross-seam pin. The token golden is ENGINE-EMITTED by
+ * `combo_infinite_pile::real_4p_object_growth_accept_writes_infinite_pile`, driving a REAL
+ * 4-player dump through the REAL APNAP accept. Regenerate with
  * `UPDATE_WIRE_GOLDEN=1 cargo test -p phase-engine --test integration <fn>`. Never hand-edit them.
  * Every existing client test that touches these channels hand-writes its own `derived` block, so
  * this file is the only place the engine's wire shape and the client's readers meet.
- * Both goldens are captured AFTER the accept, while a finite collapse is merely SCHEDULED — the
+ * The token golden is captured AFTER the accept, while a finite collapse is merely SCHEDULED — the
  * engine applies the growth at the next CR 500.5 boundary, while advancing to the shortcut's
  * ending point (CR 732.2c), and the marks stay live through that window, so the ∞ channels are
- * still populated. If the engine went back to hiding them there, both goldens would regenerate
+ * still populated. If the engine went back to hiding them there, the golden would regenerate
  * empty and every assertion below would red.
  * The `unbounded_pile → Set` hop is performed here rather than by `gameStateView.ts`, because
  * driving that function would require committing a whole `GameState`; the ids, the field name and
@@ -31,7 +30,6 @@ import { familyOf, UNBOUNDED_FAMILY_FOR_TEST } from "../../components/hud/HudBad
 import { pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay";
 import { buildGameObject } from "../../test/factories/gameObjectFactory";
 import { buildGameState } from "../../test/factories/gameStateFactory";
-import counterWire from "../../test/fixtures/unbounded-counter-wire.json";
 import declinedWire from "../../test/fixtures/unbounded-declined-wire.json";
 import familyTags from "../../test/fixtures/unbounded-family-tags.json";
 import tokenWire from "../../test/fixtures/unbounded-token-wire.json";
@@ -50,37 +48,21 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
   it("emits populated ∞ channels and omits the empty ones", () => {
     // (1) reach-guard: the engine emitted a populated pile, so the group assertions below are
     // not run against an empty set.
-    expect(tokenWire.unbounded_pile).toEqual([402, 403, 404, 407]);
-    // (2) reach-guard + the two counter seam facts: the map key is a JSON STRING, and
-    // `CounterType` serializes FLAT ("charge", not {"Generic":"charge"}). A regressed Serialize
-    // would silently blank every ∞ pill.
-    // The value is a PRE-PARTITIONED row set carrying the engine's live count, not a bare type
-    // list — and `magnitude` is only written for the exceptional `Unbounded` case.
-    expect(counterWire.counter_display).toEqual({
-      "405": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
-    });
-    // (2b) the discriminator against a `skip_serializing_if` INVERSION. Without it, an inversion
-    // that made every row read `Finite` would leave the golden above looking plausible — the TS
-    // mirror types `magnitude` as optional, so `tsc` cannot see it either.
-    expect(counterWire.counter_display["405"].pills[0].magnitude).toBe("Unbounded");
+    expect(tokenWire.unbounded_pile).toEqual([402, 403, 404, 406, 407]);
     // (3) omit-when-empty, engine-attested in BOTH directions.
-    expect("unbounded_pile" in counterWire).toBe(false);
+    expect("unbounded_pile" in declinedWire).toBe(false);
     expect("counter_display" in tokenWire).toBe(false);
     // (4) the ROW no longer carries a schedule at all — the flag was deleted. Pinning the exact
     // row shape is what catches a partial revert that leaves the field on one side.
     expect(tokenWire.unbounded_resources).toEqual([{ axis: "TokensCreated", player: 0 }]);
     expect(JSON.stringify(tokenWire)).not.toContain("scheduled");
-    expect(JSON.stringify(counterWire)).not.toContain("scheduled");
     // (5) the second family — pins the externally-tagged `ResourceAxis` encoding across the
     // language boundary: a data variant is a single-key OBJECT, not a bare string.
-    expect(counterWire.unbounded_resources[0].axis).toEqual({ Counter: ["Other", "Other"] });
-    // (6) THE COLLAPSE STATE, engine-emitted, in all three of its shapes — and its serde
-    // encoding, which is `tag = "type", content = "data"`. Three real engine frames:
+    expect(declinedWire.unbounded_resources[0].axis).toEqual({ Counter: ["Plus1Plus1", "Creature"] });
+    // (6) THE COLLAPSE STATE, engine-emitted, in both of its wire shapes — and its serde
+    // encoding, which is `tag = "type", content = "data"`. Two real engine frames:
     //   - token wire: a BATCHED `Tokens` accept ⇒ Conditional, because its boundary mint can park;
-    //   - counter wire: the real kilo `DriveSequence` accept ⇒ Committed, the only one in the suite;
     //   - declined wire: the post-decline frame ⇒ Unscheduled, axis still ∞, promise withdrawn.
-    // Certainty is the discriminator here: the first two are both "scheduled", and a projection
-    // that collapsed them into one answer reds this row.
     //
     // EXHAUSTIVE OBJECT EQUALITY, not a property read, and that choice is the discriminator for
     // `prompted`: `toEqual` on the whole row reds if the engine silently stops emitting the seat,
@@ -88,8 +70,8 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     // and... still pass on a golden regenerated without it. The seat is a real wire field, so it
     // is pinned like one.
     //
-    // HONEST BOUND: both goldens carry `prompted: 0`, and 0 is also the attributed seat, because
-    // each golden's single axis attributes to its own controller. So this file pins the ENCODING
+    // HONEST BOUND: the token golden carries `prompted: 0`, and 0 is also the attributed seat,
+    // because its single axis attributes to its own controller. So this file pins the ENCODING
     // of the seat, never the divergence between the prompted seat and the badge's seat — that is
     // `derived_views::tests::two_controllers_draining_one_victim_do_not_cross_schedule` arms B/C
     // engine-side and `UnboundedBadge.test.tsx`'s U8 client-side.
@@ -97,14 +79,7 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
       {
         player: 0,
         family: "tokens",
-        state: { type: "Scheduled", data: { certainty: "Conditional", prompted: 0 } },
-      },
-    ]);
-    expect(counterWire.unbounded_families).toEqual([
-      {
-        player: 0,
-        family: "counters",
-        state: { type: "Scheduled", data: { certainty: "Committed", prompted: 0 } },
+        state: { type: "Scheduled", data: { prompted: 0 } },
       },
     ]);
     expect(declinedWire.unbounded_families).toEqual([
@@ -122,10 +97,7 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     // - `Mixed` is invisible here. Pinned engine-side by
     //   `derived_views::tests::mixed_family_is_not_scheduled` and
     //   `two_controllers_draining_one_victim_do_not_cross_schedule`, and client-side by `M1-e`.
-    // - the `Mana(_)` scope limit and the two-controllers-one-victim case are invisible here
-    //   (single non-mana axis, single seat). Pinned by
-    //   `loop_shortcut_mana_engine::scheduled_drive_still_renders_the_already_spendable_mana_badge`
-    //   (R4/agree) and
+    // - the two-controllers-one-victim case is invisible here (single seat). Pinned by
     //   `derived_views::tests::two_controllers_draining_one_victim_do_not_cross_schedule`.
   });
 
@@ -151,8 +123,8 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
   it("drives the real groupByName pile predicate off engine ids", () => {
     const unboundedPileIds: ReadonlySet<ObjectId> = new Set(tokenWire.unbounded_pile);
     const objects: GameObject[] = [
-      ...[402, 403, 404, 407].map((id) => saproling(id, true)),
-      ...[406, 408, 409, 410].map((id) => saproling(id, false)),
+      ...[402, 403, 404, 406, 407].map((id) => saproling(id, true)),
+      ...[408, 409, 410].map((id) => saproling(id, false)),
       buildGameObject({
         id: 401,
         name: "Witherbloom, the Balancer",
@@ -176,12 +148,12 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     // control in that same run instead of being skipped by the positive's throw.
     //
     // (5) paired NEGATIVE from the SAME groupByName call: same name, differs only on `tapped`.
-    expect(groupOf(406).ids).toEqual([406, 408, 409, 410]);
-    expect(groupOf(406).isUnboundedPile).toBe(false);
+    expect(groupOf(408).ids).toEqual([408, 409, 410]);
+    expect(groupOf(408).isUnboundedPile).toBe(false);
     // (6) free third negative: tapped, but not a pile member — so it is not "everything tapped".
     expect(groupOf(401).isUnboundedPile).toBe(false);
     // (4) paired POSITIVE: the tapped Saprolings the engine named.
-    expect(groupOf(402).ids).toEqual([402, 403, 404, 407]);
+    expect(groupOf(402).ids).toEqual([402, 403, 404, 406, 407]);
     expect(groupOf(402).isUnboundedPile).toBe(true);
   });
 
@@ -190,26 +162,8 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     expect(familyOf(tokenWire.unbounded_resources[0].axis as ResourceAxis)).toBe("tokens");
     // (8) data variant — a single-key object on the wire.
     expect(
-      familyOf(counterWire.unbounded_resources[0].axis as unknown as ResourceAxis),
+      familyOf(declinedWire.unbounded_resources[0].axis as unknown as ResourceAxis),
     ).toBe("counters");
-    // (9) redundant reinforcement, kept as documentation of intent: it cannot fail unless (7) or
-    // (8) already has.
-    expect(familyOf(tokenWire.unbounded_resources[0].axis as ResourceAxis)).not.toBe(
-      familyOf(counterWire.unbounded_resources[0].axis as unknown as ResourceAxis),
-    );
-  });
-
-  it("feeds the real useCounterDisplay hook from the engine wire", () => {
-    setGameStoreForTest({
-      gameState: buildGameState({ derived: counterWire as unknown as DerivedViews }),
-    });
-    // (10) paired POSITIVE through the real zustand selector — the engine's row reaches the hook
-    // verbatim, not re-derived from the object (which is absent from this state).
-    expect(renderHook(() => useCounterDisplay(405)).result.current).toEqual({
-      pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }],
-    });
-    // (11) paired NEGATIVE: 404 is on the same battlefield and has no projection entry.
-    expect(pillsOf(renderHook(() => useCounterDisplay(404)).result.current)).toEqual([]);
   });
 
   // The zustand v5 hazard the hook's shape exists to avoid: v5 has no shallow default, so the
@@ -217,8 +171,13 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
   // selector returns a fresh ref on every store read and trips the getSnapshot cache. `tsc`
   // cannot see it; this asserts the referential stability directly.
   it("returns a referentially STABLE value across re-renders (zustand v5 getSnapshot)", () => {
+    // COMPOSED: no engine golden carries a counter row.
     setGameStoreForTest({
-      gameState: buildGameState({ derived: counterWire as unknown as DerivedViews }),
+      gameState: buildGameState({
+        derived: {
+          counter_display: { 405: { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] } },
+        } as unknown as DerivedViews,
+      }),
     });
     const marked = renderHook(() => useCounterDisplay(405));
     const firstMarked = marked.result.current;

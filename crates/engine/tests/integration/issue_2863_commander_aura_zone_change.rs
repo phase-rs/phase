@@ -106,7 +106,7 @@ fn issue_2863_aura_put_in_graveyard_when_commander_exiled_and_returns() {
     );
     assert!(
         runner.state().objects[&inviolability].attached_to.is_none(),
-        "aura must not remain attached after CR 704.5n"
+        "aura must not remain attached after the commander's departure (CR 701.3d)"
     );
     assert_eq!(
         runner.state().objects[&arcades].zone,
@@ -114,14 +114,14 @@ fn issue_2863_aura_put_in_graveyard_when_commander_exiled_and_returns() {
         "commander must return to command zone from exile"
     );
 
-    runner.state_mut().players[0].mana_pool.mana = vec![
+    runner.state_mut().players[0].mana_pool = engine::types::mana::ManaPool::from_units(vec![
         ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
         ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
         ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
         ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
         ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
         ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-    ];
+    ]);
 
     let card_id = runner.state().objects[&arcades].card_id;
     runner

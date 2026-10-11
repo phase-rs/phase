@@ -13,6 +13,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{CastingPermission, ResolutionCastCleanup, TargetRef};
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::{
     CastPaymentMode, GameState, StackEntryKind, SyntheticTriggerProvenance, WaitingFor,
 };
@@ -21,8 +22,6 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 use super::cast_this_way_gate_8721::{offered_card, settle_attack_trigger, to_declare_attackers};
 use super::rules::AttackTarget;
@@ -128,7 +127,7 @@ fn commit_cast(runner: &mut GameRunner, spell: ObjectId, target: Option<TargetRe
 }
 
 fn reseed(runner: &mut GameRunner, seed: u64) {
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(seed);
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
 }
 
 fn saw_coin(events: &[GameEvent], won: bool) -> bool {

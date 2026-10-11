@@ -392,14 +392,12 @@ fn real_mana_activation_replays_recorded_insert_and_spend_commands() {
         assert_eq!(
             replayed
                 .mana_pool
-                .mana
-                .iter()
+                .units()
                 .map(|unit| unit.pip_id)
                 .collect::<Vec<_>>(),
             ordinary
                 .mana_pool
-                .mana
-                .iter()
+                .units()
                 .map(|unit| unit.pip_id)
                 .collect::<Vec<_>>(),
             "replay preserves the exact surviving mana identities"

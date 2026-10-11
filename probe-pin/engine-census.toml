@@ -113,9 +113,9 @@ claim = "the production half fails DOWNWARD, and the pinned tuple + adjudication
   count = 0
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (24, 24)",
-             "right: (25, 24)",
-             "THE TEST HALF HAS BEEN ADJUDICATED SEVEN TIMES"]
+  anchor  = ["left: (26, 28)",
+             "right: (27, 28)",
+             "THE TEST HALF HAS BEEN ADJUDICATED EIGHT TIMES"]
 
 [[probe]]
 id    = "P2_test_site_removed"
@@ -131,7 +131,7 @@ claim = "the cfg(test) half is pinned INDEPENDENTLY of the production half"
   count = 1
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (25, 23)", "right: (25, 24)"]
+  anchor  = ["left: (27, 27)", "right: (27, 28)"]
 
 [[probe]]
 id    = "P3_walk_reaches_phase_ai_and_skips_comments"
@@ -148,7 +148,7 @@ claim = "the phase-ai root is walked, zero-hit files are visited, and COMMENT li
   count = 4
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (26, 24)", "right: (25, 24)"]
+  anchor  = ["left: (28, 28)", "right: (27, 28)"]
 
 [[probe]]
 id    = "P4_counting_is_per_line"
@@ -164,7 +164,7 @@ claim = "the count sums LINES, not files -- two planted lines in one file move i
   count = 2
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (27, 24)", "right: (25, 24)"]
+  anchor  = ["left: (29, 28)", "right: (27, 28)"]
 
 [[probe]]
 id    = "P5_relocation_preserves_the_count"
@@ -186,7 +186,7 @@ claim = "the per-file multiset is pinned INDEPENDENTLY of the total -- the reloc
   [[probe.assert_count]]
   file  = "crates/engine/src/game/interaction.rs"
   text  = "WaitingFor::LoopShortcut {"
-  count = 6
+  count = 7
   [probe.expect]
   outcome = "fail"
   # The integer in the second anchor is a COUNT, not a line number -- see the DISCLOSURE in the

@@ -3346,6 +3346,12 @@ mod tests {
         }
     }
 
+    /// The bump this number is at: `WaitingFor::LoopShortcut` and
+    /// `ShortcutProposal` gained a required `road: OfferRoad`. A v127 peer drops
+    /// the key from every frame it re-encodes, so the handshake refuses the
+    /// pairing rather than leave the road to the legacy-offer migration's
+    /// inference.
+    ///
     /// The resolved-rules journal admits a land-play `rebound_from` on a
     /// `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield); a v123
     /// peer rejects that `GameState.resolved_rules_journal`, so it must be refused
@@ -3496,8 +3502,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_127_for_attached_to_referent() {
-        assert_eq!(PROTOCOL_VERSION, 127);
+    fn protocol_version_is_128_for_period_reach_and_cleanup() {
+        assert_eq!(PROTOCOL_VERSION, 128);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3508,7 +3514,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_127_for_attached_to_referent` stays
+    /// `protocol_version_is_128_for_period_reach_and_cleanup` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

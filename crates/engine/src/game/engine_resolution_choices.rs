@@ -1,4 +1,5 @@
 // engine-citation-gate: symbol anchors only
+use crate::types::game_state::RandomDraw;
 use std::collections::{HashMap, HashSet};
 
 use rand::seq::SliceRandom;
@@ -16,7 +17,7 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
     ZoneOpponentChooserPurpose,
 };
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::ObjectId;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
 };
@@ -1036,7 +1037,7 @@ pub(crate) fn route_rest_partition(
         // CR 400.5 + CR 608.2c: Exact Oracle text requires a randomized
         // remainder; only this rest pile, not the remainder of the library,
         // consumes entropy.
-        ordered_ids.shuffle(&mut state.rng);
+        ordered_ids.shuffle(state.rng.draw(RandomDraw::Placement));
     }
     route_rest_partition_then(state, &ordered_ids, rest_zone, source_id, None, events)
 }
@@ -1770,9 +1771,7 @@ fn append_vote_ballot_and_advance(
 /// Earlier revisions of this doc called the re-check unlicensed. That conceded a rule the code
 /// satisfies. The subsystem's single authority for the full four-position reading is
 /// `types/game_state.rs`'s `scheduled_collapse_axes` doc; see also `game/derived_views.rs`'s
-/// `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block. `derived_views::FamilyCollapseState` still
-/// separates `Committed` from the weaker variants, because being right about WHEN the loop closes
-/// is not the same as knowing WHAT NUMBER lands, and `∞→N` is a promise about the number.
+/// `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block.
 ///
 /// CR 732.2a supplies the CONTENT of the re-check, and its antecedent is worth stating exactly so
 /// nobody over-reads it: "at any point in the game, THE PLAYER WITH PRIORITY MAY SUGGEST a shortcut
@@ -1800,32 +1799,8 @@ impl ObservedGrowth {
     }
 }
 
-/// A way the boundary finishes a stashed item WITHOUT applying it — leaving the axis ∞ with no
-/// finite amount reaching it. NO CR GOVERNS THIS ENUM: it is a census of THIS engine loop's own
-/// control flow at the boundary described on [`ObservedGrowth`], not a rules behavior
-/// (cf. `game/filter.rs`'s `context_free_prop_matches_face` Kleene `AnyOf` arm).
-///
-/// MEASURED CENSUS of the loop below, not a guess. THE COUNTING UNIT IS THE CONTROL-FLOW STATEMENT
-/// (`continue` / `return` / the single `collapsed.push`), because that is the unit an edit adds one
-/// of; counting "kinds of exit" instead is what made the earlier version of this paragraph fail to
-/// sum. The loop body has exactly FOUR, and they decompose 1 + 2 + 1 = 4:
-///   • 1 PUSH — `collapsed.push(item.clone())`, the single apply-succeeded exit.
-///   • 2 ITEM-LEVEL NON-PUSH — the `boundary_declines` `continue` ([`BoundaryHold::ObservedGrowth`])
-///     and the `active_copy_token()` `return` ([`BoundaryHold::CopyTokenPause`]). These two, and
-///     only these two, are what [`possible_hold`] enumerates: 2 statements, 2 variants.
-///   • 1 INNER PER-GROWTH SKIP — `!state.battlefield.contains(&g.object)` (CR 400.7: an object that
-///     changes zones becomes a new object, so the stale id is skipped). It is a `continue` on the
-///     INNER `for g in growths` loop, so its ITEM still reaches the push. It is NOT a hold, and
-///     mistaking it for one is the reading error this doc exists to prevent.
-/// So: 3 of the 4 statements are non-push, and 2 of those 3 are holds.
-/// `boundary_hold_census_matches_the_apply_loop` re-derives all three numbers from this file's own
-/// source text, so an added or removed exit reds it instead of silently invalidating this paragraph.
-/// Today's loop happens to use only `continue` and `return`, but the census counts `break` and `?`
-/// as well — the earlier detector did not, and a `break` skips the push for its item AND every
-/// later one, which is the failure this whole enum exists to make impossible.
-///
-/// This is the badge's question. [`boundary_declines`] answers a strictly narrower one, and a
-/// promise derived from it alone is FALSE for `Tokens`, whose only hold is a pause.
+/// THE boundary's decline gate, the runtime half of [`ObservedGrowth`]: the loop branches on this
+/// instead of per-arm `if *_observed_now`.
 ///
 /// # The citation gate for this subsystem
 ///
@@ -1903,116 +1878,12 @@ impl ObservedGrowth {
 /// an opt-in marker comment and reds on any surviving line anchor. The rule used to be prose that
 /// only a reviewer could apply, which is how it shipped false twice. Read that test's doc for the
 /// residual hole it deliberately does not claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum BoundaryHold {
-    /// An observer of the growing class appeared accept→boundary, so the batched single-application
-    /// would no longer match the sequence's own result, and the engine declines it: `continue`, no
-    /// push, ∞ left for manual play. Runtime gate: [`boundary_declines`].
-    ///
-    /// THIS ARM ENFORCES CR 732.2c. The sentence above states the invariant without naming it: the
-    /// batched single-application "would no longer match the sequence's own result" — that is
-    /// ELISION ≢ PERFORMANCE, detected. CR 732.2c defines the advance as reaching the ending point
-    /// "with all game choices contained in the shortcut proposal having been taken", so the end
-    /// state must be the state those choices produce. Applying the batch anyway would land a state
-    /// they would NOT produce; replaying an observer-laden sequence would execute a proposal nobody
-    /// accepted. Declining to manual play is the only remaining CR 732-faithful option, and it
-    /// costs no player a decision — everyone keeps priority and performs the actions. The full
-    /// three-route statement with lemmas is at `types::game_state`'s `scheduled_collapse_axes` doc.
-    ///
-    /// An earlier revision of this doc said "NOT LICENSED BY ANY CR" and listed CR 732.1a/1b/2a/2b
-    /// as rules that "look close and are not". That list was built on the assumption that CR 732.2
-    /// is the exclusive procedure; CR 732.1a's plain text ("any shortcut system they use is
-    /// acceptable") is what refutes it, and CR 732.1b names this exact job — the shortcut rules
-    /// determine "how many times those actions are repeated … and how the loop is broken".
-    /// Declining an elision is not a deviation from a rule that licenses elision: the ELISION is
-    /// what needs a license, and its absence never does.
-    ObservedGrowth,
-    /// CR 614.1 + CR 614.1a: the fodder mint parked on a replacement choice, so the arm returns
-    /// through its pause transaction before the push — zero tokens minted, no finite amount chosen,
-    /// axis stays ∞. CR 614.1 is why an "instead" replacement still applies here: replacement effects
-    /// "apply continuously as events happen—they aren't locked in ahead of time" and "watch for a
-    /// particular event", and "you would create one or more tokens" is exactly the event this mint is.
-    /// CR 614.1a supplies only the CLASSIFICATION — that an "instead" effect is a replacement effect.
-    ///
-    /// WHY THE MINT IS SOURCE-LESS (the `ObjectId(0)` sentinel below): because it happens inside the
-    /// engine's deferral window, not during any spell or ability resolution. Under CR 732.2c the
-    /// growth would already have been applied at accept and there would be no boundary mint at all —
-    /// so 732.2c is the rule this DEVIATES FROM, not the rule that authorizes the sentinel. See
-    /// [`ObservedGrowth`] and `types/game_state.rs`'s `scheduled_collapse_axes` doc.
-    ///
-    /// TWO ingresses, both parking on the one `active_copy_token()` guard. Each names the arm of
-    /// `token_copy.rs`'s `replace_event` match that produces it:
-    ///   • the `ReplacementResult::NeedsChoice` arm — from ONE optional candidate
-    ///     (`replacement.rs`'s `replacement_is_optional` single-candidate branch; CR 614.1a
-    ///     "instead", e.g. Jinnie Fay, Jetmir's Second) or from ≥2 materially-ordered candidates
-    ///     (`replacement.rs`'s `replacement_ordering_is_material` branch; CR 616.1, whose text
-    ///     is scoped to "two or more" and so covers ONLY that ingress);
-    ///   • the `Execute` arm's `apply_create_token_after_replacement == false` early return.
-    /// NOT a hold: the `ReplacementResult::Prevented` arm mints zero tokens but does not
-    /// park, so the arm reaches its push — see [`materialization_certainty`].
-    ///
-    /// TWO RULES THAT DO NOT APPLY HERE:
-    ///   • CR 608.2d — "if an effect OF A SPELL OR ABILITY offers any choices"; at a source-less mint
-    ///     that antecedent is false by construction. It is correct at the PARSER
-    ///     (`parse_optional_token_substitution_choice` in `oracle_replacement.rs`) and is
-    ///     deliberately not imported.
-    ///   • CR 614.16 — "if an EFFECT would create one or more tokens"; the parsed tag is
-    ///     "if YOU would create" — that parser's literal
-    ///     `tag("if you would create one or more tokens, ")`.
-    CopyTokenPause,
-}
-
-impl BoundaryHold {
-    /// The full variant set. Production code never enumerates holds — it branches on
-    /// [`boundary_declines`] and on the one `active_copy_token()` guard — so this exists purely
-    /// for the completeness half of `boundary_hold_census_matches_the_apply_loop`, which is what
-    /// keeps a variant no kind can reach from being added.
-    #[cfg(test)]
-    pub(crate) const ALL: [BoundaryHold; 2] = [Self::ObservedGrowth, Self::CopyTokenPause];
-}
-
-/// The hold this item's KIND can take, independent of live state. `None` => the arm reaches the
-/// single `collapsed.push` unconditionally. No CR governs this — it is the control-flow census
-/// described on [`BoundaryHold`].
-pub(crate) fn possible_hold(item: &PersistentAxisMaterialization) -> Option<BoundaryHold> {
-    match item {
-        PersistentAxisMaterialization::Tokens(_) => Some(BoundaryHold::CopyTokenPause),
-        PersistentAxisMaterialization::Counters(_) | PersistentAxisMaterialization::Life { .. } => {
-            Some(BoundaryHold::ObservedGrowth)
-        }
-        // No non-push exit: `drive_persistent_axis_collapse` holds a `SimulationProbeGuard` so it
-        // cannot park, and `break`s to commit the successful prefix on a failed cycle — the arm
-        // always reaches the push.
-        PersistentAxisMaterialization::DriveSequence { .. } => None,
-    }
-}
-
-/// What the HUD may promise. `Conditional` iff the kind has a hold. No CR governs this — it is a
-/// display promise derived from the census above, not a rules behavior.
-///
-/// APPLIED-BUT-NULLIFIED is deliberately `Committed`: a `Counters` item whose bearers all left
-/// (CR 400.7, the inner stale-id skip), a `Prevented` mint, and a `DriveSequence` committing k<N all
-/// PUSH, so the ∞ genuinely ends. The shipped copy promises "a finite amount will be chosen", not a
-/// quantity.
-pub(crate) fn materialization_certainty(
-    item: &PersistentAxisMaterialization,
-) -> crate::game::derived_views::CollapseCertainty {
-    match possible_hold(item) {
-        Some(_) => crate::game::derived_views::CollapseCertainty::Conditional,
-        None => crate::game::derived_views::CollapseCertainty::Committed,
-    }
-}
-
-/// THE boundary's decline gate — the runtime half of [`BoundaryHold::ObservedGrowth`], whose rules
-/// frame (CR 732.1a/1b: the shortcut system decides how the loop is broken) is stated there. SINGLE AUTHORITY: the loop branches on this instead of
-/// per-arm `if *_observed_now`.
 pub(crate) fn boundary_declines(
     item: &PersistentAxisMaterialization,
     observed: ObservedGrowth,
 ) -> bool {
     match item {
-        PersistentAxisMaterialization::Tokens(_)
-        | PersistentAxisMaterialization::DriveSequence { .. } => false,
+        PersistentAxisMaterialization::Tokens(_) => false,
         PersistentAxisMaterialization::Counters(_) => observed.counter,
         PersistentAxisMaterialization::Life { .. } => observed.life,
     }
@@ -3417,7 +3288,7 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
                 let waiting_for =
-                    mana_abilities::advance_mana_ability_activation(state, pending, events)?;
+                    mana_abilities::continue_mana_ability_activation(state, pending, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
@@ -3441,7 +3312,7 @@ pub(super) fn handle_resolution_choice(
                     };
                     // CR 732.2a pause-safety: process the ONLY pause-prone axis (`Tokens` — its
                     // per-cycle fodder mint can raise an ETB replacement `NeedsChoice`, unlike
-                    // the deterministic Counters/Life/DriveSequence axes) LAST. A mixed loop
+                    // the deterministic Counters/Life axes) LAST. A mixed loop
                     // stashes multiple axes at once (Guide of Souls + Sprout Swarm =
                     // tokens+life; Witherbloom + Sprout Swarm = tokens+counters). Committing the
                     // deterministic axes first means a `Tokens` pause leaves the finite
@@ -3459,21 +3330,18 @@ pub(super) fn handle_resolution_choice(
                     // the stash, so it needs no sequence): if an observer appeared, DECLINE
                     // the batched `Counters`/`Life` apply and leave those ∞ axes marked for
                     // manual play — unambiguously sound (never a wrong count). `Tokens` (N real
-                    // ETB events) and `DriveSequence` (N-cycle real replay) honor observers
-                    // regardless and always proceed. Only the ACTUALLY-applied items are
+                    // ETB events) honors observers regardless and always proceeds. Only the ACTUALLY-applied items are
                     // cleared, so a declined axis stays ∞.
                     // AXIS-SPECIFIC re-check: an observer of the counter class must not veto a
                     // batched LIFE gain and vice-versa. Each axis re-runs its own firewall —
                     // which is why `ObservedGrowth` carries both answers separately.
                     // CR 732.1a/1b: this re-check is the shortcut system closing the elided loop
                     // where the table understood it would close. The rules frame lives on
-                    // `ObservedGrowth::at_boundary` and `BoundaryHold::ObservedGrowth`; do not
-                    // re-derive one here.
+                    // `ObservedGrowth`; do not re-derive one here.
                     let observed = ObservedGrowth::at_boundary(state);
                     let mut collapsed: Vec<PersistentAxisMaterialization> = Vec::new();
                     for item in &items {
-                        // The ONE decline decision — `BoundaryHold::ObservedGrowth` (see its doc
-                        // for the CR 732.1a/1b frame).
+                        // The ONE decline decision.
                         if boundary_declines(item, observed) {
                             continue;
                         }
@@ -3489,8 +3357,8 @@ pub(super) fn handle_resolution_choice(
                                 // `analysis::resource::fodder_content_eq` and
                                 // `game::printed_cards::intrinsic_copiable_values` — so one
                                 // profile faithfully represents all k. A period whose k already
-                                // absorbed a `CreateToken` replacement's factor is routed to
-                                // `DriveSequence` instead (`token_growth_is_observed`, gated on
+                                // absorbed a `CreateToken` replacement's factor is performed at
+                                // the take instead (`token_growth_is_observed`, gated on
                                 // k > 1), so this mint's own `replace_event` below cannot apply it
                                 // twice. Counters/Life carry the same `per_cycle_delta` field.
                                 let batch = crate::types::game_state::PendingCopyTokenBatch {
@@ -3519,10 +3387,8 @@ pub(super) fn handle_resolution_choice(
                                     ObjectId(0),
                                     events,
                                 );
-                                // DEFENSE-IN-DEPTH AT ACCEPT ONLY. The offer firewall — the
-                                // exhaustive fail-closed `_ => Err(RecastAbort)` in
-                                // `drive_loop_action_iteration` (cited by symbol; it has no
-                                // replacement-/target-choice arm) — runs at CERTIFICATION. It
+                                // DEFENSE-IN-DEPTH AT ACCEPT ONLY. The offer firewall runs at
+                                // CERTIFICATION. It
                                 // cannot bind this mint, which happens later: a replacement
                                 // effect installed AFTER the accept reaches this pause, and
                                 // `med_tokens_boundary_mint_pause_preserves_replacement_choice`
@@ -3539,8 +3405,7 @@ pub(super) fn handle_resolution_choice(
                                 //
                                 // CR 732.2c is named here ONLY as the rule this window DEVIATES
                                 // FROM: under it the growth would already have been applied at
-                                // accept and there would be no boundary mint to pause. See
-                                // `BoundaryHold::CopyTokenPause`.
+                                // accept and there would be no boundary mint to pause.
                                 //
                                 // So: DO NOT advance the phase / mark the axis collapsed /
                                 // overwrite the replacement `waiting_for`: preserve the paused
@@ -3548,16 +3413,14 @@ pub(super) fn handle_resolution_choice(
                                 // stay correct because the ∞ marks are not cleared). No
                                 // `debug_assert!` — the defensive test deliberately drives this
                                 // pause, which a debug_assert would panic.
-                                // BoundaryHold::CopyTokenPause
                                 if state.active_copy_token().is_some() {
                                     // CR 732.2a pause-safe transaction: cash out the axes already
                                     // applied THIS pass (a mixed stash, Edit 1 puts Tokens last) so
                                     // no finite-applied Counters/Life axis is left with a stale ∞
                                     // mark. The still-paused Tokens axis is NOT in `collapsed`, so
                                     // its ∞ axis/pile is preserved for manual play (the loop has
-                                    // not closed yet, so the capability still stands; see
-                                    // `BoundaryHold::CopyTokenPause`). Do NOT drain the phase — the
-                                    // mint is mid-flight.
+                                    // not closed yet, so the capability still stands). Do NOT drain
+                                    // the phase — the mint is mid-flight.
                                     state.clear_collapsed_materializations(player, &collapsed);
                                     return Ok(ResolutionChoiceOutcome::WaitingFor(
                                         state.waiting_for.clone(),
@@ -3599,22 +3462,8 @@ pub(super) fn handle_resolution_choice(
                                     events,
                                 );
                             }
-                            PersistentAxisMaterialization::DriveSequence {
-                                sequence,
-                                collapsed_axes: _,
-                            } => {
-                                // CR 732.2a: replay N real cycles; observers fire each cycle;
-                                // no re-offer (the drive holds the simulation guard).
-                                crate::game::engine::drive_persistent_axis_collapse(
-                                    state, sequence, amount,
-                                );
-                            }
                         }
-                        // The SINGLE push. Reaching here means the growth applied; every other
-                        // outcome is a labelled `BoundaryHold` above. `possible_hold` is exactly
-                        // the set of arms that can skip this line. "Single" is asserted, not just
-                        // asked for: `boundary_apply_loop_region` panics on a second push, because
-                        // the exit census reads the text between the sort and the FIRST push.
+                        // Reaching here means the growth applied.
                         collapsed.push(item.clone());
                     }
                     // CR 732.2a: cash out ONLY the axes actually collapsed (axis-scoped) —
@@ -3623,7 +3472,7 @@ pub(super) fn handle_resolution_choice(
                     // display collapses to an ordinary ×N for the collapsed axes.
                     //
                     // FINDING #4 DECLINED-AXIS ∞ LIFECYCLE (CR 732.1b — the shortcut system
-                    // determines how the loop is broken; see BoundaryHold::ObservedGrowth): a declined `Counters`/`Life`
+                    // determines how the loop is broken; see `ObservedGrowth`): a declined `Counters`/`Life`
                     // axis (`continue`d above without `collapsed.push`) is absent from `collapsed`,
                     // so `clear_collapsed_materializations` — which iterates ONLY `collapsed`
                     // (game_state.rs) — never removes its `unbounded_resources` /
@@ -4578,7 +4427,7 @@ pub(super) fn handle_resolution_choice(
                             if rest_order == DigRestOrder::Random {
                                 // CR 400.5 + CR 608.2c: Randomize exactly the
                                 // unchosen pile immediately before bottom placement.
-                                unkept.shuffle(&mut state.rng);
+                                unkept.shuffle(state.rng.draw(RandomDraw::Placement));
                             }
                             for &obj_id in &unkept {
                                 // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
@@ -4792,7 +4641,7 @@ pub(super) fn handle_resolution_choice(
                 let rest_destination = rest_destination.unwrap_or(Zone::Graveyard);
                 let mut ordered_unkept = unkept.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_unkept.shuffle(&mut state.rng);
+                    ordered_unkept.shuffle(state.rng.draw(RandomDraw::Placement));
                 }
                 let completion = crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
@@ -6613,7 +6462,7 @@ pub(super) fn handle_resolution_choice(
                 // objects and emits no battlefield-exit events, so no
                 // dies-trigger collection is needed.
                 //
-                // CR 603.7: Terminal empty `up_to` must still rebind a fresh
+                // CR 608.2c: Terminal empty `up_to` must still rebind a fresh
                 // empty chain tracked set before the continuation drains, or a
                 // following `TargetFilter::TrackedSet` can observe a prior
                 // non-empty set. Mid-pause empty publishes stay skipped at the
@@ -6632,6 +6481,7 @@ pub(super) fn handle_resolution_choice(
                     publish_effect_zone_choice_tracked_set(
                         state,
                         effect_kind,
+                        destination,
                         &[],
                         library_position,
                         false,
@@ -6869,13 +6719,14 @@ pub(super) fn handle_resolution_choice(
                                 }
                             }
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
-                                // CR 608.2c + CR 603.7 + CR 303.4f: Publish the
+                                // CR 608.2c + CR 303.4f: Publish the
                                 // selection before pausing for Aura host choice —
                                 // this early return skips the terminal publish
                                 // below (Storm Herald "Exile those Auras").
                                 publish_effect_zone_choice_tracked_set(
                                     state,
                                     effect_kind,
+                                    destination,
                                     &chosen_ids,
                                     library_position,
                                     true,
@@ -6947,12 +6798,13 @@ pub(super) fn handle_resolution_choice(
                                 // `effects/mod.rs::drain_pending_change_zone_iteration`
                                 // resumes the loop after this replacement
                                 // choice resolves (issue #535).
-                                // CR 608.2c + CR 603.7: Publish selection before
+                                // CR 608.2c: Publish selection before
                                 // the replacement pause — same early-return gap
                                 // as NeedsAuraAttachmentChoice above.
                                 publish_effect_zone_choice_tracked_set(
                                     state,
                                     effect_kind,
+                                    destination,
                                     &chosen_ids,
                                     library_position,
                                     true,
@@ -7566,6 +7418,7 @@ pub(super) fn handle_resolution_choice(
                 publish_effect_zone_choice_tracked_set(
                     state,
                     effect_kind,
+                    destination,
                     &tracked,
                     library_position,
                     false,
@@ -8801,7 +8654,7 @@ fn action_result_outcome(
     ))
 }
 
-/// CR 608.2c + CR 603.7: Publish the EffectZoneChoice selection as the chain
+/// CR 608.2c: Publish the EffectZoneChoice selection as the chain
 /// tracked set when a continuation will consume it ("those Auras", plotted
 /// cards, etc.).
 ///
@@ -8814,9 +8667,16 @@ fn action_result_outcome(
 /// choice / replacement ordering still open). When false (terminal completion),
 /// an empty `up_to` selection must rebind a fresh empty chain set so a following
 /// `TargetFilter::TrackedSet` cannot reuse a prior non-empty set.
+///
+/// CR 608.2c + CR 608.2h: the choice IS the producing instruction here, so its
+/// own `(effect_kind, destination)` names the action each member carries. A
+/// later count bound to that action ("for each permanent exiled this way")
+/// therefore reads exactly the members this choice produced, by last known
+/// information once they have left the zone.
 fn publish_effect_zone_choice_tracked_set(
     state: &mut GameState,
     effect_kind: EffectKind,
+    destination: Option<Zone>,
     chosen: &[ObjectId],
     library_position: Option<LibraryPosition>,
     mid_pause: bool,
@@ -8892,10 +8752,11 @@ fn publish_effect_zone_choice_tracked_set(
     if tracked.is_empty() && mid_pause && !narrowed {
         return;
     }
-    let tracked_id = TrackedSetId(state.next_tracked_set_id);
-    state.next_tracked_set_id += 1;
-    state.tracked_object_sets.insert(tracked_id, tracked);
-    state.chain_tracked_set_id = Some(tracked_id);
+    // A narrowed set holds the cards this choice left BEHIND, which no action of
+    // this choice produced; `PutAtLibraryPosition` names no verb, so the table
+    // answers `None` for it either way.
+    let cause = effects::this_way_cause_for_action(effect_kind, destination);
+    effects::publish_fresh_tracked_set_with_causes(state, tracked, cause);
 }
 
 fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
@@ -9224,10 +9085,11 @@ fn finish_effect_zone_put_at_library_position(
         } else {
             chosen.clone()
         };
-        let tracked_id = TrackedSetId(state.next_tracked_set_id);
-        state.next_tracked_set_id += 1;
-        state.tracked_object_sets.insert(tracked_id, tracked);
-        state.chain_tracked_set_id = Some(tracked_id);
+        // This seam's placement fixes its producer: it resolves as
+        // `PutAtLibraryPosition`, which names no "<verb>ed this way" set and
+        // carries no destination, so the table records no cause here.
+        let cause = effects::this_way_cause_for_action(EffectKind::PutAtLibraryPosition, None);
+        effects::publish_fresh_tracked_set_with_causes(state, tracked, cause);
     }
     state.last_effect_count = Some(chosen.len() as i32);
     events.push(GameEvent::EffectResolved {
@@ -9420,15 +9282,8 @@ pub(crate) fn validate_resolution_cast_delayed_trigger_receipts(
             .count();
         let journal_matches = state
             .resolved_rules_journal
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.command.as_ref())
-            .filter_map(|command| match command {
-                crate::types::resolved_commands::ResolvedRulesCommand::DelayedTriggerInstall(
-                    command,
-                ) => command.trigger.provenance.origin(),
-                _ => None,
-            })
+            .delayed_install_origins_sharing(receipt.token, receipt.instance)
+            .into_iter()
             .filter(|origin| {
                 origin.token == receipt.token
                     && origin.instance == receipt.instance
@@ -9884,7 +9739,7 @@ pub(crate) fn run_batch_completion(
             {
                 let mut ordered_rest_cards = rest_cards.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_rest_cards.shuffle(&mut state.rng);
+                    ordered_rest_cards.shuffle(state.rng.draw(RandomDraw::Placement));
                 }
                 let completion = BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
@@ -9956,7 +9811,7 @@ pub(crate) fn run_batch_completion(
             if publish_tracked_set.is_some() && !rest_cards.is_empty() {
                 let mut ordered_rest_cards = rest_cards.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_rest_cards.shuffle(&mut state.rng);
+                    ordered_rest_cards.shuffle(state.rng.draw(RandomDraw::Placement));
                 }
                 let cleanup = BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
@@ -10074,23 +9929,18 @@ pub(crate) fn run_batch_completion(
                 } else {
                     kept
                 };
-                let published_set_id = effects::publish_fresh_tracked_set(state, published.clone());
                 // CR 608.2c + CR 400.7: when this publish carries the REST
                 // partition for a downstream count (Dihada, Binder of Wills
-                // class — `dig_continuation_wants_rest_pile_for_count`), stamp
-                // every member with the cause so its
+                // class — `dig_continuation_wants_rest_pile_for_count`), every
+                // member carries the cause this completion was handed, so its
                 // `QuantityRef::FilteredTrackedSetSize { caused_by: Some(_), .. }`
                 // finds them. Every other publish (including the unchanged
-                // kept-pile default) carries `None` here and this is a no-op.
-                if let Some(cause) = publish_tracked_set_cause {
-                    let causes = state
-                        .tracked_set_member_causes
-                        .entry(published_set_id)
-                        .or_default();
-                    for &id in &published {
-                        causes.insert(id, cause);
-                    }
-                }
+                // kept-pile default) carries `None`.
+                effects::publish_fresh_tracked_set_with_causes(
+                    state,
+                    published.clone(),
+                    publish_tracked_set_cause,
+                );
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     let continuation = if continuation_targets.is_empty() {
                         published
@@ -10181,7 +10031,14 @@ pub(crate) fn run_batch_completion(
                         .is_some_and(|obj| obj.zone == destination)
                 })
                 .collect();
-            effects::publish_fresh_tracked_set(state, delivered);
+            // CR 608.2c: this completion's placement names its producer — the
+            // members are exactly the cards this batch moved to `destination`,
+            // so a count bound to that move's action reads them here. The
+            // destination the completion already carries is the one the table
+            // keys on, so the verb is not decided a second time.
+            let cause =
+                effects::this_way_cause_for_action(EffectKind::ChangeZone, Some(destination));
+            effects::publish_fresh_tracked_set_with_causes(state, delivered, cause);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Dig,
                 source_id,
@@ -10469,7 +10326,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::ReplacementId;
     use crate::types::replacements::ReplacementEvent;
@@ -13012,7 +12869,7 @@ mod tests {
         let keep = random_state.players[0].library[0];
         let mut expected_rest = rest.to_vec();
         let mut expected_rng = random_state.rng.clone();
-        expected_rest.shuffle(&mut expected_rng);
+        expected_rest.shuffle(expected_rng.draw(crate::types::game_state::RandomDraw::Placement));
         let mut events = Vec::new();
         handle_resolution_choice(
             &mut random_state,
@@ -13316,7 +13173,7 @@ mod tests {
         assert!(state.planar_deck.contains(&deck_top));
     }
 
-    /// CR 603.7: Terminal `up_to` EffectZoneChoice with zero cards selected must
+    /// CR 608.2c: Terminal `up_to` EffectZoneChoice with zero cards selected must
     /// rebind a fresh empty chain tracked set through the production
     /// `handle_resolution_choice` path so a following TrackedSet consumer cannot
     /// reuse a prior non-empty set. Mid-pause empty publishes stay skipped.
@@ -13358,7 +13215,14 @@ mod tests {
         state.chain_tracked_set_id = Some(TrackedSetId(1));
 
         // Mid-pause empty must not rebind (Storm Herald Aura-host pause).
-        publish_effect_zone_choice_tracked_set(&mut state, EffectKind::ChangeZone, &[], None, true);
+        publish_effect_zone_choice_tracked_set(
+            &mut state,
+            EffectKind::ChangeZone,
+            Some(Zone::Battlefield),
+            &[],
+            None,
+            true,
+        );
         assert_eq!(state.chain_tracked_set_id, Some(TrackedSetId(1)));
         assert_eq!(
             state.tracked_object_sets.get(&TrackedSetId(1)),
@@ -13544,90 +13408,255 @@ mod tests {
         }
     }
 
-    /// Minimal 1/1 `CopiableValues` for the `Tokens` stash kind — only the VARIANT is under
-    /// test here, never the profile contents.
-    fn boundary_census_token_profile() -> Box<crate::types::ability::CopiableValues> {
-        Box::new(crate::types::ability::CopiableValues {
-            name: "Saproling".to_string(),
-            mana_cost: crate::types::mana::ManaCost::default(),
-            color: vec![],
-            card_types: crate::types::card_type::CardType::default(),
-            power: Some(1),
-            toughness: Some(1),
-            loyalty: None,
-            printed_loyalty: None,
-            keywords: vec![],
-            abilities: std::sync::Arc::default(),
-            trigger_definitions: std::sync::Arc::default(),
-            trigger_printed_origins: std::sync::Arc::default(),
-            replacement_definitions: std::sync::Arc::default(),
-            static_definitions: std::sync::Arc::default(),
-            room_halves: None,
-            prepare_face: None,
-            name_origin: Default::default(),
-        })
-    }
+    /// CR 608.2c + CR 614.6: the zone choice stamps the action its own
+    /// `(effect_kind, destination)` names, and nothing else. A kind that names
+    /// no "<verb>ed this way" verb, and a declared destination no such verb
+    /// covers, publish membership without provenance; only a destination whose
+    /// verb exists records one.
+    #[test]
+    fn effect_zone_choice_stamps_only_the_action_it_names() {
+        use crate::types::ability::ThisWayCause;
+        use crate::types::game_state::PendingContinuation;
+        use crate::types::identifiers::TrackedSetId;
 
-    /// The boundary apply loop's own source region, sliced out of this file at compile time.
-    ///
-    /// WHY SOURCE TEXT. `possible_hold`'s wildcard-free `match` is compiler-enforced on the
-    /// `PersistentAxisMaterialization` VARIANT axis, but nothing in the type system binds it to the
-    /// loop's EXIT axis. Without this slice the census below compares `possible_hold` against a
-    /// hand-transcribed `vec![..]` — i.e. against itself — so adding an item-level non-push exit
-    /// reachable by `DriveSequence` would leave `possible_hold` still reporting
-    /// `DriveSequence => None ⇒ Committed` and the badge would silently resume promising `∞→N` for
-    /// a collapse that never lands. That is MED-2 recurring, invisibly. Reading engine source with
-    /// `include_str!` is the in-house technique for exactly this
-    /// (`tests/integration/cr_annotations.rs`); it does not recurse, so a file may read itself.
-    ///
-    /// THE REGION STARTS AT THE SORT, NOT AT THE `for`. The Tokens-last ordering is the reason the
-    /// `CopyTokenPause` `return` cannot strand a still-unapplied non-`Tokens` item — which is the
-    /// other way `DriveSequence => Committed` becomes a lie — so dropping it must red this test too.
-    ///
-    /// Panics rather than degrading into a file-wide scan if any anchor moves.
-    fn boundary_apply_loop_region() -> &'static str {
-        const SRC: &str = include_str!("engine_resolution_choices.rs");
-        const TEST_MOD: &str = "#[cfg(test)]\nmod tests {";
-        const SORT: &str =
-            "items.sort_by_key(|i| matches!(i, PersistentAxisMaterialization::Tokens(_)))";
-        const OPEN: &str = "for item in &items {";
-        const CLOSE: &str = "collapsed.push(item.clone());";
+        /// Publish one selection through the production seam and report the
+        /// chain set it bound plus the provenance recorded for that set.
+        fn publish(
+            effect_kind: EffectKind,
+            destination: Option<Zone>,
+        ) -> (Vec<ObjectId>, Vec<ThisWayCause>) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            let member = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Member".to_string(),
+                Zone::Battlefield,
+            );
+            // The publication returns early without a parked continuation, so
+            // the membership leg below is the reach guard, not decoration.
+            state.park_ability_continuation(PendingContinuation::new(
+                Box::new(crate::types::ability::ResolvedAbility::new(
+                    crate::types::ability::Effect::GrantCastingPermission {
+                        permission: crate::types::ability::CastingPermission::Plotted {
+                            turn_plotted: 0,
+                        },
+                        target: TargetFilter::TrackedSet {
+                            id: TrackedSetId(0),
+                        },
+                        grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                &state,
+            ));
 
-        // PRODUCTION ONLY. The three anchors below are also `const` string literals in THIS module,
-        // so an un-truncated search silently falls through to the test's own source when an anchor
-        // is deleted from the loop: the `Tokens`-last drop probe reported `(0, 0)` — red, but for
-        // the wrong reason, with a `possible_hold` message pointing at a mutation that was really a
-        // missing sort. Truncating first makes a deleted anchor a named panic instead.
-        let production = SRC
-            .find(TEST_MOD)
-            .map(|at| &SRC[..at])
-            .expect("this file's inline test module header");
+            publish_effect_zone_choice_tracked_set(
+                &mut state,
+                effect_kind,
+                destination,
+                &[member],
+                None,
+                false,
+            );
 
-        let sort = production
-            .find(SORT)
-            .expect("the Tokens-last stash ordering that keeps the pause from stranding items");
-        let open = production[sort..]
-            .find(OPEN)
-            .map(|at| at + sort)
-            .expect("the boundary apply loop opener");
-        // SINGLE-PUSH INVARIANT, IN CODE. `close` takes the FIRST push after the opener, so a push
-        // inserted higher in the body silently truncates the region and drops every exit below it
-        // from the census below — defeating it without failing it. The invariant used to be stated
-        // only in prose on the push itself.
+            let chain = state
+                .chain_tracked_set_id
+                .expect("the publication binds a chain tracked set");
+            let members = state
+                .tracked_object_sets
+                .get(&chain)
+                .cloned()
+                .unwrap_or_default();
+            let causes = state
+                .tracked_set_member_causes
+                .get(&chain)
+                .map(|by_object| by_object.values().copied().collect())
+                .unwrap_or_default();
+            (members, causes)
+        }
+
+        // A kind that names no "<verb>ed this way" action records nothing.
+        for kind in [
+            EffectKind::Tap,
+            EffectKind::Untap,
+            EffectKind::PutAtLibraryPosition,
+            EffectKind::CastFromZone,
+        ] {
+            let (members, causes) = publish(kind, None);
+            assert_eq!(members.len(), 1, "{kind:?} must publish its selection");
+            assert!(causes.is_empty(), "{kind:?} names no producer action");
+        }
+
+        // A DECLARED destination whose zone names no such action records
+        // nothing either — the leg the kind axis cannot see.
+        let (members, causes) = publish(EffectKind::ChangeZone, Some(Zone::Library));
         assert_eq!(
-            production.matches(CLOSE).count(),
+            members.len(),
             1,
-            "the boundary apply loop must contain exactly one `collapsed.push(item.clone());`; a \
-             second one silently narrows the census region instead of failing it"
+            "a library move must publish its selection"
         );
-        let close = production[open..]
-            .find(CLOSE)
-            .map(|at| at + open)
-            .expect("the single collapsed.push");
-        &production[sort..close]
+        assert!(
+            causes.is_empty(),
+            "a library destination names no \"this way\" action"
+        );
+
+        // CR 701.13a: the same call with a destination whose action exists
+        // records it — the live control, so no leg above can pass by the
+        // recording path being dead.
+        let (members, causes) = publish(EffectKind::ChangeZone, Some(Zone::Exile));
+        assert_eq!(members.len(), 1, "an exile must publish its selection");
+        assert_eq!(causes, vec![ThisWayCause::Exiled]);
     }
 
-    /// The citation rule on [`BoundaryHold`] shipped false twice as prose, each time through a
+    /// CR 608.2c + CR 614.6: on one chain set fed by two producers carrying
+    /// different actions, a count bound to the first producer's action counts
+    /// only that producer's members, while a cause-unbound count counts every
+    /// member. This refuses a repair that buys its counts by counting
+    /// everything, and it reds under a stamper that writes one action for every
+    /// member of the merged set.
+    #[test]
+    fn a_cause_bound_count_reads_only_its_own_producers_members() {
+        use crate::types::ability::ThisWayCause;
+
+        let mut state = GameState::new_two_player(42);
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exiled Member".to_string(),
+            Zone::Exile,
+        );
+        let sacrificed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sacrificed Member".to_string(),
+            Zone::Graveyard,
+        );
+
+        // Publish with one action, then extend the SAME chain set through the
+        // existing multi-cause publication with a member carrying another.
+        let set_id = effects::publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![exiled],
+            Some(ThisWayCause::Exiled),
+        );
+        effects::publish_tracked_set_with_causes(
+            &mut state,
+            vec![(sacrificed, Some(ThisWayCause::Sacrificed))],
+        );
+        assert_eq!(
+            state.chain_tracked_set_id,
+            Some(set_id),
+            "the second producer extends the same chain set"
+        );
+
+        let members = state
+            .tracked_object_sets
+            .get(&set_id)
+            .expect("the merged set exists");
+        let causes = state
+            .tracked_set_member_causes
+            .get(&set_id)
+            .expect("both producers recorded");
+
+        let bound_to_exiled = members
+            .iter()
+            .filter(|id| causes.get(id) == Some(&ThisWayCause::Exiled))
+            .count();
+
+        assert_eq!(
+            bound_to_exiled, 1,
+            "a count bound to one action reads only that producer's members"
+        );
+        assert_eq!(
+            members.len(),
+            2,
+            "a cause-unbound count reads every member of the merged set"
+        );
+    }
+
+    /// CR 608.2c + CR 614.1: a mass Dig's batch completion publishes the cards
+    /// that actually reached its destination, and stamps the action that move
+    /// names. Reverting it to the cause-less publication leaves the side map
+    /// absent and the first leg reads zero.
+    #[test]
+    fn dig_mass_put_all_completion_stamps_the_destination_it_delivered_to() {
+        use crate::types::ability::ThisWayCause;
+        use crate::types::game_state::BatchCompletion;
+
+        /// Run the completion over one member already settled in `destination`
+        /// and report the published membership plus what it recorded.
+        fn complete(destination: Zone) -> (usize, Vec<ThisWayCause>) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            let member = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Delivered".to_string(),
+                destination,
+            );
+            let mut events = Vec::new();
+            run_batch_completion(
+                &mut state,
+                BatchCompletion::DigMassPutAllComplete {
+                    player: PlayerId(0),
+                    source_id: source,
+                    selected: vec![member],
+                    destination,
+                },
+                &mut events,
+            );
+            let chain = state
+                .chain_tracked_set_id
+                .expect("the completion binds a chain tracked set");
+            let members = state
+                .tracked_object_sets
+                .get(&chain)
+                .map(Vec::len)
+                .unwrap_or_default();
+            let causes = state
+                .tracked_set_member_causes
+                .get(&chain)
+                .map(|by_object| by_object.values().copied().collect())
+                .unwrap_or_default();
+            (members, causes)
+        }
+
+        // CR 701.13a: the delivered exile records the action that delivered it.
+        let (members, causes) = complete(Zone::Exile);
+        assert_eq!(members, 1, "the settled card is published");
+        assert_eq!(causes, vec![ThisWayCause::Exiled]);
+
+        // A destination whose zone names no such verb records nothing, so the
+        // leg above cannot pass by the completion stamping indiscriminately;
+        // its membership leg is the reach guard proving the arm ran.
+        let (members, causes) = complete(Zone::Library);
+        assert_eq!(members, 1, "the settled card is published");
+        assert!(
+            causes.is_empty(),
+            "a library destination names no \"this way\" action"
+        );
+    }
+
+    /// The citation rule on [`boundary_declines`] shipped false twice as prose, each time through a
     /// carve-out only a reviewer could apply. This is the executable form.
     ///
     /// MEASURED, not feared: at `BASE_SHA` this file already carried five line anchors, and four of
@@ -13734,155 +13763,11 @@ mod tests {
         );
         assert!(
             offenders.is_empty(),
-            "an enrolled file cites by line, which the rule on `BoundaryHold` forbids: an unrelated \
+            "an enrolled file cites by line, which the rule on `boundary_declines` forbids: an unrelated \
              edit above the target silently repoints the citation, and four such citations were \
              already stale when this gate was written. Name the symbol or a greppable heading \
              instead.\n{}",
             offenders.join("\n")
-        );
-    }
-
-    /// Whole-word occurrences of `keyword` in already-comment-stripped code. Bare `str::matches`
-    /// counts `should_continue;` and `breakfast`, so a census built on it moves under a rename —
-    /// and a census a rename can move is one people learn to silence.
-    fn count_exit_keyword(code: &str, keyword: &str) -> usize {
-        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
-        code.match_indices(keyword)
-            .filter(|(at, _)| {
-                code[..*at].chars().next_back().is_none_or(|c| !is_ident(c))
-                    && code[at + keyword.len()..]
-                        .chars()
-                        .next()
-                        .is_none_or(|c| !is_ident(c))
-            })
-            .count()
-    }
-
-    /// B-1: `possible_hold` is the boundary apply loop's own non-push-exit census, so it must
-    /// agree with that loop kind-for-kind, and every `BoundaryHold` variant must be claimed by
-    /// at least one kind.
-    ///
-    /// REVERT-PROBE (matched positive AND negative in this one test):
-    ///   (a) `Tokens => None` ⇒ the `Tokens` hold/certainty assertions flip ⇒ RED.
-    ///   (b) `DriveSequence => Some(BoundaryHold::ObservedGrowth)` ⇒ the only `Committed` kind
-    ///       flips ⇒ RED.
-    ///   (c) a third `BoundaryHold` variant claimed by no kind ⇒ the completeness assertion reds.
-    ///   (d) ADD any item-level non-push exit to the loop ⇒ the exit-axis assertion reds. All four
-    ///       exit forms are counted — `continue`, `return`, `break`, `?`. The first two alone were
-    ///       not enough: a `break` skips the push for its item AND every later one, which is the
-    ///       MED-2 shape this census exists to catch, and it went uncounted.
-    ///   (e) REMOVE one (e.g. delete the `boundary_declines` guard) ⇒ it reds the other way.
-    ///   (f) drop the `items.sort_by_key(..)` ⇒ `boundary_apply_loop_region` panics ⇒ RED.
-    ///   (g) ADD a second `collapsed.push(item.clone());` ⇒ the single-push assertion in
-    ///       `boundary_apply_loop_region` panics ⇒ RED. Without it a push inserted higher in the
-    ///       body truncates the census region and drops the exits below it, silently.
-    #[test]
-    fn boundary_hold_census_matches_the_apply_loop() {
-        use crate::game::derived_views::CollapseCertainty;
-
-        let kinds = [
-            PersistentAxisMaterialization::Tokens(Box::new(
-                crate::types::game_state::TokenGrowth {
-                    profile: boundary_census_token_profile(),
-                    per_cycle_delta: 1,
-                },
-            )),
-            PersistentAxisMaterialization::Counters(vec![]),
-            PersistentAxisMaterialization::Life {
-                player: PlayerId(0),
-                per_cycle_delta: 2,
-            },
-            PersistentAxisMaterialization::DriveSequence {
-                sequence: vec![],
-                collapsed_axes: vec![],
-            },
-        ];
-
-        let holds: Vec<Option<BoundaryHold>> = kinds.iter().map(possible_hold).collect();
-        assert_eq!(
-            holds,
-            vec![
-                Some(BoundaryHold::CopyTokenPause),
-                Some(BoundaryHold::ObservedGrowth),
-                Some(BoundaryHold::ObservedGrowth),
-                None,
-            ],
-            "possible_hold must mirror the boundary loop's three non-push exits: the Tokens \
-             pause, and the Counters/Life observer declines. DriveSequence has none."
-        );
-
-        let certainties: Vec<CollapseCertainty> =
-            kinds.iter().map(materialization_certainty).collect();
-        assert_eq!(
-            certainties,
-            vec![
-                CollapseCertainty::Conditional,
-                CollapseCertainty::Conditional,
-                CollapseCertainty::Conditional,
-                CollapseCertainty::Committed,
-            ],
-            "certainty is Conditional iff the kind has a hold — DriveSequence is the only \
-             Committed kind, which is why ∞→N is reserved for it"
-        );
-
-        // COMPLETENESS: no BoundaryHold variant may exist that no kind can reach.
-        let mut claimed: Vec<BoundaryHold> = holds.into_iter().flatten().collect();
-        claimed.sort();
-        claimed.dedup();
-        assert_eq!(
-            claimed,
-            BoundaryHold::ALL.to_vec(),
-            "every BoundaryHold variant must be claimed by at least one materialization kind"
-        );
-
-        // EXIT-AXIS BINDING — the half the two assertions above cannot supply, because they compare
-        // `possible_hold` against a transcription of itself. Counting unit and decomposition are the
-        // ones stated on `BoundaryHold`: 4 control-flow statements = 1 push + 2 item-level non-push
-        // + 1 inner per-growth skip. `crate::source_census::code_lines` is the shared rule:
-        // whole-line AND trailing comment text removed, so prose ABOUT `continue`/`return`
-        // cannot inflate the count from either position.
-        let code: String = crate::source_census::code_lines(boundary_apply_loop_region());
-        // The counters read raw text, and a string literal is not a comment, so one carrying the
-        // word `break` (or a `?`) would be counted as control flow — a red no reader could act on.
-        // There are none in the loop today; keep it that way, or teach the counters to skip them.
-        assert!(
-            !code.contains('"'),
-            "the boundary apply loop must carry no string literal — the exit census counts raw text"
-        );
-        // Whole-word so an identifier ending in a keyword cannot inflate the count.
-        let continues = count_exit_keyword(&code, "continue");
-        let returns = count_exit_keyword(&code, "return");
-        // `break` and `?` are exits the earlier `matches("continue;")` / `matches("return ")` pair
-        // could not see, which made claim (d) above false: a `break` skips the push for THIS item
-        // and every later one — the exact MED-2 shape — and `foo()?` leaves the function outright.
-        // Not hypothetical vocabulary: `possible_hold`'s own doc describes
-        // `drive_persistent_axis_collapse` as one that `break`s to commit a successful prefix.
-        let breaks = count_exit_keyword(&code, "break");
-        // Deliberately crude: `?Sized` or `'?'` would OVER-count, and over-counting reds (a human
-        // re-derives the census) while under-counting ships MED-2. The two directions are not
-        // symmetric, so the cheap matcher is the safe one.
-        let tries = code.matches('?').count();
-        assert_eq!(
-            (continues, returns, breaks, tries),
-            (2, 1, 0, 0),
-            "the boundary apply loop's control-flow census moved. Re-derive it, then update \
-             `possible_hold`, `BoundaryHold`, and this test together — an item-level exit that \
-             `possible_hold` does not know about makes the badge promise a collapse that never \
-             lands (MED-2)"
-        );
-
-        // The inner `for g in growths` stale-id skip (CR 400.7) is the ONE non-push statement whose
-        // ITEM still reaches the push, so it is subtracted rather than mapped to a variant. What is
-        // left must be exactly the hold set. Adding an item-level exit raises the left side without
-        // raising the right; removing one lowers it. Deliberately blind to WHICH kind of statement
-        // was added — a new inner skip reds this too, which forces a human to re-derive the census
-        // rather than letting the safe case train anyone to ignore it.
-        const INNER_PER_GROWTH_SKIPS: usize = 1;
-        assert_eq!(
-            continues + returns + breaks + tries - INNER_PER_GROWTH_SKIPS,
-            BoundaryHold::ALL.len(),
-            "every item-level non-push exit in the loop must be a labelled BoundaryHold, and every \
-             BoundaryHold must be one of those exits"
         );
     }
 

@@ -1011,7 +1011,7 @@ mod tests {
             }
         }
         state.rng_seed = seed;
-        state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
+        state.rng = engine::types::game_state::GameRng::seed_from_u64(seed);
         state
     }
 

@@ -49,8 +49,7 @@ fn pidx(p: PlayerId) -> usize {
 fn red_count(state: &GameState, player: PlayerId) -> usize {
     state.players[pidx(player)]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|u| u.color == ManaType::Red)
         .count()
 }
@@ -59,8 +58,7 @@ fn red_count(state: &GameState, player: PlayerId) -> usize {
 fn red_expiry(state: &GameState, player: PlayerId) -> Option<ManaExpiry> {
     state.players[pidx(player)]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .find(|u| u.color == ManaType::Red)
         .and_then(|u| u.expiry)
 }

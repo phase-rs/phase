@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::quantity::resolve_quantity_with_targets;
@@ -111,7 +112,7 @@ pub(crate) fn complete_exile_face_down_pile_delivery(
     if fully_exiled {
         // CR 701.24a: The face-down pile, not the library, is shuffled. The
         // resulting vector is its exact top-to-bottom return order.
-        members.shuffle(&mut state.rng);
+        members.shuffle(state.rng.draw(RandomDraw::Placement));
         for id in &members {
             state
                 .objects

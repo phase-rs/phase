@@ -2196,7 +2196,7 @@ mod tests {
             ResolvedAbility::new((*def.effect).clone(), vec![], ObjectId(100), PlayerId(0));
         let mut expected_rest = rest.clone();
         let mut expected_rng = state.rng.clone();
-        expected_rest.shuffle(&mut expected_rng);
+        expected_rest.shuffle(expected_rng.draw(crate::types::game_state::RandomDraw::Placement));
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 

@@ -1943,7 +1943,7 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
     .unwrap();
 
     assert!(state.objects.get(&restricted_source).unwrap().tapped);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
 #[test]
@@ -1957,7 +1957,7 @@ fn unless_mana_payment_rejects_activation_only_source() {
     assert!(pay_unless_cost(&mut state, PlayerId(0), &cost, &mut events).is_err());
 
     assert!(!state.objects.get(&restricted_source).unwrap().tapped);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
 #[test]
@@ -2010,7 +2010,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
     pay_mana_cost(&mut state, PlayerId(0), spell, &cost, &mut events).unwrap();
 
     assert!(state.objects.get(&mountain).unwrap().tapped);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
 fn add_play_from_exile_test_spell(
@@ -2091,7 +2091,7 @@ fn play_from_exile_any_color_pays_colored_cost_and_respects_grantee() {
         let outcome = runner.cast(spell).resolve();
         outcome.assert_zone(&[spell], Zone::Graveyard);
         assert!(
-            outcome.state().players[0].mana_pool.mana.is_empty(),
+            outcome.state().players[0].mana_pool.is_empty(),
             "{available_mana:?} must be spent to pay the blue pip"
         );
     }
@@ -2159,7 +2159,7 @@ fn play_from_exile_any_color_is_bound_to_elected_object_permission() {
         .stack
         .iter()
         .any(|entry| entry.source_id == allowed_spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -2237,7 +2237,7 @@ fn play_from_exile_any_color_preserves_strict_colorless_requirement() {
         .stack
         .iter()
         .any(|entry| entry.source_id == allowed_spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 /// CR 609.4b + CR 107.4h: `AnyColor` does not waive the snow-source quality
@@ -2304,7 +2304,7 @@ fn play_from_exile_any_color_preserves_snow_source_requirement() {
         .stack
         .iter()
         .any(|entry| entry.source_id == allowed_spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -3382,7 +3382,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
     )
     .expect("Foretell must pay its elected blue cost through the public cast path");
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -24085,7 +24085,7 @@ fn cancel_cast_after_convoke_removes_payment_marker_and_untaps_creature() {
     apply_as_current(&mut state, GameAction::CancelCast).unwrap();
 
     assert!(!state.objects.get(&helper).unwrap().tapped);
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert!(state.players[0].hand.contains(&spell));
 }
 
@@ -24188,7 +24188,7 @@ fn successful_cast_after_extra_convoke_tap_removes_unused_marker_and_untaps_crea
     );
     assert!(state.objects.get(&helper).unwrap().tapped);
     assert!(!state.objects.get(&extra).unwrap().tapped);
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert_eq!(
         state.objects.get(&spell).unwrap().convoked_creatures,
         vec![helper]
@@ -24250,7 +24250,7 @@ fn cancel_cast_uses_stamped_convoked_creatures_when_pending_snapshot_is_empty() 
         .unwrap()
         .convoked_creatures
         .is_empty());
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -24290,7 +24290,7 @@ fn terminal_cancel_with_fresh_pending_cast_drops_delve_markers() {
 
     handle_cancel_cast(&mut state, &pending, &mut Vec::new());
 
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert_eq!(state.objects[&fuel].zone, Zone::Graveyard);
 }
 
@@ -26496,7 +26496,7 @@ fn target_dependent_battlefield_tax_is_paid_after_matching_target_selection() {
 
     assert!(matches!(waiting, WaitingFor::Priority { .. }));
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "target-dependent tax should consume the three generic mana"
     );
 }
@@ -28309,7 +28309,7 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
 
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         1,
         "the {{X}} activation mana cost should be paid after target selection"
     );
@@ -29023,7 +29023,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
                 }
             )
     }));
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -47288,8 +47288,7 @@ fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId)
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists")
-        .mana_pool
-        .mana = vec![
+        .mana_pool = crate::types::mana::ManaPool::from_units(vec![
         crate::types::mana::ManaUnit::new(
             crate::types::mana::ManaType::Colorless,
             ObjectId(0),
@@ -47297,7 +47296,7 @@ fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId)
             vec![]
         );
         3
-    ];
+    ]);
     exiled
 }
 
@@ -47340,7 +47339,7 @@ fn an_alternative_rider_static_cannot_authorize_disguise() {
         "the alternative-rider source must never produce a face-down cast"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         3,
         "the pay-life alternative leaves the pool untouched"
     );
@@ -47419,7 +47418,7 @@ fn an_additional_rider_static_still_authorizes_disguise() {
         "disguise must remain reachable through the Additional-rider route"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "the {{3}} face-down cost is charged"
     );
@@ -47473,7 +47472,7 @@ fn an_earlier_alternative_rider_source_never_pays_for_the_face_down_cast() {
         "the eligible later source authorizes face down"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "exactly the {{3}} is charged — never zeroed by the earlier rider source"
     );
@@ -47535,7 +47534,7 @@ fn a_normal_cost_cast_grant_lets_disguise_cast_face_down() {
         "the disguise face-down cast must be reachable via the normal-cost grant"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "the {{3}} face-down cost is charged"
     );
@@ -47567,7 +47566,7 @@ fn a_normal_cost_play_grant_with_companion_lets_disguise_cast_face_down() {
         "the companion must not block the normal-cost grant's disguise route"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "the {{3}} face-down cost is charged"
     );
@@ -49754,7 +49753,7 @@ fn exile_static_any_color_casts_off_color_for_authorized_controller_only() {
     let mut runner = crate::game::scenario::GameRunner::from_state(state);
     let outcome = runner.cast(spell).resolve();
     outcome.assert_zone(&[spell], Zone::Graveyard);
-    assert!(outcome.state().players[0].mana_pool.mana.is_empty());
+    assert!(outcome.state().players[0].mana_pool.is_empty());
 }
 
 /// CR 601.2a + CR 609.4b: two static permissions may authorize the same
@@ -49810,7 +49809,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
     )
     .expect("the elected AnyColor source must authorize the off-color payment");
     assert!(allowed.stack.iter().any(|entry| entry.source_id == spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 /// Build a Vizier-of-the-Menagerie-class permanent carrying the
@@ -52924,7 +52923,7 @@ fn seed_unit(state: &mut GameState, player: PlayerId, unit: ManaUnit) -> ManaPip
         .find(|p| p.id == player)
         .unwrap()
         .mana_pool
-        .mana
+        .units()
         .last()
         .unwrap()
         .pip_id
@@ -53009,8 +53008,7 @@ fn generic_cost_pin_honored() {
 
     let pool: Vec<ManaPipId> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id)
         .collect();
     // Exactly one colorless survives, and it is NOT the pinned unit — the pin
@@ -53112,8 +53110,7 @@ fn pin_preserves_z_eligible_unit() {
 
     let pool: Vec<ManaPipId> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id)
         .collect();
     assert!(
@@ -53255,7 +53252,7 @@ fn cancel_clears_pins() {
         PlayerId(0),
         plain_unit(ManaType::Colorless, ObjectId(22)),
     );
-    let pool_before = state.players[0].mana_pool.mana.len();
+    let pool_before = state.players[0].mana_pool.total();
 
     begin_manual_cast(&mut state, PlayerId(0), obj);
     apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: c })
@@ -53267,7 +53264,7 @@ fn cancel_clears_pins() {
         "CancelCast must tear down pending_cast (and its pins)"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         pool_before,
         "cancelling must leave the pool intact (pin is a hint, not a removal)"
     );
@@ -53365,8 +53362,7 @@ fn empty_pins_baseline_unchanged() {
     assert!(state.pending_cast.is_none(), "cast must finalize");
     let survivors: Vec<ManaPipId> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id)
         .collect();
     assert_eq!(
@@ -53406,12 +53402,12 @@ fn phyrexian_shards_uncorrupted_by_pin() {
     );
 
     begin_manual_cast(&mut state, PlayerId(0), obj);
-    let pool_len_before = state.players[0].mana_pool.mana.len();
+    let pool_len_before = state.players[0].mana_pool.total();
     // Pin an unrelated colorless unit (eligible for the {1} generic).
     apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: extra })
         .expect("pin is legal");
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         pool_len_before,
         "pinning must not remove any unit — compute_phyrexian_shards must see the true pool"
     );
@@ -55358,7 +55354,7 @@ fn graveyard_paid_cast_accept_on_color_opens_manual_payment_then_stack() {
         "the paid spell must reach the stack after payment"
     );
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "the {{U}} must have been spent from the pool"
     );
 }
@@ -55400,7 +55396,7 @@ fn graveyard_paid_cast_accept_off_color_pays_via_any_type_concession() {
         "the off-color-paid spell must reach the stack"
     );
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "the red mana must have been spent to pay the {{U}} pip off-color"
     );
 }
@@ -55462,7 +55458,7 @@ fn graveyard_paid_cast_any_color_survives_offer_and_pays_off_color() {
         state.stack.iter().any(|entry| entry.source_id == spell),
         "the off-color-paid spell must reach the stack"
     );
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 /// CR 601.2a + CR 608.2g + CR 609.4b: accepting a during-resolution offer
@@ -55535,7 +55531,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
     apply_as_current(&mut state, GameAction::PassPriority)
         .expect("the accepted offer's AnyColor rider must pay {U} with red mana");
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 
     stack::resolve_top(&mut state, &mut Vec::new());
     assert_eq!(
@@ -56899,7 +56895,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
         "red mana must not pay the elected permission's blue cost"
     );
     assert_eq!(state.objects[&spell].zone, Zone::Exile);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+    assert_eq!(state.players[0].mana_pool.total(), 1);
 }
 
 /// TEST 6 (negative): a `without_paying` immediate graveyard free cast (Memory

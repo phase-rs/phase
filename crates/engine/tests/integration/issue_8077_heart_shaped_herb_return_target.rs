@@ -264,7 +264,9 @@ fn heart_shaped_herb_returns_whichever_creature_was_chosen() {
 /// rendered nowhere (its `attached_to` was set but no host listed it), and the
 /// returned creature kept the Equipment's continuous bonus.
 ///
-/// CR 301.5c: the Equipment itself remains on the battlefield, unattached.
+/// CR 701.3d: an attachment ends when the object it was attached to leaves
+/// the zone it was in, which is what the host's exit does here. The
+/// Equipment itself does not move, so it stays on the battlefield.
 #[test]
 fn equipment_unattaches_when_heart_shaped_herb_returns_its_host() {
     let db = load_db().expect("integration card fixture must load");
@@ -338,7 +340,8 @@ fn equipment_unattaches_when_heart_shaped_herb_returns_its_host() {
         "the returned creature must carry three +1/+1 counters"
     );
 
-    // CR 704.5n / CR 301.5c: the Equipment stays on the battlefield...
+    // CR 701.3d: the host's exit ended the attachment; the Equipment itself
+    // never moved, so it stays on the battlefield...
     assert_eq!(
         runner.state().objects[&bonesplitter].zone,
         Zone::Battlefield,
@@ -350,7 +353,7 @@ fn equipment_unattaches_when_heart_shaped_herb_returns_its_host() {
     assert_eq!(
         runner.state().objects[&bonesplitter].attached_to,
         None,
-        "CR 704.5n: the Equipment must be unattached once its host left the battlefield"
+        "CR 701.3d: the Equipment must be unattached once its host left the zone it was in"
     );
     assert!(
         !runner.state().objects[&creature]

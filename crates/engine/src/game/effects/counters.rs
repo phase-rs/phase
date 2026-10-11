@@ -29,8 +29,16 @@ use crate::types::zones::Zone;
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
-/// characteristic stay in lockstep. This is the single site outside
-/// `evaluate_layers` that writes those fields.
+/// characteristic stay in lockstep. Either field is re-derived from the counter
+/// map alone: this function consults no zone, while CR 306.5a / CR 310.4a give
+/// the printed value off the battlefield — the half the `c` subrules do not
+/// speak to.
+///
+/// Regenerate the sites deriving these fields from the counter map with
+/// `grep -rnP '\.(loyalty|defense)\s*=\s*Some\((\s*$|\w*counters)' crates/engine/src`.
+/// They include `apply_card_face_to_object`, which derives both on the
+/// rehydration path and does consult the zone, battlefield-guarding its
+/// re-derivation on the printed-value ground its own annotation gives.
 ///
 /// Other counter types (P1P1, M1M1, Stun, Lore, Generic) don't project into
 /// a dedicated field — their effects flow through layer 7c (P/T) or are
@@ -1308,7 +1316,7 @@ pub fn apply_resolved_counter_edit(
         state.layers_dirty.mark_full();
     }
     if let Some(record) = added_record {
-        state.counter_added_this_turn.push(record);
+        state.counter_added_this_turn.push_back(record);
     }
     Ok(())
 }

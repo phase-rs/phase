@@ -3,6 +3,7 @@ use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, LibraryPosition, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
@@ -131,7 +132,7 @@ pub(crate) fn shuffle_to_bottom(
     use rand::seq::SliceRandom;
 
     let mut shuffled = cards.to_vec();
-    shuffled.shuffle(&mut state.rng);
+    shuffled.shuffle(state.rng.draw(RandomDraw::Placement));
 
     let requests = shuffled
         .into_iter()

@@ -51,7 +51,7 @@ fn real_mana_activation_records_exact_produced_and_spent_units() {
     let journal = &state.resolved_rules_journal;
     let spent = journal
         .spent_mana()
-        .first()
+        .front()
         .expect("the Signet's generic cost consumes the land's exact mana unit");
     assert_ne!(spent.unit.pip_id.0, 0, "consumed mana must be stamped");
     assert_eq!(spent.unit.source_id, land);

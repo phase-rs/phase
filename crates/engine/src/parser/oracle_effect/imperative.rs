@@ -2287,7 +2287,7 @@ pub(super) fn parse_targeted_action_ast(
             count: None,
         });
     }
-    // CR 400.7 + CR 611.2c: Unified `return [all|each]?` dispatcher. Consumes
+    // CR 400.7: Unified `return [all|each]?` dispatcher. Consumes
     // the verb plus an optional `all`/`each` plural quantifier, then routes
     // by destination + origin. Mass-bounce ("return all creatures to their
     // owners' hands") promotes to `ReturnAll` ⇒ `Effect::BounceAll`.
@@ -2865,7 +2865,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             destination: None,
             selection,
         },
-        // CR 400.7 + CR 611.2c: "Return all/each [filter]" mass-bounce — the
+        // CR 400.7: "Return all/each [filter]" mass-bounce — the
         // resolver iterates every matching permanent. Class filter is preserved
         // as-is; single-object refs (SelfRef / TriggeringSource / AttachedTo /
         // ParentTarget) cannot reach this AST variant because the bare
@@ -4777,7 +4777,7 @@ pub(super) fn parse_choose_ast(
         return Some(ast);
     }
 
-    // CR 608.2c + CR 603.7 / CR 610.3 + CR 406.6: "choose a card [at random]
+    // CR 608.2c / CR 610.3 + CR 406.6: "choose a card [at random]
     // exiled this way / exiled with ~" — the impulse-exile choose anaphor. The
     // "exiled this way" referent is the chain's tracked set (the cards exiled by
     // a preceding clause in this resolution, e.g. End-Blaze Epiphany); the
@@ -5215,7 +5215,7 @@ fn try_parse_choose_owned_by_voter(
     })
 }
 
-/// CR 608.2c + CR 603.7 / CR 610.3 + CR 406.6: Parse "choose a card [at random]
+/// CR 608.2c / CR 610.3 + CR 406.6: Parse "choose a card [at random]
 /// exiled this way / exiled with ~ / exiled with it" — the impulse-exile choose
 /// anaphor.
 ///

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -1244,18 +1245,30 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.all_creature_types = sorted;
 
     if !state.planar_deck.is_empty() {
-        crate::util::im_ext::shuffle_vector(&mut state.planar_deck, &mut state.rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut state.planar_deck,
+            state.rng.draw(RandomDraw::Placement),
+        );
     }
     if !state.scheme_deck.is_empty() {
-        crate::util::im_ext::shuffle_vector(&mut state.scheme_deck, &mut state.rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut state.scheme_deck,
+            state.rng.draw(RandomDraw::Placement),
+        );
     }
 
     // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
-        crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
-        crate::util::im_ext::shuffle_vector(&mut player.contraption_deck, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
+        crate::util::im_ext::shuffle_vector(
+            &mut player.attraction_deck,
+            rng.draw(RandomDraw::Placement),
+        );
+        crate::util::im_ext::shuffle_vector(
+            &mut player.contraption_deck,
+            rng.draw(RandomDraw::Placement),
+        );
     }
 }
 
@@ -1279,7 +1292,7 @@ fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> 
         .iter()
         .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
         .collect::<Vec<_>>();
-    faces.shuffle(&mut state.rng);
+    faces.shuffle(state.rng.draw(RandomDraw::Placement));
     faces
 }
 

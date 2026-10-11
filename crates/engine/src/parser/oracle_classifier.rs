@@ -708,7 +708,7 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     )
     .parse(lower)
     .is_ok()
-        && (scan_contains(lower, "from your graveyard")
+        && (super::oracle_static::is_graveyard_cast_permission_lead(lower)
             || (scan_contains(lower, "from your hand") && scan_contains(lower, "without paying"))
             // CR 401.5 + CR 118.9 + CR 601.2a: "you may [play|cast] X from the
             // top of your library" — top-of-library cast permission class

@@ -82,5 +82,5 @@ fn paradox_surveyor_demand_fallback_casts_and_resolves() {
         .iter()
         .find(|player| player.id == P0)
         .expect("P0 exists");
-    assert!(player.mana_pool.mana.is_empty());
+    assert!(player.mana_pool.is_empty());
 }

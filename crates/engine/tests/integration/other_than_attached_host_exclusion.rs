@@ -336,7 +336,7 @@ fn kjeldoran_pride_reattach_targets_every_creature_but_host() {
         "the Aura moved to B"
     );
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "the {{2}}{{U}} cost was paid"
     );
 }

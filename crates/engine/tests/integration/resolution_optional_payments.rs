@@ -1011,15 +1011,16 @@ fn resolution_optional_oneof_routes_mana_through_existing_payment() {
     };
     apply(runner.state_mut(), P0, pay.clone()).expect("canonical mana payment starts");
     if let WaitingFor::ManaPayment { .. } = runner.state().waiting_for {
-        let pip_id = runner.state().players[P0.0 as usize].mana_pool.mana[0].pip_id;
+        let pip_id = runner.state().players[P0.0 as usize]
+            .mana_pool
+            .unit_at(0)
+            .unwrap()
+            .pip_id;
         apply(runner.state_mut(), P0, GameAction::SpendPoolMana { pip_id })
             .expect("pool mana is a legal payment pin");
         apply(runner.state_mut(), P0, GameAction::PassPriority).expect("pinned payment finalizes");
     }
-    assert!(runner.state().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .is_empty());
+    assert!(runner.state().players[P0.0 as usize].mana_pool.is_empty());
     assert_eq!(runner.state().players[P0.0 as usize].life, life + 3);
     let after = serde_json::to_string(runner.state()).unwrap();
     assert!(apply(runner.state_mut(), P0, pay).is_err());

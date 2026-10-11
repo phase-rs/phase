@@ -227,7 +227,8 @@ fn kodama_hand_choice_respects_entering_permanent_mana_value() {
         .id();
 
     let mut runner = scenario.build();
-    runner.state_mut().players[P0.0 as usize].mana_pool.mana = floating_generic(2);
+    runner.state_mut().players[P0.0 as usize].mana_pool =
+        engine::types::mana::ManaPool::from_units(floating_generic(2));
     cast_from_hand(&mut runner, trigger_creature);
 
     assert!(
@@ -368,7 +369,8 @@ fn kodama_decline_with_no_eligible_hand_cards_resolves_cleanly() {
         .id();
 
     let mut runner = scenario.build();
-    runner.state_mut().players[P0.0 as usize].mana_pool.mana = floating_generic(2);
+    runner.state_mut().players[P0.0 as usize].mana_pool =
+        engine::types::mana::ManaPool::from_units(floating_generic(2));
     cast_from_hand(&mut runner, trigger_creature);
 
     assert!(advance_to_optional_choice(&mut runner));

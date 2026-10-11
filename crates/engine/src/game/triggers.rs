@@ -1,14 +1,12 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use rand_chacha::ChaCha20Rng;
-
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
-    DamageAmountThreshold, DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect,
+    DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
     FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
     StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
@@ -946,6 +944,22 @@ impl PendingActivationTriggerCollection {
     }
 }
 
+/// CR 603.7a: the identity of a delayed triggered ability `creator` makes, or `None` when the
+/// creator has no printed card.
+pub(crate) fn delayed_ability_origin(
+    state: &GameState,
+    creator: ObjectId,
+    condition: DelayedTriggerCondition,
+    effect: Effect,
+) -> Option<Box<DelayedAbilityOrigin>> {
+    let creator = state.objects.get(&creator)?.base_printed_ref.clone()?;
+    Some(Box::new(DelayedAbilityOrigin {
+        creator,
+        condition,
+        effect,
+    }))
+}
+
 /// Installs one CR 603.7 delayed triggered ability and journals it.
 ///
 /// SINGLE AUTHORITY for adding to `GameState::delayed_triggers`. Every rules
@@ -966,6 +980,15 @@ pub fn install_delayed_trigger(
     mut trigger: DelayedTrigger,
     _events: &mut Vec<GameEvent>,
 ) {
+    // CR 603.7a: a caller that did not stamp the origin is identified by what it installs.
+    if trigger.ability.delayed_origin.is_none() {
+        trigger.ability.delayed_origin = delayed_ability_origin(
+            state,
+            trigger.source_id,
+            trigger.condition.clone(),
+            trigger.ability.effect.clone(),
+        );
+    }
     let token = DelayedTriggerToken(state.next_delayed_trigger_token);
     state.next_delayed_trigger_token = state.next_delayed_trigger_token.saturating_add(1);
     let instance = DelayedTriggerInstanceId(state.next_delayed_trigger_instance);
@@ -1056,18 +1079,12 @@ pub fn apply_resolved_delayed_trigger(
     }
     // The resolved-rules journal is the durable install-root authority. A
     // one-shot may already have fired and left `delayed_triggers`, but replay
-    // must still never reuse its CR 603.7 identity.
+    // must still never reuse its CR 603.7 identity. Only an install sharing the token or the
+    // instance can collide, and the journal hands those back in journal order.
     let installed_provenances = state
         .resolved_rules_journal
-        .entries()
-        .iter()
-        .filter_map(|entry| entry.command.as_ref())
-        .filter_map(|command| match command {
-            crate::types::resolved_commands::ResolvedRulesCommand::DelayedTriggerInstall(
-                command,
-            ) => command.trigger.provenance.origin(),
-            _ => None,
-        })
+        .delayed_install_origins_sharing(provenance.token, provenance.instance)
+        .into_iter()
         .chain(
             state
                 .delayed_triggers
@@ -3320,90 +3337,18 @@ pub fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone)
     }
 }
 
-/// CR 603.2 / CR 603.6a: can this observer's trigger event ever fire on the growing fodder
-/// class ENTERING the battlefield? Returns `true` iff it PROVABLY cannot — a scalar
-/// single-clause enters-the-battlefield trigger (`ChangesZone`/`ChangesZoneAll`,
-/// `destination == Battlefield`, no disjunctive `zone_change_clauses`) whose positive
-/// `valid_card` matcher excludes `class_member` (wrong subtype/type, `NonToken` vs a token, or
-/// a controller scope bound to a player other than the loop controller — CR 603.6a checks the
-/// entering permanent against the matcher). Matching is delegated verbatim to
-/// `trigger_matchers::valid_card_matches` (the SAME `matches_target_filter` +
-/// source-relative `FilterContext` path `match_changes_zone` uses at fire time), so no new
-/// subtype/controller logic is written here.
-///
-/// SOUNDNESS + ORDERING (load-bearing — do not reorder the callers): such a trigger never
-/// fires on the loop's per-cycle token creation because two invariants, checked IN ORDER inside
-/// `analysis::resource::loop_states_cover_modulo_fodder_growth`, guarantee that every object
-/// difference between the frames is either a fodder-class member or an id the period's
-/// instructed-departure certificate accounts:
-///
-/// 1. the FIRST accept-time frame pair's ONE-CLASS MINTED set is guaranteed by
-///    `game::engine::derived_fodder_class` (it returns `None` unless EVERY object the cycle
-///    MINTED onto the battlefield is the same class under BOTH
-///    `analysis::resource::fodder_content_eq` AND
-///    `game::printed_cards::intrinsic_copiable_values`, so a `Some` fodder class means the k >= 1
-///    minted entrants were all fodder. The invariant needs "one class", not
-///    "one object", and content equality delivers it. `derived_fodder_class` also has a second,
-///    display-only caller — the soundness-bearing one is inside the fodder-cover arm); and
-/// 2. the SECOND cover frame pair's "only the growing set differs" is guaranteed SOLELY by
-///    `analysis::resource::board_covers_modulo_fodder`, whose all-zones
-///    stable-partition content-equality is enforced by its own return value at its ONLY call
-///    site — which PRECEDES the firewall call in the same function. A reader/refactor
-///    must not reorder the
-///    `board_covers_modulo_fodder` gate after the firewall: the disjointness argument here
-///    relies on it having already proven that nothing outside that set differs.
-///
-/// The premise is stated over the CERTIFIED set rather than over what can never enter the
-/// battlefield, so it stays true however the certificate later WIDENS — and it never rests on
-/// what the proposer may or may not see.
-///
-/// Therefore a matcher that provably excludes the fodder does not observe the loop and must not
-/// veto the CR 732.2a offer.
-///
-/// Fail-closed on every axis it cannot classify: a broad (`valid_card == None`), disjunctive
-/// (`zone_change_clauses` non-empty), non-battlefield-destination, or genuinely-matching observer
-/// returns `false` (it may observe the loop → the firewall keeps its conservative veto).
-pub(crate) fn etb_observer_provably_excludes_class(
-    def: &TriggerDefinition,
-    state: &GameState,
-    class_member: ObjectId,
-    source_id: ObjectId,
-) -> bool {
-    matches!(
-        def.mode,
-        TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll
-    ) && def.zone_change_clauses.is_empty()
-        && def.destination == Some(Zone::Battlefield)
-        && def.valid_card.is_some()
-        && {
-            // `valid_card_matches` takes an observation-time source-context snapshot
-            // (upstream's LKI-by-incarnation refactor) rather than a bare id, so
-            // source-relative refs in the `valid_card` filter resolve against the
-            // source's characteristics. Project the live functioning source the same
-            // way the trigger pipeline does (`trigger_source_context_for_latch`).
-            // `source_id` is the object being scanned, so it is always present;
-            // fail-closed (keep the veto) if it somehow isn't.
-            let Some(source) = state.objects.get(&source_id) else {
-                return false;
-            };
-            let source_context = trigger_source_context_for_latch(state, source);
-            !crate::game::trigger_matchers::valid_card_matches(
-                def,
-                state,
-                class_member,
-                &source_context,
-            )
-        }
-}
-
 /// CR 701.17a: a mill puts a card from the top of a library into a graveyard; CR 614.6
 /// lets a replacement send it elsewhere instead, so the shapes a certified id can have
 /// taken are its own landing zone and the graveyard — and only a matcher that excludes
 /// ALL of them provably cannot fire on one. Returns `true` iff so.
 ///
-/// The departure-event sibling of [`etb_observer_provably_excludes_class`], under the
-/// same fail-closed discipline: every axis this predicate cannot classify keeps the
-/// caller's conservative veto.
+/// Fail-closed: every axis this predicate cannot classify keeps the caller's conservative veto.
+///
+/// It takes neither a `&GameState` nor a class member, because its proof is
+/// zone/event-key disjointness against sets its caller supplies. Its one consult sits inside
+/// `certify_instructed_opponent_library_departure`, which runs on both projected and
+/// unprojected frames, so binding this proof to a frame would make its verdict depend on which
+/// caller asked.
 ///
 /// `destinations` is the caller's own certified set's landing zones plus
 /// `Zone::Graveyard`. Taking it as a PARAMETER is what keeps the admitted set and this
@@ -3492,55 +3437,6 @@ pub(crate) fn departure_observer_provably_excludes(
                 && !keys.is_empty()
                 && !keys.iter().any(|key| class_event_keys.contains(key))
         }
-    }
-}
-
-/// CR 510.2 / CR 506.1 (+ CR 500.1 for the phase list): can this trigger's event occur
-/// while the loop window sits in `phase`? Returns `true` iff it PROVABLY cannot — then
-/// the trigger never fires inside the window and does not observe the growing class.
-///
-/// Exhaustive dispatch on [`TriggerMode`] with a fail-closed `_ => false` arm: a mode
-/// this predicate cannot classify KEEPS its veto. That wildcard is the deliberate
-/// error-direction deviation — a future mode is swallowed into *conservatism*, never
-/// into relief.
-///
-/// ⛔ SHAPE IS PINNED ON BOTH ARMS.
-/// (1) The `Phase` arm is STRICT inequality. `def.phase == Some(phase)` MUST return
-///     `false`, and widening it to relieve `p == phase` ("it already triggered this
-///     phase, so it cannot trigger again") is a SOUNDNESS change, not a precision one:
-///     CR 117.3a puts beginning-of-phase abilities ON THE STACK before the active
-///     player receives the priority at which CR 732.2a lets a shortcut be proposed, and
-///     CR 608.2h determines an on-stack ability's information AT RESOLUTION — inside
-///     the window. Such a refinement needs a stack-emptiness proof no caller supplies.
-/// (2) The combat-damage arm REQUIRES `damage_kind == CombatOnly`. CR 510.2 confines
-///     combat damage to the combat damage step (extra combat damage steps are still
-///     `Phase::CombatDamage`), which is exactly what makes the arm sound; a
-///     `damage_kind: Any` trigger can fire on NONCOMBAT damage in any phase, so
-///     dropping the requirement would relieve observers that genuinely fire in the
-///     window.
-/// Both pins are asserted by `trigger_event_unreachable_in_phase_shape_is_pinned`.
-pub(crate) fn trigger_event_unreachable_in_phase(def: &TriggerDefinition, phase: Phase) -> bool {
-    match def.mode {
-        // CR 500.1 / CR 506.1: a phase/step-keyed trigger's event is the arrival of
-        // that phase or step, which cannot occur inside a window proven invariant at a
-        // DIFFERENT one. `def.phase == None` proves nothing ⇒ keep the veto.
-        TriggerMode::Phase => def.phase.is_some_and(|p| p != phase),
-        // CR 510.2: the whole CR 120.2a combat-damage family. Combat damage is dealt
-        // only by the combat damage step's turn-based action, so a `CombatOnly` filter
-        // cannot match any damage event inside a window invariant at another step.
-        TriggerMode::DamageDone
-        | TriggerMode::DamageDoneOnce
-        | TriggerMode::DamageAll
-        | TriggerMode::DamageDealtOnce
-        | TriggerMode::DamageDoneOnceByController
-        | TriggerMode::DamageReceived
-        | TriggerMode::DamagePreventedOnce
-        | TriggerMode::ExcessDamage
-        | TriggerMode::ExcessDamageAll => {
-            def.damage_kind == DamageKindFilter::CombatOnly && phase != Phase::CombatDamage
-        }
-        // Fail-closed: every mode this predicate cannot classify keeps its veto.
-        _ => false,
     }
 }
 
@@ -7680,7 +7576,7 @@ fn permute_group_by_pins(
 fn is_specific_persistent_order_template(
     template: &crate::analysis::decision_template::DecisionTemplate,
 ) -> bool {
-    use crate::analysis::decision_template::PinnedDecision;
+    use crate::analysis::decision_template::{DecisionSlot, PinnedDecision};
     use crate::types::game_state::YieldTarget;
 
     if !template.key.is_persistent()
@@ -7712,9 +7608,13 @@ fn is_specific_persistent_order_template(
         .iter()
         .filter_map(|decision| match decision {
             PinnedDecision::Order {
-                source:
-                    source @ YieldTarget::AllCopies {
-                        trigger_description: Some(description),
+                slot:
+                    DecisionSlot {
+                        source:
+                            source @ YieldTarget::AllCopies {
+                                trigger_description: Some(description),
+                                ..
+                            },
                         ..
                     },
                 pos,
@@ -7756,7 +7656,8 @@ fn record_submitted_trigger_order(
     submitted_order_was_identity: bool,
 ) {
     use crate::analysis::decision_template::{
-        DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+        PinnedDecision, ReplayMode,
     };
 
     if submitted_order_was_identity {
@@ -7776,7 +7677,9 @@ fn record_submitted_trigger_order(
         .cloned()
         .enumerate()
         .map(|(position, source)| PinnedDecision::Order {
-            source,
+            // CR 603.3b: one ordering slot per source in this batch — instance `0` of its
+            // (source, TriggerOrder) class.
+            slot: DecisionSlot::first(source, ChoicePoint::TriggerOrder),
             pos: u8::try_from(position).expect("source count fits Order position"),
         })
         .collect();
@@ -7799,7 +7702,8 @@ fn build_ephemeral_order_template(
     triggers: &[PendingTriggerContext],
 ) -> crate::analysis::decision_template::DecisionTemplate {
     use crate::analysis::decision_template::{
-        DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+        PinnedDecision, ReplayMode,
     };
     use crate::types::game_state::YieldTarget;
     let sources = group_thisobject_sources(triggers);
@@ -7807,11 +7711,16 @@ fn build_ephemeral_order_template(
         .iter()
         .enumerate()
         .map(|(pos, ctx)| PinnedDecision::Order {
-            source: YieldTarget::ThisObject {
-                source_id: ctx.pending.source_id,
-                incarnation: ctx.pending.ability.trigger_source_incarnation(),
-                trigger_description: None,
-            },
+            // CR 603.3b: one ordering slot per trigger in this batch, at instance `0` of its
+            // own (source, TriggerOrder) class.
+            slot: DecisionSlot::first(
+                YieldTarget::ThisObject {
+                    source_id: ctx.pending.source_id,
+                    incarnation: ctx.pending.ability.trigger_source_incarnation(),
+                    trigger_description: None,
+                },
+                ChoicePoint::TriggerOrder,
+            ),
             pos: pos as u8,
         })
         .collect();
@@ -7881,7 +7790,7 @@ fn apply_trigger_order_template(
             .decisions
             .iter()
             .filter_map(|d| match d {
-                PinnedDecision::Order { source, pos } => Some((source.clone(), *pos)),
+                PinnedDecision::Order { slot, pos } => Some((slot.source.clone(), *pos)),
                 // CR 603.3b (N3 structural guard): a `TriggerOrdering` template carries ONLY
                 // `Order` pins; a targeting / modal / may / unless-break pin never belongs in a
                 // trigger-ordering group. EXHAUSTIVE (no `_`) so a future `PinnedDecision`
@@ -9226,12 +9135,12 @@ impl TriggerDispatchDisposition {
 enum PreparedTriggerTargets {
     NoTargets {
         trigger: PendingTrigger,
-        rng: ChaCha20Rng,
+        rng: crate::types::game_state::GameRng,
         events: Vec<GameEvent>,
     },
     AutoAssigned {
         trigger: PendingTrigger,
-        rng: ChaCha20Rng,
+        rng: crate::types::game_state::GameRng,
         events: Vec<GameEvent>,
     },
     NeedsPlayerChoice {
@@ -9353,7 +9262,7 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
 
 fn commit_prepared_trigger_targets(
     state: &mut GameState,
-    rng: ChaCha20Rng,
+    rng: crate::types::game_state::GameRng,
     events: Vec<GameEvent>,
     events_out: &mut Vec<GameEvent>,
 ) {
@@ -20863,7 +20772,7 @@ pub mod tests {
         accept_optional_effect(&mut state);
 
         assert!(!state.cost_payment_failed_flag);
-        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
         assert_eq!(state.players[0].life, 19);
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 0);
@@ -50488,86 +50397,6 @@ pub mod tests {
         );
     }
 
-    /// X2-3 — `trigger_event_unreachable_in_phase` is FAIL-CLOSED on the modes it
-    /// cannot classify, and still answers `true` for the two families it can. Both
-    /// polarities live in one row, so a constant implementation fails an arm.
-    ///
-    /// REVERT-PROBE: replace the predicate's `_ => false` arm with `_ => true` ⇒ the
-    /// `ChangesZone` assertion FAILS while the two `true` assertions still pass, so the
-    /// probe is isolated to the fail-closed arm.
-    #[test]
-    fn trigger_event_unreachable_in_phase_is_fail_closed() {
-        // Unclassifiable mode: an ETB observer's event can occur in any phase, so the
-        // predicate must NOT claim unreachability — the veto is kept.
-        let mut etb = TriggerDefinition::new(TriggerMode::ChangesZone);
-        etb.destination = Some(Zone::Battlefield);
-        assert!(
-            !trigger_event_unreachable_in_phase(&etb, Phase::PreCombatMain),
-            "CR 603.6a: a zone-change observer is unclassifiable by phase ⇒ fail closed"
-        );
-
-        // Classified family 1 — CR 500.1 / CR 506.1 phase-keyed.
-        let mut end_step = TriggerDefinition::new(TriggerMode::Phase);
-        end_step.phase = Some(Phase::End);
-        assert!(
-            trigger_event_unreachable_in_phase(&end_step, Phase::PreCombatMain),
-            "an end-step trigger's event cannot occur in a precombat-main window"
-        );
-
-        // Classified family 2 — CR 510.2 combat damage.
-        let mut combat_damage = TriggerDefinition::new(TriggerMode::DamageDone);
-        combat_damage.damage_kind = DamageKindFilter::CombatOnly;
-        assert!(
-            trigger_event_unreachable_in_phase(&combat_damage, Phase::PreCombatMain),
-            "CR 510.2: combat damage is dealt only in the combat damage step"
-        );
-    }
-
-    /// X2-4a + X2-4b — the ⛔ ANTI-COLLAPSE PIN on both classified arms. Each arm
-    /// carries its own paired positive, so the row proves the SHAPE and not merely
-    /// that the function returns something.
-    ///
-    /// REVERT-PROBES, one per arm:
-    /// * arm 1 (X2-4a): widen the `Phase` arm from `p != phase` to `def.phase.is_some()`
-    ///   (or to any `p == phase` relief) ⇒ the first assertion FAILS. It fails for a
-    ///   SOUNDNESS reason, not to protect a test: CR 117.3a puts a beginning-of-phase
-    ///   ability on the stack BEFORE the shortcut's priority and CR 608.2h reads its
-    ///   information at resolution, inside the window.
-    /// * arm 2 (X2-4b): drop the `damage_kind == CombatOnly` requirement ⇒ the third
-    ///   assertion FAILS. A `damage_kind: Any` trigger fires on NONCOMBAT damage in any
-    ///   phase, so classifying it would relieve an observer that genuinely fires.
-    #[test]
-    fn trigger_event_unreachable_in_phase_shape_is_pinned() {
-        // ── arm 1: the Phase arm is STRICT inequality ──
-        let mut precombat = TriggerDefinition::new(TriggerMode::Phase);
-        precombat.phase = Some(Phase::PreCombatMain);
-        assert!(
-            !trigger_event_unreachable_in_phase(&precombat, Phase::PreCombatMain),
-            "X2-4a PIN: `p == phase` must NOT be relieved (CR 117.3a + CR 603.3 + CR 608.2h)"
-        );
-        assert!(
-            trigger_event_unreachable_in_phase(&precombat, Phase::CombatDamage),
-            "X2-4a paired positive: the same def IS unreachable at a different phase"
-        );
-
-        // ── arm 2: the damage arm REQUIRES `CombatOnly` ──
-        let mut any_damage = TriggerDefinition::new(TriggerMode::DamageDone);
-        any_damage.damage_kind = DamageKindFilter::Any;
-        assert!(
-            !trigger_event_unreachable_in_phase(&any_damage, Phase::PreCombatMain),
-            "X2-4b PIN: `damage_kind: Any` can fire on noncombat damage in any phase"
-        );
-        let mut combat_only = TriggerDefinition::new(TriggerMode::DamageDone);
-        combat_only.damage_kind = DamageKindFilter::CombatOnly;
-        assert!(
-            trigger_event_unreachable_in_phase(&combat_only, Phase::PreCombatMain),
-            "X2-4b paired positive: `CombatOnly` IS unreachable outside CR 510.2's step"
-        );
-        assert!(
-            !trigger_event_unreachable_in_phase(&combat_only, Phase::CombatDamage),
-            "X2-4b: `CombatOnly` is reachable IN the combat damage step (CR 510.2)"
-        );
-    }
     /// CR 603.4 + CR 701.54a: "a creature other than ~" — the event-snapshotted
     /// bearer proves OTHER only against a known source identity; without one
     /// the condition fails closed (review #7820 round 5).

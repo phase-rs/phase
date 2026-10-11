@@ -1377,7 +1377,7 @@ fn codie_activation_prepares_each_eligible_creature_without_targeting() {
     );
     // CR 602.2b + CR 107.5: the cost is paid on activation.
     assert!(runner.state().objects[&codie].tapped);
-    assert!(runner.state().players[0].mana_pool.mana.is_empty());
+    assert!(runner.state().players[0].mana_pool.is_empty());
 
     // CR 117.4: both players pass and the ability resolves; priority returns to
     // P0 only after the state-based actions are checked.
@@ -1481,7 +1481,7 @@ fn codie_activation_then_prepared_cast_copies_and_retargets() {
     assert_priority(&runner, P0);
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().objects[&emeritus].prepared.is_some());
-    let pool = &runner.state().players[0].mana_pool.mana;
+    let pool: Vec<_> = runner.state().players[0].mana_pool.units().collect();
     assert_eq!(pool.len(), 1);
     assert_eq!(pool[0].color, ManaType::White);
 
@@ -1516,7 +1516,7 @@ fn codie_activation_then_prepared_cast_copies_and_retargets() {
             1,
             "CR 601.2i + CR 722.3d: casting the prepared spell triggers Codie"
         );
-        assert!(state.players[0].mana_pool.mana.is_empty());
+        assert!(state.players[0].mana_pool.is_empty());
         assert!(
             state.objects[&emeritus].prepared.is_none(),
             "CR 722.3c + CR 601.2i: the permanent is unprepared as the spell becomes cast"
@@ -1798,7 +1798,7 @@ fn prepare_spell_designation_is_recorded_on_the_cast_ledger() {
     let state = runner.state();
     assert_eq!(state.stack.len(), 1);
     assert_eq!(state.stack[0].id, glass_copy);
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     let records = p0_cast_records(state);
     assert_eq!(
         records
@@ -1939,7 +1939,7 @@ fn negated_prepare_cast_limit_does_not_count_a_prepared_cast() {
     cast_and_resolve_shock(&mut runner, shock, y);
     // The limit instrument works: one Red remains, so only the limit blocks
     // the second Shock.
-    let pool = &runner.state().players[0].mana_pool.mana;
+    let pool: Vec<_> = runner.state().players[0].mana_pool.units().collect();
     assert_eq!(pool.len(), 1);
     assert_eq!(pool[0].color, ManaType::Red);
     assert!(!engine::game::casting::can_cast_object_now(
@@ -1968,7 +1968,7 @@ fn negated_prepare_cast_limit_allows_the_prepared_candidate() {
     cast_and_resolve_shock(&mut runner, shock, y);
     // The limit instrument works: {W}{R} remain, so only the limit blocks the
     // second Shock.
-    assert_eq!(runner.state().players[0].mana_pool.mana.len(), 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
     assert!(!engine::game::casting::can_cast_object_now(
         runner.state(),
         P0,
@@ -2324,7 +2324,7 @@ fn activate_codie_preparing_emeritus(board: &mut DrakeBoard) -> ObjectId {
     let state = board.runner.state();
     assert!(state.stack.is_empty());
     assert!(state.objects[&board.codie].tapped);
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert!(state.objects[&board.emeritus].prepared.is_some());
     exact_linked_copy(state, board.emeritus, P0, "Swords to Plowshares")
 }
@@ -2670,7 +2670,7 @@ fn cast_counterpart(
     ));
     let state = board.runner.state();
     assert!(state.stack.is_empty());
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     let tokens: Vec<ObjectId> = state
         .battlefield
         .iter()

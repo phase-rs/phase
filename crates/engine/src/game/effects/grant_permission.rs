@@ -63,10 +63,8 @@ pub(crate) fn resolve_grantee(
 
 /// Grant a CastingPermission to the target object (CR 604.6).
 ///
-/// Implements static abilities that modify where/how a card can be cast, such as
-/// "You may cast this card from exile" (CR 604.6: static abilities that apply while
-/// a card is in a zone you could cast it from). Building block for Airbending,
-/// Foretell, Suspend, and similar "cast from exile" mechanics.
+/// Implements permissions that modify where/how a card can be cast. Building block
+/// for Airbending, Foretell, Suspend, and similar "cast from exile" mechanics.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,

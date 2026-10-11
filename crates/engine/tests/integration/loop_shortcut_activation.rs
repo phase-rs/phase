@@ -55,7 +55,7 @@ fn place_on_battlefield(
 /// Find the token-creating activated ability on `host`'s LAYER-DERIVED abilities (Gond's
 /// granted `{T}: Create a 1/1 green Elf Warrior`). Reads OFF the host — never injects. `None`
 /// when the grant is absent (the board-lever negative control).
-fn token_ability_index(state: &GameState, host: ObjectId) -> Option<usize> {
+pub(crate) fn token_ability_index(state: &GameState, host: ObjectId) -> Option<usize> {
     state
         .objects
         .get(&host)?
@@ -74,14 +74,19 @@ fn elf_count(state: &GameState) -> usize {
         .count()
 }
 
-struct Canary {
-    runner: GameRunner,
-    host: ObjectId,
+pub(crate) struct Canary {
+    pub(crate) runner: GameRunner,
+    pub(crate) host: ObjectId,
 }
 
 /// Build the 2-player canary board: a vanilla host creature, optional Intruder Alarm (the
 /// untapper), and an optional Presence of Gond attached to the host (the grant source).
-fn setup(with_gond: bool, with_alarm: bool, mode: LoopDetectionMode, db: &CardDatabase) -> Canary {
+pub(crate) fn setup(
+    with_gond: bool,
+    with_alarm: bool,
+    mode: LoopDetectionMode,
+    db: &CardDatabase,
+) -> Canary {
     let mut scenario = GameScenario::new(); // new_two_player: P0 + P1
     scenario.at_phase(Phase::PreCombatMain);
     let host = scenario.add_real_card(P0, HOST, Zone::Battlefield, db);
@@ -110,7 +115,7 @@ fn setup(with_gond: bool, with_alarm: bool, mode: LoopDetectionMode, db: &CardDa
 /// Activate the host's `{T}` through the real reducer, then pass priority (both seats) to let
 /// the ability + downstream Elf-ETB/untap trigger resolve. Stop at the CR 732.2a `LoopShortcut`
 /// offer, or when the stack settles empty at a `Priority` window (no offer).
-fn activate_and_drive(runner: &mut GameRunner, host: ObjectId, ability_index: usize) {
+pub(crate) fn activate_and_drive(runner: &mut GameRunner, host: ObjectId, ability_index: usize) {
     runner
         .act(GameAction::ActivateAbility {
             source_id: host,
@@ -149,13 +154,13 @@ fn activation_loop_gond_intruder_alarm_captures_and_sustains() {
     let idx = token_ability_index(c.runner.state(), c.host)
         .expect("Gond's granted token-creating {T} must be on the host's layer-derived abilities");
 
-    // First activation: the capture ARMS, one Elf enters, Intruder Alarm untaps the host, and the
+    // First activation: it is traced, one Elf enters, Intruder Alarm untaps the host, and the
     // CR 732.2a firewall now OFFERS (P3: the Typed-precision relaxation passes Intruder Alarm's
     // untap-all effect body through the LoopFirewall trigger-effect-body scan).
     activate_and_drive(&mut c.runner, c.host, idx);
     assert!(
-        !c.runner.state().last_loop_action_sequence.is_empty(),
-        "the token-creating activation ARMS the capture (CR 602.2a Activate)"
+        traced_plays(c.runner.state()) > 0,
+        "the token-creating activation is traced (CR 602.2a)"
     );
     assert_eq!(
         elf_count(c.runner.state()),
@@ -252,16 +257,17 @@ fn activation_loop_without_grant_source_does_not_offer() {
         ),
         "no grant ⇒ no activation ⇒ no offer"
     );
-    assert!(
-        c.runner.state().last_loop_action_sequence.is_empty(),
-        "no activation happened, so nothing was captured"
+    assert_eq!(
+        traced_plays(c.runner.state()),
+        0,
+        "no activation happened, so nothing was traced"
     );
 }
 
 /// P1-2 — NEGATIVE TWIN (untapper-absent lever). SAME real cards MINUS Intruder Alarm ⇒ the
-/// first activation is legal and the capture ARMS, but the host stays tapped (no untap
+/// first activation is legal and traced, but the host stays tapped (no untap
 /// trigger), so the drive's 2nd activation is illegal and DECLINES ⇒ no offer. The
-/// non-vacuity guard: rejection comes from the DRIVE, not a failure to capture.
+/// non-vacuity guard: rejection comes from the DRIVE, not a failure to trace.
 #[test]
 fn activation_loop_without_untapper_does_not_offer() {
     let Some(db) = shared_card_db() else { return };
@@ -272,10 +278,10 @@ fn activation_loop_without_untapper_does_not_offer() {
 
     activate_and_drive(&mut c.runner, c.host, idx);
 
-    // Positive reach-guard: the capture ARMED (the input got past the setter — not vacuous).
+    // Positive reach-guard: the activation was traced (not vacuous).
     assert!(
-        !c.runner.state().last_loop_action_sequence.is_empty(),
-        "the token-creating activation must ARM the capture (non-vacuity guard)"
+        traced_plays(c.runner.state()) > 0,
+        "the token-creating activation must be traced (non-vacuity guard)"
     );
     // SUSTAIN-FAILURE discriminator — the load-bearing negation vs the positive
     // `captures_and_sustains` (which asserts the host is `!tapped`, OFFERS, and sustains to 2 Elves
@@ -302,10 +308,9 @@ fn activation_loop_without_untapper_does_not_offer() {
     );
 }
 
-/// P1-8 — `Off` byte-identical (#4603). The P1-1 board under `LoopDetectionMode::Off` ⇒ the
-/// capture is NEVER written (the `.samples()` gate) ⇒ no offer + the driving permanent behaves
-/// exactly as pre-feature. Revert-probe: flip the `.samples()` gate to always-write ⇒ `Off`
-/// writes the capture ⇒ `is_none()` flips.
+/// P1-8 — `Off` byte-identical (#4603). The P1-1 board under `LoopDetectionMode::Off` ⇒ nothing
+/// is traced (the `.samples()` gate) ⇒ no offer + the driving permanent behaves exactly as
+/// pre-feature.
 #[test]
 fn activation_loop_off_mode_is_byte_identical() {
     let Some(db) = shared_card_db() else { return };
@@ -317,8 +322,8 @@ fn activation_loop_off_mode_is_byte_identical() {
     activate_and_drive(&mut c.runner, c.host, idx);
 
     assert!(
-        c.runner.state().last_loop_action_sequence.is_empty(),
-        "Off (#4603): a token-creating activation must NOT write the capture"
+        engine::game::play_trace_view(c.runner.state()).is_none(),
+        "Off (#4603): a token-creating activation must NOT be traced"
     );
     assert!(
         !matches!(
@@ -515,4 +520,14 @@ fn activation_interruptibility_defused_opponent_responds_no_grant() {
          ⇒ NO grant beyond the current stack, got {:?}",
         c.runner.state().waiting_for
     );
+}
+
+/// How many plays the window's trace records.
+fn traced_plays(state: &engine::types::game_state::GameState) -> usize {
+    engine::game::play_trace_view(state).map_or(0, |view| {
+        view.entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, engine::game::EntryKind::Play { .. }))
+            .count()
+    })
 }

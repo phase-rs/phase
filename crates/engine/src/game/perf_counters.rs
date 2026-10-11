@@ -1,4 +1,6 @@
 use std::cell::Cell;
+#[cfg(feature = "test-support")]
+use std::cell::RefCell;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
@@ -192,6 +194,166 @@ pub struct AttackDeclarationSolverCounters {
     pub defender_permission_lookups: u64,
 }
 
+/// Test-only counters for the work a replay take does on the turn's growing history: history
+/// records deep-copied, map-backed history entries a state copy does not share, state copies,
+/// keyed journal reads and the records they examine, the replay drive's whole-state
+/// snapshots, and the mana-pool entries and units walked. Kept out of [`PerfCounterSnapshot`]
+/// for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TakeCostCounters {
+    pub history_entries_copied: u64,
+    pub history_map_entries_unshared: u64,
+    pub state_copies: u64,
+    pub journal_keyed_reads: u64,
+    pub journal_records_examined: u64,
+    pub drive_snapshots: u64,
+    pub pool_entries_walked: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl TakeCostCounters {
+    /// The counts accrued since `earlier`, a snapshot taken on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            history_entries_copied: self.history_entries_copied - earlier.history_entries_copied,
+            history_map_entries_unshared: self.history_map_entries_unshared
+                - earlier.history_map_entries_unshared,
+            state_copies: self.state_copies - earlier.state_copies,
+            journal_keyed_reads: self.journal_keyed_reads - earlier.journal_keyed_reads,
+            journal_records_examined: self.journal_records_examined
+                - earlier.journal_records_examined,
+            drive_snapshots: self.drive_snapshots - earlier.drive_snapshots,
+            pool_entries_walked: self.pool_entries_walked - earlier.pool_entries_walked,
+        }
+    }
+}
+
+/// Test-only counters for the play trace's work: action boundaries entered (outermost, nested,
+/// inside a probe), entries recorded, the trace's node-map and node-key work, whole-state copies
+/// its own code makes, the windows and legality reads its naming makes, and the spans the
+/// producer asks the confirmer and the replays it drives for them.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayTraceCounters {
+    pub boundary_entries: u64,
+    pub nested_applies: u64,
+    pub probe_entries: u64,
+    pub actions_recorded: u64,
+    pub resolutions_recorded: u64,
+    pub resolution_hooks_in_probe: u64,
+    pub node_map_reads: u64,
+    pub node_map_writes: u64,
+    pub node_key_compares: u64,
+    pub trace_state_copies: u64,
+    pub windows: u64,
+    pub legality_reads: u64,
+    pub legality_read_copies: u64,
+    pub confirm_asks: u64,
+    pub confirm_drives: u64,
+    /// Entries appended to carried spans.
+    pub carry_appends: u64,
+    /// Old-window nodes looked up in the carrying index at a step's end.
+    pub step_end_lookups: u64,
+    /// Engine B runs that rebuilt a seat's carrying index.
+    pub engine_b_rebuilds: u64,
+    /// Objects visited by the face-set scans that fingerprint a seat's printed faces.
+    pub face_set_scans: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl PlayTraceCounters {
+    /// The counts accrued since `earlier`, a snapshot taken on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            boundary_entries: self.boundary_entries - earlier.boundary_entries,
+            nested_applies: self.nested_applies - earlier.nested_applies,
+            probe_entries: self.probe_entries - earlier.probe_entries,
+            actions_recorded: self.actions_recorded - earlier.actions_recorded,
+            resolutions_recorded: self.resolutions_recorded - earlier.resolutions_recorded,
+            resolution_hooks_in_probe: self.resolution_hooks_in_probe
+                - earlier.resolution_hooks_in_probe,
+            node_map_reads: self.node_map_reads - earlier.node_map_reads,
+            node_map_writes: self.node_map_writes - earlier.node_map_writes,
+            node_key_compares: self.node_key_compares - earlier.node_key_compares,
+            trace_state_copies: self.trace_state_copies - earlier.trace_state_copies,
+            windows: self.windows - earlier.windows,
+            legality_reads: self.legality_reads - earlier.legality_reads,
+            legality_read_copies: self.legality_read_copies - earlier.legality_read_copies,
+            confirm_asks: self.confirm_asks - earlier.confirm_asks,
+            confirm_drives: self.confirm_drives - earlier.confirm_drives,
+            carry_appends: self.carry_appends - earlier.carry_appends,
+            step_end_lookups: self.step_end_lookups - earlier.step_end_lookups,
+            engine_b_rebuilds: self.engine_b_rebuilds - earlier.engine_b_rebuilds,
+            face_set_scans: self.face_set_scans - earlier.face_set_scans,
+        }
+    }
+}
+
+/// One replay take: the count it was driven at, the cycles it delivered, the whole take's counts,
+/// and each delivered cycle's counts in order.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TakeCostRecord {
+    pub count: u32,
+    pub delivered: u32,
+    pub whole_take: TakeCostCounters,
+    pub cycles: Vec<TakeCostCounters>,
+}
+
+/// Entries of a map-backed history field that a state copy does not share with its original.
+#[cfg(feature = "test-support")]
+pub(crate) trait Unshared {
+    fn unshared(&self, copy: &Self) -> u64;
+}
+
+// An `im` copy shares every entry while it is `ptr_eq` to its original, and none after a write.
+#[cfg(feature = "test-support")]
+impl<K, V, S> Unshared for im::HashMap<K, V, S>
+where
+    K: std::hash::Hash + Eq + Clone,
+    V: Clone,
+    S: std::hash::BuildHasher,
+{
+    fn unshared(&self, copy: &Self) -> u64 {
+        if self.ptr_eq(copy) {
+            0
+        } else {
+            self.len() as u64
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl<K, V> Unshared for im::OrdMap<K, V>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
+    fn unshared(&self, copy: &Self) -> u64 {
+        if self.ptr_eq(copy) {
+            0
+        } else {
+            self.len() as u64
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl<T, S> Unshared for im::HashSet<T, S>
+where
+    T: std::hash::Hash + Eq + Clone,
+    S: std::hash::BuildHasher,
+{
+    fn unshared(&self, copy: &Self) -> u64 {
+        if self.ptr_eq(copy) {
+            0
+        } else {
+            self.len() as u64
+        }
+    }
+}
+
 thread_local! {
     /// Per-thread (NOT process-global) so parallel `cargo test` runs do not
     /// cross-pollute counters between a test's `reset()` and `snapshot()`.
@@ -290,6 +452,44 @@ thread_local! {
     static COMPLETION_WALK_WORK: Cell<CompletionWalkWork> = const {
         Cell::new(CompletionWalkWork {
             per_op: [0; crate::game::ability_utils::WalkOp::COUNT],
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static TAKE_COST_COUNTERS: Cell<TakeCostCounters> = const {
+        Cell::new(TakeCostCounters {
+            history_entries_copied: 0,
+            history_map_entries_unshared: 0,
+            state_copies: 0,
+            journal_keyed_reads: 0,
+            journal_records_examined: 0,
+            drive_snapshots: 0,
+            pool_entries_walked: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static TAKE_COST_RECORDS: RefCell<Vec<TakeCostRecord>> = const { RefCell::new(Vec::new()) };
+    #[cfg(feature = "test-support")]
+    static PLAY_TRACE_COUNTERS: Cell<PlayTraceCounters> = const {
+        Cell::new(PlayTraceCounters {
+            boundary_entries: 0,
+            nested_applies: 0,
+            probe_entries: 0,
+            actions_recorded: 0,
+            resolutions_recorded: 0,
+            resolution_hooks_in_probe: 0,
+            node_map_reads: 0,
+            node_map_writes: 0,
+            node_key_compares: 0,
+            trace_state_copies: 0,
+            windows: 0,
+            legality_reads: 0,
+            legality_read_copies: 0,
+            confirm_asks: 0,
+            confirm_drives: 0,
+            carry_appends: 0,
+            step_end_lookups: 0,
+            engine_b_rebuilds: 0,
+            face_set_scans: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -784,6 +984,132 @@ pub fn reset_prior_target_binding_counters() {
         .with(|counters| counters.set(PriorTargetBindingCounters::default()));
 }
 
+#[cfg(feature = "test-support")]
+fn with_take_cost(f: impl FnOnce(&mut TakeCostCounters)) {
+    TAKE_COST_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_history_entry_copied() {
+    with_take_cost(|c| c.history_entries_copied += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_history_map_entries_unshared(entries: u64) {
+    with_take_cost(|c| c.history_map_entries_unshared += entries);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_state_copy() {
+    with_take_cost(|c| c.state_copies += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_journal_keyed_read() {
+    with_take_cost(|c| c.journal_keyed_reads += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_journal_record_examined() {
+    with_take_cost(|c| c.journal_records_examined += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_drive_snapshot() {
+    with_take_cost(|c| c.drive_snapshots += 1);
+}
+
+/// Runs a debug-build check without charging its work to the take-cost counters.
+#[cfg(debug_assertions)]
+pub(crate) fn outside_take_cost(check: impl FnOnce()) {
+    #[cfg(feature = "test-support")]
+    let counted = TAKE_COST_COUNTERS.with(Cell::get);
+    check();
+    #[cfg(feature = "test-support")]
+    TAKE_COST_COUNTERS.with(|cell| cell.set(counted));
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_pool_entries_walked(entries: u64) {
+    with_take_cost(|c| c.pool_entries_walked += entries);
+}
+
+#[cfg(feature = "test-support")]
+pub fn take_cost_snapshot() -> TakeCostCounters {
+    TAKE_COST_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_play_trace(f: impl FnOnce(&mut PlayTraceCounters)) {
+    PLAY_TRACE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn play_trace_counters() -> PlayTraceCounters {
+    PLAY_TRACE_COUNTERS.with(Cell::get)
+}
+
+/// Every take recorded on this thread since the last [`reset`], in order.
+#[cfg(feature = "test-support")]
+pub fn take_cost_records() -> Vec<TakeCostRecord> {
+    TAKE_COST_RECORDS.with(|records| records.borrow().clone())
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_take_cost() {
+    TAKE_COST_COUNTERS.with(|counters| counters.set(TakeCostCounters::default()));
+    TAKE_COST_RECORDS.with(|records| records.borrow_mut().clear());
+}
+
+/// Builds one take's [`TakeCostRecord`] as the replay drive performs it.
+#[cfg(feature = "test-support")]
+pub(crate) struct TakeCostRecorder {
+    count: u32,
+    take_start: TakeCostCounters,
+    cycle_start: TakeCostCounters,
+    cycles: Vec<TakeCostCounters>,
+}
+
+#[cfg(feature = "test-support")]
+impl TakeCostRecorder {
+    pub(crate) fn begin(count: u32) -> Self {
+        let now = take_cost_snapshot();
+        Self {
+            count,
+            take_start: now,
+            cycle_start: now,
+            cycles: Vec::new(),
+        }
+    }
+
+    pub(crate) fn begin_cycle(&mut self) {
+        self.cycle_start = take_cost_snapshot();
+    }
+
+    pub(crate) fn end_cycle(&mut self) {
+        self.cycles
+            .push(take_cost_snapshot().since(self.cycle_start));
+    }
+
+    pub(crate) fn finish(self, delivered: u32) {
+        let record = TakeCostRecord {
+            count: self.count,
+            delivered,
+            whole_take: take_cost_snapshot().since(self.take_start),
+            cycles: self.cycles,
+        };
+        TAKE_COST_RECORDS.with(|records| records.borrow_mut().push(record));
+    }
+}
+
 pub fn reset() {
     COUNTERS.with(|c| c.set(PerfCounterSnapshot::default()));
     #[cfg(feature = "test-support")]
@@ -799,6 +1125,10 @@ pub fn reset() {
         .with(|counters| counters.set(ActivationCostRouteCounters::default()));
     #[cfg(feature = "test-support")]
     COMPLETION_WALK_WORK.with(|counters| counters.set(CompletionWalkWork::default()));
+    #[cfg(feature = "test-support")]
+    reset_take_cost();
+    #[cfg(feature = "test-support")]
+    PLAY_TRACE_COUNTERS.with(|counters| counters.set(PlayTraceCounters::default()));
     #[cfg(feature = "test-support")]
     EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
     #[cfg(feature = "test-support")]

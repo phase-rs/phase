@@ -112,7 +112,7 @@ fn weird_offer_bound() -> u32 {
             state.waiting_for
         );
     };
-    schema.max_iterations
+    schema.deliverable_capacity
 }
 
 /// The driven two-player optional-drain rig, declared at `count` and parked at its responder.
@@ -377,7 +377,7 @@ fn a_place_the_engine_cannot_drive_is_refused_and_the_next_answer_ends_the_loop(
     );
     let before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
 
-    let over_budget = ShortcutDecisionSchema::default().max_iterations + 1;
+    let over_budget = ShortcutDecisionSchema::default().deliverable_capacity + 1;
     assert!(
         admitted_places(&state).contains(&over_budget),
         "reach-guard: CR 732.2b admits this place, so the refusal below is the DRIVE's and not \
@@ -531,7 +531,7 @@ fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
 /// disjunct from the predicate (the middle leg goes red).
 #[test]
 fn a_restored_over_cap_proposal_refuses_what_it_cannot_drive_and_admits_the_repairing_place() {
-    let cap = ShortcutDecisionSchema::default().max_iterations;
+    let cap = ShortcutDecisionSchema::default().deliverable_capacity;
     // The tamper is `cap + 2`, not `cap + 1`: at `cap + 1` the published range ends at `cap` and
     // the boundary member below would be outside it, so the range refusal would do the refusing.
     let tampered = || {
@@ -939,7 +939,7 @@ fn interaction_admits(state: &GameState, at_iteration: u32) -> bool {
 #[test]
 fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it() {
     let bound = weird_offer_bound();
-    let cap = ShortcutDecisionSchema::default().max_iterations;
+    let cap = ShortcutDecisionSchema::default().deliverable_capacity;
     let mut admitted = 0usize;
     let mut refused = 0usize;
     let mut above_budget = 0usize;
@@ -1552,5 +1552,102 @@ fn the_second_shortener_narrows_the_range_and_holds_the_ending_point() {
         board_by_seat(&state),
         board_by_seat(&accepting),
         "the two runs took different lengths, so the shorter one is not the same board"
+    );
+}
+
+/// **CR 732.2b when the accepted count spans a cascade.** A two-segment declaration accepted at a
+/// count containing a predicted CR 704.5a crossing is shortened inside that count: the ending
+/// point is the shortener, exactly as at a count that spans none.
+///
+/// The paired accept leg — same board, same declaration, nobody naming a place — supplies the
+/// fallback seat this row asserts the shortener differs from, so the claim cannot be satisfied by
+/// an ending-point rule that ignores who shortened.
+#[test]
+fn a_shortened_cascade_spanning_declaration_seats_the_shortener() {
+    let (open_window, count, crossing) =
+        crate::fantastic_four_bounded_loop::f4_cascade_spanning_window();
+
+    // Nobody shortens: the ending point falls back to the living priority seat.
+    let mut accepted = open_window.clone();
+    while matches!(accepted.waiting_for, WaitingFor::RespondToShortcut { .. }) {
+        respond(&mut accepted, ShortcutResponse::Accept).expect("CR 732.2c: an accept is legal");
+    }
+    let WaitingFor::Priority { player: fallback } = accepted.waiting_for else {
+        panic!(
+            "CR 732.2c: an all-accepted proposal is taken and the game advances to its ending \
+             point, got {:?}",
+            accepted.waiting_for
+        );
+    };
+
+    let mut shortened = open_window;
+    let (shortener, queued) = window(&shortened);
+    assert!(
+        !queued.is_empty(),
+        "reach-guard: seats must remain behind the shortener, else the accepts below are vacuous"
+    );
+    assert_ne!(
+        shortener, fallback,
+        "reach-guard: the shortener must differ from the seat an accept-only drive hands back, \
+         else the claim below is satisfied by an engine that never reads `shortened_by`"
+    );
+    // Strictly inside the accepted count and strictly before the crossing, so the drive performs
+    // to the named place rather than stopping short of it on a departure.
+    let place = crossing - 1;
+    assert!(
+        place > 0 && admitted_places(&shortened).contains(&place),
+        "reach-guard: the named place must lie inside the proposal's own admitted range; \
+         place={place} count={count} range={:?}",
+        admitted_places(&shortened)
+    );
+    shorten(&mut shortened, place).expect("CR 732.2b: naming a place inside the count is legal");
+    while matches!(shortened.waiting_for, WaitingFor::RespondToShortcut { .. }) {
+        respond(&mut shortened, ShortcutResponse::Accept).expect("CR 732.2c: an accept is legal");
+    }
+    assert_eq!(
+        shortened.waiting_for,
+        WaitingFor::Priority { player: shortener },
+        "CR 732.2b + CR 732.2c: the responder who named the ending point receives priority there, \
+         and a count containing a crossing does not move that seat"
+    );
+}
+
+/// The shortened mana engine's per-cycle pool walk does not grow with its count.
+#[test]
+fn mana_engine_take_pool_walk_is_flat_per_cycle() {
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    crate::loop_shortcut::assert_take_pool_walk_is_flat(32, |n| {
+        let mut state = mana_engine_window(db, n + 1);
+        engine::game::perf_counters::reset();
+        shorten(&mut state, n).expect("the named place is in range");
+        state
+    });
+}
+
+/// The shortened mana engine's per-cycle history work does not grow with its count.
+#[test]
+fn mana_engine_take_history_work_is_flat_per_cycle() {
+    use crate::loop_shortcut::{
+        assert_take_history_work_is_flat, TakeHistoryMap, TakeHistoryVector,
+    };
+
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    assert_take_history_work_is_flat(
+        32,
+        &[
+            TakeHistoryVector::JournalEntries,
+            TakeHistoryVector::ProducedMana,
+            TakeHistoryVector::SpentMana,
+        ],
+        &[
+            TakeHistoryMap::AbilityResolutions,
+            TakeHistoryMap::ActivatedAbilities,
+        ],
+        |n| {
+            let mut state = mana_engine_window(db, n + 1);
+            engine::game::perf_counters::reset();
+            shorten(&mut state, n).expect("the named place is in range");
+            state
+        },
     );
 }

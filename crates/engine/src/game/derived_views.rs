@@ -207,27 +207,6 @@ pub enum UnboundedFamily {
     Triggers,
 }
 
-/// Whether the boundary can still fail to apply this scheduled collapse. No CR governs it — it is
-/// derived from `engine_resolution_choices::materialization_certainty`, which reads the boundary's
-/// own non-push-exit census, never a copy of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CollapseCertainty {
-    Committed,
-    Conditional,
-}
-
-impl CollapseCertainty {
-    /// `Conditional` wins: a family is only as certain as its least certain member. No CR governs
-    /// this — it is a meet over a display promise, not a rules behavior (cf. `game/filter.rs`'s
-    /// `context_free_prop_matches_face` Kleene `AnyOf` arm).
-    fn weaker(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Committed, Self::Committed) => Self::Committed,
-            _ => Self::Conditional,
-        }
-    }
-}
-
 /// This family's collapse coverage. `Scheduled` displays
 /// `GameState::pending_unbounded_materialization` — growth whose count was fixed at accept and
 /// which is in flight along CR 732.2c's advance to the proposal's ending point, that point being a
@@ -235,9 +214,7 @@ impl CollapseCertainty {
 /// (`types/game_state.rs`'s `scheduled_collapse_axes` doc, and this file's
 /// `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block). An earlier version of this doc called that
 /// stash unlicensed; it is not — see `scheduled_collapse_axes` for the four-position reading.
-/// `Scheduled` is nonetheless a WEAKER claim than `Committed`, and that distinction is the point of
-/// this enum: `Committed` is what licenses the `∞→N` badge, which is a promise about what will
-/// land, and the engine makes that promise only where it can keep it. `Mixed` is a join result.
+/// `Mixed` is a join result.
 ///
 /// `Unscheduled` is the one variant a CR describes, and only in the SHAPED sense the rest of this
 /// crate uses (this file's `IS AN ENGINE-STATE ARGUMENT, NOT A RULES ONE` block): CR 732.1b's
@@ -253,7 +230,6 @@ pub enum FamilyCollapseState {
     Unscheduled,
     Mixed,
     Scheduled {
-        certainty: CollapseCertainty,
         /// CR 732.2a: the seat that will be asked to name the "specified number of times" when
         /// this collapse cashes out — the loop's CONTROLLER, emitted because it is NOT
         /// recoverable from [`UnboundedFamilyView::player`] (the ATTRIBUTION seat, which for
@@ -273,7 +249,7 @@ pub enum FamilyCollapseState {
 }
 
 impl FamilyCollapseState {
-    /// Join: `Scheduled ⊔ Scheduled = Scheduled(weaker certainty, met seat)`,
+    /// Join: `Scheduled ⊔ Scheduled = Scheduled(met seat)`,
     /// `Unscheduled ⊔ Scheduled { .. } = Mixed`, `Mixed` is top. Commutative + associative +
     /// idempotent because it IS a join — load-bearing: the FE fold it replaces documented a
     /// last-wins order hazard, and its open question ("what would make the over-report
@@ -295,17 +271,7 @@ impl FamilyCollapseState {
             (Self::Unscheduled, Self::Unscheduled) => Self::Unscheduled,
             (Self::Unscheduled, Self::Scheduled { .. })
             | (Self::Scheduled { .. }, Self::Unscheduled) => Self::Mixed,
-            (
-                Self::Scheduled {
-                    certainty: a,
-                    prompted: p,
-                },
-                Self::Scheduled {
-                    certainty: b,
-                    prompted: q,
-                },
-            ) => Self::Scheduled {
-                certainty: a.weaker(b),
+            (Self::Scheduled { prompted: p }, Self::Scheduled { prompted: q }) => Self::Scheduled {
                 prompted: if p == q { p } else { None },
             },
         }
@@ -335,8 +301,7 @@ impl FamilyCollapseState {
 /// priority window per CR 732.2a, not the CR 500.5 boundary itself
 /// (`types/game_state.rs`'s `scheduled_collapse_axes` doc). It is still not a GUARANTEE of the
 /// final amount: the boundary's growth re-check and the controller's CR 732.2a count choice can
-/// both reduce what lands, which is why the display carries certainty rather than a
-/// number. A second channel mirroring
+/// both reduce what lands, which is why the display carries no number. A second channel mirroring
 /// the stash is no longer "a contract with no reader", which it genuinely was when that objection
 /// was written:
 /// THIS is the reader — `usePlayerDesignations` → `UnboundedBadge`, pinned on the wire by
@@ -347,36 +312,14 @@ impl FamilyCollapseState {
 /// objection, and a reader still sees it on screen. Only THIS channel carries a collapse state.
 /// `unbounded_pile` (card groups) and `counter_display` (counter pills) are `ObjectId`-keyed and
 /// carry no collapse projection at all, so during the accept→boundary window one loop can show
-/// `∞→N` on the badge and a plain `∞` on its own token group and counter pill in the SAME frame.
-/// Witnessed rather than asserted:
-/// `kilo_live_offer_from_real_dump::kilo_accept_marks_pentad_charge_as_unbounded_display_target`
-/// pins `counter_display[Pentad]` as a single `charge` row carrying [`CounterMagnitude`]'s
-/// `Unbounded` — a bare `∞` pill — in the exact frame whose golden family state is
-/// `Scheduled(Committed)`.
+/// a scheduled badge and a plain `∞` on its own token group and counter pill in the SAME frame.
 ///
 /// THE ANSWER, not a disclosure: this is not the `Mana(_)` false-promise case. The collapse really
 /// IS scheduled for that axis, so the quiet surfaces under-announce; none of them promises a bound
 /// it will not keep. Announcing it on the object-keyed channels would require a
 /// `(player, family)` → `ObjectId` join that the engine does not put on the wire, and computing
 /// that join downstream is precisely the display-layer computation this channel exists to remove
-/// (see `CLAUDE.md`). `Mana(_)` is different in kind — its promise is false the moment it is made —
-/// and it is handled by exclusion upstream at `scheduled_display_axes`, not by this asymmetry.
-///
-/// THE SECOND ASYMMETRY, ACROSS THE BOUNDARY RATHER THAN INSIDE THE WINDOW — disclosed, measured,
-/// and deliberately kept. `∞` counter targets are registered for the whole beneficial-counter
-/// partition, while a `DriveSequence` collapse names only the axes its own proposal carried. At the
-/// boundary, `types::game_state::clear_collapsed_materializations` filters the registered pairs by
-/// the collapsed axes and RE-INSERTS the survivors, and the counter-pill loop below is ungated on
-/// `unbounded_resources` — so a registered pair whose derived axis was NOT in the driven collapse
-/// keeps rendering `∞` on its own pill for one boundary after its family row is gone. The rules
-/// state is untouched: that pair's axis was never collapsed, so per CR 732.2c nothing about it has
-/// ended, and the axis-removal set and the `unbounded_loop_enablers` lockstep both move exactly as
-/// they did before the widening. Fixing the pill by stripping unmatched pairs would trade this
-/// display over-KEEP for a display over-DROP, which the subsystem's stated polarity forbids: it may
-/// only ever leave an `∞` standing one boundary longer than it should, never hide a real one.
-/// Pinned by `types::game_state`'s
-/// `widened_counter_registration_survives_a_driven_collapse_without_moving_the_axis_set` and its
-/// matched negative `a_counter_pair_on_the_driven_axis_is_dropped_at_the_boundary`.
+/// (see `CLAUDE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnboundedFamilyView {
     pub player: PlayerId,
@@ -1253,12 +1196,12 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
 
     // Scratch pool of ONLY the pinned units = the player's current selection.
     let player_obj = state.players.iter().find(|p| p.id == viewer)?;
-    let mut selected = ManaPool::default();
-    for unit in &player_obj.mana_pool.mana {
-        if pending.pinned_pool_units.contains(&unit.pip_id) {
-            selected.add(unit.clone());
-        }
-    }
+    let selected = ManaPool::from_units(
+        player_obj
+            .mana_pool
+            .units()
+            .filter(|unit| pending.pinned_pool_units.contains(&unit.pip_id)),
+    );
 
     // CR 106.6: reduce under the SAME spend-restriction context the finalize
     // spend uses, so restricted mana the spell can't accept stays in the residual.
@@ -1853,8 +1796,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // rules-correct about WHEN the loop closes is not the same as knowing WHAT NUMBER will land.
     // The boundary re-checks whether the growth is still observed, and the controller names the
     // count at the ending point (CR 732.2a's "specified number of times"), so the final amount is
-    // not knowable while the badge is on screen. `∞→N` is a promise; the engine makes it only for
-    // a family whose amount it can already stand behind, and shows `∞→?` otherwise.
+    // not knowable while the badge is on screen, so a scheduled family shows `∞→?`.
     //
     // The two CRs this code does rely on, each for what it actually governs:
     //  • CR 732.2c — the shortcut is taken at the count every player accepted, so the collapse may
@@ -1957,15 +1899,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // (`attribution_player`) AND the display family (`family_of`).
     let mut families: BTreeMap<(PlayerId, UnboundedFamily), FamilyCollapseState> = BTreeMap::new();
     for (&controller, axes) in &state.unbounded_resources {
-        // Which axes THIS controller has an accepted-but-unapplied collapse for, and how certain
-        // each one is. Resolved once per controller, on the controller key, BEFORE attribution
+        // Which axes THIS controller has an accepted-but-unapplied collapse for. Resolved once per
+        // controller, on the controller key, BEFORE attribution
         // rewrites `player` — that ordering is the whole point. After `attribution_player` runs, a
         // victim-attributed axis no longer carries the identity of the loop that produced it, so no
         // downstream consumer (engine or frontend) can answer this correctly; two controllers
         // draining one victim would collide. This reads the ENGINE'S DEFERRAL STASH, which no CR
         // licenses (see `FamilyCollapseState`) — it is not a projection of CR 732.2c.
         let accepted_axes = accepted_collapse_axes(state, controller);
-        let scheduled_axes = scheduled_display_axes(&accepted_axes);
         for &axis in axes {
             // CR 732.2a + CR 110.1: an object-growth ∞ whose ENTIRE registered display set
             // has left the battlefield has no live board backing left — drop the row rather
@@ -1975,32 +1916,23 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             //
             // CR 732.2c binds the shortcut the instant the last player accepts, so an agreed
             // collapse is NOT cancelled by its board backing dying — its row survives the
-            // departure and keeps announcing the growth that will still land. The FACT set is
-            // read here, deliberately not the display-filtered one: `object_growth_backing`
-            // returns `None` for `Mana(_)` today, so the two happen to agree — an accident
-            // between two functions, not an invariant either of them states.
-            //
-            // A mana axis now reaches here with `accepted_axes` HOLDING it, so its row is kept
-            // solely by `object_growth_backing`'s `None` arm. If that arm ever moves, `Mana(_)`
-            // rows start disappearing during the accept→boundary window — decide it there,
-            // deliberately. Pinned by
-            // `combo_infinite_pile::low3_mixed_axis_replay_collapses_only_the_deferred_life_axis`.
-            if !accepted_axes.contains_key(&axis)
+            // departure and keeps announcing the growth that will still land.
+            if !accepted_axes.contains(&axis)
                 && object_growth_backing(state, controller, axis) == Some(false)
             {
                 continue;
             }
             let player = attribution_player(axis, controller);
-            let state_for_axis = match scheduled_axes.get(&axis) {
-                Some(&certainty) => FamilyCollapseState::Scheduled {
-                    certainty,
+            let state_for_axis = if accepted_axes.contains(&axis) {
+                FamilyCollapseState::Scheduled {
                     // The prompted seat is THIS loop's controller, captured here, in the only
                     // scope that still knows it: one line below, `attribution_player` may
                     // replace `player` with the victim, and from that point the controller is
                     // unrecoverable.
                     prompted: Some(controller),
-                },
-                None => FamilyCollapseState::Unscheduled,
+                }
+            } else {
+                FamilyCollapseState::Unscheduled
             };
             families
                 .entry((player, family_of(axis)))
@@ -2044,13 +1976,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     views.counter_display = counter_display_views(state);
 
     // CR 732.2a: an open shortcut window states the largest number of repetitions its proposal may
-    // specify. Publish that count; nothing downstream may re-derive it. The `is_bounded()` guard is
-    // the single authority for "the producer narrowed the bound"; an unnarrowed offer publishes
-    // nothing. Emitted HERE, above the Commander short-circuit below, for the same reason the
-    // channels above are.
+    // specify — the capacity the declare handler will accept, never the threshold its producer
+    // measured. Publish that count; nothing downstream may re-derive it. The `is_bounded()` guard
+    // is the single authority for "the producer measured a threshold"; an offer that measured none
+    // publishes nothing. Emitted HERE, above the Commander short-circuit below, for the same
+    // reason the channels above are.
     views.bounded_loop_max_repetitions = match &state.waiting_for {
         WaitingFor::LoopShortcut { schema, .. } if schema.is_bounded() => {
-            Some(schema.max_iterations)
+            Some(schema.deliverable_capacity)
         }
         _ => None,
     };
@@ -2392,107 +2325,14 @@ fn turn_order_views(
     (turn_order, viewer_turn_number)
 }
 
-/// CR 732.2c: THE FACT — the axes `controller` has an accepted, not-yet-applied collapse for.
-///
-/// The KEYS are the fact (which axes an accepted collapse names). The VALUES are
-/// `engine_resolution_choices::possible_hold`'s display encoding ([`CollapseCertainty`], typed as a
-/// display promise by its own doc there), carried alongside because every consumer that needs the
-/// fact also needs to know what may be promised about it. No display judgement is applied here —
-/// that is [`scheduled_display_axes`]'s job, and the split is what keeps a RULES consumer (the row
-/// loop's acceptance gate) from silently inheriting a DISPLAY exclusion.
-///
-/// This reads the stash of growth in flight along CR 732.2c's advance to the proposal's ending
-/// point — a priority window per CR 732.2a, reached after the CR 500.5 boundary where the growth
-/// lands. What it reports is therefore a real accepted result, not a parking spot; the reason the
-/// value is CERTAINTY rather than a number is that the boundary re-checks whether the growth is
-/// still observed and the controller names the count at the ending point (CR 732.2a). See
-/// [`FamilyCollapseState`], the `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block above, and
-/// `types/game_state.rs`'s `scheduled_collapse_axes` doc for the reading.
-fn accepted_collapse_axes(
-    state: &GameState,
-    controller: PlayerId,
-) -> BTreeMap<ResourceAxis, CollapseCertainty> {
-    let mut axes: BTreeMap<ResourceAxis, CollapseCertainty> = BTreeMap::new();
-    let Some(items) = state.pending_unbounded_materialization.get(&controller) else {
-        return axes;
-    };
-    for item in items {
-        // Per ITEM, so each axis inherits the certainty of the kind that actually scheduled it;
-        // two items naming the same axis merge to the weaker answer.
-        let certainty = crate::game::engine_resolution_choices::materialization_certainty(item);
-        for axis in state.scheduled_collapse_axes(std::slice::from_ref(item)) {
-            axes.entry(axis)
-                .and_modify(|acc| *acc = acc.weaker(certainty))
-                .or_insert(certainty);
-        }
-    }
-    axes
-}
-
-/// THE ANNOUNCEMENT — the fact ([`accepted_collapse_axes`]) minus what the badge cannot honestly
-/// promise, as the HUD should announce it, each axis carrying how CERTAIN that collapse is.
-///
-/// Takes the fact BY REFERENCE rather than re-deriving it: the signature is the guarantee that no
-/// caller can compute one without holding the other, so the two cannot drift into agreeing by
-/// coincidence. The `Mana(_)` exclusion below is the ONLY display judgement in the pair, which is
-/// what makes the FACT/ANNOUNCEMENT split meaningful at all.
-///
-/// Named rather than inlined into its one caller because the SCOPE LIMIT below is a rule, not a
-/// line of the row loop, and it has already proved it drifts when written twice: an earlier cut of
-/// this change had a second consumer (a `scheduled_collapse` tag channel, since removed for having
-/// no reader) and the guard lived in that consumer alone, so mana rows shipped flagged while the
-/// tag omitted them. Any future second consumer calls THIS, and inherits the limit; a consumer that
-/// needs the unfiltered rules answer calls [`accepted_collapse_axes`] instead, and the type it asks
-/// for says which of the two it got.
-///
-/// SCOPE LIMIT — `Mana(_)` is excluded. This is about what the badge would TELL the player, not
-/// about which code path ends the axis, and it is scoped to THE WINDOW THE BADGE RENDERS IN
-/// (accept → CR 500.5 boundary). Inside that window:
-/// - The pool is already unbounded and spendable — `mana_payment::refill_infinite_mana` re-tops it
-///   off the store after every action — so the chosen `N` does not bound what the player may
-///   spend. "A finite amount will be chosen" is false for this axis while it is true for every
-///   deferred one, and the badge is only on screen here.
-/// - CR 500.5 ends the badge at the step/phase end when the pool empties, on a schedule the
-///   accepted count does not move.
-///
-/// ACROSS the boundary it is not unconditional, and the sentence above is deliberately not written
-/// as if it were: a `DriveSequence` collapse replays the captured sequence `N` times after that
-/// empty, so the post-collapse pool genuinely is bounded by `N`. The badge is gone by then.
-///
-/// THE OTHER OVER-PROMISE — NOW TYPED, NOT DISCLOSED. `Counters` and `Life` axes can be scheduled
-/// here and then NOT collapse: the boundary re-runs the observed-growth firewall
-/// (`engine_resolution_choices`) and DECLINES the batched apply if a counter/life observer (Heliod,
-/// Corpsejack) appeared during the accept→boundary window, and a `Tokens` axis can park on a
-/// replacement choice instead. Each kind's answer comes from
-/// `engine_resolution_choices::materialization_certainty`, which reads that loop's own non-push-exit
-/// census rather than a copy of it, and it lands here as [`CollapseCertainty`]: `Conditional` for
-/// the three kinds with a hold, `Committed` only for `DriveSequence`, which cannot park. Witnessed
-/// by `combo_infinite_pile::real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_mints_tokens`.
-///
-/// It is NOT fixable at flag time — the observer can appear after this projection ran, so no value
-/// computed here can be right for the whole window — and THAT is precisely why `Conditional` is a
-/// variant rather than an apology: the badge stops promising a bound it cannot keep and says
-/// "collapse pending; this may stay unbounded" instead. `Mana(_)` is excluded above because its
-/// promise is false the moment it is made; this one can only become false later, which is why the
-/// two are handled differently.
-///
-/// This exclusion answers a DIFFERENT question from the collapse filter at the registration site:
-/// what the badge may PROMISE during the accept→boundary window, versus which authority ends the
-/// axis. The collapse no longer drops the `Mana(_)` axis at all —
-/// `game::engine::materialize_object_growth_shortcut` stores only `DeferredAccrual` axes in a
-/// `DriveSequence`'s `collapsed_axes` (`analysis::resource::ResourceAxis::unbounded_mark_kind`),
-/// and the batched items never named one — so no `PersistentAxisMaterialization` kind can schedule
-/// a `Mana(_)` axis, and this `retain` is a no-op on every production path today.
-///
-/// It is kept deliberately, as DEFENSE IN DEPTH: a future stash kind that scheduled a mana axis
-/// would otherwise silently start promising a bound on a pool the player is already spending
-/// without bound. The badge must not promise a bound the player's spendable pool never had.
-fn scheduled_display_axes(
-    accepted: &BTreeMap<ResourceAxis, CollapseCertainty>,
-) -> BTreeMap<ResourceAxis, CollapseCertainty> {
-    let mut axes = accepted.clone();
-    axes.retain(|axis, _| !matches!(axis, ResourceAxis::Mana(_)));
-    axes
+/// CR 732.2c: the axes `controller` has an accepted, not-yet-applied collapse for — growth in
+/// flight along CR 732.2c's advance to the proposal's ending point (see [`FamilyCollapseState`]).
+fn accepted_collapse_axes(state: &GameState, controller: PlayerId) -> BTreeSet<ResourceAxis> {
+    state
+        .pending_unbounded_materialization
+        .get(&controller)
+        .map(|items| state.scheduled_collapse_axes(items))
+        .unwrap_or_default()
 }
 
 /// The seat a resource axis LANDS ON, for the four axes that name one — and `None` for every
@@ -5150,8 +4990,7 @@ mod tests {
         }
         let pip_ids: Vec<_> = state.players[0]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .map(|u| u.pip_id)
             .collect();
 
@@ -6798,7 +6637,7 @@ mod tests {
     ///
     /// MUTATIONS THAT RED THIS (two-sided): (a) compute the state by testing each axis against the
     /// union of every controller's scheduled set — the `(player, axis)` join — instead of
-    /// `controller`'s own ⇒ the family comes back `Scheduled(Conditional)`; (b) never consult the
+    /// `controller`'s own ⇒ the family comes back `Scheduled`; (b) never consult the
     /// stash ⇒ it comes back `Unscheduled`.
     #[test]
     fn two_controllers_draining_one_victim_do_not_cross_schedule() {
@@ -6860,7 +6699,7 @@ mod tests {
             life_rows[0].state,
             FamilyCollapseState::Mixed,
             "P1 accepted a collapse and P0 did not, so the victim's life family is Mixed and \
-             renders a bare ∞ — a (player, axis) union join would say Scheduled(Conditional) and \
+             renders a bare ∞ — a (player, axis) union join would say Scheduled and \
              never consulting the stash would say Unscheduled; got {:?}",
             life_rows[0]
         );
@@ -6927,10 +6766,7 @@ mod tests {
         }
         assert_eq!(
             life_family_state(&both),
-            FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
-                prompted: None,
-            },
+            FamilyCollapseState::Scheduled { prompted: None },
             "two controllers with accepted collapses on one victim's life family name two seats, \
              so the badge falls back to the seat-neutral voice"
         );
@@ -6954,10 +6790,7 @@ mod tests {
         let agreed_state = life_family_state(&agreed);
         assert_eq!(
             agreed_state,
-            FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
-                prompted: Some(p1),
-            },
+            FamilyCollapseState::Scheduled { prompted: Some(p1) },
             "one controller, one accepted collapse ⇒ the badge names THAT controller"
         );
         let FamilyCollapseState::Scheduled { prompted, .. } = agreed_state else {
@@ -7072,7 +6905,7 @@ mod tests {
     }
 
     /// Minimal 1/1 token profile for the `Tokens` stash kind. Only the VARIANT matters to these
-    /// tests — `family_of` and `materialization_certainty` are both payload-independent.
+    /// tests — `family_of` is payload-independent.
     fn family_test_token_profile() -> Box<crate::types::ability::CopiableValues> {
         Box::new(crate::types::ability::CopiableValues {
             name: "Saproling".to_string(),
@@ -7151,14 +6984,13 @@ mod tests {
                     player: PlayerId(0),
                     family: UnboundedFamily::Tokens,
                     state: FamilyCollapseState::Scheduled {
-                        certainty: CollapseCertainty::Conditional,
                         // The controller IS the attributed seat for an aggregate axis, so this
                         // fixture cannot tell the two apart — the divergent case is
                         // `two_controllers_draining_one_victim_do_not_cross_schedule`.
                         prompted: Some(PlayerId(0)),
                     },
                 }),
-            "an accepted Tokens collapse is Scheduled(Conditional) — never Committed; got {:?}",
+            "an accepted Tokens collapse is Scheduled; got {:?}",
             scheduled_views.unbounded_families
         );
 
@@ -7180,9 +7012,9 @@ mod tests {
     /// (an ADJACENT-VARIANT hostile fixture: the two axes are different `ResourceAxis`
     /// variants that must nonetheless share one badge).
     ///
-    /// MUTATIONS: (a) fold with OR ("scheduled if ANY member is") ⇒ `Scheduled(Conditional)`;
+    /// MUTATIONS: (a) fold with OR ("scheduled if ANY member is") ⇒ `Scheduled`;
     /// (b) fold with AND ⇒ `Unscheduled`. (c) MATCHED POSITIVE in this same test: the same
-    /// state without the `Poison` seed yields `Scheduled(Conditional)`, so a badge that never
+    /// state without the `Poison` seed yields `Scheduled`, so a badge that never
     /// reports a schedule at all cannot pass either.
     #[test]
     fn mixed_family_is_not_scheduled() {
@@ -7252,7 +7084,7 @@ mod tests {
             counters_rows[0].state,
             FamilyCollapseState::Mixed,
             "one scheduled axis and one unscheduled axis in the same family is Mixed — an OR fold \
-             would say Scheduled(Conditional), an AND fold Unscheduled; got {:?}",
+             would say Scheduled, an AND fold Unscheduled; got {:?}",
             counters_rows[0]
         );
 
@@ -7271,27 +7103,20 @@ mod tests {
         );
         assert_eq!(
             scheduled_rows[0].state,
-            FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
-                prompted: Some(p0),
-            },
+            FamilyCollapseState::Scheduled { prompted: Some(p0) },
             "matched positive: with no unscheduled sibling the counters family IS scheduled, and \
-             a batched Counters collapse is Conditional; got {:?}",
+             a batched Counters collapse is Scheduled; got {:?}",
             scheduled_rows[0]
         );
     }
 
     /// M1-c (migrated from `PlayerHud.designations.test.tsx`, where the frontend used to do this
-    /// fold): two distinct `Mana(_)` axes collapse to ONE `mana` badge, and it is `Unscheduled` —
-    /// `scheduled_display_axes` excludes `Mana(_)` because the pool is spendable throughout the
-    /// window, so no `N` bounds it. Migrating the test IS the evidence the fold moved into the
-    /// engine.
+    /// fold): two distinct `Mana(_)` axes collapse to ONE `mana` badge, and it is `Unscheduled`.
+    /// Migrating the test IS the evidence the fold moved into the engine.
     ///
     /// MUTATION: key the accumulator by `axis` instead of `family` ⇒ two mana rows ⇒ RED.
-    /// MUTATION: drop the `Mana(_)` exclusion in `scheduled_display_axes` ⇒ `Mixed` ⇒ RED.
     #[test]
     fn two_mana_axes_fold_to_one_family_row() {
-        use crate::types::game_state::PersistentAxisMaterialization;
         use crate::types::mana::ManaType;
 
         let p0 = PlayerId(0);
@@ -7303,23 +7128,6 @@ mod tests {
                 ResourceAxis::Mana(ManaType::White),
             ],
         );
-        // A DELIBERATELY HOSTILE graft. Post-`ResourceAxis::unbounded_mark_kind`, production
-        // filters `Mana(_)` out of a `DriveSequence`'s `collapsed_axes`, so NO accept can build
-        // this stash. It is constructed by hand precisely so the `scheduled_display_axes`
-        // exclusion is still exercised: the row asks "if a mana axis DID reach the announcement,
-        // would the badge fold and stay `Unscheduled`?", which is a question about the PROJECTION,
-        // not about the filter. Do not "simplify" it to match production — that vacates the row.
-        state.register_pending_materialization(
-            p0,
-            PersistentAxisMaterialization::DriveSequence {
-                sequence: vec![],
-                collapsed_axes: vec![
-                    ResourceAxis::Mana(ManaType::Green),
-                    ResourceAxis::Mana(ManaType::White),
-                ],
-            },
-        );
-
         let views = derive_views(&state, None);
         assert_eq!(
             views.unbounded_resources.len(),
@@ -7334,8 +7142,7 @@ mod tests {
                 family: UnboundedFamily::Mana,
                 state: FamilyCollapseState::Unscheduled,
             }],
-            "two mana axes are ONE mana badge, and mana is never scheduled — the pool stays \
-             spendable for the whole window"
+            "two mana axes are ONE mana badge"
         );
     }
 
@@ -7448,23 +7255,14 @@ mod tests {
             FamilyCollapseState::Unscheduled,
             FamilyCollapseState::Mixed,
             FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Committed,
                 prompted: Some(PlayerId(0)),
             },
+            // DIFFERENT seat from the row above — the axis the seat meet added.
             FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
-                prompted: Some(PlayerId(0)),
-            },
-            // Same certainty as the row above, DIFFERENT seat — the axis the seat meet added.
-            FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
                 prompted: Some(PlayerId(1)),
             },
             // ⊥ of the seat lattice, reachable only as a meet result.
-            FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
-                prompted: None,
-            },
+            FamilyCollapseState::Scheduled { prompted: None },
         ];
         for x in all {
             assert_eq!(x.merge(x), x, "idempotent: {x:?}");
@@ -7486,38 +7284,28 @@ mod tests {
         // The lattice's load-bearing shape, stated so a reader need not re-derive it.
         assert_eq!(
             FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Committed,
                 prompted: Some(PlayerId(0)),
             }
             .merge(FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
                 prompted: Some(PlayerId(0)),
             }),
             FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Conditional,
                 prompted: Some(PlayerId(0)),
             },
-            "two schedules keep the WEAKER certainty, and an AGREED seat survives the meet"
+            "an AGREED seat survives the meet"
         );
         assert_eq!(
             FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Committed,
                 prompted: Some(PlayerId(0)),
             }
             .merge(FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Committed,
                 prompted: Some(PlayerId(1)),
             }),
-            FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Committed,
-                prompted: None,
-            },
-            "two DISTINCT seats meet to ⊥ (`None` = 'two or more seats', never 'nobody') while the \
-             certainty is untouched — the seat axis and the certainty axis meet independently"
+            FamilyCollapseState::Scheduled { prompted: None },
+            "two DISTINCT seats meet to ⊥ (`None` = 'two or more seats', never 'nobody')"
         );
         assert_eq!(
             FamilyCollapseState::Scheduled {
-                certainty: CollapseCertainty::Committed,
                 prompted: Some(PlayerId(0)),
             }
             .merge(FamilyCollapseState::Unscheduled),

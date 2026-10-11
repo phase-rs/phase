@@ -528,7 +528,7 @@ fn test_convoke_white_creature_pays_white() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::White
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -574,7 +574,7 @@ fn test_convoke_multicolor_creature_accepts_either_color_payment() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::Green
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -634,7 +634,7 @@ fn test_convoke_colorless_always_valid() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::Colorless
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));

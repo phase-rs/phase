@@ -1547,7 +1547,9 @@ pub enum StaticMode {
         who: ProhibitionScope,
     },
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
-    /// matching cards from the graveyards its `pool` names.
+    /// matching cards from the graveyards its `pool` names. A self-referential
+    /// permission's castable zones are its `active_zones`, which may include
+    /// `Exile`.
     GraveyardCastPermission {
         /// CR 601.2a: Per-turn cast frequency. `OncePerTurn` = "once during each of
         /// your turns" (Lurrus, Karador). `Unlimited` = no per-turn cap (Conduit).

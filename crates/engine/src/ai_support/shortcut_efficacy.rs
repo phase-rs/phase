@@ -1068,7 +1068,8 @@ fn indexed_ability_window_reach(
 }
 
 /// CR 603.2: can a CONFINED action's event stream ever match this trigger's
-/// trigger event? Returns `true` iff it PROVABLY cannot.
+/// trigger event? Returns `true` iff it PROVABLY cannot, where the proof covers
+/// only the events the `## Boundary` section below considers.
 ///
 /// # This predicate is NOT a fact about the trigger
 ///
@@ -1109,15 +1110,17 @@ fn indexed_ability_window_reach(
 /// `true` in [`any_action_may_interfere`] without consulting this. Events are
 /// counted from announcement through full resolution, INCLUDING cost payment
 /// (CR 601.2b–i for a spell, CR 602.2b for an activated ability, which routes to
-/// the same process). `GameAction::PassPriority` is excluded by construction (it
-/// returns `false` before the fold), so phase advance is out of domain and a
-/// beginning-of-phase trigger cannot be reached through this predicate's callers.
+/// the same process). The arms below reason over what the allowlisted costs and
+/// effects themselves produce; an event that a replacement effect's `execute`
+/// produces while replacing one of the action's own events is not considered.
+/// `GameAction::PassPriority` is excluded by construction (it returns `false`
+/// before the fold), so phase advance is out of domain and a beginning-of-phase
+/// trigger cannot be reached through this predicate's callers.
 ///
 /// ## Fail-closed
 ///
-/// Exhaustive dispatch with a `_ => false` arm, mirroring
-/// [`crate::game::triggers::trigger_event_unreachable_in_phase`]: a mode this
-/// predicate cannot classify KEEPS its veto. A future mode is swallowed into
+/// Exhaustive dispatch with a `_ => false` arm: a mode this predicate cannot
+/// classify KEEPS its veto. A future mode is swallowed into
 /// conservatism, never into relief.
 fn trigger_event_unreachable_by_confined_action(
     def: &crate::types::ability::TriggerDefinition,
@@ -1213,7 +1216,12 @@ fn trigger_event_unreachable_by_confined_action(
         // * `TokenCreated`/`TokenCreatedOnce` — CR 111.1: tokens are put onto the
         //   battlefield by effects that say so. `Effect::Token` is not allowlisted,
         //   and `match_token_created` keys on the dedicated
-        //   `GameEvent::TokenCreated`.
+        //   `GameEvent::TokenCreated`. That ground does not cover a token that a
+        //   replacement effect (CR 614.1a) creates while replacing the confined
+        //   action's own event, and a `TokenCreated` observer sees that token: an
+        //   opponent's Kalitas, Traitor of Ghet replaces the death of a Sakura-Tribe
+        //   Elder sacrificed to its own ability with exile plus a Zombie token, and
+        //   that opponent's Akim, the Soaring Wind triggers on the token.
         //
         // `Milled`/`MilledOnce`/`MilledAll` are DELIBERATELY ABSENT — see below.
         TriggerMode::Drawn
@@ -2207,13 +2215,13 @@ mod tests {
     /// only ever correct on the day it is written; a `..`-free destructure is correct
     /// until the compiler says otherwise.
     ///
-    /// **Why `CardFace` and not `GameObject`.** `GameObject` has 149 fields, most of them
-    /// runtime state (zone, damage, counters, attachments) with no bearing on what a card
-    /// can do. Destructuring it here would be a churn magnet that every unrelated field
-    /// addition breaks, and it would be blanket-`..`'d back within a round. `CardFace` has
-    /// 33 and is the actual source `printed_cards` reads to populate object rules content,
-    /// so it guards the defect class that occurred rather than the largest surface
-    /// available.
+    /// **Why `CardFace` and not `GameObject`.** `GameObject`'s fields are mostly runtime
+    /// state (zone, damage, counters, attachments) with no bearing on what a card can do,
+    /// and there are far more of them. Destructuring it here would be a churn magnet that
+    /// every unrelated field addition breaks, and it would be blanket-`..`'d back within a
+    /// round. `CardFace` has 33 and is the actual source `printed_cards` reads to populate
+    /// object rules content, so it guards the defect class that occurred rather than the
+    /// largest surface available.
     ///
     /// **Honest scope limit:** this guards fields that reach an object THROUGH
     /// `printed_cards`. A `GameObject` field written by some other path is not covered —
@@ -2265,8 +2273,8 @@ mod tests {
                     forge_triggers: _,
                     forge_statics: _,
                     forge_replacements: _,
-                    // Names tokens this card can make; MAKING one runs through
-                    // `Effect::Token` in `abilities`, which this fold already reads.
+                    // Names tokens this card can make; MAKING one runs through the
+                    // effects in `abilities`, which this fold already reads.
                     related_token_ids: _,
                     // Image/catalog identifiers.
                     source_printing_ids: _,
@@ -2449,8 +2457,8 @@ mod tests {
         // `back_face` is the one gated field with no `apply_card_face_to_object` route:
         // `printed_cards::apply_card_face_to_back_face` fills a `BackFaceData` on the
         // transform path instead. Asserted directly, and reusing `game::specialize`'s
-        // existing empty constructor rather than hand-rolling a 22-field literal that would
-        // go stale the moment `BackFaceData` gains a field.
+        // existing empty constructor rather than hand-rolling a full `BackFaceData` literal
+        // that would go stale the moment it gains a field.
         let mut state = GameState::default();
         let id = create_object(
             &mut state,

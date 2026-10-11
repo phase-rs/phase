@@ -2766,7 +2766,17 @@ fn finish_cost_object_moves(
                         .is_some_and(|object| object.zone == Zone::Exile)
                 })
                 .collect();
-            let set_id = super::effects::publish_fresh_tracked_set(state, delivered);
+            // CR 608.2c: this arm's own placement names its producer. It is
+            // reached only behind a cost move whose destination is
+            // `Zone::Exile`, and it keeps exactly the members that arrived
+            // there, so a "cards exiled this way" count bound to that action
+            // reads them.
+            let cause = super::effects::this_way_cause_for_action(
+                crate::types::ability::EffectKind::ChangeZone,
+                Some(Zone::Exile),
+            );
+            let set_id =
+                super::effects::publish_fresh_tracked_set_with_causes(state, delivered, cause);
             let mut pending = pending;
             pending.ability.bind_tracked_set_sentinel_recursive(set_id);
             finish_pending_cost_or_cast(state, player, pending, events)?
@@ -3439,14 +3449,12 @@ fn settle_delve_markers(
     };
     let unspent: Vec<ObjectId> = pool
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.is_convoke_payment() && selected.contains(&unit.source_id))
-        .map(|unit| unit.source_id)
+        .shapes()
+        .filter(|(shape, _)| shape.is_convoke_payment() && selected.contains(&shape.source_id))
+        .map(|(shape, _)| shape.source_id)
         .collect();
     pool.mana_pool
-        .mana
-        .retain(|unit| !(unit.is_convoke_payment() && unspent.contains(&unit.source_id)));
+        .retain_shapes(|shape| !(shape.is_convoke_payment() && unspent.contains(&shape.source_id)));
     pending.delved_cards = selected
         .into_iter()
         .filter(|id| !unspent.contains(id))
@@ -11605,7 +11613,15 @@ pub(super) fn pay_and_push_adventure(
 
     state.pending_cast = Some(Box::new(pending));
     if payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
-        auto_tap_non_sacrificial_mana_sources(state, player, cost, events, object_id);
+        let keep_untapped = sacrificial_tap_sources_to_keep(state, player, cost, object_id);
+        auto_tap_non_sacrificial_mana_sources(
+            state,
+            player,
+            cost,
+            events,
+            object_id,
+            &keep_untapped,
+        );
         if pending_cost_is_payable_from_pool(state, player) {
             return finalize_automatic_mana_payment(state, player, events);
         }
@@ -12110,65 +12126,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .unwrap_or_default();
     let convoked_creature_count = convoked_creatures.len();
 
-    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast as a 1-element
-    // loop-action sequence the PR-7 Phase 4d-ii / P7 v3 loop-shortcut hook replays. Gated to a
-    // buyback-paid, permanent-creating (token) spell so the hook's cheap precondition
-    // (`!last_loop_action_sequence.is_empty()`) is set ~never. Fail-safe note: a spurious capture
-    // from buyback + some OTHER optional cost only makes the clone-drive run — its cover/abort
-    // rejects any non-covering recast, so this can never false-certify. Cleared (set `[]`) on any
-    // non-matching cast, so a stale sequence never lingers. Additionally gated on
-    // `!in_simulation_probe()` so the detection/materialize drive (which re-runs this same cast
-    // under a `SimulationProbeGuard`) does NOT re-write the field — the sequence must stay
-    // byte-stable across the cover's s_n/s_n1/s_n2 frames (it is COMPARED, resource.rs). Overwrite
-    // is idempotent for a recast, but the shared invariant keeps the multi-activation path (which
-    // APPENDS, engine.rs) honest. `ability.effect` is read here before `ability` is moved into
-    // `stack_ability` below.
-    {
-        let is_token_creating =
-            matches!(ability.effect, crate::types::ability::Effect::Token { .. });
-        let (has_buyback, convoke) = state.objects.get(&object_id).map_or((false, None), |obj| {
-            let has_buyback = obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)));
-            let convoke = obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Convoke))
-                .then_some(crate::types::game_state::ConvokeMode::Convoke);
-            (has_buyback, convoke)
-        });
-        // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
-        // SERIALIZED surface too — `last_loop_action_sequence` is `skip_serializing_if=is_empty`, so
-        // a spurious element in OFF mode would appear in a save/replay/scenario. Gate on the SAME
-        // accessor the consuming hook uses so the mode gate has one source. The whole
-        // set-or-clear is skipped inside a `SimulationProbeGuard` (the detection/materialize drive
-        // re-casts on a clone): the sequence must stay byte-STABLE across the cover's s_n/s_n1/s_n2
-        // frames (it is COMPARED, resource.rs), so the probe must LEAVE it untouched rather than
-        // clear it. Overwrite-with-`vec![ctx]`-or-`[]` is the real-cast behavior (idempotent for a
-        // homogeneous recast; a non-matching real cast clears a stale sequence).
-        if !crate::game::engine::in_simulation_probe() {
-            state.last_loop_action_sequence = (state.loop_detection.samples()
-                && additional_cost_paid
-                && has_buyback
-                && is_token_creating)
-                .then_some(crate::types::game_state::LoopActionContext {
-                    card_id,
-                    controller: player,
-                    action: crate::types::game_state::LoopAction::Recast {
-                        from_zone: source_zone,
-                        uses_buyback: crate::types::game_state::BuybackUsage::Used,
-                    },
-                    convoke,
-                    // FIX-1: a buyback recast pins its loop choices via `convoke`, not the
-                    // FIX-1 tap-cost/color/proliferate choices — recorded pinless.
-                    pins: Vec::new(),
-                })
-                .map(|ctx| vec![ctx])
-                .unwrap_or_default();
-        }
-    }
-
     let announced_targets = declared_targets_in_chain(&ability);
 
     // Determine whether this spell has a meaningful on-resolve ability.
@@ -12337,7 +12294,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
             "graveyard permission slot not announced".to_string(),
         ));
     }
-    // CR 601.2a + CR 611.2a: Capture the tracked-set group of a
+    // CR 601.2a + CR 608.2c + CR 611.2a: Capture the tracked-set group of a
     // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
     // leaves its source zone for the stack.
     // Consumed after the move (see below) so the grant's one allowed cast is
@@ -12738,7 +12695,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         )
         .expect("top-of-library cast permission must have an unused ledger slot");
     }
-    // CR 601.2a + CR 611.2a: A single-use exile-cast grant is spent
+    // CR 601.2a + CR 608.2c + CR 611.2a: A single-use exile-cast grant is spent
     // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
     // every other card still in the tracked set so the remaining exiled cards
     // can no longer be cast (Chandra, Hope's Beacon +1: "an instant or sorcery
@@ -13626,15 +13583,17 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding(
 }
 
 /// CR 601.2g-h + CR 605.3b: Apply the existing automatic planner while
-/// excluding sacrificial activation rows. This is the safe first leg of
-/// `AutoExceptSacrificialMana`; the caller retains the pending cast and offers
-/// the excluded capabilities explicitly if this leg cannot finish payment.
+/// excluding sacrificial activation rows and the `excluded` sources. This is
+/// the safe first leg of `AutoExceptSacrificialMana`; the caller retains the
+/// pending cast and offers the excluded capabilities explicitly if this leg
+/// cannot finish payment.
 pub(super) fn auto_tap_non_sacrificial_mana_sources(
     state: &mut GameState,
     player: PlayerId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
     source_id: ObjectId,
+    excluded: &HashSet<ObjectId>,
 ) {
     let spell_meta = super::casting::build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
@@ -13644,7 +13603,7 @@ pub(super) fn auto_tap_non_sacrificial_mana_sources(
         cost,
         events,
         Some(source_id),
-        &HashSet::new(),
+        excluded,
         Some(mana_sources::ManaSourcePenalty::Sacrifices),
         spell_ctx.as_ref(),
         None,
@@ -13666,8 +13625,57 @@ pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap(
 ) -> bool {
     let mut simulated = state.clone();
     let mut events = Vec::new();
-    auto_tap_non_sacrificial_mana_sources(&mut simulated, player, cost, &mut events, source_id);
+    auto_tap_non_sacrificial_mana_sources(
+        &mut simulated,
+        player,
+        cost,
+        &mut events,
+        source_id,
+        &HashSet::new(),
+    );
     spell_cost_is_payable_from_pool(&simulated, player, source_id, cost)
+}
+
+/// CR 601.2g-h + CR 605.3a: The sources the first leg of
+/// `AutoExceptSacrificialMana` must leave untapped. A source whose sacrificial
+/// row needs `{T}` (Phyrexian Tower, Crystal Vein) loses that row once the first
+/// leg taps it for another row, so it is kept whenever tapping it would leave
+/// the cast unpayable by the castability authority.
+fn sacrificial_tap_sources_to_keep(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    source_id: ObjectId,
+) -> HashSet<ObjectId> {
+    let mut simulated = state.clone();
+    auto_tap_non_sacrificial_mana_sources(
+        &mut simulated,
+        player,
+        cost,
+        &mut Vec::new(),
+        source_id,
+        &HashSet::new(),
+    );
+    if super::casting::can_feasibly_pay_mana_cost(&simulated, player, Some(source_id), cost) {
+        return HashSet::new();
+    }
+    mana_sources::activatable_mana_source_selections(state, player)
+        .into_iter()
+        .filter(|selection| selection.penalty == mana_sources::ManaSourcePenalty::Sacrifices)
+        .filter(|selection| {
+            selection
+                .ability_index
+                .and_then(|index| {
+                    state
+                        .objects
+                        .get(&selection.source.object_id)?
+                        .abilities
+                        .get(index)
+                })
+                .is_some_and(|ability| mana_sources::has_tap_component(&ability.cost))
+        })
+        .map(|selection| selection.source.object_id)
+        .collect()
 }
 
 pub(crate) fn spell_cost_is_payable_from_pool(
@@ -18169,6 +18177,121 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 701.13a: an aggregate-threshold exile cost that pauses in
+    /// `PendingCostMoveCompletion::PublishExileTrackedSet` publishes the cards
+    /// that reached exile AND the action that put them there, so a "cards exiled
+    /// this way" count bound to `Exiled` reads them. Drives the real
+    /// `apply_action` payment path. Dropping the cause from that arm leaves the
+    /// side map absent and the second leg reads zero while the first still
+    /// passes.
+    #[test]
+    fn exile_aggregate_cost_publishes_the_action_that_exiled_its_members() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty, ThisWayCause};
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aggregate Exiler".to_string(),
+            Zone::Hand,
+        );
+        let mut fodder = Vec::new();
+        for (index, name) in ["Fodder A", "Fodder B"].into_iter().enumerate() {
+            let id = create_object(
+                &mut state,
+                CardId(10 + index as u64),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Graveyard,
+            );
+            state.players[0].graveyard.push_back(id);
+            fodder.push(id);
+        }
+
+        // No-kicker, no-target spell so the payment lands the cast in the same
+        // action (`finish_pending_cost_or_cast` → `pay_and_push`).
+        let mut pending = make_pending(spell);
+        pending.activation_ability_index = None;
+        pending.card_id = CardId(1);
+        pending.origin_zone = Zone::Hand;
+
+        // CR 601.2a: the announcement entry the real cast flow leaves on the
+        // stack while costs are paid.
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::ExileAggregate {
+                zone: Zone::Graveyard,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                value: 0,
+                filter: TargetFilter::Any,
+            },
+            choices: fodder.clone(),
+            count: fodder.len(),
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: fodder.clone(),
+            },
+        )
+        .expect("exiling both graveyard cards satisfies the aggregate threshold");
+
+        let published = state
+            .chain_tracked_set_id
+            .expect("the cost completion binds a chain tracked set");
+        let mut members = state
+            .tracked_object_sets
+            .get(&published)
+            .cloned()
+            .unwrap_or_default();
+        members.sort_unstable_by_key(|id| id.0);
+        let mut expected = fodder.clone();
+        expected.sort_unstable_by_key(|id| id.0);
+        // Reach guard: the cost really moved both cards and the arm really ran.
+        assert_eq!(
+            members, expected,
+            "the cost publishes exactly the cards that reached exile"
+        );
+
+        let causes = state
+            .tracked_set_member_causes
+            .get(&published)
+            .expect("the completion records the action that exiled its members");
+        for id in &fodder {
+            assert_eq!(
+                causes.get(id),
+                Some(&ThisWayCause::Exiled),
+                "each member carries the action the cost's exile named"
+            );
+        }
+    }
+
     /// CR 603.6c + CR 603.10a + CR 603.3b (DEFERRED kicker/target-paused
     /// sub-case): when an additional sacrifice cost is followed by a deferred
     /// target/kicker/modal pause, `finish_pending_cost_or_cast` returns a
@@ -18603,8 +18726,12 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 1, "no hand card may be paid");
         let mut actual_rng = state.rng.clone();
         assert_eq!(
-            actual_rng.next_u64(),
-            expected_rng.next_u64(),
+            actual_rng
+                .draw(crate::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
+            expected_rng
+                .draw(crate::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
             "strict rejection must not advance seeded randomness"
         );
     }

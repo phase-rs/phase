@@ -7914,18 +7914,29 @@ pub fn synthesize_backup(face: &mut CardFace) {
 /// permanent. The `type_str` is the capitalized Champion payload (e.g.
 /// "Kithkin", "Dragon"); per CR 702.72a it always names a creature type. A
 /// payload of "Creature" (cards that champion a creature of any type) yields a
-/// bare creature filter with no subtype constraint.
+/// bare creature filter with no subtype constraint. An "X or Y" payload
+/// ("Goblin or Shaman") is the union of both types.
 ///
 /// `FilterProp::Another` enforces the "another" clause (CR 109.1): the
-/// championing permanent itself can never be the exiled creature.
+/// championing permanent itself can never be the exiled permanent.
 fn champion_type_filter(type_str: &str) -> TargetFilter {
-    let mut filter = TypedFilter::creature()
-        .controller(ControllerRef::You)
-        .properties(vec![FilterProp::Another]);
-    if !type_str.eq_ignore_ascii_case("creature") {
-        filter = filter.subtype(type_str.to_string());
+    let any_creature = type_str.eq_ignore_ascii_case("creature");
+    // CR 109.2 + CR 205.3m: a creature type names any permanent with that
+    // type, kindreds included; only "a creature" is scoped to creatures.
+    let scope = if any_creature {
+        TypedFilter::creature()
+    } else {
+        TypedFilter::permanent()
     }
-    TargetFilter::Typed(filter)
+    .controller(ControllerRef::You)
+    .properties(vec![FilterProp::Another]);
+    if any_creature {
+        return TargetFilter::Typed(scope);
+    }
+    if let Some(union) = crate::parser::oracle_target::parse_type_phrase_union(type_str, &scope) {
+        return union;
+    }
+    TargetFilter::Typed(scope.subtype(type_str.to_string()))
 }
 
 fn champion_has_eligible_object_condition(type_str: &str) -> AbilityCondition {
@@ -24775,7 +24786,7 @@ mod sunburst_runtime_tests {
             .map(|c| ManaUnit::new(ManaType::from(*c), ObjectId(0), false, Vec::new()))
             .collect();
         if let Some(p) = state.players.iter_mut().find(|p| p.id == P0) {
-            p.mana_pool.mana = mana;
+            p.mana_pool = crate::types::mana::ManaPool::from_units(mana);
         }
 
         (GameRunner::from_state(state), spell)
@@ -25650,7 +25661,12 @@ mod champion_synthesis_tests {
                             .type_filters
                             .iter()
                             .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Elf")));
+                        // CR 109.2 + CR 205.3m: an Elf permanent, kindreds included.
                         assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|f| matches!(f, TypeFilter::Permanent)));
+                        assert!(!tf
                             .type_filters
                             .iter()
                             .any(|f| matches!(f, TypeFilter::Creature)));
@@ -25667,6 +25683,28 @@ mod champion_synthesis_tests {
             .find(|b| matches!(&*b.effect, Effect::Sacrifice { .. }))
             .expect("sacrifice branch must exist");
         assert!(is_champion_self_sacrifice_ability(sacrifice));
+    }
+
+    /// CR 702.72a: "Champion a Goblin or Shaman" (Lightning Crafter) exiles
+    /// another Goblin or another Shaman you control, never one subtype named
+    /// "Goblin or Shaman".
+    #[test]
+    fn champion_or_payload_is_a_union_of_both_types() {
+        let filter = champion_type_filter("Goblin or Shaman");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or union, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for (leg, kind) in filters.iter().zip(["Goblin", "Shaman"]) {
+            let TargetFilter::Typed(tf) = leg else {
+                panic!("expected a Typed leg, got {leg:?}");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.properties.contains(&FilterProp::Another));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype(kind.to_string())));
+        }
     }
 
     /// CR 702.72a + CR 702.72b: Champion synthesizes an LTB trigger that

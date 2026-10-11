@@ -359,11 +359,21 @@ fn v3_mulligan_by_either_seat_shuffles_the_pile() {
 fn shuffling_the_empty_seat_consumes_no_entropy() {
     let mut state = GameState::new_two_player(7);
     let before = state.rng.get_word_pos();
-    engine::util::im_ext::shuffle_vector(&mut im::Vector::<ObjectId>::new(), &mut state.rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut im::Vector::<ObjectId>::new(),
+        state
+            .rng
+            .draw(engine::types::game_state::RandomDraw::Placement),
+    );
     assert_eq!(state.rng.get_word_pos(), before);
 
     let mut pile: im::Vector<ObjectId> = (1..=8).map(ObjectId).collect();
-    engine::util::im_ext::shuffle_vector(&mut pile, &mut state.rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut pile,
+        state
+            .rng
+            .draw(engine::types::game_state::RandomDraw::Placement),
+    );
     assert_ne!(
         state.rng.get_word_pos(),
         before,

@@ -454,6 +454,16 @@ fn effect_pay_cost_mana_resume(
             convoke_mode: *convoke_mode,
         });
     }
+    // CR 605.3a + CR 616.1: a mana ability's payment window is likewise the root.
+    if let WaitingFor::ManaAbilityManaPayment {
+        pending_mana_ability,
+        ..
+    } = &state.waiting_for
+    {
+        return Some(ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability: pending_mana_ability.clone(),
+        });
+    }
     // CR 118.12 + CR 605.3b + CR 616.1: `UnlessPayment` is already the
     // authoritative outer payment root.  A mana source paused while funding
     // it must return to that exact prompt, not manufacture an Effect::PayCost

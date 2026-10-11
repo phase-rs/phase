@@ -210,6 +210,21 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 128 — Loop-shortcut and period-confirmation shapes, one bump over 127:
+ *      ShortcutDecisionSchema replaced max_iterations with the pair
+ *      measured_repetition_bound and deliverable_capacity, so
+ *      WaitingFor.LoopShortcut publishes the threshold the reduction measured
+ *      separately from the count this engine will deliver (every field
+ *      involved carries a serde default, so a v127 peer reads a count neither
+ *      side measured, and the handshake is the only place that can be
+ *      refused); WaitingFor.LoopShortcut and ShortcutProposal gained a
+ *      required road naming the producer that minted the offer, which a v127
+ *      peer drops from every frame it re-encodes;
+ *      WaitingFor.ManaAbilityManaPayment and its ManaAbilityResume root are
+ *      new variants a v127 peer cannot parse, and ResolvedAbility gains the
+ *      optional delayed_origin; GameState drops the recorded loop-action
+ *      sequence; ConfirmedPeriod gains its reach and PeriodicDelta its
+ *      cleanup pair. Wire 110 moves with it; no lobby frame names it.
  * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
  *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
  *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
@@ -797,7 +812,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 127;
+export const PROTOCOL_VERSION = 128;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -19,12 +19,12 @@
 //! (`drive_damage_loop_certificate` plus the negatives) exercise the same pipeline
 //! without the export. Reverting either `detect_loop` gate flips an assertion.
 //!
-//! Corpus card-availability over all 54 rows
+//! Corpus card-availability over every corpus row
 //! (`corpus_cards_present_and_implementation_status_matches_gating`): every card
 //! present, and every non-gated combo fully modeled (no top-level `Unimplemented`).
 //! Skips gracefully when the gitignored export is absent.
 //!
-//! Corpus table (`corpus::CORPUS`) + shape/partition-lock meta-tests: all 54 rows
+//! Corpus table (`corpus::CORPUS`) + shape/partition-lock meta-tests: every corpus row
 //! partitioned into driven ∪ gated ∪ deferred. The `combo-verify` CLI
 //! ([`corpus::drive_row`]) classifies each via the same drivers;
 //! `drive_row_classifies_corpus_via_shared_pipeline` and the `classify_status`
@@ -58,14 +58,10 @@ fn card_db() -> &'static CardDatabase {
 // ===========================================================================
 
 /// META-TEST: lock the corpus shape so an accidental row deletion or miscount
-/// fails loudly. 54 rows total (3 driving + 51 corpus), exactly 4 card-gated.
+/// fails loudly: the row total, the card-gated rows, and their testable complement.
 #[test]
 fn corpus_table_shape_is_locked() {
-    assert_eq!(
-        corpus::corpus_len(),
-        54,
-        "corpus must hold all 3 driving + 51 combos"
-    );
+    assert_eq!(corpus::corpus_len(), 61, "corpus must hold all 61 rows");
     let gated = (0..corpus::corpus_len())
         .filter(|&i| corpus::row(i).gated_on.is_some())
         .count();
@@ -87,13 +83,13 @@ fn corpus_table_shape_is_locked() {
             | WinKind::Advantage => {}
         }
     }
-    // 50 of 54 are testable today (gated count is the complement).
+    // The testable rows are the complement of the gated rows.
     let testable = corpus::corpus_len() - gated;
-    assert_eq!(testable, 50, "50 corpus combos are testable once driven");
+    assert_eq!(testable, 57, "57 corpus combos are testable once driven");
 }
 
 /// META-TEST: the corpus is a clean partition — every row is exactly one of
-/// {driven, gated, deferred}, pairwise disjoint, covering all 54. The driven set
+/// {driven, gated, deferred}, pairwise disjoint, covering every row. The driven set
 /// is `corpus::DRIVERS`, gated is `gated_on.is_some()`, deferred is
 /// `deferral.is_some()`; a driven/gated row must NOT also carry a deferral bucket.
 #[test]
@@ -108,9 +104,9 @@ fn corpus_partition_is_locked() {
         .filter(|&i| corpus::row(i).deferral.is_some())
         .collect();
 
-    assert_eq!(driven.len(), 13, "13 driven rows");
+    assert_eq!(driven.len(), 22, "22 driven rows");
     assert_eq!(gated.len(), 4, "4 gated rows");
-    assert_eq!(deferred.len(), 37, "37 deferred rows");
+    assert_eq!(deferred.len(), 35, "35 deferred rows");
 
     assert!(driven.is_disjoint(&gated), "driven ∩ gated must be empty");
     assert!(
@@ -131,7 +127,7 @@ fn corpus_partition_is_locked() {
         n,
         "driven ∪ gated ∪ deferred must cover every one of the {n} rows"
     );
-    assert_eq!(n, 54);
+    assert_eq!(n, 61);
 
     // Exclusivity: a driven or gated row must not also declare a deferral bucket.
     for &i in driven.iter().chain(gated.iter()) {
@@ -161,7 +157,7 @@ fn face_has_unimplemented(face: &crate::types::card::CardFace) -> bool {
             .any(|t| t.execute.as_deref().is_some_and(ability_unimpl))
 }
 
-/// ACCEPTANCE OVER THE WHOLE CORPUS (all 54 rows): every card of every combo is
+/// ACCEPTANCE OVER THE WHOLE CORPUS (every row): every card of every combo is
 /// present in the real card-data export, and its implementation status matches
 /// the row's `gated_on` — a non-gated combo has zero `Effect::Unimplemented`
 /// across all its cards, while a gated combo legitimately contains an unmodeled
@@ -181,7 +177,7 @@ fn corpus_cards_present_and_implementation_status_matches_gating() {
             match db.get_face_by_name(card) {
                 None => missing.push(format!("{} (in {})", card, row.name)),
                 Some(face) => {
-                    // Only the non-gated rows must be fully modeled; the 4 gated
+                    // Only the non-gated rows must be fully modeled; the gated
                     // rows legitimately contain an unmodeled card. A nested
                     // Unimplemented in a cost/replacement may not be surfaced by
                     // `face_has_unimplemented` (it walks top-level ability/trigger
@@ -278,6 +274,70 @@ fn drive_row_classifies_corpus_via_shared_pipeline() {
         match corpus::drive_row(db, idx).status {
             corpus::RowStatus::Gated { card: c } => assert_eq!(c, card),
             other => panic!("idx {idx} must be Gated (never Failed), got {other:?}"),
+        }
+    }
+
+    // Confirmed (offer): each Food Chain member is offered as an advantage loop through `apply()`.
+    for idx in [40usize, 54] {
+        match corpus::drive_row(db, idx).status {
+            corpus::RowStatus::Confirmed { win_kind, .. } => {
+                assert_eq!(win_kind, WinKind::Advantage)
+            }
+            other => panic!("idx {idx} (Food Chain) must be Confirmed, got {other:?}"),
+        }
+    }
+
+    // Confirmed (offer): the Altar of the Brood member mills each of the three opponents.
+    match corpus::drive_row(db, 55).status {
+        corpus::RowStatus::Confirmed {
+            unbounded,
+            win_kind,
+        } => {
+            assert_eq!(win_kind, WinKind::Advantage);
+            for seat in 1..4 {
+                assert!(
+                    unbounded.contains(&ResourceAxis::LibraryDelta(PlayerId(seat))),
+                    "idx 55 must name P{seat}'s library (got {unbounded:?})"
+                );
+            }
+        }
+        other => panic!("idx 55 (Altar of the Brood) must be Confirmed, got {other:?}"),
+    }
+
+    // Confirmed (offer): each drain member is offered bounded at the opponents' crossings.
+    for (idx, drained) in [(45usize, 1..2), (56, 1..4), (57, 1..4)] {
+        match corpus::drive_row(db, idx).status {
+            corpus::RowStatus::Confirmed {
+                unbounded,
+                win_kind,
+            } => {
+                assert_eq!(win_kind, WinKind::LethalDamage);
+                for seat in drained {
+                    assert!(
+                        unbounded.contains(&ResourceAxis::Life(PlayerId(seat))),
+                        "idx {idx} must name P{seat}'s life (got {unbounded:?})"
+                    );
+                }
+            }
+            other => panic!("idx {idx} (drain) must be Confirmed, got {other:?}"),
+        }
+    }
+
+    // Confirmed (offer): each carried period is offered at its next combat or turn.
+    for (idx, win_kind, axis) in [
+        (58usize, WinKind::LethalDamage, ResourceAxis::Life(P1)),
+        (59, WinKind::LethalDamage, ResourceAxis::Life(P1)),
+        (60, WinKind::Advantage, ResourceAxis::ExtraTurns),
+    ] {
+        match corpus::drive_row(db, idx).status {
+            corpus::RowStatus::Confirmed {
+                unbounded,
+                win_kind: got,
+            } => {
+                assert_eq!(got, win_kind, "idx {idx}");
+                assert!(unbounded.contains(&axis), "idx {idx}: {unbounded:?}");
+            }
+            other => panic!("idx {idx} (carried period) must be Confirmed, got {other:?}"),
         }
     }
 
@@ -1785,4 +1845,116 @@ fn drive_finite_stack_keeps_ring_empty() {
         "a shrinking finite stack must never record a loop snapshot (ring stayed empty)"
     );
     assert!(resolutions >= 3, "the drive must have processed real beats");
+}
+
+/// CR 500.7 + CR 732.2a: the Time Sieve row's extra-turn span is carried into each extra turn, but
+/// Thopter Assembly re-mints its Thopters there, so the confirmer refuses it wherever it is named
+/// and nothing is offered.
+#[test]
+fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
+    use crate::game::period_confirm::confirm_for_tests;
+    use crate::game::play_trace::SpanSource;
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::zones::Zone;
+    let db = card_db();
+    let sieve_row = (0..corpus::corpus_len())
+        .find(|&idx| corpus::row(idx).name == "Time Sieve + Thopter Assembly")
+        .expect("the Time Sieve row");
+    assert!(matches!(
+        corpus::drive_row(db, sieve_row).status,
+        corpus::RowStatus::Deferred {
+            bucket: corpus::DeferralBucket::ExtraTurnOrCombat
+        }
+    ));
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..25 {
+        scenario.add_real_card(P0, "Island", Zone::Library, db);
+    }
+    scenario.with_library_top(P1, &["Island"; 25]);
+    let sieve = scenario.add_real_card(P0, "Time Sieve", Zone::Battlefield, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    }
+    let assembly = scenario.add_real_card(P0, "Thopter Assembly", Zone::Hand, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let start = runner.state().turn_number;
+    let mut verdicts = Vec::new();
+    while runner.state().turn_number <= start + 6 {
+        assert!(
+            corpus::offered_certificate(&runner).is_none(),
+            "offered at turn {}",
+            runner.state().turn_number
+        );
+        let state = runner.state();
+        let priority = matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+            && state.stack.is_empty();
+        if priority {
+            verdicts.extend(
+                confirm_for_tests(state)
+                    .into_iter()
+                    .filter(|(span, _)| matches!(span.source, SpanSource::Carried(_)))
+                    .map(|(_, verdict)| verdict),
+            );
+        }
+        let main = priority && state.active_player == P0 && state.phase == Phase::PreCombatMain;
+        let untapped_islands = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Island" && !state.objects[id].tapped)
+            .count();
+        let thopters = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+        let action = match &state.waiting_for {
+            _ if main && state.players[0].hand.contains(&assembly) && untapped_islands >= 6 => {
+                GameAction::CastSpell {
+                    object_id: assembly,
+                    card_id: state.objects[&assembly].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::default(),
+                }
+            }
+            _ if main && thopters >= 5 && !state.objects[&sieve].tapped => {
+                GameAction::ActivateAbility {
+                    source_id: sieve,
+                    ability_index: state.objects[&sieve]
+                        .abilities
+                        .iter()
+                        .position(|a| !crate::game::mana_abilities::is_mana_ability(a))
+                        .expect("the Sieve's ability"),
+                }
+            }
+            WaitingFor::PayCost { choices, count, .. } => GameAction::SelectCards {
+                cards: choices
+                    .iter()
+                    .copied()
+                    .filter(|id| state.objects[id].is_token)
+                    .take(*count)
+                    .collect(),
+            },
+            WaitingFor::DiscardToHandSize { cards, count, .. } => GameAction::SelectCards {
+                cards: cards.iter().copied().take(*count).collect(),
+            },
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            _ => GameAction::PassPriority,
+        };
+        runner.act(action).expect("the Sieve drive's action");
+    }
+    assert!(
+        runner.state().turn_number > start + 3 && runner.state().active_player == P0,
+        "reach: the Sieve took extra turns"
+    );
+    assert!(!verdicts.is_empty(), "reach: the Sieve's span is carried");
+    assert!(verdicts.iter().all(Result::is_err), "{verdicts:?}");
 }

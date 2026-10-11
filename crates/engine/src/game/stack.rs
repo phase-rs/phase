@@ -530,6 +530,18 @@ pub(crate) struct PoppedStackEntry {
     pub trigger_firing: Option<TriggerFiring>,
 }
 
+/// Empties the stack together with every per-entry table [`PoppedStackEntry`] carries, the bulk
+/// counterpart of [`remove_stack_entry_at_unobserved`]: a new per-entry table joins both.
+///
+/// It neither journals the removal (CR 733) nor records delayed-trigger outcomes, so it is only
+/// for throwaway comparison copies.
+pub(crate) fn clear_stack_with_entry_tables(state: &mut GameState) {
+    state.stack.clear();
+    state.stack_paid_facts.clear();
+    state.stack_trigger_event_batches.clear();
+    state.stack_trigger_firings.clear();
+}
+
 /// Takes the firing classification coupled to a stack entry.
 ///
 /// Current scheduler pushes always install a row for triggered entries. Older
@@ -4277,6 +4289,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
@@ -4525,6 +4538,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
@@ -4753,6 +4767,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
@@ -5090,6 +5105,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: a_force_block_attacker,
         target_incarnations: a_target_incarnations,
         controller: a_controller,
@@ -5175,6 +5191,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: b_force_block_attacker,
         target_incarnations: b_target_incarnations,
         controller: b_controller,

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -773,7 +774,7 @@ fn library_bottom_requests_in_random_order(
     cards: &[ObjectId],
 ) -> Vec<ZoneMoveRequest> {
     let mut shuffled = cards.to_vec();
-    shuffled.shuffle(&mut state.rng);
+    shuffled.shuffle(state.rng.draw(RandomDraw::Placement));
 
     shuffled
         .into_iter()

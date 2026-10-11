@@ -65,7 +65,10 @@ fn braid_of_fire_cumulative_upkeep_adds_red_for_each_age_counter() {
         .expect("Braid of Fire remains");
     assert_eq!(braid_object.zone, Zone::Battlefield);
     assert_eq!(braid_object.counters.get(&CounterType::Age), Some(&2));
-    let pool = &runner.state().players[P0.0 as usize].mana_pool.mana;
+    let pool: Vec<_> = runner.state().players[P0.0 as usize]
+        .mana_pool
+        .units()
+        .collect();
     assert_eq!(pool.len(), 2);
     assert!(pool.iter().all(|unit| unit.color == ManaType::Red));
 }
@@ -113,7 +116,10 @@ fn fixed_mana_effect_cost_pays_into_the_unless_payers_mana_pool() {
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("fixed mana effect cost is payable");
 
-    let pool = &runner.state().players[P0.0 as usize].mana_pool.mana;
+    let pool: Vec<_> = runner.state().players[P0.0 as usize]
+        .mana_pool
+        .units()
+        .collect();
     assert_eq!(
         pool.iter().map(|unit| unit.color).collect::<Vec<_>>(),
         vec![ManaType::Blue, ManaType::Red]

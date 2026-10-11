@@ -427,7 +427,7 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 400.7 + CR 611.2c: Mass-bounce — return every battlefield permanent
+/// CR 400.7: Mass-bounce — return every battlefield permanent
 /// matching the filter to its owner's hand (default) or to the destination
 /// zone if `Effect::BounceAll.destination` is set.
 ///
@@ -457,7 +457,7 @@ pub fn resolve_all(
         _ => (TargetFilter::None, Zone::Hand, None),
     };
 
-    // CR 701.3 + CR 611.2c: A `TargetFilter::None` lands here when the parser
+    // A `TargetFilter::None` lands here when the parser
     // didn't supply a class filter. Default to "all creatures" — the
     // historically dominant mass-bounce shape — to match `destroy::resolve_all`.
     let effective_filter = if matches!(target_filter, TargetFilter::None) {
@@ -1166,7 +1166,7 @@ mod tests {
         assert!(!state.players[0].graveyard.contains(&rancor_id));
     }
 
-    /// CR 400.7 + CR 611.2c: Mass-bounce iterates every battlefield permanent
+    /// CR 400.7: Mass-bounce iterates every battlefield permanent
     /// matching the filter. Mixed match/no-match population: only matching
     /// permanents move to their owners' hands; non-matching permanents stay.
     #[test]

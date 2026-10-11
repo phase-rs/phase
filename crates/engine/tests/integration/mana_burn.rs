@@ -432,7 +432,7 @@ fn a_prevented_burn_leaves_no_provenance_behind() {
         "nothing may be narrated as mana burn when no burn resolved: {:?}",
         burns(&events)
     );
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(runner.state().phase, Phase::BeginCombat);
 }
 

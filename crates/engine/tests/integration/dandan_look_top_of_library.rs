@@ -299,7 +299,7 @@ mod top_cast {
                 "reach: pile top"
             );
             assert!(
-                state.players[holder.0 as usize].mana_pool.mana.is_empty(),
+                state.players[holder.0 as usize].mana_pool.is_empty(),
                 "reach: no mana to pay with"
             );
             assert!(

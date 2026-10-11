@@ -42,8 +42,6 @@ const OPTION_HASH_MAP: &str =
 const VEC_HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::vec_hash_map\"";
 const HASH_MAP_OF_HASH_SET: &str =
     "serialize_with=\"crate::types::deterministic_serde::hash_map_of_hash_set\"";
-const HASH_MAP_OF_HASH_MAP: &str =
-    "serialize_with=\"crate::types::deterministic_serde::hash_map_of_hash_map\"";
 const IM_HASH_SET: &str = "serialize_with=\"crate::types::deterministic_serde::im_hash_set\"";
 const IM_HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::im_hash_map\"";
 const IM_HASH_MAP_OF_IM_HASH_MAP: &str =
@@ -215,7 +213,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "players_who_created_token_this_turn",
         "players_who_discarded_card_this_turn",
         "players_who_sacrificed_artifact_this_turn",
-        "batched_zone_change_trigger_fired",
         "assassin_or_commander_dealt_combat_damage_this_turn",
         "modal_modes_chosen_this_turn",
         "modal_modes_chosen_this_game",
@@ -269,11 +266,19 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "im::HashSet",
         Classification::Canonical(IM_HASH_SET),
     );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "batched_zone_change_trigger_fired",
+        "im::HashSet",
+        Classification::Canonical(IM_HASH_SET),
+    );
 
     for field in [
         "stack_paid_facts",
         "liminal_entries",
-        "tracked_object_sets",
         "tracked_set_participants",
         "commander_cast_count",
         "commander_cast_owners",
@@ -331,8 +336,8 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "GameState",
         None,
         "tracked_set_member_causes",
-        "HashMap<HashMap>",
-        Classification::Canonical(HASH_MAP_OF_HASH_MAP),
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
     add_spec(
         &mut specs,
@@ -366,7 +371,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "Box<HashMap<HashSet>>",
         Classification::Canonical(HASH_MAP_OF_HASH_SET),
     );
-    for field in ["objects", "attribution", "lki_cache"] {
+    for field in ["objects", "attribution", "lki_cache", "tracked_object_sets"] {
         add_spec(
             &mut specs,
             game_state,
@@ -413,10 +418,22 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "HashMap",
         Classification::Canonical(HASH_MAP_ENTRIES),
     );
-    for (field, adapter) in [
-        ("activated_abilities_this_turn", "with=\"tuple_key_map\""),
-        ("activated_abilities_this_game", "with=\"tuple_key_map\""),
-        ("ability_resolutions_this_turn", "with=\"tuple_key_map\""),
+    for (field, shape, adapter) in [
+        (
+            "activated_abilities_this_turn",
+            "im::HashMap",
+            "with=\"tuple_key_map\"",
+        ),
+        (
+            "activated_abilities_this_game",
+            "HashMap",
+            "with=\"tuple_key_map\"",
+        ),
+        (
+            "ability_resolutions_this_turn",
+            "im::HashMap",
+            "with=\"tuple_key_map\"",
+        ),
     ] {
         add_spec(
             &mut specs,
@@ -424,7 +441,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "GameState",
             None,
             field,
-            "HashMap",
+            shape,
             Classification::Canonical(adapter),
         );
     }
@@ -1531,21 +1548,21 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (ObjectId(1), ObjectAttribution::default()),
         (ObjectId(2), ObjectAttribution::default()),
     ]);
-    state.tracked_object_sets = HashMap::from([
+    state.tracked_object_sets = im::HashMap::from_iter([
         (TrackedSetId(1), vec![ObjectId(11)]),
         (TrackedSetId(2), vec![ObjectId(22), ObjectId(23)]),
     ]);
-    state.tracked_set_member_causes = HashMap::from([
+    state.tracked_set_member_causes = im::HashMap::from_iter([
         (
             TrackedSetId(1),
-            HashMap::from([
+            im::HashMap::from_iter([
                 (ObjectId(11), ThisWayCause::Exiled),
                 (ObjectId(12), ThisWayCause::Sacrificed),
             ]),
         ),
         (
             TrackedSetId(2),
-            HashMap::from([
+            im::HashMap::from_iter([
                 (ObjectId(21), ThisWayCause::Destroyed),
                 (ObjectId(22), ThisWayCause::Milled),
             ]),
