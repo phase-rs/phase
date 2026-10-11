@@ -22356,6 +22356,25 @@ impl Effect {
         )
     }
 
+    /// CR 707.10 + CR 608.2k + CR 113.7a: True when this effect's anaphoric
+    /// `ParentTarget` names the spell or ability it copies ("copy that ability",
+    /// "copy that spell") — a stack object that exists independently of its
+    /// source, which `copy_spell::copy_source_entry` resolves from the parent
+    /// chain or the trigger event. Event-context binding yields the event's
+    /// object or the source's attached host, never the copied stack object, so
+    /// neither the trigger-push seeder's attached-host
+    /// fallback nor resolution-time hydration may bind it. Single authority for
+    /// both binders so they cannot disagree.
+    pub(crate) fn parent_target_is_copy_referent(&self) -> bool {
+        matches!(
+            self,
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
+    }
+
     pub fn target_filter(&self) -> Option<&TargetFilter> {
         match self {
             // CR 115.1 + CR 601.2c: a `ChooseFromZone` is normally a resolution

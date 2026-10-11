@@ -749,6 +749,15 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
     if let Some(entry) = triggering_spell_stack_entry(state) {
         return CopySourceLookup::Source(Box::new(CopySource::on_stack(entry)));
     }
+    // CR 113.7a + CR 701.6a: an activation event names the activated ability
+    // itself. Once that ability has left the stack (countered), nothing on the
+    // stack is "that ability" — the top of the stack is an unrelated object.
+    if matches!(
+        state.current_trigger_event,
+        Some(GameEvent::AbilityActivated { .. })
+    ) {
+        return CopySourceLookup::Gone;
+    }
     state
         .stack
         .last()

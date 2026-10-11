@@ -12611,6 +12611,13 @@ fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
 fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 608.2k + CR 707.10: a copy's `ParentTarget` names the copied stack
+    // object, which `copy_spell::copy_source_entry` resolves from the same
+    // trigger event; hydrating it would bind the event's object or the source's
+    // attached host (CR 301.5a / CR 303.4b) in its place.
+    if effect.parent_target_is_copy_referent() {
+        return None;
+    }
     // CR 110.2 + CR 603.7c: `GiveControl` carries both an object `target` and a
     // `recipient`. Kain ("that player gains control of Kain") binds the recipient
     // to `TriggeringPlayer` while the object is `SelfRef` — only the recipient
@@ -22653,6 +22660,36 @@ mod tests {
         assert!(ability_with_event_context_targets(&state, &ability)
             .targets
             .is_empty());
+    }
+
+    /// CR 608.2k + CR 707.10: a copy's `ParentTarget` ("copy that ability")
+    /// names the copied stack object, so resolution hydration must not bind it;
+    /// every other event-context copy filter and `ParentTarget` effect still
+    /// hydrates.
+    #[test]
+    fn extract_event_context_filter_skips_a_copy_referent_parent_target() {
+        let copy = |target| Effect::CopySpell {
+            target,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
+            additional_modifications: vec![],
+            starting_loyalty_from_casualty_sacrifice: false,
+        };
+        assert_eq!(
+            extract_event_context_filter(&copy(TargetFilter::ParentTarget)),
+            None
+        );
+        assert_eq!(
+            extract_event_context_filter(&copy(TargetFilter::TriggeringSource)),
+            Some(&TargetFilter::TriggeringSource)
+        );
+        assert_eq!(
+            extract_event_context_filter(&Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::ParentTarget)
+        );
     }
     use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::zones::create_object;

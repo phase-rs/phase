@@ -197,6 +197,7 @@ mod copy_announcement_walk;
 mod copy_gy_creature_mana_value_x;
 mod copy_retarget_past_rider;
 mod copy_target_walk_restore;
+mod copy_that_ability_referent;
 mod copy_token_except_keyword_and_quoted_ability;
 mod cosmic_intervention_graveyard_redirect;
 mod cost_paid_objects_historical_restore;
