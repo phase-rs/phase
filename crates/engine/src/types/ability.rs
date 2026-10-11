@@ -11406,8 +11406,11 @@ pub enum PlayerFilter {
     /// CR 115.1 + CR 601.2c: the first declared PLAYER target of the resolving
     /// ability, read through `filter::target_player_from_ability_or_root`, the
     /// same read as `ControllerRef::TargetPlayer`, root-chain fallback included.
-    /// Names nobody when no player target is declared or it is gone
-    /// (CR 608.2b). Legality ('target opponent' vs 'target player') belongs to
+    /// Names nobody when no player target is declared, when the root fallback's
+    /// first declared player slot was an illegal target at resolution
+    /// (CR 608.2b), or when that player has left the game. The node's own
+    /// targets are read first, as its first remaining player target.
+    /// Legality ('target opponent' vs 'target player') belongs to
     /// the declaring slot's `TargetFilter`. Do not add a `TargetOpponent`
     /// sibling. Ability-aware only: resolved by `players_for_filter`; the
     /// generic `matches_player_scope` answers `false`.

@@ -35438,6 +35438,153 @@ mod tests {
         );
     }
 
+    /// CR 608.2b + CR 603.2: an enters trigger shaped like Assassin Gauntlet's
+    /// ("When this Equipment enters, attach it to up to one target creature you
+    /// control. Tap all creatures target opponent controls."), resolved from the
+    /// stack. When the opponent became an illegal target and the creature target
+    /// keeps the trigger resolving, "creatures target opponent controls" names
+    /// nobody: it does not fall back to the enters event's player, the trigger's
+    /// own controller.
+    #[test]
+    fn target_opponent_mass_tap_taps_nobody_when_the_opponent_target_is_illegal() {
+        let resolve = |opponent_has_hexproof: bool| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Entering Equipment".to_string(),
+                Zone::Battlefield,
+            );
+            let mut creature = |card: u64, controller: PlayerId| {
+                let id = create_object(
+                    &mut state,
+                    CardId(card),
+                    controller,
+                    format!("Creature {card}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            };
+            let targeted = creature(2, PlayerId(0));
+            let yours = creature(3, PlayerId(0));
+            let theirs = creature(4, PlayerId(1));
+            if opponent_has_hexproof {
+                // "You have hexproof" on a permanent P1 controls: P1 is no longer
+                // a legal target of P0's trigger.
+                let grantor = create_object(
+                    &mut state,
+                    CardId(5),
+                    PlayerId(1),
+                    "You Have Hexproof Source".to_string(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&grantor).unwrap().static_definitions =
+                    vec![StaticDefinition::new(StaticMode::Hexproof).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    )]
+                    .into();
+                crate::game::layers::flush_layers(&mut state);
+                assert!(
+                    crate::game::static_abilities::player_has_hexproof(&state, PlayerId(1)),
+                    "reach guard: the grant lands on P1"
+                );
+            }
+
+            // Declared slots: [Object(targeted), Player(1)]. The opponent is the
+            // mass tap's companion player slot.
+            let root = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+                vec![TargetRef::Object(targeted)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent),
+                    ),
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            ));
+            state.stack.push_back(StackEntry {
+                id: ObjectId(500),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(root),
+                    condition: None,
+                    trigger_event: Some(GameEvent::ZoneChanged {
+                        object_id: source,
+                        from: Some(Zone::Hand),
+                        to: Zone::Battlefield,
+                        record: Box::new(ZoneChangeRecord::test_minimal(
+                            source,
+                            Some(Zone::Hand),
+                            Zone::Battlefield,
+                        )),
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+
+            let mut events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut events);
+            let tapped = |id: ObjectId| state.objects[&id].tapped;
+            (
+                state.objects[&targeted]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                [tapped(targeted), tapped(yours)],
+                tapped(theirs),
+            )
+        };
+
+        // Reach guard: with P1 a legal target, P1's creature is tapped and the
+        // controller's are not.
+        assert_eq!(resolve(false), (1, [false, false], true));
+        // P1 became an illegal target; the creature target keeps the trigger
+        // resolving.
+        let (counters, yours, theirs) = resolve(true);
+        assert_eq!(
+            counters, 1,
+            "reach guard: the trigger resolved through its legal creature target"
+        );
+        assert_eq!(
+            yours,
+            [false, false],
+            "an illegal target opponent does not become the enters event's player"
+        );
+        assert!(
+            !theirs,
+            "an illegal target opponent's creatures are not tapped"
+        );
+    }
+
     #[test]
     fn player_scope_discard_then_dark_deal_draws_per_players_discard_count_minus_one() {
         let mut state = GameState::new_two_player(42);
