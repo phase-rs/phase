@@ -1081,6 +1081,7 @@ mod leading_duration_distribution_7923;
 mod leeching_sliver;
 mod legend_rule_scope;
 mod leyline_taps_for_mana_repro;
+mod library_size_and_empty_hand_conditions;
 mod lictor_opponent_entered_this_turn;
 mod life_and_limb_sylvan_advocate;
 mod life_at_stake_both_choosers_6965;
