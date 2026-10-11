@@ -2223,6 +2223,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::AllExcept { exclude } => {
             return format!("each player other than {}", fmt_player_filter(exclude));
         }
+        // CR 102.1: `AnyOf` is a recursive carrier too — two different unions
+        // must not render identically, so each member is rendered.
+        PlayerFilter::AnyOf { filters } => {
+            return filters
+                .iter()
+                .map(fmt_player_filter)
+                .collect::<Vec<_>>()
+                .join(" and ");
+        }
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         // CR 608.2c: the player scope and the action kind both select — "each
@@ -2253,6 +2262,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
         PlayerFilter::GrantingObjectCaster => "the player who cast the granting object",
+        PlayerFilter::TargetPlayer => "the target player",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
         PlayerFilter::ControlsCount {
@@ -10323,6 +10333,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     match scope {
         PlayerFilter::All => ("All", Handled),
         PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
+        // CR 102.1 + CR 608.2c: the player_scope driver resolves every member
+        // through the exhaustive ability-aware `speed_effects::players_for_filter`.
+        PlayerFilter::AnyOf { .. } => ("AnyOf", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
@@ -10355,6 +10368,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
         // CR 201.5a: installing the grant replaces it with the caster's `SpecificPlayer`.
         PlayerFilter::GrantingObjectCaster => ("GrantingObjectCaster", Handled),
+        // CR 115.1: resolved from the declared player target by
+        // `speed_effects::players_for_filter`.
+        PlayerFilter::TargetPlayer => ("TargetPlayer", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
@@ -13969,6 +13985,37 @@ mod tests {
                     exclude: Box::new(PlayerFilter::DefendingPlayer),
                 },
             ),
+        ]);
+
+        // `AnyOf` is a recursive carrier too: unions over different members
+        // must differ, and the declared-target anchor must not render like
+        // its anchored neighbours.
+        let with_controller = |member: PlayerFilter| PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, member],
+        };
+        assert_all_distinct(&[
+            (
+                "you and the target player",
+                &with_controller(PlayerFilter::TargetPlayer),
+            ),
+            (
+                "you and the triggering player",
+                &with_controller(PlayerFilter::TriggeringPlayer),
+            ),
+            (
+                "you and the parent target's controller",
+                &with_controller(PlayerFilter::ParentObjectTargetController),
+            ),
+            (
+                "you and each opponent",
+                &with_controller(PlayerFilter::Opponent),
+            ),
+            ("the target player", &PlayerFilter::TargetPlayer),
+            (
+                "the parent target's controller",
+                &PlayerFilter::ParentObjectTargetController,
+            ),
+            ("the triggering player", &PlayerFilter::TriggeringPlayer),
         ]);
     }
 

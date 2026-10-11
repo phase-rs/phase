@@ -2012,7 +2012,7 @@ fn declared_player(
 /// chained node's most-recent object-target propagation hide an earlier player
 /// slot. Local targets remain the fast path; the flattened resolving root is
 /// the exact fallback used by `ParentTargetSlot` anaphors elsewhere.
-fn target_player_from_ability_or_root(
+pub(crate) fn target_player_from_ability_or_root(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
 ) -> Option<PlayerId> {
@@ -2295,6 +2295,7 @@ pub(crate) fn player_filter_contains(
         PlayerFilter::OpponentDealtDamage { source, .. } => source.as_deref().is_some_and(recurse),
         PlayerFilter::ControlsCount { filter, .. } => recurse(filter),
         PlayerFilter::TrackedSetPossessor { filter, .. } => recurse(filter),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(|f| player_filter_contains(f, leaf)),
         // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
         // `QuantityExpr` are quantities, which the scope rule on
         // `filter_contains` assigns to the quantity authority.
@@ -2321,6 +2322,7 @@ pub(crate) fn player_filter_contains(
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
@@ -2564,6 +2566,9 @@ fn player_filter_contains_filter_prop(
         PlayerFilter::AllExcept { exclude } => {
             player_filter_contains_filter_prop(exclude, predicate)
         }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(|f| player_filter_contains_filter_prop(f, predicate)),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2585,6 +2590,7 @@ fn player_filter_contains_filter_prop(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
@@ -3490,6 +3496,9 @@ fn rewrite_player_filter_props(
         PlayerFilter::AllExcept { exclude } => {
             rewrite_player_filter_props(exclude, rewrite_node, rewrite, complete)
         }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter_mut()
+            .for_each(|f| rewrite_player_filter_props(f, rewrite_node, rewrite, complete)),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -3511,6 +3520,7 @@ fn rewrite_player_filter_props(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => {}
     }
 }

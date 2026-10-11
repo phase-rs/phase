@@ -3738,6 +3738,10 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
             .is_some_and(|f| target_filter_reads_zone(f, zone)),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
         PlayerFilter::AllExcept { exclude } => player_filter_reads_zone(exclude, zone),
+        // CR 102.1 + CR 608.2c: the union reads what any member reads.
+        PlayerFilter::AnyOf { filters } => {
+            filters.iter().any(|f| player_filter_reads_zone(f, zone))
+        }
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
         // comparison `count` expression.
         PlayerFilter::ControlsCount { filter, count, .. } => {
@@ -3778,6 +3782,7 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
@@ -4263,6 +4268,8 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
             .is_some_and(target_filter_reads_life_total),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
         PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
+        // CR 102.1 + CR 608.2c: the union reads what any member reads.
+        PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_reads_life),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
         // comparison `count` expression.
         PlayerFilter::ControlsCount { filter, count, .. } => {
@@ -4298,6 +4305,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }

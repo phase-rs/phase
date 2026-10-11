@@ -265,6 +265,29 @@ pub(crate) fn players_for_filter(
             .collect(),
         // CR 201.5a: an unlatched caster names nobody.
         PlayerFilter::GrantingObjectCaster => Vec::new(),
+        // CR 102.1 + CR 608.2c: the union of the members, each resolved by its
+        // own ability-aware verdict here. The union never adds a player no
+        // member names; first-seen order is kept and duplicates are dropped.
+        PlayerFilter::AnyOf { filters } => {
+            let mut players: Vec<PlayerId> = Vec::new();
+            for member in filters {
+                for player in players_for_filter(state, member, ability) {
+                    if !players.contains(&player) {
+                        players.push(player);
+                    }
+                }
+            }
+            players
+        }
+        // CR 115.1 + CR 608.2b: the first declared player target of the
+        // resolving ability (root-chain fallback included); names nobody when
+        // none is declared or that player has left the game.
+        PlayerFilter::TargetPlayer => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
+                .and_then(|player| live_player(state, player))
+                .into_iter()
+                .collect()
+        }
         // CR 608.2c + CR 109.4: the resolution-scoped chosen player at `index`.
         PlayerFilter::ChosenPlayer { index } => ability
             .chosen_players
@@ -626,6 +649,119 @@ mod tests {
             vec![PlayerId(0), PlayerId(2)],
             "AllExcept excludes the parent target's controller (P1)"
         );
+    }
+
+    /// CR 102.1 + CR 608.2c + CR 115.1 + CR 608.2b: `TargetPlayer` reads the
+    /// first declared PLAYER target, and `AnyOf` is the ordered, deduplicated
+    /// union of each member's ability-aware set — so an ability-anchored member
+    /// (`ParentObjectTargetController`) that the generic predicate cannot
+    /// answer still contributes its player.
+    #[test]
+    fn any_of_and_target_player_resolve_through_the_ability_aware_resolver() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        // Object owned and controlled by P1 — the parent object target.
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Targeted Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_with = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                Effect::StartYourEngines {
+                    player_scope: PlayerFilter::Controller,
+                },
+                targets,
+                ObjectId(0),
+                PlayerId(0),
+            )
+        };
+        let controller_and_target = PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+        };
+
+        // (a) Positive: the controller and the declared player target.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &controller_and_target,
+                &ability_with(vec![TargetRef::Player(PlayerId(1))]),
+            ),
+            vec![PlayerId(0), PlayerId(1)],
+        );
+        // (b) Both members name P0: the union holds it once.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &controller_and_target,
+                &ability_with(vec![TargetRef::Player(PlayerId(0))]),
+            ),
+            vec![PlayerId(0)],
+        );
+        // (c) The union adds no implicit controller.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &PlayerFilter::AnyOf {
+                    filters: vec![PlayerFilter::Opponent],
+                },
+                &ability_with(Vec::new()),
+            ),
+            vec![PlayerId(1)],
+        );
+        // (d) An ability-anchored member resolves ability-aware: the parent
+        // target's controller (P1) joins the controller.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &PlayerFilter::AnyOf {
+                    filters: vec![
+                        PlayerFilter::Controller,
+                        PlayerFilter::ParentObjectTargetController,
+                    ],
+                },
+                &ability_with(vec![TargetRef::Object(permanent)]),
+            ),
+            vec![PlayerId(0), PlayerId(1)],
+        );
+        // (e) The first PLAYER target is read past an earlier object target.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &PlayerFilter::TargetPlayer,
+                &ability_with(vec![
+                    TargetRef::Object(permanent),
+                    TargetRef::Player(PlayerId(1)),
+                ]),
+            ),
+            vec![PlayerId(1)],
+        );
+        // (f) No declared player target names nobody.
+        assert!(players_for_filter(
+            &state,
+            &PlayerFilter::TargetPlayer,
+            &ability_with(Vec::new())
+        )
+        .is_empty());
+        assert!(players_for_filter(
+            &state,
+            &PlayerFilter::TargetPlayer,
+            &ability_with(vec![TargetRef::Object(permanent)]),
+        )
+        .is_empty());
+        // (g) A target player who has left the game names nobody; (a) is the
+        // reach guard that the read fires for a live target.
+        state.players[1].is_eliminated = true;
+        assert!(players_for_filter(
+            &state,
+            &PlayerFilter::TargetPlayer,
+            &ability_with(vec![TargetRef::Player(PlayerId(1))]),
+        )
+        .is_empty());
     }
 
     /// CR 108.3 + CR 603.10a + CR 608.2c + CR 608.2h: owner-relative

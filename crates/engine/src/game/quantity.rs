@@ -9609,6 +9609,12 @@ pub(crate) fn resolve_player_count(
                                 state, p.id, exclude, controller, source_id,
                             )
                         }
+                        // CR 102.1 + CR 608.2c: the union of the members (count
+                        // context). Delegates to the single-authority predicate in
+                        // `matches_player_scope`, which answers any-member.
+                        PlayerFilter::AnyOf { .. } => crate::game::effects::matches_player_scope(
+                            state, p.id, filter, controller, source_id,
+                        ),
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
                                 .players
@@ -9703,12 +9709,14 @@ pub(crate) fn resolve_player_count(
                             .last_vote_ballots
                             .iter()
                             .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                        // CR 109.4 + CR 108.3 + CR 601.2a + CR 608.2c: the parent-object-target
-                        // anchors, the granter caster and the resolution-scoped chosen-player
+                        // CR 109.4 + CR 108.3 + CR 601.2a + CR 608.2c + CR 115.1: the
+                        // parent-object-target anchors, the declared-player-target anchor,
+                        // the granter caster and the resolution-scoped chosen-player
                         // anchor have no single-player-count meaning here (these resolve
                         // to a single anchored player, not a counted set).
                         PlayerFilter::ParentObjectTargetController
                         | PlayerFilter::ParentObjectTargetOwner
+                        | PlayerFilter::TargetPlayer
                         | PlayerFilter::GrantingObjectCaster
                         | PlayerFilter::ChosenPlayer { .. } => false,
                         // CR 109.4 + CR 109.5: "each [player class] who controls

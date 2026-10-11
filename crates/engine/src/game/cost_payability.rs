@@ -130,6 +130,9 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
 fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude } => player_filter_has_x_mana_value_constraint(exclude),
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(player_filter_has_x_mana_value_constraint),
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
             .is_some_and(target_filter_has_x_mana_value_constraint),
@@ -160,6 +163,7 @@ fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. } => false,
     }
@@ -172,6 +176,12 @@ fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
     match player {
         PlayerFilter::AllExcept { exclude } => PlayerFilter::AllExcept {
             exclude: Box::new(relax_x_mana_value_constraint_player(exclude)),
+        },
+        PlayerFilter::AnyOf { filters } => PlayerFilter::AnyOf {
+            filters: filters
+                .iter()
+                .map(relax_x_mana_value_constraint_player)
+                .collect(),
         },
         PlayerFilter::OpponentDealtDamage {
             source,
@@ -1468,12 +1478,25 @@ mod tests {
                 comparator: Comparator::GE,
             }),
         });
+        // Nor may an `AnyOf` union hide one behind a constraint-free member.
+        let nested_any_of = wrap(PlayerFilter::AnyOf {
+            filters: vec![
+                PlayerFilter::Controller,
+                PlayerFilter::ControlsCount {
+                    filter: cmc_x(),
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                    relation: PlayerRelation::All,
+                    comparator: Comparator::GE,
+                },
+            ],
+        });
 
         for (label, filter) in [
             ("ControlsCount.filter", &controls_count),
             ("OpponentDealtDamage.source", &dealt_damage),
             ("TrackedSetPossessor.filter", &tracked_set),
             ("AllExcept -> ControlsCount.filter", &nested_all_except),
+            ("AnyOf -> ControlsCount.filter", &nested_any_of),
         ] {
             assert!(
                 target_filter_has_x_mana_value_constraint(filter),

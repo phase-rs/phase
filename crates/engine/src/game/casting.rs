@@ -28800,9 +28800,15 @@ fn player_filter_reads_chosen_target(filter: &PlayerFilter, read: TargetRead) ->
     match filter {
         // CR 109.4: a player filter anchored on a parent target. The filter
         // matcher binds no targets for it (see `effects::matches_player_scope`),
-        // so it is the one read settlement can't price.
-        PlayerFilter::ParentObjectTargetController | PlayerFilter::ParentObjectTargetOwner => true,
+        // so it is the one read settlement can't price. CR 115.1: the
+        // declared-player-target anchor has the same property.
+        PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer => true,
         PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude, read),
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(|f| player_filter_reads_chosen_target(f, read)),
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
             .is_some_and(|x| target_filter_reads_chosen_target(x, read)),

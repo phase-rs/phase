@@ -2076,6 +2076,15 @@ fn collect_matching_players(
                             source_id,
                         )
                     }
+                    // CR 102.1 + CR 608.2c: the union of the members, answered
+                    // member by member by the generic predicate authority.
+                    PlayerFilter::AnyOf { .. } => crate::game::effects::matches_player_scope(
+                        state,
+                        p.id,
+                        &player_filter,
+                        source_controller,
+                        source_id,
+                    ),
                     PlayerFilter::Opponent => p.id != source_controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -2203,12 +2212,14 @@ fn collect_matching_players(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
-                    // CR 109.4 + CR 108.3 + CR 601.2a: the parent-object-target anchors,
-                    // the resolution-scoped chosen-player anchor and the unlatched
-                    // granter caster have no meaning for a damage-each-player effect
-                    // (none is in scope here); never matches.
+                    // CR 109.4 + CR 108.3 + CR 601.2a + CR 115.1: the parent-object-target
+                    // anchors, the declared-player-target anchor, the resolution-scoped
+                    // chosen-player anchor and the unlatched granter caster have no
+                    // meaning for a damage-each-player effect (none is in scope
+                    // here); never matches.
                     PlayerFilter::ParentObjectTargetController
                     | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::TargetPlayer
                     | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
@@ -2347,6 +2358,15 @@ pub fn resolve_each_player(
                             ability.source_id,
                         )
                     }
+                    // CR 102.1 + CR 608.2c: the union of the members, answered
+                    // member by member by the generic predicate authority.
+                    PlayerFilter::AnyOf { .. } => crate::game::effects::matches_player_scope(
+                        state,
+                        p.id,
+                        &player_filter,
+                        ability.controller,
+                        ability.source_id,
+                    ),
                     PlayerFilter::Opponent => p.id != ability.controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -2476,12 +2496,14 @@ pub fn resolve_each_player(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                    // CR 109.4 + CR 108.3 + CR 601.2a: the parent-object-target anchors,
-                    // the resolution-scoped chosen-player anchor and the unlatched
-                    // granter caster have no meaning for a damage-each-player effect
-                    // (none is in scope here); never matches.
+                    // CR 109.4 + CR 108.3 + CR 601.2a + CR 115.1: the parent-object-target
+                    // anchors, the declared-player-target anchor, the resolution-scoped
+                    // chosen-player anchor and the unlatched granter caster have no
+                    // meaning for a damage-each-player effect (none is in scope
+                    // here); never matches.
                     PlayerFilter::ParentObjectTargetController
                     | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::TargetPlayer
                     | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls

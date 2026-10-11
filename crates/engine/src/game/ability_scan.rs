@@ -4987,6 +4987,12 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_filter(exclude, mode));
             acc
         }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .fold(Axes::NONE, |acc, f| acc.or(scan_player_filter(f, mode))),
+        // CR 115.1: a declared-target read, the same read as
+        // `ControllerRef::TargetPlayer` (`scan_controller_ref`).
+        PlayerFilter::TargetPlayer => Axes::NONE,
         PlayerFilter::HighestSpeed => Axes::NONE,
         PlayerFilter::ZoneChangedThisWay => Axes::NONE,
         PlayerFilter::PerformedActionThisWay {

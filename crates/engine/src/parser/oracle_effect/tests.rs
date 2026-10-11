@@ -64888,9 +64888,9 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
 /// used to sit in [`filter_has_chosen_color`]'s `=> false` list, which answered
 /// "no" for every filter boxed inside a player filter. `OpponentDealtDamage`
 /// boxes a source `TargetFilter` (CR 120.9), `ControlsCount` and
-/// `TrackedSetPossessor` each carry one outright, and `AllExcept` recurses into
-/// `PlayerFilter` itself. The 22 leaf variants in the final arm carry no nested
-/// filter at all.
+/// `TrackedSetPossessor` each carry one outright, and `AllExcept` and `AnyOf`
+/// recurse into `PlayerFilter` itself. Every other variant carries no nested
+/// filter.
 ///
 /// The `..` on `ControlsCount` is the quantity-field boundary
 /// [`filter_has_chosen_color`] states: its `count` sub-expression is a count,
@@ -64901,6 +64901,7 @@ fn player_filter_has_chosen_color(pf: &PlayerFilter) -> bool {
             source.as_deref().is_some_and(filter_has_chosen_color)
         }
         PlayerFilter::AllExcept { exclude } => player_filter_has_chosen_color(exclude),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_has_chosen_color),
         PlayerFilter::ControlsCount { filter, .. } => filter_has_chosen_color(filter),
         PlayerFilter::TrackedSetPossessor { filter, .. } => filter_has_chosen_color(filter),
         PlayerFilter::Controller
@@ -64925,6 +64926,7 @@ fn player_filter_has_chosen_color(pf: &PlayerFilter) -> bool {
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
