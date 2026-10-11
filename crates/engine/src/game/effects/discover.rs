@@ -33,6 +33,9 @@ pub fn resolve(
         }
         _ => return Err(EffectError::InvalidParam("Expected Discover".to_string())),
     };
+    let Some(discovering_player) = discovering_player else {
+        return Ok(());
+    };
 
     // CR 701.57a: record this discover's mana-value limit so a "whenever you
     // discover" trigger's effect can reference "the same value" (Curator of

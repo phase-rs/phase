@@ -41,19 +41,12 @@ pub fn resolve(
         .map(|obj| obj.spell_mana_value())
         .unwrap_or(0);
 
-    // CR 603.3a: Re-read the controller from the source spell at resolution
-    // time rather than trusting `ability.controller` (captured at trigger-
-    // creation time). If the cascade spell is still on the stack we use its
-    // current `controller` so a control-change effect between trigger
-    // creation and resolution is honored. If the spell has left the stack,
-    // fall back to the trigger's snapshot.
-    // TODO: unify controller-at-resolution pattern across triggers (this
-    // currently has to be done at the resolver per effect).
-    let controller = state
-        .objects
-        .get(&ability.source_id)
-        .map(|obj| obj.controller)
-        .unwrap_or(ability.controller);
+    // CR 603.3a + CR 109.5: a triggered ability is controlled by the player who
+    // controlled its source when it triggered, and "you"/"your" in its text
+    // mean that player. A later control change of the cascade spell (e.g.
+    // Commandeer) does not move the exile walk to another library or hand the
+    // free cast to the new controller.
+    let controller = ability.controller;
 
     if !state.players.iter().any(|p| p.id == controller) {
         return Err(EffectError::PlayerNotFound);

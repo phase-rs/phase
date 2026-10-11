@@ -25,7 +25,7 @@ use crate::analysis::decision_template::{
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction,
-    DamageModification, TargetRef,
+    AttachmentReferent, DamageModification, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -5767,6 +5767,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         // fixed-object family, not with the mutable slots.
         | TargetFilter::AmassedArmy
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
@@ -5894,6 +5895,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::ParentTarget
         | TargetFilter::AmassedArmy
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
@@ -6019,9 +6021,10 @@ fn prop_is_arrival_invariant(prop: &crate::types::ability::FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
-        | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
         // CR 702.95a: an arriving creature pairs with a PRE-EXISTING unpaired one.
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -6164,6 +6167,7 @@ fn controller_ref_is_arrival_invariant(controller: &crate::types::ability::Contr
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
@@ -22733,12 +22737,12 @@ mod tests {
     /// a published offer.**
     ///
     /// Conjunct (a) calls `optional_prompt_player`, whose sole state-touching callee is
-    /// `targeting::resolve_effect_player_ref`, reaching eleven distinct `GameState` fields
+    /// `targeting::resolve_effect_player_ref`, reaching these distinct `GameState` fields
     /// (`players`, `seat_order`, `format_config`, `objects`, `lki_cache`, `stack`,
     /// `current_trigger_event`, `last_created_token_ids`, `last_revealed_ids`,
-    /// `last_zone_changed_ids`, `resolution_stack`). Every one of the three branches that
-    /// reach it is gated on an `Effect` that `effect_resolution_choice_freedom` puts in its
-    /// fail-closed grouped arm — so conjunct (6) refuses any offer carrying such an entry.
+    /// `last_zone_changed_ids`, `resolution_stack`, `resolving_stack_entry`). Every one of the
+    /// three branches that reach it is gated on an `Effect` that
+    /// `effect_resolution_choice_freedom` puts in its fail-closed grouped arm — so conjunct (6) refuses any offer carrying such an entry.
     /// The reads happen; they cannot bear on a published result.
     ///
     /// NO PRODUCTION DELTA: this row pins an ARGUMENT, which is why it needs a revert-probe
@@ -22790,7 +22794,7 @@ mod tests {
         };
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, ability),
-            PlayerId(0),
+            Some(PlayerId(0)),
             "(a) reach-guard: the `PayCost` branch really routes through \
              `resolve_effect_player_ref`'s `Controller` arm and returns the proposer"
         );
@@ -22807,7 +22811,7 @@ mod tests {
         };
         assert_ne!(
             crate::game::effects::optional_prompt_player(&state, ability),
-            PlayerId(0),
+            Some(PlayerId(0)),
             "(a′) reach-guard: the `Opponent` arm resolves to a seat that is NOT the proposer"
         );
         assert!(

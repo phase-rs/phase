@@ -709,6 +709,7 @@
     "libraryCount_one": "ライブラリー（{{count}}枚）",
     "libraryCount_other": "ライブラリー（{{count}}枚）",
     "playFromTop": "ライブラリーの一番上から{{name}}をプレイ",
+    "activateFromTop": "ライブラリーの一番上から{{name}}を起動",
     "topOfLibrary": "ライブラリーの一番上",
     "indicatorOpponentPrefix": "対戦相手 ",
     "graveyardLower": "墓地",
@@ -716,6 +717,7 @@
     "zoneTitle": "{{zone}}（{{count}}）",
     "noCardsIn": "{{zone}}にカードはありません",
     "castFromZone": "{{zone}}から唱える: {{name}}",
+    "activateFromZone": "{{zone}}から起動する: {{name}}",
     "viewCount": "{{count}}枚を表示",
     "castableCount": "{{zone}} — 唱えられるカード{{count}}枚"
   },
@@ -945,6 +947,7 @@
     "confirmSacrifice": "生け贄に捧げる（{{selected}}/{{count}}）",
     "skipSacrifice": "生け贄に捧げない",
     "keepCurrentTargets": "現在の対象を維持",
+    "keepCurrentTarget": "この対象を維持",
     "skip": "スキップ",
     "opponentChoice": "（対戦相手が選択）"
   },
@@ -2449,7 +2452,8 @@
     "confirm": "確認",
     "badgeNewTarget": "新しい対象",
     "slotLabel": "対象{{index}}：{{current}} → {{chosen}}",
-    "unselected": "変更なし"
+    "unselected": "変更なし",
+    "keep": "維持"
   },
   "separatePiles": {
     "chooserName": "プレイヤー{{number}}",

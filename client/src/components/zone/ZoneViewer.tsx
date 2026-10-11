@@ -22,8 +22,9 @@ import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.t
 import {
   collectObjectActions,
   isManaObjectAction,
-  playOrCastActionsForObject,
+  isPlayOrCastAction,
   resolveSingleActionDispatch,
+  zoneSurfaceActionsForObject,
 } from "../../viewmodel/cardActionChoice.ts";
 import { DebugCardContextMenu } from "../chrome/DebugCardContextMenu.tsx";
 import { debugContextMenuPoint } from "../chrome/debugContextMenuPosition.ts";
@@ -153,13 +154,16 @@ export function ZoneViewer({
               // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
               // castable graveyard/exile card (Retrace, Adventure, Foretell,
-              // Suspend, Plot, Warp, etc.). The zone viewer surfaces whatever
-              // the engine reports — no per-mechanic permission inspection.
+              // Suspend, Plot, Warp, etc.), and an ActivateAbility for abilities
+              // that function from the zone (Unearth, Scavenge, Encore). The zone
+              // viewer surfaces whatever the engine reports — no per-mechanic
+              // permission inspection.
               //
-              // CR 401.5 + CR 118.9: for `library`, the engine only surfaces a
-              // play/cast action on the top card when a TopOfLibraryCastPermission
-              // (Future Sight, Bolas's Citadel, Mystic Forge, …) is active, so
-              // the playable affordance naturally lands on the revealed top.
+              // CR 401.5 + CR 118.9 + CR 702.170f: for `library`, the engine only
+              // surfaces an action on the top card when a TopOfLibraryCastPermission
+              // (Future Sight, Bolas's Citadel, Mystic Forge, …) or a plot-from-top
+              // permission (Fblthp, Lost on the Range) is active, so the playable
+              // affordance naturally lands on the revealed top.
               //
               // CR 715.3d / CR 400.7i: this includes opponent-OWNED cards in
               // exile the viewer was granted permission to play (Hostage Taker,
@@ -168,7 +172,7 @@ export function ZoneViewer({
               // viewer — `legalActionsByObject` (engine authority, keyed to the
               // player the permission was granted to) is the sole gate.
               const castActions = hasPriority
-                ? playOrCastActionsForObject(legalActionsByObject, obj.id)
+                ? zoneSurfaceActionsForObject(legalActionsByObject, obj, obj.id)
                 : [];
               const delveActions = canDelveFromGraveyard
                 ? collectObjectActions(legalActionsByObject, obj.id).filter((action) =>
@@ -191,10 +195,15 @@ export function ZoneViewer({
                   obj={obj}
                   isValidTarget={isValidTarget}
                   canCast={castActions.length > 0}
-                  castTitle={t("zone.castFromZone", {
-                    zone: zoneLabel,
-                    name: isHiddenFromViewer ? t("card.faceDownName") : obj.name,
-                  })}
+                  castTitle={t(
+                    castActions.every(isPlayOrCastAction)
+                      ? "zone.castFromZone"
+                      : "zone.activateFromZone",
+                    {
+                      zone: zoneLabel,
+                      name: isHiddenFromViewer ? t("card.faceDownName") : obj.name,
+                    },
+                  )}
                   hiddenFromViewer={isHiddenFromViewer}
                   showTimeCounter={zone === "exile" && !isHiddenFromViewer}
                   debugInteractionMode={debugInteractionMode}

@@ -82,8 +82,11 @@ pub fn resolve(
     // loops, through the same single-authority helper `Effect::Token` uses so
     // "target opponent creates a token that's a copy of it" places the copy
     // under the chosen opponent's control rather than the trigger controller's.
-    let token_owner =
-        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter);
+    let Some(token_owner) =
+        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter)
+    else {
+        return crate::game::effects::token::no_token(state, ability, events);
+    };
 
     // Step 1: Resolve the copy source list.
     // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant
@@ -190,9 +193,15 @@ pub fn resolve(
                 .any(|t| matches!(t, TargetRef::Player(_)))
             {
                 let mut narrowed = ability.clone();
-                narrowed
+                // An occurrence projection: object occurrences keep their pins.
+                let objects: Vec<usize> = narrowed
                     .targets
-                    .retain(|t| matches!(t, TargetRef::Object(_)));
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
+                    .map(|(position, _)| position)
+                    .collect();
+                narrowed.project_target_occurrences(&objects);
                 object_only_ability = narrowed;
                 &object_only_ability
             } else {

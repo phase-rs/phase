@@ -70,6 +70,11 @@ export function isClickThroughWaitingFor(
   if (waitingFor.type === "RetargetChoice") {
     return waitingFor.data.scope.type === "Single";
   }
+  // CR 601.2c + CR 115.1: a copy announcement's announcing-opponent election
+  // is a modal choice, not a board pick.
+  if (waitingFor.type === "CopyRetarget" && waitingFor.data.announcer_election) {
+    return false;
+  }
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
   return getBoardChoiceView(waitingFor, objects) != null;
 }

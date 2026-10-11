@@ -9963,7 +9963,7 @@ pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> S
 /// creature attacking that player. When the rider carries the "attacking that
 /// player" combat qualifier, the affected set is therefore NARROWER than plain
 /// `Opponent` (all opponents): it is only those opponents who control a creature
-/// attacking the enchanted/defending player this combat (CR 102.2 + CR 508.1b).
+/// attacking the enchanted player when the effect is applied (CR 102.2).
 /// The qualifier is folded into a dedicated `OpponentAttackingEnchantedPlayer`
 /// scope so a non-attacking opponent — and, crucially, the enchanted defending
 /// player in a two-player game — never receives the copied effect. A plain
@@ -9998,9 +9998,9 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
         return None;
     }
     if has_attacking_qualifier {
-        // CR 508.6 + CR 102.2 + CR 508.1b: "each opponent attacking that player"
-        // = opponents of the controller who declared a creature attacking the
-        // enchanted player. Only composes with the opponent subject; any other
+        // CR 508.6 + CR 102.2: "each opponent attacking that player"
+        // = opponents of the controller who control a creature attacking the
+        // enchanted player when the effect is applied. Only composes with the opponent subject; any other
         // subject + combat qualifier stays an honest residual (no matching CR
         // scope, and no card exercises it).
         match scope {

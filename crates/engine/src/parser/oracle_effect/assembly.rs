@@ -1789,6 +1789,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::OriginalController
             | TargetFilter::OriginalSource
@@ -1811,7 +1812,9 @@ fn subject_anchored_optional_actor(
             | TargetFilter::DefendingPlayer
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
-            | TargetFilter::ScopedPlayer => Some(actor.clone()),
+            | TargetFilter::ScopedPlayer
+            // CR 608.2c + CR 115.1: "that player may ..." after a declared target player.
+            | TargetFilter::DeclaredPlayer { .. } => Some(actor.clone()),
 
             // CR 109.5 + CR 608.2h: controller-relative refs. `Controller` IS
             // the fallback and is the value `inject_subject_target` replaces, so
@@ -2805,7 +2808,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         let mut def = AbilityDefinition::new(kind, clause_effect);
         def.declares_chosen_group = clause_ir
             .declares_chosen_clause
-            .map(|id| ChosenGroupId(id.0));
+            .map(|id| ChosenGroupId(id.0))
+            .or(clause_ir.declared_player_group);
         def.reads_chosen_group = clause_ir.reads_chosen_clause.map(|id| ChosenGroupId(id.0));
         def.target_reads = clause_ir.target_reads;
         if ir.clauses.iter().any(|reader| {
@@ -3161,11 +3165,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // helper no longer refuses a stamped node (it now READS the stamp),
             // so precedence belongs at the writer, not at the classifier.
             if def.optional_for.is_none() && def.optional_player.is_none() {
-                if let Some(actor) =
-                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution)
-                {
-                    def.optional_player = Some(actor);
-                }
+                def.optional_player =
+                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
             }
         }
         if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {

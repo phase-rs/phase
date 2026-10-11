@@ -7797,7 +7797,7 @@ mod tests {
                 controller: PlayerId(0),
                 source_id: ObjectId(131),
                 branches: Vec::new(),
-                parent_targets: Vec::new(),
+                parent_occurrences: Default::default(),
                 context: Box::new(SpellContext::default()),
                 continuation: None,
                 replacement_applied: HashSet::new(),

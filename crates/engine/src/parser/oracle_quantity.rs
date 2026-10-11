@@ -4938,7 +4938,12 @@ mod tests {
                     }),
             } => {
                 assert_eq!(controller, None);
-                assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                assert_eq!(
+                    properties,
+                    vec![FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Source
+                    }]
+                );
                 assert_eq!(type_filters, vec![TypeFilter::Subtype("Equipment".into())]);
             }
             other => panic!("expected ObjectCount{{AttachedToSource}}, got {other:?}"),
@@ -4955,7 +4960,12 @@ mod tests {
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter { properties, .. }),
             } => {
-                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                assert_eq!(
+                    properties,
+                    vec![FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Recipient
+                    }]
+                );
             }
             other => panic!("expected recipient ObjectCount, got {other:?}"),
         }
@@ -4973,8 +4983,11 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter { properties, .. }),
             } => {
                 assert!(
-                    !properties.contains(&FilterProp::AttachedToSource)
-                        && !properties.contains(&FilterProp::AttachedToRecipient),
+                    !properties.contains(&FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Source
+                    }) && !properties.contains(&FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Recipient
+                    }),
                     "generic ObjectCount must not gain an attachment prop, got {properties:?}"
                 );
             }

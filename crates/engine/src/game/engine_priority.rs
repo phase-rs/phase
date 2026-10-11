@@ -146,6 +146,16 @@ fn run_post_action_pipeline_from_with_policy(
     let mut consumed_trigger_events =
         std::mem::take(&mut state.consumed_before_priority_trigger_events);
     let mut delayed_trigger_events = Vec::new();
+    // Where this pass's delayed scan starts in `events`: the whole buffer,
+    // unless the announced-cast batch below already scanned a prefix of it.
+    let mut delayed_scan_start = 0;
+    // CR 603.3 + CR 603.3b: the cast observers latched during a finished
+    // resolution are put on the stack with this action's fresh observers as
+    // ONE batch, above the cast spells; the fresh observers join the queue
+    // instead of being dispatched ahead of it.
+    let announced_cast_batch = drain_policy == DeferredTriggerDrainPolicy::ResolutionSafe
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && triggers::deferred_triggers_hold_announced_casts(state);
 
     // CR 603.2: Triggered abilities trigger at the moment the event occurs.
     // Scan for triggers BEFORE SBAs so that objects still on the battlefield
@@ -293,6 +303,10 @@ fn run_post_action_pipeline_from_with_policy(
             || deferred_trigger_batch_was_sba_choice_parked
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
+        } else if announced_cast_batch && state.game_end.is_none() {
+            // The action's delayed observers join the batch in the single
+            // delayed scan before the combined drain below.
+            triggers::collect_triggers_into_deferred(state, &filtered_events);
         } else if state.game_end.is_none() {
             // CR 104.1: only while the game is still going. Once this action
             // has recorded a result on `GameState::game_end` (e.g. a CR 104.4b
@@ -390,7 +404,7 @@ fn run_post_action_pipeline_from_with_policy(
             );
             // CR 603.3b: SBA-generated triggers join the terminal batch rather
             // than being ordered before its final cast trigger is collected.
-            if state.pending_resolution_completion.is_some() {
+            if state.pending_resolution_completion.is_some() || announced_cast_batch {
                 triggers::collect_triggers_into_deferred(state, &sba_events);
             } else {
                 triggers::process_triggers(state, &sba_events);
@@ -448,6 +462,7 @@ fn run_post_action_pipeline_from_with_policy(
         // cannot be ordered before the final cast trigger is collected.
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || state.pending_resolution_completion.is_some()
+            || announced_cast_batch
         {
             triggers::collect_triggers_into_deferred(state, &unconsumed_exile_return_events);
         } else {
@@ -527,10 +542,38 @@ fn run_post_action_pipeline_from_with_policy(
                     state.waiting_for = wf;
                 }
             }
-        } else if let Some(wf) =
-            triggers::drain_deferred_trigger_queue_with_policy(state, events, drain_policy)
-        {
-            state.waiting_for = wf;
+        } else {
+            // CR 603.3: the observers of spells cast and announced during a
+            // finished resolution go on the stack above those spells.
+            let policy = if announced_cast_batch {
+                // CR 603.2 + CR 603.3b: the action's delayed observers (of its
+                // own events, its state-based actions and its exile returns)
+                // join the same batch, through the one delayed scan the bottom
+                // of this pass would otherwise make. Scanned here, before the
+                // drain can stop on an ordering prompt; the bottom scan then
+                // reads only what the drain appends, so each occurrence is
+                // scanned once.
+                let delayed_input = unclaimed_delayed_trigger_input(
+                    state,
+                    events,
+                    delayed_scan_start,
+                    &mut consumed_trigger_events,
+                );
+                triggers::collect_unclaimed_delayed_triggers_into_deferred(
+                    state,
+                    events,
+                    &delayed_input,
+                );
+                delayed_scan_start = events.len();
+                DeferredTriggerDrainPolicy::SettledPriority
+            } else {
+                drain_policy
+            };
+            if let Some(wf) =
+                triggers::drain_deferred_trigger_queue_with_policy(state, events, policy)
+            {
+                state.waiting_for = wf;
+            }
         }
     }
 
@@ -552,15 +595,13 @@ fn run_post_action_pipeline_from_with_policy(
         }
     }
 
-    consumed_trigger_events.extend(std::mem::take(
-        &mut state.consumed_before_priority_trigger_events,
-    ));
-    let delayed_input = triggers::filter_consumed_trigger_events(
+    let delayed_input = unclaimed_delayed_trigger_input(
+        state,
         events,
-        triggers::TriggerCollectionRequester::Delayed,
-        &consumed_trigger_events,
+        delayed_scan_start,
+        &mut consumed_trigger_events,
     );
-    let delayed_events = triggers::check_delayed_triggers(state, &delayed_input);
+    let delayed_events = triggers::check_delayed_triggers(state, &delayed_input.events);
     events.extend(delayed_events);
     state.consumed_before_priority_trigger_events.clear();
 
@@ -601,6 +642,31 @@ fn run_post_action_pipeline_from_with_policy(
         default_wf.clone(),
         default_wf.acting_player(),
     ))
+}
+
+/// CR 603.2 + CR 603.2c + CR 603.7: the input of a post-action pass's delayed
+/// scan: `events[start..]` minus every occurrence a collector has claimed. The
+/// claims still in the pass ledger are folded into `consumed` first. The
+/// announced-cast batch and the final scan both read through here; the final
+/// scan starts where the batch's scan ended, so no occurrence is scanned twice
+/// whatever ordinals the batch's own claims carry. The kept events remember
+/// their buffer positions, so a claim the batch's scan publishes is the
+/// full-buffer occurrence it matched (CR 603.2c).
+fn unclaimed_delayed_trigger_input(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+    consumed: &mut Vec<triggers::ConsumedTriggerEventOccurrence>,
+) -> triggers::UnclaimedTriggerEvents {
+    consumed.extend(std::mem::take(
+        &mut state.consumed_before_priority_trigger_events,
+    ));
+    triggers::unclaimed_trigger_events_from(
+        events,
+        start,
+        triggers::TriggerCollectionRequester::Delayed,
+        consumed,
+    )
 }
 
 /// CR 903.9a + CR 704.5j + CR 310.11: SBA-owned commander, legend, and

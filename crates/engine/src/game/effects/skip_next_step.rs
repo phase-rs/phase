@@ -1,7 +1,5 @@
 use crate::game::quantity::resolve_quantity;
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, SkipScope, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, SkipScope};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -25,15 +23,8 @@ pub fn resolve(
         ));
     };
 
-    let player = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => {
-            if let Some(TargetRef::Player(pid)) = ability.targets.first() {
-                *pid
-            } else {
-                ability.controller
-            }
-        }
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, target) else {
+        return Ok(());
     };
 
     let idx = player.0 as usize;
@@ -81,7 +72,9 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, StepSkipTarget};
+    use crate::types::ability::{
+        AbilityKind, QuantityExpr, SpellContext, StepSkipTarget, TargetFilter,
+    };
     use crate::types::game_state::CombatPhaseSkipState;
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
@@ -119,8 +112,10 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,

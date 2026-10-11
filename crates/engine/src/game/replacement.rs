@@ -3851,7 +3851,7 @@ fn stamp_explore_chain(
 ) {
     ability.replacement_applied = applied.clone();
     if !matches!(&ability.effect, Effect::Scry { .. }) {
-        ability.targets = vec![TargetRef::Object(explorer)];
+        ability.set_unpinned_targets(vec![TargetRef::Object(explorer)]);
     }
     if let Some(sub) = ability.sub_ability.as_deref_mut() {
         stamp_explore_chain(sub, explorer, applied);
@@ -4004,7 +4004,7 @@ fn connive_applier(
                 ..
             } => {
                 let mut ability = build_resolved_from_def(def, rid.source, controller);
-                ability.targets = vec![TargetRef::Object(object_id)];
+                ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
                 let connive_count = crate::game::quantity::resolve_quantity_with_targets(
                     state,
                     connive_count_expr,
@@ -4041,7 +4041,7 @@ fn connive_applier(
                 let mut single = def.clone();
                 single.sub_ability = None;
                 let mut ability = build_resolved_from_def(&single, rid.source, controller);
-                ability.targets = vec![TargetRef::Object(object_id)];
+                ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
                 let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
 
                 // CR 701.50a + CR 614.5 + CR 616.1f: if this draw link parked an
@@ -4074,7 +4074,7 @@ fn connive_applier(
                         {
                             let mut next_ability =
                                 build_resolved_from_def(next, rid.source, controller);
-                            next_ability.targets = vec![TargetRef::Object(object_id)];
+                            next_ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
                             let connive_count =
                                 crate::game::quantity::resolve_quantity_with_targets(
                                     state,
@@ -5321,7 +5321,7 @@ fn untap_applier(
         let mut current = Some(execute.as_ref());
         while let Some(def) = current {
             let mut ability = build_resolved_from_def(def, object_id, controller);
-            ability.targets = vec![TargetRef::Object(object_id)];
+            ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
             let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
             current = def.sub_ability.as_deref();
         }
@@ -6534,7 +6534,11 @@ fn replacement_active_player_matches(
         Some(ControllerRef::You) => state.active_player == controller,
         Some(ControllerRef::Opponent) => state.active_player != controller,
         Some(ControllerRef::ScopedPlayer) => false,
-        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+        Some(
+            ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::DeclaredPlayer { .. },
+        ) => false,
         Some(ControllerRef::ParentTargetController) => false,
         // CR 120.1 + CR 109.4: the damage recipient's controller.
         Some(ControllerRef::EventTargetController) => false,
@@ -6672,7 +6676,11 @@ fn evaluate_replacement_condition(
                 // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
                 // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                Some(
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. },
+                ) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
@@ -6728,7 +6736,11 @@ fn evaluate_replacement_condition(
                 // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
                 // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                Some(
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. },
+                ) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
@@ -6923,6 +6935,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
                 | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. }
                 | ControllerRef::ParentTargetController
                 | ControllerRef::EventTargetController
                 | ControllerRef::ParentTargetOwner
@@ -7166,6 +7179,7 @@ fn apply_state_level_gates(
                 crate::types::ability::ControllerRef::ScopedPlayer
                 | crate::types::ability::ControllerRef::TargetPlayer
                 | crate::types::ability::ControllerRef::TargetOpponent
+                | crate::types::ability::ControllerRef::DeclaredPlayer { .. }
                 | crate::types::ability::ControllerRef::ParentTargetController
                 // Engine constraint: resolving the damage recipient's
                 // controller needs a trigger event window, which a replacement
@@ -7659,6 +7673,7 @@ fn object_replacement_candidate_applies(
                 // CR 109.4: TargetOpponent has no active-ability context at
                 // replacement-check time — fails closed identically to TargetPlayer.
                 | crate::types::ability::ControllerRef::TargetOpponent
+                | crate::types::ability::ControllerRef::DeclaredPlayer { .. }
                 | crate::types::ability::ControllerRef::ParentTargetController
                 // Engine constraint: no trigger event window at
                 // replacement-check time; fails closed like the parent-target

@@ -17391,7 +17391,9 @@ fn static_parse_for_each_attached_to_self_kellan() {
         } => match filter {
             TargetFilter::Typed(tf) => {
                 assert!(
-                    tf.properties.contains(&FilterProp::AttachedToSource),
+                    tf.properties.contains(&FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Source
+                    }),
                     "filter must carry AttachedToSource, got {:?}",
                     tf.properties
                 );
@@ -18693,8 +18695,8 @@ fn static_strong_back_attached_to_recipient_emits_attached_to_recipient_prop() {
     // to it." The pronoun "it" is anaphoric on the enchanted creature
     // (the per-recipient affected of the boost), not on the Aura source.
     // The static must therefore lower to a `QuantityRef::ObjectCount`
-    // whose filter carries `FilterProp::AttachedToRecipient`, NOT
-    // `FilterProp::AttachedToSource`. The legacy bug was a flat
+    // whose filter carries `FilterProp::AttachedTo { to: AttachmentReferent::Recipient }`, NOT
+    // `FilterProp::AttachedTo { to: AttachmentReferent::Source }`. The legacy bug was a flat
     // `AddPower(2) + AddToughness(2)` because the for-each clause did not
     // recognize "attached to it" and the parser fell through to the
     // fixed-P/T fallback.
@@ -18735,11 +18737,15 @@ fn static_strong_back_attached_to_recipient_emits_attached_to_recipient_prop() {
         } => match filter {
             TargetFilter::Typed(TypedFilter { properties, .. }) => {
                 assert!(
-                    properties.contains(&FilterProp::AttachedToRecipient),
+                    properties.contains(&FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Recipient
+                    }),
                     "filter must carry AttachedToRecipient, got {properties:?}"
                 );
                 assert!(
-                    !properties.contains(&FilterProp::AttachedToSource),
+                    !properties.contains(&FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Source
+                    }),
                     "filter must NOT carry AttachedToSource (would point at the Aura)"
                 );
             }

@@ -91,25 +91,21 @@ pub(crate) fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
-        // CR 508.6 + CR 102.2 + CR 508.1b: each opponent of the controller who
-        // is attacking the enchanted/defending player this combat (the Commander
-        // 2017 "each opponent attacking that player does the same" curse rider).
-        // The "that player" anchor is the trigger source's AttachedTo host.
-        PlayerFilter::OpponentAttackingEnchantedPlayer => {
-            match crate::game::effects::enchanted_player_anchor(state, source_id) {
-                Some(enchanted) => state
-                    .players
-                    .iter()
-                    .filter(|player| !player.is_eliminated)
-                    .filter(|player| {
-                        player.id != controller
-                            && state.player_attacked_player_this_combat(player.id, enchanted)
-                    })
-                    .map(|player| player.id)
-                    .collect(),
-                None => Vec::new(),
-            }
-        }
+        // CR 508.6 + CR 102.2 + CR 102.3: each opponent of the controller who is
+        // attacking the enchanted player (the Commander 2017 "each opponent
+        // attacking that player does the same" curse rider). Delegates to the
+        // single scope authority (live, kind-preserving, team-aware).
+        PlayerFilter::OpponentAttackingEnchantedPlayer => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::effects::matches_player_scope(
+                    state, player.id, filter, controller, source_id,
+                )
+            })
+            .map(|player| player.id)
+            .collect(),
         PlayerFilter::All => state
             .players
             .iter()
@@ -696,6 +692,158 @@ mod tests {
         assert!(
             players_for_filter(&state, &filter, &ability).is_empty(),
             "missing owner anchor must not leak to every player"
+        );
+    }
+
+    /// Curse-rider fixture: a curse controlled by P0 enchanting `enchanted`, and
+    /// one creature per `attacking` player attacking `enchanted`, with the
+    /// declaration ledger written exactly as declaration writes it. Returns the
+    /// state, the curse, and the attackers in `attacking` order.
+    fn curse_attack_fixture(
+        format: FormatConfig,
+        enchanted: PlayerId,
+        attacking: &[PlayerId],
+    ) -> (GameState, ObjectId, Vec<ObjectId>) {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::game_object::AttachTarget;
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(format, 4, 0);
+        let curse = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to = Some(AttachTarget::Player(enchanted));
+
+        let attackers: Vec<ObjectId> = attacking
+            .iter()
+            .map(|&player| {
+                let card_id = CardId(state.next_object_id);
+                let id = create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    "Attacker".to_string(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            })
+            .collect();
+
+        let mut combat = CombatState {
+            attackers: attackers
+                .iter()
+                .map(|&id| AttackerInfo::attacking_player(id, enchanted))
+                .collect(),
+            ..CombatState::default()
+        };
+        for &player in attacking {
+            combat
+                .attacked_defenders_this_combat
+                .entry(player)
+                .or_default()
+                .insert(enchanted);
+        }
+        state.combat = Some(combat);
+        (state, curse, attackers)
+    }
+
+    fn start_engines_for_attackers_of_enchanted(curse: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::OpponentAttackingEnchantedPlayer,
+            },
+            Vec::<TargetRef>::new(),
+            curse,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 508.6 + CR 506.4: `players_for_filter` reads LIVE combat membership for
+    /// `OpponentAttackingEnchantedPlayer`. P2 and P3 both attack the enchanted
+    /// P1; P2's attacker is then removed from combat, which prunes the attacker
+    /// but not the declaration ledger. Only P3 is still attacking P1. Reverting
+    /// to the ledger read starts P2's engines too.
+    #[test]
+    fn opponent_attacking_enchanted_player_drops_attacker_removed_from_combat() {
+        let (mut state, curse, attackers) = curse_attack_fixture(
+            FormatConfig::standard(),
+            PlayerId(1),
+            &[PlayerId(2), PlayerId(3)],
+        );
+        crate::game::effects::remove_from_combat::remove_object_from_combat(
+            &mut state,
+            attackers[0],
+        );
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the declaration ledger still records P2 attacking P1"
+        );
+
+        let ability = start_engines_for_attackers_of_enchanted(curse);
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[2].speed, None,
+            "P2's attacker was removed from combat: P2 is not attacking P1"
+        );
+        assert_eq!(
+            state.players[3].speed,
+            Some(1),
+            "P3 is still attacking the enchanted player"
+        );
+        assert_eq!(
+            state.players[0].speed, None,
+            "the controller is not an opponent"
+        );
+        assert_eq!(
+            state.players[1].speed, None,
+            "the enchanted player is not attacking"
+        );
+    }
+
+    /// CR 102.3 + CR 508.6: "opponent" is team-aware. In Two-Headed Giant P1 is
+    /// P0's teammate, so P1 attacking the enchanted P2 is not an opponent
+    /// attacking that player. The same board in a free-for-all game makes P1 an
+    /// opponent, which proves the arm is reached and the team axis alone decides.
+    /// Reverting to the raw `!= controller` test starts P1's engines in 2HG.
+    #[test]
+    fn opponent_attacking_enchanted_player_excludes_teammates() {
+        let (mut state, curse, _) = curse_attack_fixture(
+            FormatConfig::two_headed_giant(),
+            PlayerId(2),
+            &[PlayerId(1)],
+        );
+        let ability = start_engines_for_attackers_of_enchanted(curse);
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[1].speed, None,
+            "P1 is P0's teammate in 2HG, not an opponent"
+        );
+
+        let (mut state, curse, _) =
+            curse_attack_fixture(FormatConfig::standard(), PlayerId(2), &[PlayerId(1)]);
+        let ability = start_engines_for_attackers_of_enchanted(curse);
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[1].speed,
+            Some(1),
+            "reach-guard: in a free-for-all game P1 is an opponent attacking P2"
         );
     }
 }

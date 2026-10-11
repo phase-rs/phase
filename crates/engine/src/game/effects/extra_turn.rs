@@ -1,7 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -25,17 +23,8 @@ pub fn resolve(
     };
 
     // CR 500.7: Resolve the target to a PlayerId.
-    let player = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => {
-            // Targeted variant: resolve from ability.targets
-            if let Some(TargetRef::Player(pid)) = ability.targets.first() {
-                *pid
-            } else {
-                // Fallback to controller if no target resolved
-                ability.controller
-            }
-        }
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, target) else {
+        return Ok(());
     };
 
     // CR 107.1b: a negative calculated effect result is treated as zero.
@@ -69,7 +58,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetRef};
+    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetFilter, TargetRef};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::ExtraTurn;
     use crate::types::identifiers::ObjectId;
@@ -105,8 +94,10 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,

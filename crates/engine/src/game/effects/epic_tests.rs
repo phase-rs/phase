@@ -370,18 +370,30 @@ fn legacy_copy_retarget_completion_uses_copy_as_default_source() {
     // those states are generic copy choices whose completion source is the copy.
     let mut state = GameState::new_two_player(42);
     let copy_id = epic_spell_on_stack(&mut state, 7, true);
+    // The copy holds the target its legacy prompt records.
+    if let Some(ability) = state.stack.back_mut().and_then(|entry| entry.ability_mut()) {
+        *ability = targeted_snapshot(copy_id);
+    }
 
     state.waiting_for = WaitingFor::CopyRetarget {
         player: PlayerId(0),
+        controller: None,
         copy_id,
         target_slots: vec![crate::types::game_state::CopyTargetSlot {
             current: Some(crate::types::ability::TargetRef::Player(PlayerId(1))),
             legal_alternatives: Vec::new(),
+            address: None,
+            can_keep: false,
+            can_decline: false,
         }],
         effect_kind: EffectKind::CopySpell,
         effect_source_id: None,
         current_slot: 0,
         paradigm_remaining_offers: None,
+        mode: None,
+        picks: None,
+        can_keep_rest: false,
+        announcer_election: None,
     };
 
     let result = apply(&mut state, PlayerId(0), GameAction::KeepAllCopyTargets)

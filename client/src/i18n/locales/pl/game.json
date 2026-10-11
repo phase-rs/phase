@@ -671,6 +671,7 @@
     "libraryCount_one": "Biblioteka ({{count}} karta)",
     "libraryCount_other": "Biblioteka ({{count}} kart)",
     "playFromTop": "Zagraj {{name}} z wierzchu biblioteki",
+    "activateFromTop": "Aktywuj {{name}} z wierzchu biblioteki",
     "topOfLibrary": "wierzch biblioteki",
     "indicatorOpponentPrefix": "Przec ",
     "graveyardLower": "cmentarz",
@@ -678,6 +679,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Brak kart w strefie {{zone}}",
     "castFromZone": "Rzuć z {{zone}}: {{name}}",
+    "activateFromZone": "Aktywuj z {{zone}}: {{name}}",
     "viewCount": "Zobacz {{count}}",
     "castableCount": "{{zone}} — {{count}} możliwych do rzucenia"
   },
@@ -899,6 +901,7 @@
     },
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
+    "keepCurrentTarget": "Zachowaj ten cel",
     "skip": "Pomiń",
     "opponentChoice": "(wybór przeciwnika)",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -2406,7 +2409,8 @@
     "confirm": "Potwierdź",
     "badgeNewTarget": "Nowy cel",
     "slotLabel": "Cel {{index}}: {{current}} → {{chosen}}",
-    "unselected": "bez zmian"
+    "unselected": "bez zmian",
+    "keep": "Zachowaj"
   },
   "separatePiles": {
     "chooserName": "Gracz {{number}}",

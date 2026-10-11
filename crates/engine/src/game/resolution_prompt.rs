@@ -595,15 +595,17 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
-        selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
+        target_pins: _, // CR 400.7 selected-target pins, no choice
+        legacy_selected_target_incarnations: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
-        controller: _, // player id
-        original_controller: _, // player id
-        scoped_player: _, // player id (iteration binding)
-        kind: _,      // AbilityKind tag (no payload)
-        context: _,   // SpellContext: cast-time fact snapshot, not a live choice
-        description: _, // display string
+        controller: _,           // player id
+        original_controller: _,  // player id
+        scoped_player: _,        // player id (iteration binding)
+        kind: _,                 // AbilityKind tag (no payload)
+        context: _,              // SpellContext: cast-time fact snapshot, not a live choice
+        description: _,          // display string
         selected_mode_labels: _, // display strings, no resolution-time choice
         // CR 700.2 + CR 700.2a: mode-root position marker. The modes were CHOSEN
         // at announcement (`modal` / `mode_abilities`, folded into the verdict

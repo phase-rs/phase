@@ -87,6 +87,7 @@ pub mod complete_player_action;
 pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
+pub(crate) mod copy_choice;
 pub(crate) mod copy_exception;
 pub mod copy_spell;
 pub mod copy_token_blocking;
@@ -487,8 +488,14 @@ pub(crate) fn matches_player_scope(
                             && state
                                 .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
-                    // CR 508.6 + CR 102.2 + CR 508.1b: opponent of the controller
-                    // who is attacking the enchanted/defending player this combat.
+                    // CR 508.6 + CR 102.2 + CR 102.3: opponent of the controller
+                    // who IS ATTACKING the enchanted player when the effect is
+                    // applied. Live combat membership, kind-preserving (CR 506.3:
+                    // attacking that player's planeswalker or battle is not
+                    // attacking that player), and an attacker removed from combat
+                    // drops out (CR 506.4). Deliberately NOT the declaration
+                    // ledger, which records "has attacked" and collapses
+                    // planeswalker/battle attacks to the defending player.
                     // The "that player" anchor is the trigger source's AttachedTo
                     // host (the aura source is never itself an attacker, so it can
                     // never appear in `combat.attackers` for `DefendingPlayer`),
@@ -496,7 +503,9 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
                         crate::game::players::is_opponent(state, controller, p.id)
                             && enchanted_player_anchor(state, source_id).is_some_and(|enchanted| {
-                                state.player_attacked_player_this_combat(p.id, enchanted)
+                                crate::game::combat::player_is_attacking_player(
+                                    state, p.id, enchanted,
+                                )
                             })
                     }
                     PlayerFilter::HighestSpeed => {
@@ -969,7 +978,10 @@ fn rebind_child_to_forwarded_objects(
     state: &GameState,
     child: &mut ResolvedAbility,
     producer: ObjectId,
-    producer_targets: &[TargetRef],
+    producer_targets: &[(
+        TargetRef,
+        Option<crate::types::identifiers::ObjectIncarnationRef>,
+    )],
     moved: &[ObjectId],
 ) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
     bind_forwarded_generic_self_ref(child);
@@ -1003,9 +1015,10 @@ fn rebind_child_to_forwarded_objects(
         if attach_target_is_parent {
             if child.targets.is_empty() {
                 if !producer_targets.is_empty() {
-                    child.targets = producer_targets.to_vec();
+                    // The producer's occurrences, each with its own pin.
+                    child.replace_target_occurrences(producer_targets.to_vec());
                 } else {
-                    child.targets.push(TargetRef::Object(producer));
+                    child.push_target(TargetRef::Object(producer));
                 }
             }
         } else if !attach_target_is_last_created
@@ -1014,7 +1027,7 @@ fn rebind_child_to_forwarded_objects(
                 .iter()
                 .any(|t| matches!(t, TargetRef::Object(id) if *id == producer))
         {
-            child.targets.push(TargetRef::Object(producer));
+            child.push_target(TargetRef::Object(producer));
         }
     }
     // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
@@ -1055,7 +1068,10 @@ fn bind_moved_objects_to_child(
     state: &GameState,
     child: &mut ResolvedAbility,
     producer: ObjectId,
-    producer_targets: &[TargetRef],
+    producer_targets: &[(
+        TargetRef,
+        Option<crate::types::identifiers::ObjectIncarnationRef>,
+    )],
     result: ForwardedResultContext,
 ) {
     let moved: Vec<ObjectId> = result
@@ -1071,7 +1087,10 @@ fn bind_moved_objects_to_child(
 fn bind_active_continuation_to_moved_objects(
     state: &mut GameState,
     producer: ObjectId,
-    producer_targets: &[TargetRef],
+    producer_targets: &[(
+        TargetRef,
+        Option<crate::types::identifiers::ObjectIncarnationRef>,
+    )],
     result: ForwardedResultContext,
 ) {
     let Some(pending) = state.active_ability_continuation() else {
@@ -1129,7 +1148,7 @@ fn park_forwarded_zone_result_on_active_continuation(
         bind_active_continuation_to_moved_objects(
             state,
             ability.source_id,
-            &ability.targets,
+            &ability.target_occurrences(),
             result,
         );
     }
@@ -2927,7 +2946,7 @@ pub(crate) fn resolve_effect_pay_cost_rider(
     };
     let mut rider = sub.as_ref().clone();
     if should_propagate_parent_targets(ability, &rider) {
-        rider.targets = ability.targets.clone();
+        rider.mirror_targets_from(ability);
     }
     apply_parent_chain_context(&mut rider, ability, None, state);
     resolve_ability_chain(state, &rider, events, 1)
@@ -2953,7 +2972,7 @@ pub(crate) fn prepend_remaining_pay_cost_continuation(
     if let Some(sub) = ability.sub_ability.as_ref() {
         let mut sub_clone = sub.as_ref().clone();
         if should_propagate_parent_targets(ability, &sub_clone) {
-            sub_clone.targets = ability.targets.clone();
+            sub_clone.mirror_targets_from(ability);
         }
         apply_parent_chain_context(&mut sub_clone, ability, None, state);
         super::ability_utils::append_to_sub_chain(&mut remaining_payment, sub_clone);
@@ -3626,7 +3645,7 @@ fn try_materialize_reflexive_trigger_inner(
             && ability_refs_parent_target(&owned)
             && should_propagate_parent_targets(parent, &owned)
         {
-            owned.targets = parent.targets.clone();
+            owned.mirror_targets_from(parent);
             propagated_parent_targets = true;
         }
         apply_parent_chain_context(&mut owned, parent, effect_context_object, state);
@@ -4073,7 +4092,14 @@ fn prepare_one_sided_fight_child(
 fn bind_one_sided_fight_subject(child: &mut ResolvedAbility, subject: OneSidedFightSubject) {
     let binding = match subject {
         OneSidedFightSubject::Prepend(source) => {
-            child.targets.insert(0, TargetRef::Object(source));
+            // The prepended subject keeps the pin this node recorded for it
+            // (first occurrence of that object), if any.
+            let pin = child
+                .target_occurrences()
+                .into_iter()
+                .find(|(target, _)| *target == TargetRef::Object(source))
+                .and_then(|(_, pin)| pin);
+            child.insert_target(0, TargetRef::Object(source), pin);
             TargetDamageSourceBinding::Bound
         }
         OneSidedFightSubject::Illegal => TargetDamageSourceBinding::Illegal,
@@ -4094,8 +4120,10 @@ fn bind_forwarded_result_targets_for_legacy_effect(child: &mut ResolvedAbility) 
         && effect_refs_parent_target(&child.effect)
     {
         if let Some(context) = &child.context.forwarded_result_context {
-            child.targets = context.targets.clone();
-            child.set_target_incarnations_recursive(context.object_incarnations.clone());
+            let targets = context.targets.clone();
+            let incarnations = context.object_incarnations.clone();
+            child.set_unpinned_targets(targets);
+            child.set_target_incarnations_recursive(incarnations);
         }
     }
 }
@@ -4215,7 +4243,13 @@ pub(crate) fn apply_parent_chain_context(
     // and a child that was never handed off this way (e.g. a freshly-built
     // ability in a test) simply keeps the default `None` regardless of stray
     // global state.
-    if let Some(reason) = state.last_parent_target_missing_reason.take() {
+    let handed = state.last_parent_target_missing_reason.take();
+    // CR 608.2c + CR 609.3: a referent never produced is absent for every dependent anaphor,
+    // so the verdict travels down target-less hops as the targets do.
+    let passed_down = parent
+        .parent_target_missing_reason
+        .filter(|_| child.targets.is_empty());
+    if let Some(reason) = handed.or(passed_down) {
         child.parent_target_missing_reason = Some(reason);
     }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
@@ -4305,6 +4339,7 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && sub.illegal_local_target_slots.is_empty()
+        && sub.declares_chosen_group.is_none()
         && sub.reads_chosen_group.is_none()
         && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
@@ -4625,7 +4660,7 @@ pub(super) fn resolve_optional_effect_decision(
                 if should_propagate_parent_targets(&ability, &resolved)
                     && effect_refs_parent_target(&resolved.effect)
                 {
-                    resolved.targets = ability.targets.clone();
+                    resolved.mirror_targets_from(&ability);
                 }
                 resolved.context = ability.context.clone();
                 // CR 608.2c: This optional effect was DECLINED — the decline
@@ -5098,8 +5133,10 @@ fn instruction_outlives_declined_gate(
         trigger_source: _,
         trigger_definition_ref: _,
         target_incarnations: _,
-        selected_target_incarnations: _,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
         illegal_target_slots: _,
+        unjudged_target_slots: _,
         illegal_local_target_slots: _,
         controller: _,
         original_controller: _,
@@ -5122,7 +5159,8 @@ fn instruction_outlives_declined_gate(
         activation_record: _,
     } = node;
     let unbound = condition.is_none()
-        && declares_chosen_group.is_none()
+        && declares_chosen_group
+            .is_none_or(crate::types::ability::ChosenGroupId::is_declared_player)
         && reads_chosen_group.is_none()
         && declares_return_result.is_none()
         && reads_return_result.is_none()
@@ -5772,6 +5810,7 @@ fn referent_exists_without_gated_action(
                         ControllerRef::ScopedPlayer
                         | ControllerRef::TargetPlayer
                         | ControllerRef::TargetOpponent
+                        | ControllerRef::DeclaredPlayer { .. }
                         | ControllerRef::ParentTargetController
                         | ControllerRef::EventTargetController
                         | ControllerRef::ParentTargetOwner
@@ -5788,6 +5827,10 @@ fn referent_exists_without_gated_action(
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { index: _ } => {
             parent_target_is_declared
         }
+        // CR 601.2c + CR 602.2b + CR 603.3d: a declared player is announced as the
+        // spell or ability is put on the stack, whether or not the gated action happens;
+        // `SpecificPlayer` is that announcement captured when a delayed payload was installed.
+        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. } => true,
         TargetFilter::Not { filter } => {
             referent_exists_without_gated_action(filter, parent_target_is_declared)
         }
@@ -5802,7 +5845,6 @@ fn referent_exists_without_gated_action(
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
@@ -10120,6 +10162,14 @@ pub(crate) fn publish_fresh_tracked_set(
     set_id
 }
 
+/// CR 608.2c: A look/reveal instruction replaces the chain's result with its own,
+/// including an empty one, so a later `ParentTarget`/`LastRevealed` reader never
+/// sees an earlier producer's cards.
+pub(crate) fn publish_reveal_result(state: &mut GameState, ids: Vec<ObjectId>) {
+    publish_fresh_tracked_set(state, ids.clone());
+    state.last_revealed_ids = ids;
+}
+
 /// CR 608.2c + CR 608.2d: An immutable capability for one reciprocal producer
 /// → consumer transition preserves the ordered instruction and the player who
 /// must announce the later resolution-time choice.
@@ -11058,27 +11108,7 @@ pub(crate) fn bind_detached_continuation_to_parent(
             });
         continuation.set_target_incarnations_recursive(pins);
     }
-    continuation.targets = referents;
-}
-
-/// CR 603.7 + CR 109.5: Replace the first `TargetRef::Object` in a target
-/// slice with the supplied object id. Used by the `repeat_for: TrackedSetSize`
-/// per-iteration rebind so the i-th iteration's parent reference (e.g.,
-/// `ParentTargetController` resolution in `search_library::resolve_library_owner`)
-/// binds to the i-th tracked-set member, making "its controller" (CR 109.5)
-/// resolve to the i-th object's controller per iteration.
-fn rebind_first_object_target(
-    targets: &mut Vec<TargetRef>,
-    new_id: crate::types::identifiers::ObjectId,
-) {
-    if let Some(slot) = targets
-        .iter_mut()
-        .find(|t| matches!(t, TargetRef::Object(_)))
-    {
-        *slot = TargetRef::Object(new_id);
-    } else {
-        targets.push(TargetRef::Object(new_id));
-    }
+    continuation.set_unpinned_targets(referents);
 }
 
 /// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
@@ -11087,21 +11117,34 @@ fn rebind_first_object_target(
 /// player targets. Ordinary member loops retain the established first-slot
 /// binding for their independent target slots.
 fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: ObjectId) {
+    // The member is this iteration's object, not an announced target: it is
+    // written unpinned, while every retained (player) occurrence keeps its own
+    // pin through the occurrence projection.
     if ability.context.parent_target_iteration_members.is_some() {
         let insertion_index = ability
             .targets
             .iter()
             .position(|target| matches!(target, TargetRef::Object(_)))
             .unwrap_or(ability.targets.len());
-        ability
+        let players: Vec<usize> = ability
             .targets
-            .retain(|target| !matches!(target, TargetRef::Object(_)));
-        ability.targets.insert(
-            insertion_index.min(ability.targets.len()),
-            TargetRef::Object(member),
-        );
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| !matches!(target, TargetRef::Object(_)))
+            .map(|(position, _)| position)
+            .collect();
+        ability.project_target_occurrences(&players);
+        let index = insertion_index.min(ability.targets.len());
+        ability.insert_target(index, TargetRef::Object(member), None);
     } else {
-        rebind_first_object_target(&mut ability.targets, member);
+        match ability
+            .targets
+            .iter()
+            .position(|target| matches!(target, TargetRef::Object(_)))
+        {
+            Some(first) => ability.set_target_at(first, TargetRef::Object(member), None),
+            None => ability.push_target(TargetRef::Object(member)),
+        }
     }
 }
 
@@ -11340,7 +11383,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                     }
 
                     let mut candidate = ability.clone();
-                    candidate.targets = vec![TargetRef::Object(id)];
+                    candidate.set_unpinned_targets(vec![TargetRef::Object(id)]);
                     let mut simulated = state.clone();
                     cast_from_zone::resolve(&mut simulated, &candidate, &mut Vec::new()).is_ok()
                 });
@@ -11400,7 +11443,8 @@ pub(crate) enum OptionalFeasibility {
 /// would re-base every metered row's pinned spend and make neither number readable.
 pub(crate) struct UpfrontOptionalGate {
     /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
-    pub prompt_player: PlayerId,
+    /// `None`: the instruction is addressed to no one, so it is declined unprompted.
+    pub prompt_player: Option<PlayerId>,
     /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
     /// on it. That is not the same as "no preference stored": it is "no key exists".
     pub key: Option<MayTriggerAutoChoiceKey>,
@@ -11470,8 +11514,9 @@ pub(crate) fn upfront_optional_gate(
         key: ability
             .may_trigger_origin
             .clone()
-            .map(|origin| MayTriggerAutoChoiceKey {
-                player: prompt_player,
+            .zip(prompt_player)
+            .map(|(origin, player)| MayTriggerAutoChoiceKey {
+                player,
                 source_id: ability.source_id,
                 origin,
             }),
@@ -11501,8 +11546,8 @@ pub(crate) fn stored_may_answer(
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
 /// mandatory iterations), each payment is offered SEPARATELY and the reflexive
-/// triggers exactly once for one-or-more payments, sized by the payment count
-/// (CR 700.2d). Such an ability is driven by `drive_repeated_optional_payment`
+/// triggers exactly once for one-or-more payments, sized by the payment count.
+/// Such an ability is driven by `drive_repeated_optional_payment`
 /// instead of the up-front optional gate + `repeated_full_chain` loop. Mirrors
 /// `has_kind_driven_repeat` / `has_member_driven_repeat`.
 ///
@@ -11559,7 +11604,7 @@ fn drive_repeated_optional_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
 ) -> Result<(), EffectError> {
-    // CR 700.2d: the "up to N" payment budget.
+    // CR 603.12a: the "up to N" payment budget.
     let n = match &ability.repeat_for {
         Some(QuantityExpr::Fixed { value }) => (*value).max(0),
         _ => 0,
@@ -11597,6 +11642,10 @@ fn drive_sequential_repeated_optional_payment(
     // depth==0 prelude and must not re-gate each individual {1} payment.
     payment_unit.condition = None;
 
+    // CR 608.2b: no one to ask means no payment opportunity, so K stays 0.
+    if !offer_repeated_payment(state, &payment_unit) {
+        return Ok(());
+    }
     state.push_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
         pending: Some(Box::new(PendingRepeatedOptionalPayment {
             payment_unit: Box::new(payment_unit),
@@ -11605,15 +11654,25 @@ fn drive_sequential_repeated_optional_payment(
         })),
         optional_cost_payments_this_resolution: 0,
     });
+    Ok(())
+}
+
+/// CR 608.2d: each "you may pay" offer goes to the player the optional
+/// instruction names (`optional_prompt_player`), not always the caster. False
+/// when no one is asked.
+fn offer_repeated_payment(state: &mut GameState, payment_unit: &ResolvedAbility) -> bool {
+    let Some(player) = optional_prompt_player(state, payment_unit) else {
+        return false;
+    };
     state.waiting_for = WaitingFor::OptionalEffectChoice {
-        player: ability.controller,
+        player,
         decision_subject_id: None,
-        source_id: ability.source_id,
-        description: ability.description.clone(),
+        source_id: payment_unit.source_id,
+        description: payment_unit.description.clone(),
         may_trigger_key: None,
         same_card_may_trigger_choice_available: false,
     };
-    Ok(())
+    true
 }
 
 /// CR 603.12a + CR 608.2c: Resume a repeated-optional-payment process for one
@@ -11669,11 +11728,7 @@ pub(super) fn resolve_repeated_optional_payment_choice(
             // not satisfy the "if you do" rider, so the sequence ends here and
             // the reflexive resolves once with the payments already made (it is
             // not offered another payment opportunity).
-            if remaining > 0 {
-                // CR 700.2d: offer the next "up to N" payment.
-                let player = payment_unit.controller;
-                let source_id = payment_unit.source_id;
-                let description = payment_unit.description.clone();
+            if remaining > 0 && offer_repeated_payment(state, &payment_unit) {
                 state
                     .replace_active_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
                         pending: Some(Box::new(PendingRepeatedOptionalPayment {
@@ -11684,14 +11739,6 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                         optional_cost_payments_this_resolution,
                     })
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-                state.waiting_for = WaitingFor::OptionalEffectChoice {
-                    player,
-                    decision_subject_id: None,
-                    source_id,
-                    description,
-                    may_trigger_key: None,
-                    same_card_may_trigger_choice_available: false,
-                };
                 return Ok(());
             }
         }
@@ -11996,7 +12043,29 @@ pub(crate) fn controller_for_relative_filter(
 ///    `post_replacement_event_source` (PostReplacementSourceController).
 /// 4. Fall back to `ability.controller` (preserves prior semantics for context
 ///    refs whose state slots are empty in the current resolution window).
+///
+/// CR 608.2b: `None` for a [`TargetFilter::DeclaredPlayer`] whose target was
+/// illegal (or never announced), and for a filter that declares its own slot on
+/// a resolving carrier while no player was announced into it; the effect then
+/// affects no one. Every other filter resolves to some player.
 pub(crate) fn resolve_player_for_context_ref(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<PlayerId> {
+    match target_filter {
+        TargetFilter::DeclaredPlayer { group } => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+        }
+        TargetFilter::SpecificPlayer { .. } => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        }
+        _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
+        _ => Some(resolve_context_player(state, ability, target_filter)),
+    }
+}
+
+fn resolve_context_player(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -12158,12 +12227,21 @@ pub(crate) fn resolve_player_for_context_ref(
 /// acting subject (the target permanent's controller). This mirrors the
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
-pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+/// `None`: addressed to an illegal, unannounced or departed declared player (CR 608.2b), so no one is
+/// asked and the optional resolves as declined.
+pub(crate) fn optional_prompt_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
     if let Effect::PayCost { payer, .. } = &ability.effect {
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         {
-            return player;
+            return Some(player);
+        }
+        // CR 608.2b: a payer that is an illegal or unannounced declared player is asked no one.
+        if payer.names_one_player() {
+            return None;
         }
     }
     // CR 608.2d: a parser-stamped subject such as "they may" names the player
@@ -12173,7 +12251,12 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, optional_player)
         {
-            return player;
+            return Some(player);
+        }
+        // CR 608.2b: an instruction addressed to an illegal or unannounced declared
+        // player is offered to no one.
+        if optional_player.names_one_player() {
+            return None;
         }
     }
     if let Effect::Sacrifice { target, .. } = &ability.effect {
@@ -12183,7 +12266,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
                 ability,
                 &TargetFilter::ParentTargetController,
             ) {
-                return player;
+                return Some(player);
             }
         }
     }
@@ -12199,7 +12282,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
                 ability,
                 &TargetFilter::ParentTargetController,
             ) {
-                return player;
+                return Some(player);
             }
         }
     }
@@ -12214,7 +12297,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             TargetRef::Player(player) => Some(*player),
             TargetRef::Object(_) => None,
         }) {
-            return player;
+            return Some(player);
         }
     }
 
@@ -12237,7 +12320,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             ability,
             &TargetFilter::ParentTargetController,
         ) {
-            return player;
+            return Some(player);
         }
     }
 
@@ -12247,7 +12330,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
     if let Some(scoped) = ability.scoped_player {
         if let Effect::ChangeZone { target, .. } = &ability.effect {
             if filter_uses_relative_controller_scoped(target) {
-                return scoped;
+                return Some(scoped);
             }
         }
         if ability
@@ -12255,11 +12338,11 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             .target_filter()
             .is_some_and(filter_uses_relative_controller_scoped)
         {
-            return scoped;
+            return Some(scoped);
         }
     }
 
-    ability.controller
+    Some(ability.controller)
 }
 
 fn ability_with_event_context_targets(
@@ -12272,7 +12355,7 @@ fn ability_with_event_context_targets(
             state.current_trigger_event.as_ref(),
             pending.source_id,
         ) {
-            pending.targets.push(TargetRef::Player(defending_player));
+            pending.push_target(TargetRef::Player(defending_player));
         }
         return pending;
     }
@@ -12285,7 +12368,7 @@ fn ability_with_event_context_targets(
     if ability_refs_post_replacement_event_target(&pending) {
         if let Some(target) = state.post_replacement_event_target() {
             if !pending.targets.contains(target) {
-                pending.targets.push(target.clone());
+                pending.push_target(target.clone());
             }
             return pending;
         }
@@ -12307,7 +12390,7 @@ fn ability_with_event_context_targets(
                     ),
                 };
                 if let Some(target) = target {
-                    pending.targets.push(target);
+                    pending.push_target(target);
                 }
             }
         }
@@ -12383,11 +12466,11 @@ fn hydrate_event_context_targets<'a>(
 
     let mut resolved = ability.clone();
     if let Some(target_ref) = root_ref {
-        resolved.targets = vec![target_ref];
+        resolved.set_unpinned_targets(vec![target_ref]);
     }
     if let Some(host_ref) = nested_host_ref {
         if let Some(sub) = resolved.sub_ability.as_mut() {
-            sub.targets = vec![host_ref];
+            sub.set_unpinned_targets(vec![host_ref]);
         }
     }
     Cow::Owned(resolved)
@@ -13264,7 +13347,7 @@ pub(super) fn bind_resolution_exile_batch_paths(
                     .iter()
                     .any(|existing| existing.object_id == pin.object_id)
                 {
-                    ability.targets.push(TargetRef::Object(pin.object_id));
+                    ability.push_target(TargetRef::Object(pin.object_id));
                     ability.target_incarnations.push(*pin);
                 }
             }
@@ -15156,7 +15239,7 @@ fn resolve_chain_body(
             if let Some(id) = own_id {
                 targets.push(TargetRef::Object(id));
             }
-            sub.targets = targets;
+            sub.set_unpinned_targets(targets);
             sub.multi_target = None;
             apply_parent_chain_context(&mut sub, ability, own_snapshot.as_ref(), state);
             narrowed_subs.push(sub);
@@ -15293,7 +15376,7 @@ fn resolve_chain_body(
             let initial_waiting_for = state.waiting_for.clone();
             for (i, pid) in fanout_players.iter().enumerate() {
                 let mut narrowed = per_target.clone();
-                narrowed.targets = vec![TargetRef::Player(*pid)];
+                narrowed.set_unpinned_targets(vec![TargetRef::Player(*pid)]);
                 narrowed.multi_target = None;
                 resolve_ability_chain(state, &narrowed, events, depth + 1)?;
 
@@ -15307,7 +15390,8 @@ fn resolve_chain_body(
                     let mut tail = after_fanout.clone();
                     for &remaining_pid in remaining.iter().rev() {
                         let mut remaining_narrowed = per_target.clone();
-                        remaining_narrowed.targets = vec![TargetRef::Player(remaining_pid)];
+                        remaining_narrowed
+                            .set_unpinned_targets(vec![TargetRef::Player(remaining_pid)]);
                         remaining_narrowed.multi_target = None;
                         if let Some(prev) = tail {
                             super::ability_utils::append_to_sub_chain(
@@ -15809,7 +15893,7 @@ fn resolve_chain_body(
                         0 => {}
                         1 => {
                             let mut bound = ability.clone();
-                            bound.targets = legal;
+                            bound.set_unpinned_targets(legal);
                             return resolve_ability_chain(state, &bound, events, depth);
                         }
                         _ => {
@@ -15823,7 +15907,7 @@ fn resolve_chain_body(
                                 .collect();
                             if !candidates.is_empty() {
                                 let mut cont = ability.clone();
-                                cont.targets.clear();
+                                cont.clear_targets();
                                 state.park_ability_continuation(PendingContinuation::new(
                                     Box::new(cont),
                                     state,
@@ -15868,7 +15952,7 @@ fn resolve_chain_body(
             if let Some(ref else_branch) = ability.else_ability {
                 let mut else_resolved = else_branch.as_ref().clone();
                 if should_propagate_parent_targets(ability, &else_resolved) {
-                    else_resolved.targets = ability.targets.clone();
+                    else_resolved.mirror_targets_from(ability);
                 }
                 else_resolved.context = ability.context.clone();
                 if try_begin_deferred_else_branch_target_selection(
@@ -15978,7 +16062,7 @@ fn resolve_chain_body(
                     // offer its own choice (Kathril, Aspect Warper, issue
                     // #6321 / PR #6533).
                     if should_propagate_parent_targets(ability, &sub_resolved) {
-                        sub_resolved.targets = ability.targets.clone();
+                        sub_resolved.mirror_targets_from(ability);
                     }
                     sub_resolved.context = ability.context.clone();
                     // CR 608.2c: The false-parent ordinal escape bypasses the
@@ -16162,6 +16246,18 @@ fn resolve_chain_body(
             prompt_player,
             key: may_trigger_key,
         } = gate;
+        // CR 608.2b: an instruction addressed to no one is not performed, which is
+        // how a declined "may" resolves.
+        let Some(prompt_player) = prompt_player else {
+            resolve_optional_effect_decision(
+                state,
+                ability.clone(),
+                AutoMayChoice::Decline,
+                events,
+                depth + 1,
+            )?;
+            return Ok(());
+        };
         // The executable half of the `optional_for` coupling note above: this branch is
         // reachable only because the CR 101.4 fan-out already returned, so the authority's
         // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
@@ -16516,14 +16612,14 @@ fn resolve_chain_body(
                                 );
                             }
                         } else {
-                            bound.targets = vec![TargetRef::Object(legal[0])];
+                            bound.set_unpinned_targets(vec![TargetRef::Object(legal[0])]);
                         }
                         return resolve_ability_chain(state, &bound, events, depth);
                     }
                     _ => {
                         let mut cont = ability.clone();
                         if matches!(cont.effect, Effect::PutCounter { .. }) {
-                            cont.targets.clear();
+                            cont.clear_targets();
                         }
                         state.park_ability_continuation(PendingContinuation::new(
                             Box::new(cont),
@@ -17638,7 +17734,7 @@ fn resolve_chain_body(
                 .cloned();
             if let Some(tail) = direct_sequential_tail.as_mut() {
                 if should_propagate_parent_targets(ability, tail) {
-                    tail.targets = ability.targets.clone();
+                    tail.mirror_targets_from(ability);
                 }
                 apply_parent_chain_context(tail, ability, effect_context_object.as_ref(), state);
             }
@@ -17828,15 +17924,11 @@ fn resolve_chain_body(
                 .cloned();
             if let Some(mut tail) = direct_sequential_tail {
                 if should_propagate_parent_targets(ability, &tail) {
-                    tail.targets = ability
-                        .targets
-                        .iter()
-                        .filter(|target| {
-                            matches!(target, TargetRef::Object(id)
-                                if state.exile_rider_countered_ids.contains(id))
-                        })
-                        .cloned()
-                        .collect();
+                    // A projection of the parent's occurrences, pins included.
+                    tail.inherit_target_occurrences_where(ability, |target| {
+                        matches!(target, TargetRef::Object(id)
+                            if state.exile_rider_countered_ids.contains(id))
+                    });
                 }
                 apply_parent_chain_context(
                     &mut tail,
@@ -17914,7 +18006,7 @@ fn resolve_chain_body(
                 if let Some(ref base_chain) = sub.else_ability {
                     let mut resolved = base_chain.as_ref().clone();
                     if should_propagate_parent_targets(ability, &resolved) {
-                        resolved.targets = ability.targets.clone();
+                        resolved.mirror_targets_from(ability);
                     }
                     apply_parent_chain_context(
                         &mut resolved,
@@ -18002,7 +18094,7 @@ fn resolve_chain_body(
                             }
                             None => {
                                 if should_propagate_parent_targets(ability, &resolved) {
-                                    resolved.targets = ability.targets.clone();
+                                    resolved.mirror_targets_from(ability);
                                 }
                                 apply_parent_chain_context(
                                     &mut resolved,
@@ -18093,7 +18185,7 @@ fn resolve_chain_body(
             {
                 let mut sub_clone = sub.as_ref().clone();
                 if should_propagate_parent_targets(ability, &sub_clone) {
-                    sub_clone.targets = ability.targets.clone();
+                    sub_clone.mirror_targets_from(ability);
                 }
                 apply_parent_chain_context(
                     &mut sub_clone,
@@ -18132,7 +18224,11 @@ fn resolve_chain_body(
                 && ability.targets.is_empty()
             {
                 let mut clone = ability.clone();
-                clone.targets = inject_last_revealed_targets(state, ability, sub.as_ref());
+                clone.set_unpinned_targets(inject_last_revealed_targets(
+                    state,
+                    ability,
+                    sub.as_ref(),
+                ));
                 injected_parent = clone;
                 &injected_parent
             } else {
@@ -18147,7 +18243,11 @@ fn resolve_chain_body(
                     && condition_depends_on_result_object(condition)
                 {
                     let mut clone = ability.clone();
-                    clone.targets = inject_last_revealed_targets(state, ability, sub.as_ref());
+                    clone.set_unpinned_targets(inject_last_revealed_targets(
+                        state,
+                        ability,
+                        sub.as_ref(),
+                    ));
                     condition_injected_parent = clone;
                     &condition_injected_parent
                 } else {
@@ -18193,8 +18293,11 @@ fn resolve_chain_body(
                         && !state.last_revealed_ids.is_empty()
                         && effect_writes_last_revealed_ids(&ability.effect)
                     {
-                        else_resolved.targets =
-                            inject_last_revealed_targets(state, ability, else_branch.as_ref());
+                        else_resolved.set_unpinned_targets(inject_last_revealed_targets(
+                            state,
+                            ability,
+                            else_branch.as_ref(),
+                        ));
                     } else if else_resolved.targets.is_empty()
                         && !state.last_zone_changed_ids.is_empty()
                         && matches!(ability.effect, Effect::ExileTop { .. })
@@ -18202,13 +18305,15 @@ fn resolve_chain_body(
                     {
                         // CR 309.4c + CR 607.1: Forward exiled card IDs to else-ability
                         // (linked ability pair — second refers to cards exiled by the first).
-                        else_resolved.targets = state
-                            .last_zone_changed_ids
-                            .iter()
-                            .map(|&id| TargetRef::Object(id))
-                            .collect();
+                        else_resolved.set_unpinned_targets(
+                            state
+                                .last_zone_changed_ids
+                                .iter()
+                                .map(|&id| TargetRef::Object(id))
+                                .collect(),
+                        );
                     } else if should_propagate_parent_targets(ability, &else_resolved) {
-                        else_resolved.targets = ability.targets.clone();
+                        else_resolved.mirror_targets_from(ability);
                     }
                     apply_parent_chain_context(
                         &mut else_resolved,
@@ -18245,7 +18350,7 @@ fn resolve_chain_body(
                         if starts_independent_instruction(sibling) {
                             let mut sibling_resolved = sibling.as_ref().clone();
                             if should_propagate_parent_targets(ability, &sibling_resolved) {
-                                sibling_resolved.targets = ability.targets.clone();
+                                sibling_resolved.mirror_targets_from(ability);
                             }
                             apply_parent_chain_context(
                                 &mut sibling_resolved,
@@ -18382,7 +18487,7 @@ fn resolve_chain_body(
         {
             let mut sub_clone = sub.as_ref().clone();
             if should_propagate_parent_targets(ability, &sub_clone) {
-                sub_clone.targets = ability.targets.clone();
+                sub_clone.mirror_targets_from(ability);
             }
             apply_parent_chain_context(
                 &mut sub_clone,
@@ -18447,7 +18552,7 @@ fn resolve_chain_body(
         if waits_for_resolution_choice(&state.waiting_for) {
             let mut sub_clone = sub.as_ref().clone();
             if should_propagate_parent_targets(ability, &sub_clone) {
-                sub_clone.targets = ability.targets.clone();
+                sub_clone.mirror_targets_from(ability);
             }
             apply_parent_chain_context(
                 &mut sub_clone,
@@ -18467,7 +18572,7 @@ fn resolve_chain_body(
                         state,
                         &mut sub_clone,
                         ability.source_id,
-                        &ability.targets,
+                        &ability.target_occurrences(),
                         result,
                     );
                 }
@@ -18593,7 +18698,7 @@ fn resolve_chain_body(
             {
                 let mut sub_with_sources = sub.as_ref().clone();
                 for (i, source) in parent_sources.into_iter().enumerate() {
-                    sub_with_sources.targets.insert(i, source);
+                    sub_with_sources.insert_target(i, source, None);
                 }
                 apply_parent_chain_context(
                     &mut sub_with_sources,
@@ -18679,9 +18784,9 @@ fn resolve_chain_body(
             if let Some(trailing) = sub.sub_ability.as_ref() {
                 let mut trailing_resolved = trailing.as_ref().clone();
                 if should_propagate_parent_targets(sub, &trailing_resolved) {
-                    trailing_resolved.targets = sub.targets.clone();
+                    trailing_resolved.mirror_targets_from(sub);
                 } else if should_propagate_parent_targets(ability, &trailing_resolved) {
-                    trailing_resolved.targets = ability.targets.clone();
+                    trailing_resolved.mirror_targets_from(ability);
                 }
                 apply_parent_chain_context(
                     &mut trailing_resolved,
@@ -18720,7 +18825,7 @@ fn resolve_chain_body(
                 state,
                 &mut sub_with_context,
                 ability.source_id,
-                &ability.targets,
+                &ability.target_occurrences(),
                 &forwarded_objects,
             );
             apply_parent_chain_context(
@@ -18757,7 +18862,11 @@ fn resolve_chain_body(
             // effects that write last_revealed_ids. Parallel to how
             // continuations inject chosen cards as targets.
             let mut sub_with_targets = sub.as_ref().clone();
-            sub_with_targets.targets = inject_last_revealed_targets(state, ability, sub.as_ref());
+            sub_with_targets.set_unpinned_targets(inject_last_revealed_targets(
+                state,
+                ability,
+                sub.as_ref(),
+            ));
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
@@ -18776,11 +18885,13 @@ fn resolve_chain_body(
             // reveal. Forward the draw's ZoneChanged objects as reveal targets
             // (Mad Wizard's Lair and the same draw-then-reveal class).
             let mut sub_with_targets = sub.as_ref().clone();
-            sub_with_targets.targets = state
-                .last_zone_changed_ids
-                .iter()
-                .map(|&id| TargetRef::Object(id))
-                .collect();
+            sub_with_targets.set_unpinned_targets(
+                state
+                    .last_zone_changed_ids
+                    .iter()
+                    .map(|&id| TargetRef::Object(id))
+                    .collect(),
+            );
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
@@ -18800,11 +18911,13 @@ fn resolve_chain_body(
             // like Suspend Aggression must iterate the full set, not just the
             // ExileTop results).
             let mut sub_with_targets = sub.as_ref().clone();
-            sub_with_targets.targets = state
-                .last_zone_changed_ids
-                .iter()
-                .map(|&id| TargetRef::Object(id))
-                .collect();
+            sub_with_targets.set_unpinned_targets(
+                state
+                    .last_zone_changed_ids
+                    .iter()
+                    .map(|&id| TargetRef::Object(id))
+                    .collect(),
+            );
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
@@ -18905,7 +19018,7 @@ fn resolve_chain_body(
             // bound. Broken Bond's land-put
             // (`ChangeZone { target: Typed(Land ∧ InZone(Hand)), .. }`)
             // matches; Beseech's tracked-set-bound cast and fallback do not.
-            sub_with_targets.targets = inherited_parent_targets(ability, sub);
+            sub_with_targets.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
@@ -18925,9 +19038,7 @@ fn resolve_chain_body(
             // `parent_target_controller` — can bind to the departed object.
             let mut sub_with_referent = sub.as_ref().clone();
             if let Some(snapshot) = &effect_context_object {
-                sub_with_referent
-                    .targets
-                    .push(TargetRef::Object(snapshot.object_id));
+                sub_with_referent.push_target(TargetRef::Object(snapshot.object_id));
             }
             apply_parent_chain_context(
                 &mut sub_with_referent,
@@ -19204,22 +19315,44 @@ fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool 
     }
 }
 
+/// CR 608.2b: whether `filter` is the effect's own declared player slot and no
+/// player was announced into it on a resolving carrier (zero targets chosen is
+/// a legal state, CR 115.6). The effect then affects no one.
+pub(crate) fn declared_player_slot_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    crate::game::targeting::resolves_on_stack(state, ability)
+        && !filter.is_context_ref()
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect) == Some(filter)
+        && crate::game::ability_utils::primary_announced_player(&ability.targets, ability).is_none()
+}
+
 /// CR 608.2b + CR 608.2c: an empty child with local initial-legality removal
 /// evidence inherits nothing. Other children retain players and objects unless
-/// the child owns an independent object slot.
-fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> Vec<TargetRef> {
+/// the child owns an independent object slot; a node that declares its own player slot
+/// (`declares_chosen_group`) inherits no player. Returned as the parent's
+/// OCCURRENCES — the source projection a child inherits, each occurrence
+/// with its own pin.
+pub(super) fn inherited_parent_occurrences(
+    parent: &ResolvedAbility,
+    sub: &ResolvedAbility,
+) -> Vec<(
+    TargetRef,
+    Option<crate::types::identifiers::ObjectIncarnationRef>,
+)> {
     if sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty() {
         return Vec::new();
     }
     let has_independent_target_slot = sub_has_independent_object_target_slot(sub);
     parent
-        .targets
-        .iter()
-        .filter(|target_ref| match target_ref {
-            TargetRef::Player(_) => true,
+        .target_occurrences()
+        .into_iter()
+        .filter(|(target_ref, _)| match target_ref {
+            TargetRef::Player(_) => sub.declares_chosen_group.is_none(),
             TargetRef::Object(_) => !has_independent_target_slot,
         })
-        .cloned()
         .collect()
 }
 
@@ -20659,8 +20792,13 @@ fn resolve_unless_payer(
         // (Tergrid's Lantern and the broader "target player unless they X"
         // punisher class). Delegates to `resolve_effect_player_ref`'s
         // `TargetFilter::Player` arm which scans `ability.targets` for the
-        // first `TargetRef::Player`.
-        TargetFilter::Player => {
+        // first `TargetRef::Player`. CR 608.2c: a later "that player" payer
+        // (`DeclaredPlayer`) takes that resolver's own arm, which reads the
+        // declared player and honors CR 608.2b. `SpecificPlayer` is the same
+        // payer bound at delayed-trigger install (CR 603.7a).
+        TargetFilter::Player
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         // CR 508.5 + CR 118.12a: "[Effect] unless defending player [pays cost]"
@@ -21148,12 +21286,22 @@ mod tests {
             assert!(can_inherit_parent_targets(&child));
             assert!(should_propagate_parent_targets(&parent, &child));
             assert!(!expected_targets.is_empty());
-            assert_eq!(inherited_parent_targets(&parent, &child), expected_targets);
+            assert_eq!(
+                inherited_parent_occurrences(&parent, &child)
+                    .into_iter()
+                    .map(|(target, _)| target)
+                    .collect::<Vec<_>>(),
+                expected_targets
+            );
 
             child.illegal_local_target_slots = vec![0];
             assert!(!can_inherit_parent_targets(&child));
             assert!(!should_propagate_parent_targets(&parent, &child));
-            assert!(inherited_parent_targets(&parent, &child).is_empty());
+            assert!(inherited_parent_occurrences(&parent, &child)
+                .into_iter()
+                .map(|(target, _)| target)
+                .collect::<Vec<_>>()
+                .is_empty());
         }
     }
 
@@ -21606,6 +21754,12 @@ mod tests {
             serde_json::from_str(r#"{"type":"Typed","type_filters":["Creature"],"controller":"Opponent","properties":[]}"#).unwrap(),
             TargetFilter::ParentTarget,
             TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId(
+                    crate::types::ability::ChosenGroupId::DECLARED_PLAYER_BASE,
+                ),
+            },
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
         ] {
             assert!(referent_exists_without_gated_action(&accepted, true), "{accepted:?}");
         }
@@ -24083,9 +24237,11 @@ mod tests {
             unreachable!("test constructs MoveCounters");
         };
         *target = controlled_creature;
-        ability.selected_target_incarnations = vec![
-            ObjectIncarnationRef::from_object(&state.objects[&source]),
-            ObjectIncarnationRef::from_object(&state.objects[&destination]),
+        ability.target_pins = vec![
+            Some(ObjectIncarnationRef::from_object(&state.objects[&source])),
+            Some(ObjectIncarnationRef::from_object(
+                &state.objects[&destination],
+            )),
         ];
 
         assert!(!optional_effect_is_infeasible(&state, &ability));
@@ -26732,7 +26888,7 @@ mod tests {
 
         assert_eq!(
             resolve_player_for_context_ref(&state, &ability, &TargetFilter::ParentTargetController,),
-            PlayerId(1),
+            Some(PlayerId(1)),
         );
     }
 
@@ -31908,6 +32064,19 @@ mod tests {
     /// from an earlier resolution cannot receive the new grant.
     #[test]
     fn copy_token_chain_no_created_tokens_clears_stale_last_created_before_followup() {
+        // The second owner is an unannounced declared player (CR 608.2b): it takes the
+        // owner-unresolved exit rather than the no-source one.
+        for owner in [
+            TargetFilter::Controller,
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            },
+        ] {
+            copy_token_chain_clears_stale_last_created(owner);
+        }
+    }
+
+    fn copy_token_chain_clears_stale_last_created(owner: TargetFilter) {
         let mut state = GameState::new_two_player(42);
         let stale = create_object(
             &mut state,
@@ -31934,7 +32103,7 @@ mod tests {
         let copy = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Typed(TypedFilter::creature()),
-                owner: TargetFilter::Controller,
+                owner,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,

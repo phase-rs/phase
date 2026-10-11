@@ -31,11 +31,11 @@ use crate::game::quantity::{
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttackedYouScope,
-    BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
-    ContinuousModification, CopiableValues, Designation, Duration, Effect, FilterProp,
-    ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachmentReferent,
+    AttackedYouScope, BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind,
+    CommanderOwnership, ContinuousModification, CopiableValues, Designation, Duration, Effect,
+    FilterProp, ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
     TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
@@ -3437,12 +3437,27 @@ fn finish_layer_evaluation(
     // `GameObject::reset_for_battlefield_entry`). Clearing back to false is
     // the sole responsibility of `turns::start_next_turn` for the active
     // player's permanents.
+    let mut controller_changed: Vec<ObjectId> = Vec::new();
     for (id, prev) in prev_controllers {
         if let Some(obj) = state.objects.get_mut(&id) {
             if obj.controller != prev {
                 obj.summoning_sick = true;
+                controller_changed.push(id);
             }
         }
+    }
+
+    // CR 506.4 + CR 613.1b: the same settled delta removes each changed
+    // permanent from combat. Any removed role (attacking or blocking) can change
+    // a Layer 6 combat-role grant or a `SourceIsAttacking` / `SourceIsBlocking`
+    // gate (CR 613.1f), so it must be re-derived; the unconditional
+    // `LayersDirty::Clean` below would discard the removal's own `mark_full`, so
+    // re-run the pass here, as ring normalization does. The nested pass
+    // snapshots the new controllers, so its delta is empty and the recursion is
+    // exactly one pass deep.
+    if remove_controller_changed_from_combat(state, &controller_changed, retirement_owner) {
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
+        return;
     }
 
     super::pairing::cleanup_invalid_pairs(state);
@@ -3543,6 +3558,39 @@ fn finish_layer_evaluation(
     // (Clean / EnteredObjects / Full).
     crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
+}
+
+/// CR 506.4: "A permanent is removed from combat if ... its controller ...
+/// changes." Removes every permanent whose settled effective controller
+/// (CR 613.1b) changed in this pass from combat, and returns whether combat
+/// membership changed (any combat edge naming one of them was pruned).
+///
+/// A blocker's removal leaves the attacker it blocked blocked (CR 509.1h); the
+/// shared prune authority leaves `AttackerInfo::blocked` untouched. An
+/// attacker's removal leaves every creature that was blocking it a blocking
+/// creature, possibly with no attacker assigned (CR 509.1g, CR 510.1d).
+///
+/// Journal ownership follows `retire_ended_effects`: a settlement-owned pass
+/// journals each removal with its exact participation receipt, while an
+/// attachment-owned pass prunes structurally, because replaying that attachment
+/// command re-runs this same settlement and so re-derives the prune.
+fn remove_controller_changed_from_combat(
+    state: &mut GameState,
+    changed: &[ObjectId],
+    owner: StateDurationRetirementOwner,
+) -> bool {
+    let mut membership_changed = false;
+    for &id in changed {
+        membership_changed |= match owner {
+            StateDurationRetirementOwner::LayerSettlement => {
+                super::effects::remove_from_combat::remove_object_from_combat(state, id)
+            }
+            StateDurationRetirementOwner::AttachmentCommand => {
+                super::combat::prune_object_from_combat(state, id)
+            }
+        };
+    }
+    membership_changed
 }
 
 /// CR 400.1 + CR 404 + CR 611.3a: Does a `TargetFilter` test membership of a
@@ -4321,9 +4369,18 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
-        | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -4443,6 +4500,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -15501,7 +15559,9 @@ mod tests {
                     TypeFilter::Subtype("Equipment".into()),
                 ])],
                 controller: None,
-                properties: vec![FilterProp::AttachedToRecipient],
+                properties: vec![FilterProp::AttachedTo {
+                    to: AttachmentReferent::Recipient,
+                }],
             });
             let qty = QuantityExpr::Multiply {
                 factor: 2,
@@ -15856,7 +15916,9 @@ mod tests {
                                 TypeFilter::Subtype("Equipment".into()),
                             ])],
                             controller: None,
-                            properties: vec![FilterProp::AttachedToRecipient],
+                            properties: vec![FilterProp::AttachedTo {
+                                to: AttachmentReferent::Recipient,
+                            }],
                         }),
                     },
                 }),
@@ -29204,5 +29266,807 @@ mod state_duration_retirement_recording_tests {
                 )
             );
         }
+    }
+}
+
+/// CR 506.4 + CR 613.1b: a settled Layer 2 controller change removes the
+/// permanent from combat.
+#[cfg(test)]
+mod controller_change_combat_removal_tests {
+    use super::*;
+    use crate::game::combat::{
+        apply_resolved_combat_membership, AttackerInfo, CombatParticipation, CombatState,
+    };
+    use crate::game::effects::attach::{apply_resolved_attachment, attach_to};
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::identifiers::CardId;
+    use crate::types::resolved_commands::{
+        ResolvedAttachmentCommand, ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
+        ResolvedRulesCommand,
+    };
+
+    /// Controller-agnostic Layer 6 grant keyed on `FilterProp::Attacking`.
+    const ATTACKING_DEATHTOUCH: &str = "Attacking creatures have deathtouch.";
+    /// Controller-agnostic Layer 6 grant keyed on `FilterProp::Blocking`:
+    /// "blocking creatures have deathtouch". Built typed because the static
+    /// parser reads a bare "Blocking creatures have …" subject as a creature
+    /// subtype, and no printed card grants a keyword this way.
+    fn blocking_deathtouch() -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Blocking]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch,
+            }])
+    }
+    const CONTROL_MAGIC: &str = "Enchant creature\nYou control enchanted creature.";
+
+    struct Board {
+        runner: GameRunner,
+        /// P0's creature attacking P1, blocked by `blocker`.
+        attacker: ObjectId,
+        /// P1's creature blocking `attacker`.
+        blocker: ObjectId,
+        /// P1's creature attacking P0, unblocked.
+        rival: ObjectId,
+        /// Owned by P1, controlled by P0 through `base_controller`, attacking P1.
+        borrowed: ObjectId,
+        /// P1's unattached Control Magic.
+        control_magic: ObjectId,
+    }
+
+    fn board() -> Board {
+        board_with(None)
+    }
+
+    /// [`board`], plus an optional extra P0 enchantment carrying a Layer 6
+    /// grant to blocking creatures ([`blocking_deathtouch`]).
+    fn board_with(blocking_grant: Option<StaticDefinition>) -> Board {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(P0, "Deathtouch Grant", ATTACKING_DEATHTOUCH);
+        let expects_blocking_grant = blocking_grant.is_some();
+        if let Some(grant) = blocking_grant {
+            scenario
+                .add_creature(P0, "Blocking Grant", 0, 0)
+                .as_enchantment()
+                .with_static_definition(grant);
+        }
+        let control_magic = scenario
+            .add_enchantment_from_oracle(P1, "Control Magic", CONTROL_MAGIC)
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let attacker = scenario.add_vanilla(P0, 2, 2);
+        let blocker = scenario.add_vanilla(P1, 2, 2);
+        let rival = scenario.add_vanilla(P1, 2, 2);
+        let borrowed = scenario
+            .add_creature(P1, "Borrowed", 2, 2)
+            .controlled_by(P0)
+            .id();
+        let mut runner = scenario.build();
+
+        let state = runner.state_mut();
+        let mut combat = CombatState {
+            attackers: vec![
+                AttackerInfo {
+                    object_id: attacker,
+                    defending_player: P1,
+                    attack_target: AttackTarget::Player(P1),
+                    blocked: true,
+                    band_id: None,
+                },
+                AttackerInfo::attacking_player(rival, P0),
+                AttackerInfo::attacking_player(borrowed, P1),
+            ],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+        mark_layers_full(state);
+        flush_layers(state);
+
+        // Reach guards shared by every row: the grant machinery is live and
+        // reads combat membership.
+        for id in [attacker, rival, borrowed] {
+            assert!(
+                state.objects[&id].has_keyword(&Keyword::Deathtouch),
+                "reach guard: an attacking creature has the Layer 6 grant"
+            );
+        }
+        assert_eq!(
+            state.objects[&blocker].has_keyword(&Keyword::Deathtouch),
+            expects_blocking_grant,
+            "reach guard: the attacking grant skips the blocker; only a blocking grant reaches it"
+        );
+        assert_eq!(state.objects[&borrowed].controller, P0);
+        assert_eq!(state.objects[&borrowed].owner, P1);
+
+        Board {
+            runner,
+            attacker,
+            blocker,
+            rival,
+            borrowed,
+            control_magic,
+        }
+    }
+
+    fn give_control(state: &mut GameState, target: ObjectId, to: PlayerId) {
+        state
+            .add_transient_continuous_effect(
+                target,
+                to,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::ChangeController],
+                None,
+            )
+            .expect("a permanent control change begins");
+    }
+
+    fn commands_since(state: &GameState, start: usize) -> Vec<ResolvedRulesCommand> {
+        state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .skip(start)
+            .filter_map(|entry| entry.command.clone())
+            .collect()
+    }
+
+    fn removals_since(state: &GameState, start: usize) -> Vec<ResolvedCombatMembershipCommand> {
+        commands_since(state, start)
+            .into_iter()
+            .filter_map(|command| match command {
+                ResolvedRulesCommand::CombatMembership(command) => Some(command),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn not_in_combat(state: &GameState, id: ObjectId) -> bool {
+        CombatParticipation::capture(state, id) == CombatParticipation::default()
+    }
+
+    /// CR 506.4 + CR 613.1b + CR 613.1f: an attacker whose controller changes
+    /// leaves combat in the same flush, the removal is journaled once with its
+    /// exact participation receipt, and its Layer 6 `Attacking` grant is
+    /// revoked. A second flush changes nothing.
+    #[test]
+    fn attacker_control_change_removes_it_and_revokes_attacking_grants() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            ..
+        } = board();
+        let state = runner.state_mut();
+        let expected = CombatParticipation::capture(state, attacker);
+        assert!(
+            expected.attacking.is_some() && !expected.blocked_by.is_empty(),
+            "reach guard: the attacker is attacking and blocked"
+        );
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, attacker, P1);
+        flush_layers(state);
+
+        assert_eq!(state.objects[&attacker].controller, P1);
+        assert!(
+            not_in_combat(state, attacker),
+            "CR 506.4: the creature whose controller changed is removed from combat"
+        );
+        assert!(
+            !state.objects[&attacker].has_keyword(&Keyword::Deathtouch),
+            "CR 613.1f: the removed creature is no longer attacking, so the grant is revoked"
+        );
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&blocker),
+            Some(&vec![]),
+            "CR 509.1g: the blocker remains a blocking creature, now blocking no attacker"
+        );
+        assert_eq!(
+            CombatParticipation::capture(state, blocker).blocking,
+            Some(vec![]),
+            "the blocker's receipt reads 'blocking, no attacker assigned'"
+        );
+        assert!(
+            crate::game::restrictions::is_source_blocking(state, blocker),
+            "the blocking-role reader still sees a blocking creature"
+        );
+        assert_eq!(state.layers_dirty, LayersDirty::Clean);
+        let removals = removals_since(state, start);
+        assert_eq!(removals.len(), 1, "exactly one journaled removal");
+        assert_eq!(removals[0].object.object_id, attacker);
+        assert!(
+            removals
+                .iter()
+                .all(|command| command.object.object_id != blocker),
+            "the blocker is not removed, so nothing is journaled for it"
+        );
+        assert_eq!(
+            removals[0].edit,
+            ResolvedCombatMembershipEdit::Remove {
+                expected_participation: expected,
+            }
+        );
+
+        let settled = state.resolved_rules_journal.entries().len();
+        mark_layers_full(state);
+        flush_layers(state);
+        assert_eq!(
+            state.resolved_rules_journal.entries().len(),
+            settled,
+            "a later pass sees no controller change and journals nothing"
+        );
+    }
+
+    /// CR 506.4 + CR 611.2b: control returning mid-combat is a controller
+    /// change too. A creature attacking under a borrowed controller leaves
+    /// combat when the "for as long as" control effect ends.
+    #[test]
+    fn control_returning_mid_combat_removes_the_creature() {
+        let Board {
+            mut runner,
+            blocker,
+            ..
+        } = board();
+        let state = runner.state_mut();
+        // P1's tapped blocker anchors a "for as long as it stays tapped" loan of
+        // P0's fresh creature to P1.
+        let loaned = crate::game::zones::create_object(
+            state,
+            CardId(9100),
+            P0,
+            "Loaned".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&loaned).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        state.objects.get_mut(&blocker).unwrap().tapped = true;
+        let subject = ObjectIncarnationRef::from_object(&state.objects[&blocker]);
+        let affected = ObjectIncarnationRef::from_object(&state.objects[&loaned]);
+        state
+            .add_transient_continuous_effect_with_bindings(
+                blocker,
+                P1,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: crate::types::ability::ObjectScope::Recipient,
+                    },
+                },
+                TargetFilter::SpecificObject { id: loaned },
+                vec![ContinuousModification::ChangeController],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(affected),
+                    duration_subject: Some(subject),
+                    granting_object: None,
+                },
+            )
+            .expect("the loan begins while the anchor is tapped");
+        flush_layers(state);
+        assert_eq!(state.objects[&loaned].controller, P1);
+
+        // The creature attacks under its borrowed controller.
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::attacking_player(loaned, P0));
+        mark_layers_full(state);
+        flush_layers(state);
+        assert!(
+            !not_in_combat(state, loaned),
+            "reach guard: no control change, so the borrowed attacker stays in combat"
+        );
+        assert!(
+            state.objects[&loaned].has_keyword(&Keyword::Deathtouch),
+            "reach guard: the borrowed attacker has the attacking grant"
+        );
+        let expected = CombatParticipation::capture(state, loaned);
+        let start = state.resolved_rules_journal.entries().len();
+
+        state.objects.get_mut(&blocker).unwrap().tapped = false;
+        mark_layers_full(state);
+        flush_layers(state);
+
+        assert_eq!(
+            state.objects[&loaned].controller, P0,
+            "reach guard: the loan ended and control returned to the owner"
+        );
+        assert!(
+            not_in_combat(state, loaned),
+            "CR 506.4: returning control removes the creature from combat"
+        );
+        assert!(!state.objects[&loaned].has_keyword(&Keyword::Deathtouch));
+        let removals = removals_since(state, start);
+        assert_eq!(removals.len(), 1);
+        assert_eq!(
+            removals[0].edit,
+            ResolvedCombatMembershipEdit::Remove {
+                expected_participation: expected,
+            }
+        );
+    }
+
+    /// CR 506.4: removal happens only on a CHANGE. Repeated full passes over a
+    /// board with attackers, a blocker, and a creature controlled by a
+    /// non-owner since before combat prune and journal nothing.
+    #[test]
+    fn unchanged_control_prunes_and_journals_nothing() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            rival,
+            borrowed,
+            ..
+        } = board();
+        let state = runner.state_mut();
+        let ids = [attacker, blocker, rival, borrowed];
+        let before: Vec<_> = ids
+            .iter()
+            .map(|&id| CombatParticipation::capture(state, id))
+            .collect();
+        assert!(
+            before.iter().all(|participation| !participation.is_empty()),
+            "reach guard: every fixture creature holds a combat role"
+        );
+        let start = state.resolved_rules_journal.entries().len();
+
+        for _ in 0..2 {
+            mark_layers_full(state);
+            flush_layers(state);
+        }
+
+        let after: Vec<_> = ids
+            .iter()
+            .map(|&id| CombatParticipation::capture(state, id))
+            .collect();
+        assert_eq!(after, before, "no combat role changed");
+        assert_eq!(state.objects[&borrowed].controller, P0);
+        assert!(removals_since(state, start).is_empty());
+    }
+
+    /// CR 506.4 + CR 509.1h: a blocker whose controller changes stops blocking;
+    /// the attacker it blocked stays in combat and remains blocked.
+    #[test]
+    fn blocker_control_change_removes_it_and_attacker_stays_blocked() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            ..
+        } = board();
+        let state = runner.state_mut();
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, blocker, P0);
+        flush_layers(state);
+
+        assert_eq!(state.objects[&blocker].controller, P0);
+        assert!(
+            not_in_combat(state, blocker),
+            "CR 506.4: the blocker whose controller changed is removed from combat"
+        );
+        let combat = state.combat.as_ref().unwrap();
+        let info = combat
+            .attackers
+            .iter()
+            .find(|info| info.object_id == attacker)
+            .expect("the blocked attacker is still attacking");
+        assert!(info.blocked, "CR 509.1h: the attacker remains blocked");
+        assert!(combat.blocker_assignments[&attacker].is_empty());
+        assert!(state.objects[&attacker].has_keyword(&Keyword::Deathtouch));
+        let removals = removals_since(state, start);
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].object.object_id, blocker);
+    }
+
+    /// CR 506.4 + CR 701.12b: an exchange of control of two attacking creatures
+    /// of different controllers, settled in one pass, removes both.
+    #[test]
+    fn exchanged_attackers_are_both_removed() {
+        let Board {
+            mut runner,
+            attacker,
+            rival,
+            ..
+        } = board();
+        let state = runner.state_mut();
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, attacker, P1);
+        give_control(state, rival, P0);
+        flush_layers(state);
+
+        assert_eq!(state.objects[&attacker].controller, P1);
+        assert_eq!(state.objects[&rival].controller, P0);
+        assert!(not_in_combat(state, attacker));
+        assert!(not_in_combat(state, rival));
+        for id in [attacker, rival] {
+            assert!(!state.objects[&id].has_keyword(&Keyword::Deathtouch));
+        }
+        let mut removed: Vec<_> = removals_since(state, start)
+            .iter()
+            .map(|command| command.object.object_id)
+            .collect();
+        removed.sort();
+        let mut expected = vec![attacker, rival];
+        expected.sort();
+        assert_eq!(removed, expected);
+    }
+
+    /// CR 506.4: a settlement-owned control change journals its removal, and
+    /// replaying the recorded commands onto the predecessor reproduces it.
+    #[test]
+    fn settlement_owned_removal_replays_from_the_journal() {
+        let Board {
+            mut runner,
+            attacker,
+            ..
+        } = board();
+        let before = runner.state().clone();
+        let start = before.resolved_rules_journal.entries().len();
+        let state = runner.state_mut();
+
+        give_control(state, attacker, P1);
+        flush_layers(state);
+        assert!(not_in_combat(state, attacker));
+
+        let commands = commands_since(state, start);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, ResolvedRulesCommand::CombatMembership(_)))
+                .count(),
+            1,
+            "the settlement journals exactly one removal"
+        );
+        let mut replay = before.clone();
+        assert!(
+            !not_in_combat(&replay, attacker),
+            "reach guard: the predecessor has the creature in combat"
+        );
+        for command in &commands {
+            match command {
+                ResolvedRulesCommand::ContinuousEffect(edit) => replay
+                    .apply_resolved_continuous_effect_edit(edit)
+                    .expect("the control change replays"),
+                ResolvedRulesCommand::CombatMembership(command) => {
+                    apply_resolved_combat_membership(&mut replay, command)
+                        .expect("the removal replays against its predecessor")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            not_in_combat(&replay, attacker),
+            "replay reproduces the prune"
+        );
+    }
+
+    /// CR 506.4 + CR 613.1b: a Control Magic-class Aura attached to an attacking
+    /// creature changes its controller inside an attachment-owned pass. The
+    /// pass prunes structurally and the attachment command is the only record;
+    /// replaying it re-derives the prune without recording a removal.
+    #[test]
+    fn attachment_owned_removal_is_rederived_on_replay() {
+        let Board {
+            mut runner,
+            attacker,
+            control_magic,
+            ..
+        } = board();
+        let before = runner.state().clone();
+        let start = before.resolved_rules_journal.entries().len();
+        let state = runner.state_mut();
+
+        attach_to(state, control_magic, attacker);
+
+        assert_eq!(
+            state.objects[&attacker].controller, P1,
+            "reach guard: Control Magic took control"
+        );
+        assert!(
+            not_in_combat(state, attacker),
+            "CR 506.4: the enchanted attacker is removed from combat"
+        );
+        assert!(!state.objects[&attacker].has_keyword(&Keyword::Deathtouch));
+        let commands = commands_since(state, start);
+        let attachments: Vec<ResolvedAttachmentCommand> = commands
+            .iter()
+            .filter_map(|command| match command {
+                ResolvedRulesCommand::Attachment(command) => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attachments.len(), 1, "the attachment edit is recorded");
+        assert!(
+            removals_since(state, start).is_empty(),
+            "the attachment-owned pass records no separate removal"
+        );
+
+        let mut replay = before.clone();
+        assert!(!not_in_combat(&replay, attacker), "reach guard");
+        apply_resolved_attachment(&mut replay, &attachments[0])
+            .expect("the attachment replays against its predecessor");
+        assert_eq!(replay.objects[&attacker].controller, P1);
+        assert!(
+            not_in_combat(&replay, attacker),
+            "replaying the attachment re-derives the prune"
+        );
+        assert!(
+            removals_since(&replay, start).is_empty(),
+            "replay records no removal either"
+        );
+    }
+
+    /// Replays every continuous-effect and combat-membership command journaled
+    /// since `start` onto `before`, then asserts the replayed combat equals the
+    /// live one — including `damage_assignments`, which `CombatState`'s
+    /// `PartialEq` does not compare.
+    fn assert_replay_matches(before: &GameState, live: &GameState, start: usize) {
+        let mut replay = before.clone();
+        for command in commands_since(live, start) {
+            match &command {
+                ResolvedRulesCommand::ContinuousEffect(edit) => replay
+                    .apply_resolved_continuous_effect_edit(edit)
+                    .expect("the control change replays"),
+                ResolvedRulesCommand::CombatMembership(command) => {
+                    apply_resolved_combat_membership(&mut replay, command)
+                        .expect("the removal replays against its predecessor")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(replay.combat, live.combat, "replay reproduces the prune");
+        assert_eq!(
+            replay.combat.as_ref().map(|c| &c.damage_assignments),
+            live.combat.as_ref().map(|c| &c.damage_assignments),
+        );
+    }
+
+    /// CR 509.1g + CR 613.1f: stealing the attacker leaves its blocker a
+    /// blocking creature, so a Layer 6 `FilterProp::Blocking` grant stays on
+    /// it through the nested re-derivation. Fails on revert of the kept-empty
+    /// key (the old prune dropped the blocker's membership and the nested pass
+    /// revoked the grant).
+    #[test]
+    fn attacker_control_change_leaves_blocker_blocking_for_blocking_grants() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            ..
+        } = board_with(Some(blocking_deathtouch()));
+        let state = runner.state_mut();
+        let before = state.clone();
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, attacker, P1);
+        flush_layers(state);
+
+        assert!(
+            not_in_combat(state, attacker),
+            "reach guard: the stolen attacker left combat"
+        );
+        assert!(
+            !state.objects[&attacker].has_keyword(&Keyword::Deathtouch),
+            "the stolen creature is neither attacking nor blocking: no grant"
+        );
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&blocker),
+            Some(&vec![])
+        );
+        assert!(
+            state.objects[&blocker].has_keyword(&Keyword::Deathtouch),
+            "CR 509.1g: the blocker is still a blocking creature and keeps the Blocking grant"
+        );
+        assert_eq!(state.layers_dirty, LayersDirty::Clean);
+        assert_replay_matches(&before, state, start);
+    }
+
+    /// CR 506.4 + CR 613.1f: a blocking creature with no attacker assigned
+    /// whose own controller changes leaves combat; its removal is journaled
+    /// once with the receipt `blocking == Some([])`, and its Blocking grant is
+    /// revoked in that same flush. Fails on revert of the receipt (`Some([])`
+    /// read as no role skips the removal) or of the any-edge layer gate (no
+    /// nested pass leaves the grant).
+    #[test]
+    fn orphaned_blocker_control_change_removes_it_and_revokes_blocking_grants() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            ..
+        } = board_with(Some(blocking_deathtouch()));
+        let state = runner.state_mut();
+        give_control(state, attacker, P1);
+        flush_layers(state);
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&blocker),
+            Some(&vec![]),
+            "reach guard: the blocker is orphaned"
+        );
+        assert!(
+            state.objects[&blocker].has_keyword(&Keyword::Deathtouch),
+            "reach guard: the orphan has the Blocking grant"
+        );
+        let before = state.clone();
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, blocker, P0);
+        flush_layers(state);
+
+        assert_eq!(state.objects[&blocker].controller, P0);
+        assert!(
+            not_in_combat(state, blocker),
+            "CR 506.4: the orphan whose controller changed is removed from combat"
+        );
+        assert!(
+            !state.objects[&blocker].has_keyword(&Keyword::Deathtouch),
+            "CR 613.1f: the Blocking grant is revoked in the same flush"
+        );
+        assert_eq!(state.layers_dirty, LayersDirty::Clean);
+        let removals = removals_since(state, start);
+        assert_eq!(removals.len(), 1, "exactly one journaled removal");
+        assert_eq!(removals[0].object.object_id, blocker);
+        let ResolvedCombatMembershipEdit::Remove {
+            expected_participation,
+        } = &removals[0].edit
+        else {
+            panic!("the orphan's removal is a Remove edit");
+        };
+        assert_eq!(expected_participation.blocking, Some(vec![]));
+        assert_replay_matches(&before, state, start);
+    }
+
+    /// CR 506.4 + CR 613.1f: a plain blocker whose controller changes stops
+    /// blocking, and its Blocking grant is revoked in the same flush. No
+    /// attacker is removed, so this isolates the any-edge layer gate: fails on
+    /// revert to the attacker-only gate (no nested pass, stale grant).
+    #[test]
+    fn blocker_control_change_revokes_blocking_grant_in_same_flush() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            ..
+        } = board_with(Some(blocking_deathtouch()));
+        let state = runner.state_mut();
+        let before = state.clone();
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, blocker, P0);
+        flush_layers(state);
+
+        assert_eq!(
+            state.objects[&blocker].controller, P0,
+            "reach guard: the control change happened"
+        );
+        assert!(not_in_combat(state, blocker));
+        assert!(
+            !state.objects[&blocker].has_keyword(&Keyword::Deathtouch),
+            "CR 613.1f: the removed blocker loses the Blocking grant in the same flush"
+        );
+        assert!(
+            state.objects[&attacker].has_keyword(&Keyword::Deathtouch),
+            "the still-attacking attacker keeps the Attacking grant"
+        );
+        assert_eq!(state.layers_dirty, LayersDirty::Clean);
+        let removals = removals_since(state, start);
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].object.object_id, blocker);
+        assert_replay_matches(&before, state, start);
+    }
+
+    /// CR 506.4: the attacker and its blocker both change controller in one
+    /// settled pass. Both leave combat, each journaled exactly once, and the
+    /// journal replays onto the predecessor.
+    #[test]
+    fn attacker_and_blocker_control_change_in_one_pass_removes_both() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            ..
+        } = board_with(Some(blocking_deathtouch()));
+        let state = runner.state_mut();
+        let before = state.clone();
+        let start = state.resolved_rules_journal.entries().len();
+
+        give_control(state, attacker, P1);
+        give_control(state, blocker, P0);
+        flush_layers(state);
+
+        assert!(not_in_combat(state, attacker));
+        assert!(not_in_combat(state, blocker));
+        for id in [attacker, blocker] {
+            assert!(!state.objects[&id].has_keyword(&Keyword::Deathtouch));
+        }
+        let mut removed: Vec<_> = removals_since(state, start)
+            .iter()
+            .map(|command| command.object.object_id)
+            .collect();
+        removed.sort();
+        let mut expected = vec![attacker, blocker];
+        expected.sort();
+        assert_eq!(removed, expected, "each creature is journaled exactly once");
+        assert_replay_matches(&before, state, start);
+    }
+
+    /// CR 506.4 + CR 509.1g: an attachment-owned control change of the
+    /// attacker prunes structurally and leaves the blocker exactly as the
+    /// settlement-owned path does — a blocking creature with no attacker
+    /// assigned — journaling no combat removal.
+    #[test]
+    fn attachment_owned_attacker_steal_leaves_blocker_orphaned_like_settlement() {
+        let Board {
+            mut runner,
+            attacker,
+            blocker,
+            control_magic,
+            ..
+        } = board_with(Some(blocking_deathtouch()));
+        let mut settled = runner.state().clone();
+        give_control(&mut settled, attacker, P1);
+        flush_layers(&mut settled);
+
+        let state = runner.state_mut();
+        let start = state.resolved_rules_journal.entries().len();
+        attach_to(state, control_magic, attacker);
+
+        assert_eq!(
+            state.objects[&attacker].controller, P1,
+            "reach guard: Control Magic took control"
+        );
+        assert!(not_in_combat(state, attacker));
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&blocker),
+            Some(&vec![]),
+            "CR 509.1g: the blocker remains a blocking creature"
+        );
+        assert_eq!(
+            state.combat.as_ref().unwrap().blocker_to_attacker,
+            settled.combat.as_ref().unwrap().blocker_to_attacker,
+            "both owner paths prune the same edges"
+        );
+        assert!(state.objects[&blocker].has_keyword(&Keyword::Deathtouch));
+        assert!(
+            removals_since(state, start).is_empty(),
+            "the attachment-owned pass records no separate removal"
+        );
     }
 }

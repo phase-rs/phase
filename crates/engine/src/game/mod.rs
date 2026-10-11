@@ -161,6 +161,7 @@ pub mod replacement;
 pub mod replay;
 pub(crate) mod resolution_prompt;
 pub mod restrictions;
+pub(crate) mod retarget_completion;
 pub mod room;
 pub(crate) mod sacrifice;
 pub mod sba;
@@ -180,6 +181,7 @@ pub mod stickers;
 #[cfg(test)]
 #[path = "stickers_tests.rs"]
 mod stickers_tests;
+pub mod target_occurrences;
 pub mod targeting;
 pub mod text_substitution;
 pub mod token_presets;

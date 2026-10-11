@@ -312,3 +312,107 @@ fn isochron_scepter_copies_correct_card_across_unrelated_tracked_set_activity() 
         "the unrelated decoy must be untouched by Isochron's activation"
     );
 }
+
+/// CR 603.2 + CR 603.2c: Bonus Round's delayed trigger ("Until end of turn,
+/// whenever a player casts an instant or sorcery spell, that player copies
+/// it and may choose new targets for the copy") fires exactly once for the
+/// Lightning Bolt copy Isochron Scepter casts: the copy's cast observers are
+/// collected when its announcement completes, and the post-action boundary
+/// must not collect the same SpellCast again. Bolt copy (3) + one Bonus Round
+/// copy (3) = 6 damage to P1.
+#[test]
+fn isochron_copy_cast_fires_bonus_round_once() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scepter = scenario.add_real_card(P0, "Isochron Scepter", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    let bonus_round = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Bonus Round",
+            false,
+            "Until end of turn, whenever a player casts an instant or sorcery spell, that player copies it and may choose new targets for the copy.",
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+    link_imprinted_instant(&mut runner, scepter, bolt);
+    fund_generic(&mut runner, 2);
+    {
+        let pool = &mut runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .mana_pool;
+        for _ in 0..2 {
+            pool.add(ManaUnit::new(
+                ManaType::Red,
+                engine::types::identifiers::ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+    }
+    runner.cast(bonus_round).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&bonus_round].zone,
+        Zone::Graveyard,
+        "reach: Bonus Round resolved"
+    );
+    let life_before = runner.state().players[1].life;
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: scepter,
+            ability_index: 0,
+        })
+        .expect("activate Isochron Scepter");
+    for step in 0..120 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept");
+            }
+            WaitingFor::CopyRetarget {
+                mode: Some(engine::types::game_state::CopyChoiceMode::Announce),
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Player(P1)),
+                    })
+                    .expect("announce P1");
+            }
+            WaitingFor::CopyRetarget { .. } => {
+                runner
+                    .act(GameAction::KeepAllCopyTargets)
+                    .expect("keep the copy's target");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected state at step {step}: {other:?}"),
+        }
+    }
+    assert!(runner.state().stack.is_empty(), "the stack drains");
+    assert_eq!(
+        life_before - runner.state().players[1].life,
+        6,
+        "the Bolt copy and exactly one Bonus Round copy"
+    );
+}

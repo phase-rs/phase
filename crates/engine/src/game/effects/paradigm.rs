@@ -229,26 +229,8 @@ pub fn cast_paradigm_copy(
     );
 
     // CR 702.192a + CR 601.2i: accepting the Paradigm offer casts the
-    // synthesized copy, so mint and stamp its cast occurrence before any
-    // target-selection pause can expose the stack object.
-    let copy = state.objects[&copy_id].clone();
-    let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
-        state,
-        controller,
-        &copy,
-        origin_zone,
-        CastingVariant::Normal,
-    )
-    .map_err(crate::game::effects::cast_copy_of_card::cast_copy_spell_cast_ledger_error)?;
-    crate::game::casting_costs::stamp_cast_occurrence_on_stack_spell(state, copy_id, occurrence)
-        .map_err(|error| error.to_string())?;
-    events.push(GameEvent::SpellCast {
-        card_id,
-        controller,
-        object_id: copy_id,
-        cast_mana_value: Some(state.objects[&copy_id].spell_mana_value()),
-    });
-
+    // synthesized copy; it becomes cast once its announcement is complete
+    // (`casting_costs::commit_copy_cast`, called by the offer handler).
     Ok(copy_id)
 }
 

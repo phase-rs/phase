@@ -100,6 +100,15 @@ function playLandAction(objectId: number): GameAction {
   };
 }
 
+// CR 702.170f: the plot special action Fblthp, Lost on the Range grants to the
+// top card — a runtime-granted ability, so it is absent from `abilities`.
+function plotAction(objectId: number): GameAction {
+  return {
+    type: "ActivateAbility",
+    data: { source_id: objectId, ability_index: 0 },
+  };
+}
+
 function setOpponentLibraryTop(
   topCardName: string,
   reveal: {
@@ -247,6 +256,16 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     expect(dispatchMock).toHaveBeenCalledWith(
       expect.objectContaining({ type: "PlayLand" }),
     );
+  });
+
+  it("dispatches an engine-surfaced plot activation on the top card (Fblthp)", () => {
+    setStore({ canPeek: true, actions: [plotAction(42)] });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /activate sol ring from top of library/i });
+    expect(button).toHaveAttribute("data-library-top-cast", "true");
+    fireEvent.click(button);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledWith(plotAction(42));
   });
 
   it("routes multi-action top cards to the ability-choice modal", () => {

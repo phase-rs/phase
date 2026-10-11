@@ -235,9 +235,9 @@ fn untargeted_damage_filter(
         // the generic `is_context_ref()` catch-all (same ordering contract as
         // the `TrackedSet` carve-out above).
         TargetFilter::SelfRef => None,
-        filter if filter.is_context_ref() => Some(player_damage_filter(
-            super::resolve_player_for_context_ref(state, ability, filter),
-        )),
+        filter if filter.is_context_ref() => {
+            super::resolve_player_for_context_ref(state, ability, filter).map(player_damage_filter)
+        }
         _ => None,
     }
 }
@@ -361,6 +361,14 @@ pub fn resolve(
     let target = crate::game::targeting::resolve_tracked_set_sentinel(state, target);
     let effect_source_filter = effect_source_filter
         .map(|filter| crate::game::targeting::resolve_tracked_set_sentinel(state, filter));
+
+    // CR 608.2b: a declared player with no legal referent is not protected, and
+    // a shield with no recipient filter would protect everyone.
+    if target.names_one_player()
+        && super::resolve_player_for_context_ref(state, ability, &target).is_none()
+    {
+        return Ok(());
+    }
 
     // CR 609.7 + CR 609.7a: A source-scoped prevent ("prevent all damage target
     // instant or sorcery spell would deal this turn") carries its chosen source

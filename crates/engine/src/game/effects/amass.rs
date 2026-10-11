@@ -42,7 +42,10 @@ pub fn resolve(
     // creature's controller (`TargetFilter::ParentTargetController`), which
     // can differ from `ability.controller` (Azog's controller). Mirrors
     // `Manifest.target` / `Discover.player`'s resolution path.
-    let controller = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(controller) = super::resolve_player_for_context_ref(state, ability, &player_filter)
+    else {
+        return Ok(());
+    };
     let n = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as u32;
 
     // CR 701.47a: Find an existing Army creature on the controller's battlefield.

@@ -5888,7 +5888,7 @@ fn detect_damage_subject_conjunction(
 /// the resulting `AbilityDefinition` before it is appended to the chain.
 ///
 /// Only the cascade variables whose loss would represent silent dropping
-/// are included. Internal bookkeeping variables (`anchor_subject`,
+/// are included. Internal bookkeeping variables (`carried_player`,
 /// `chunk_actor`, etc.) that feed other captures are excluded — their
 /// loss is observable only through the *terminal* slot they affect, and
 /// that terminal slot is what the diff checks.
