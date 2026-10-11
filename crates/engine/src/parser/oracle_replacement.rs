@@ -624,6 +624,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if let Some(def) = parse_damage_modification_replacement(&norm_lower, &text) {
             return Some(def);
         }
+        // CR 614.1a + CR 614.6: "If <source> would deal [noncombat] damage to
+        // <recipient>, put that many <counter> counters on that <noun> instead"
+        // (Soul-Scar Mage) — the damage event is replaced by a counter placement.
+        if let Some(def) = parse_damage_to_counters_substitution(&norm_lower, &text) {
+            return Some(def);
+        }
         // Exotic pattern (coin-flip, redirection, etc.) — keep as no-op stub
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
@@ -7277,6 +7283,186 @@ fn parse_damage_modification_replacement(
         WhileAntecedent::Absent => {}
     }
     Some(def)
+}
+
+/// CR 614.1a + CR 614.6 + CR 122.1: Parse a damage-to-counters SUBSTITUTION —
+///
+///   "If a source you control would deal noncombat damage to a creature an
+///    opponent controls, put that many -1/-1 counters on that creature
+///    instead."  (Soul-Scar Mage)
+///   "If ~ would deal combat damage to a player, instead put that many +1/+1
+///    counters on ~ and that player mills that many cards."  (Szadek, Lord of
+///    Secrets)
+///   "If a Zombie you control would deal combat damage to a player, instead
+///    that player mills that many cards."  (Undead Alchemist)
+///
+/// This is a replacement, not a prevention (CR 615): the damage event is
+/// replaced by the substitute event(s) (CR 614.6 — the replaced event never
+/// happens), so the shield is unaffected by "damage can't be prevented"
+/// (CR 615.12 suppresses prevention only) and emits no `DamagePrevented`.
+///
+/// Grammar (positional nom spine, no scanning):
+///   `"if " <source subject> " would deal " ["noncombat " | "combat "]
+///    "damage " <recipient> ", " ( <substitute> " instead"
+///                               | "instead " <substitute> )`
+///
+/// * the source subject reuses `parse_damage_source_filter` (the same authority
+///   the damage-modification sibling uses — "a source you control" →
+///   `Typed { controller: You }`, "~" → `SelfRef`);
+/// * a player recipient ("to a player", "to an opponent", "to you") is the
+///   shared `parse_damage_target_phrase` grammar → `damage_target_filter`;
+///   otherwise "to <type phrase>" becomes `valid_card` (a typed `TargetFilter`,
+///   evaluated against the damage event's recipient object — a player
+///   recipient never matches a typed object filter);
+/// * the substitute is lowered by the ordinary effect-chain parser; "that
+///   many" is the replaced event's amount (`EventContextAmount`), and the
+///   "that <noun>" / "that player" anaphors are rewritten to the replaced
+///   event's recipient (`PostReplacementDamageTarget`). Every link of the
+///   chain must be a counter placement or a mill sized by that amount (see
+///   `is_damage_substitute_link`).
+///
+/// Returns `None` (fall through to the stub) for any other shape, so the
+/// substitution never claims an unrelated "instead" clause.
+fn parse_damage_to_counters_substitution(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    type E<'a> = OracleError<'a>;
+    let (after_verb, _) = (
+        tag::<_, _, E<'_>>("if "),
+        take_until(" would deal "),
+        tag(" would deal "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+    // CR 120.2a: optional combat scope, positionally before the damage noun.
+    let (after_noun, combat_scope) = terminated(
+        opt(alt((
+            value(
+                CombatDamageScope::NoncombatOnly,
+                tag::<_, _, E<'_>>("noncombat "),
+            ),
+            value(CombatDamageScope::CombatOnly, tag("combat ")),
+        ))),
+        tag("damage "),
+    )
+    .parse(after_verb)
+    .ok()?;
+    let (substitute_text, recipient_text) = terminated(take_until::<_, _, E<'_>>(", "), tag(", "))
+        .parse(after_noun)
+        .ok()?;
+    // CR 614.1a: "instead" may trail the substitute ("put … instead") or lead
+    // it ("instead put …"); both mark the same replacement.
+    let (_, effect_text) = alt((
+        preceded(tag::<_, _, E<'_>>("instead "), rest),
+        terminated(
+            take_until(" instead"),
+            (tag(" instead"), opt(char('.')), multispace0, eof),
+        ),
+    ))
+    .parse(substitute_text)
+    .ok()?;
+
+    // CR 614.1a: the replaced recipient — a player scope, or a typed object scope.
+    let recipient_text = recipient_text.trim();
+    let player_recipient = all_consuming(parse_damage_target_phrase)
+        .parse(recipient_text)
+        .ok()
+        .and_then(|(_, filter)| {
+            matches!(filter, DamageTargetFilter::Player { .. }).then_some(filter)
+        });
+    let object_recipient = if player_recipient.is_some() {
+        None
+    } else {
+        let (type_phrase, _) = tag::<_, _, E<'_>>("to ").parse(recipient_text).ok()?;
+        let (recipient, rest) = parse_type_phrase_folding(type_phrase.trim());
+        if !rest.trim().is_empty() || matches!(recipient, TargetFilter::Any) {
+            return None;
+        }
+        Some(recipient)
+    };
+
+    // CR 614.1a: an unscoped substitution would replace every damage event in
+    // the game — fail closed when the source subject is not recognized.
+    let source_filter = parse_damage_source_filter(norm_lower)?;
+
+    let effect_text = effect_text.trim().trim_end_matches('.');
+    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    // CR 608.2c: "that <noun>" lowers to `ParentTarget`; in a passive
+    // replacement it names the replaced event's damage recipient.
+    rewrite_parent_target_to_post_replacement_damage_target(&mut execute);
+    if player_recipient.is_some() {
+        // CR 608.2c: "that player" (the damaged player) names the replaced
+        // event's player recipient.
+        rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
+    }
+    if !damage_substitute_chain_is_supported(&execute, player_recipient.is_some()) {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_source_filter(source_filter)
+        .execute(execute)
+        .description(original_text.to_string());
+    if let Some(recipient) = object_recipient {
+        def = def.valid_card(recipient);
+    }
+    if let Some(recipient) = player_recipient {
+        def = def.damage_target_filter(recipient);
+    }
+    if let Some(cs) = combat_scope {
+        def = def.combat_scope(cs);
+    }
+    Some(def)
+}
+
+/// CR 614.1a + CR 614.6: True iff every link of a damage substitute chain is a
+/// supported substitute event sized by the replaced damage ("that many" →
+/// `EventContextAmount`):
+/// * `PutCounter` on the replaced event's object recipient
+///   (`PostReplacementDamageTarget`, object recipients only) or on the
+///   replacement's own source (`SelfRef`);
+/// * `Mill` by the replaced event's player recipient
+///   (`PostReplacementDamageTarget`, player recipients only).
+///
+/// Any other link (an unrecognized anaphor, a fixed count, `Unimplemented`)
+/// rejects the whole line so it stays on the honest no-op stub.
+fn damage_substitute_chain_is_supported(def: &AbilityDefinition, player_recipient: bool) -> bool {
+    let that_many = |count: &QuantityExpr| {
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }
+        )
+    };
+    let link_ok = match &*def.effect {
+        Effect::PutCounter { count, target, .. } => {
+            that_many(count)
+                && match target {
+                    TargetFilter::SelfRef => true,
+                    TargetFilter::PostReplacementDamageTarget => !player_recipient,
+                    _ => false,
+                }
+        }
+        Effect::Mill {
+            count,
+            target,
+            destination: Zone::Graveyard,
+        } => {
+            that_many(count)
+                && player_recipient
+                && matches!(target, TargetFilter::PostReplacementDamageTarget)
+        }
+        _ => false,
+    };
+    link_ok
+        && def.else_ability.is_none()
+        && def.condition.is_none()
+        && def
+            .sub_ability
+            .as_deref()
+            .is_none_or(|sub| damage_substitute_chain_is_supported(sub, player_recipient))
 }
 
 /// CR 614.1: Parse static damage modification abilities without "instead" keyword.
@@ -16870,6 +17056,127 @@ mod tests {
             "a non-adjacent 'of that damage' phrase must not satisfy the anchored \
              'prevent N of that damage' grammar, got {def:?}"
         );
+    }
+
+    /// CR 614.1a + CR 614.6: Soul-Scar Mage — "If a source you control would
+    /// deal noncombat damage to a creature an opponent controls, put that many
+    /// -1/-1 counters on that creature instead." A damage-to-counters
+    /// SUBSTITUTION (not a CR 615 prevention): source scope `controller: You`,
+    /// recipient `valid_card` = creature an opponent controls, noncombat only,
+    /// and an `execute` that puts `EventContextAmount` -1/-1 counters on the
+    /// replaced event's recipient. No prevention shield, no amount modification.
+    #[test]
+    fn soul_scar_mage_damage_to_minus_counters_substitution() {
+        let def = parse_replacement_line(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+            "Soul-Scar Mage",
+        )
+        .expect("Soul-Scar Mage should parse as a damage replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert!(matches!(def.shield_kind, ShieldKind::None));
+        assert!(def.damage_modification.is_none());
+        assert!(def.damage_target_filter.is_none());
+
+        match def.damage_source_filter.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected typed source filter (you control), got {other:?}"),
+        }
+        match def.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected creature-an-opponent-controls recipient, got {other:?}"),
+        }
+
+        let execute = def.execute.as_ref().expect("substitute effect present");
+        assert!(execute.sub_ability.is_none());
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Minus1Minus1);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a + CR 614.6: Szadek, Lord of Secrets — "If Szadek would deal
+    /// combat damage to a player, instead put that many +1/+1 counters on
+    /// Szadek and that player mills that many cards." A leading-"instead"
+    /// damage SUBSTITUTION with a compound substitute: source `SelfRef`,
+    /// recipient = any player (`damage_target_filter`, no `valid_card`), combat
+    /// only, and an `execute` chain PutCounter(+1/+1 × that many, on Szadek) →
+    /// Mill(that many, by the damaged player).
+    #[test]
+    fn szadek_combat_damage_to_counters_and_mill_substitution() {
+        let def = parse_replacement_line(
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player mills that many cards.",
+            "Szadek, Lord of Secrets",
+        )
+        .expect("Szadek should parse as a damage replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert!(matches!(def.shield_kind, ShieldKind::None));
+        assert!(def.damage_modification.is_none());
+        assert!(def.valid_card.is_none());
+        assert_eq!(def.damage_source_filter, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Any,
+            })
+        );
+
+        let that_many = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let execute = def.execute.as_ref().expect("substitute effect present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert_eq!(*count, that_many);
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+        let mill = execute
+            .sub_ability
+            .as_deref()
+            .expect("mill continuation present");
+        assert!(mill.sub_ability.is_none());
+        match &*mill.effect {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*count, that_many);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                assert_eq!(*destination, Zone::Graveyard);
+            }
+            other => panic!("expected Effect::Mill, got {other:?}"),
+        }
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to

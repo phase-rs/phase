@@ -23841,6 +23841,17 @@ pub struct PostReplacementDrain {
     /// `TargetFilter::PostReplacementDamageTarget`.
     pub event_target: Option<crate::types::ability::TargetRef>,
 
+    /// CR 614.1a + CR 614.6: the amount of the damage event a damage
+    /// SUBSTITUTION replaced (Soul-Scar Mage: "put that many -1/-1 counters on
+    /// that creature instead"; Szadek). Read by `QuantityRef::EventContextAmount`
+    /// ahead of the enclosing trigger's event while this drain is resident, so
+    /// "that many" names the replaced damage — not the amount of a trigger
+    /// whose resolution dealt it, and not a count a preceding link of the same
+    /// continuation produced. `None` on every other install path: prevention
+    /// riders keep their "damage prevented this way" stamp.
+    #[serde(default)]
+    pub event_amount: Option<u32>,
+
     /// CR 109.5: the player "you" names inside this continuation — the
     /// controller of the object whose ability is doing the replacing.
     ///
@@ -23983,6 +23994,7 @@ impl PostReplacementDrain {
             applied: HashSet::new(),
             event_source: None,
             event_target: None,
+            event_amount: None,
             controller: None,
         }
     }
@@ -29798,6 +29810,14 @@ impl GameState {
         self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.event_target.as_ref())
+    }
+
+    /// CR 614.1a: the resident drain's replaced damage amount — set only by a
+    /// damage substitution (see [`PostReplacementDrain::event_amount`]).
+    pub fn post_replacement_event_amount(&self) -> Option<u32> {
+        self.active_post_replacement_drains()?
+            .resident()
+            .and_then(|drain| drain.event_amount)
     }
 
     /// Clear the resident drain's replacement source while leaving the

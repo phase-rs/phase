@@ -7498,6 +7498,18 @@ fn event_context_amount(
         // Meditation); `None` otherwise, so it falls straight through to the
         // existing trigger/effect cascade.
         .or(state.post_replacement_token_substitution_count)
+        // CR 614.1a + CR 614.6: a damage substitution's "that many" (Soul-Scar
+        // Mage, Szadek) is the replaced damage event's amount, latched on the
+        // resident drain. It outranks every trigger/effect tier below: the
+        // damage may be dealt by a resolving trigger with its own event amount,
+        // and an earlier link of the continuation (the counters) must not
+        // change the amount a later link (the mill) reads. `None` outside a
+        // damage substitution's continuation.
+        .or_else(|| {
+            state
+                .post_replacement_event_amount()
+                .map(u32_to_i32_saturating)
+        })
         .or_else(|| enclosing_trigger_match_count(state))
         // CR 706.4: Die results recorded earlier in THIS resolution
         // outrank the triggering event's own amount, so "roll one or more

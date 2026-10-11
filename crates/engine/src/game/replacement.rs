@@ -896,6 +896,17 @@ pub enum ApplyResult {
     Prevented,
 }
 
+/// CR 615.5 + CR 614.1a: the replaced (or prevented) event's own context that a
+/// stashed continuation reads back from its drain — the damage dealer
+/// (`PostReplacementSourceController`), the recipient
+/// (`PostReplacementDamageTarget`) and, for a damage substitution only, the
+/// replaced amount ("that many", `PostReplacementDrain::event_amount`).
+struct ReplacedEventContext {
+    source: Option<ObjectId>,
+    target: Option<TargetRef>,
+    amount: Option<u32>,
+}
+
 /// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
 /// actions, which run as part of the modified event that occurs instead.
 ///
@@ -925,9 +936,13 @@ fn stash_post_replacement_continuation(
     source: ObjectId,
     controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
-    event_source: Option<ObjectId>,
-    event_target: Option<TargetRef>,
+    replaced: ReplacedEventContext,
 ) {
+    let ReplacedEventContext {
+        source: event_source,
+        target: event_target,
+        amount: event_amount,
+    } = replaced;
     state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Ready(continuation),
@@ -935,6 +950,7 @@ fn stash_post_replacement_continuation(
             applied,
             event_source,
             event_target,
+            event_amount,
             // CR 109.5: "you" in the continuation is the REPLACING ability's
             // controller. Carried beside `source` rather than derived from it,
             // because `source` is the affected object on every zone-change
@@ -3102,8 +3118,60 @@ fn damage_done_applier(
         }
     }
 
+    // Branch 3: CR 614.1a + CR 614.6 — cross-event-type substitution. "If a
+    // source you control would deal noncombat damage to a creature an opponent
+    // controls, put that many -1/-1 counters on that creature instead" (Soul-Scar
+    // Mage). The damage event is REPLACED, not prevented (CR 615 does not apply):
+    // it never happens (CR 614.6), so there is no `DamagePrevented`, no marked
+    // damage, no lifelink and no "deals damage" trigger. The substitute runs as
+    // the post-replacement continuation stashed by `apply_single_replacement`'s
+    // `Prevented` arm, which also latches the replaced event's amount on the
+    // drain for "that many" (`PostReplacementDrain::event_amount`). Mirrors the
+    // LifeGain cross-type substitution (Lich).
+    if damage_execute_substitutes_event_type(state, rid) {
+        return ApplyResult::Prevented;
+    }
+
     // No modification and no prevention shield — pass through
     ApplyResult::Modified(event)
+}
+
+/// CR 614.1a: True iff a damage replacement substitutes a DIFFERENT event for
+/// the damage — no prevention/redirection shield, no amount modification, and an
+/// `execute` whose effect is not itself damage. `Effect::Unimplemented` is
+/// treated as **not** a substitution (silent passthrough rather than deleting
+/// damage on a partially-parsed line), exactly like
+/// `gain_life_execute_substitutes_event_type`.
+fn damage_execute_substitutes_event_type(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.is_some_and(is_damage_substitution)
+}
+
+/// CR 614.1a + CR 614.6: the definition-level predicate behind
+/// [`damage_execute_substitutes_event_type`] — a `DamageDone` replacement whose
+/// `execute` substitutes a different event for the damage. Shared by the
+/// applier (Branch 3), the stash that latches the replaced amount, and the
+/// CR 616.1 materiality classification, so the three can never disagree.
+fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
+    if repl.event != ReplacementEvent::DamageDone
+        || !matches!(repl.shield_kind, ShieldKind::None)
+        || repl.damage_modification.is_some()
+    {
+        return false;
+    }
+    repl.execute.as_deref().is_some_and(|execute| {
+        !matches!(
+            &*execute.effect,
+            Effect::Unimplemented { .. } | Effect::DealDamage { .. }
+        )
+    })
 }
 
 /// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
@@ -10138,6 +10206,18 @@ fn apply_single_replacement(
         ProposedEvent::Draw { player_id, .. } => Some(TargetRef::Player(*player_id)),
         _ => None,
     };
+    // CR 614.1a + CR 614.6: the replaced event's amount for a damage
+    // substitution's "that many" — the amount the applier receives, i.e. after
+    // every earlier-applied modification (CR 616.1). `None` for every other
+    // replacement, so no other continuation's "that many" changes.
+    let substituted_damage_amount = match &proposed {
+        ProposedEvent::Damage { amount, .. }
+            if damage_execute_substitutes_event_type(state, rid) =>
+        {
+            Some(*amount)
+        }
+        _ => None,
+    };
     let replacement_applied = proposed.applied_set().clone();
     // CR 614.5 + CR 609.7b: a one-shot replacement is consumed when it
     // *successfully applies*. The single exception is a `PreventionOneShot`
@@ -10341,14 +10421,18 @@ fn apply_single_replacement(
                         new_event.affected_object_id().unwrap_or(rid.source),
                         ability_controller,
                         replacement_applied.clone(),
-                        None,
-                        // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
-                        // player (the drawing player) so an "any other player may"
-                        // execute (Zur's Weirding) can exclude them from the APNAP
-                        // fan-out. `None` for every other event kind (see the
-                        // `proposed_event_target` match above), so no existing
-                        // continuation's event-target slot changes.
-                        proposed_event_target.clone(),
+                        ReplacedEventContext {
+                            source: None,
+                            // CR 614.6 + CR 608.2d: carry the replaced Draw's
+                            // affected player (the drawing player) so an "any
+                            // other player may" execute (Zur's Weirding) can
+                            // exclude them from the APNAP fan-out. `None` for
+                            // every other event kind (see the
+                            // `proposed_event_target` match above), so no
+                            // existing continuation's event-target slot changes.
+                            target: proposed_event_target.clone(),
+                            amount: None,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10386,8 +10470,13 @@ fn apply_single_replacement(
                         // it.
                         ability_controller,
                         replacement_applied.clone(),
-                        proposed_damage_source,
-                        proposed_event_target.clone(),
+                        ReplacedEventContext {
+                            source: proposed_damage_source,
+                            target: proposed_event_target.clone(),
+                            // CR 614.1a: a damage substitution's continuation
+                            // reads the replaced amount as "that many".
+                            amount: substituted_damage_amount,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10833,6 +10922,17 @@ fn candidate_materiality(
             field: EventField::Damage,
             commute: CommuteClass::NonCommuting,
         };
+    }
+    // CR 614.6 + CR 616.1: a damage substitution (Soul-Scar Mage, Szadek)
+    // replaces the damage event with a different event, so once it applies no
+    // other damage replacement applies any more — and applied after them, it
+    // replaces whatever they left. Which applies first decides the outcome, so
+    // the affected player or controller chooses, exactly as for the
+    // found-card replacements below. Without this its `PutCounter` execute
+    // classified as an ETB counter append (`Disjoint`) and the choice was
+    // skipped against a prevention shield.
+    if is_damage_substitution(repl_def) {
+        return CandidateMateriality::Unconditional;
     }
     if repl_def.event == ReplacementEvent::SearchFound {
         // CR 616.1: applying one found-card replacement changes the event out
@@ -12271,6 +12371,7 @@ fn continue_replacement_impl(
                         applied: proposed.applied_set().clone(),
                         event_source: None,
                         event_target: None,
+                        event_amount: None,
                         // CR 109.5: same split as the mandatory stash — the
                         // zone-change drain rebinds `source` to the entering /
                         // moving object, so the branch's "you" needs its own slot.
@@ -17190,6 +17291,7 @@ mod tests {
                     applied: HashSet::new(),
                     event_source: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
+                    event_amount: None,
                     controller: Some(PlayerId(0)),
                 },
                 ResidentDrainPolicy::KeepResident,
