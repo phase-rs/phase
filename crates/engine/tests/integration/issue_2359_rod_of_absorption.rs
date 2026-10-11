@@ -22,9 +22,10 @@
 //! exiled cards without paying their mana costs.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::CastingPermission;
 use engine::types::actions::GameAction;
 use engine::types::game_state::CastPaymentMode;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -184,9 +185,6 @@ fn rod_activated_index(
 /// sacrifice Rod and do nothing.
 #[test]
 fn rod_activation_free_casts_exiled_spells_and_sacrifices_rod() {
-    use engine::types::ability::CastingPermission;
-    use engine::types::mana::{ManaType, ManaUnit};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -286,9 +284,6 @@ fn rod_activation_free_casts_exiled_spells_and_sacrifices_rod() {
 /// cards its predecessor exiled are exiled with it, even within the same step.
 #[test]
 fn rod_returned_to_the_battlefield_cannot_cast_its_predecessors_exiles() {
-    use engine::types::ability::CastingPermission;
-    use engine::types::mana::{ManaType, ManaUnit};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
