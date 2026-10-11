@@ -835,6 +835,10 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 17 — Tournament deck submission: a new `SubmitTournamentDeck` client message
+ *      (carries a DeckData) and a `deck_submitted` readiness flag on
+ *      PlayerSummary. Both additive; MIN_SUPPORTED stays 2. The deck is private
+ *      and never projected. Mirrored in types.ts (ClientMessage + PlayerSummary).
  * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 110). A Rust broker below
  *      16 rejects a lobby frame naming it; MIN_LOBBY_PROTOCOL_FOR_DANDAN below
  *      is this client's frozen floor for that pairing.
@@ -975,7 +979,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 16;
+export const LOBBY_PROTOCOL_VERSION = 17;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

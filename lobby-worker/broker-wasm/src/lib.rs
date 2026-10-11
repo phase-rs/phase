@@ -186,6 +186,7 @@ fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
         | LobbyClientMessage::JoinTournament { .. }
         | LobbyClientMessage::StartTournamentRound { .. }
         | LobbyClientMessage::ReportMatchResult { .. }
+        | LobbyClientMessage::SubmitTournamentDeck { .. }
         | LobbyClientMessage::DropFromTournament { .. }
         | LobbyClientMessage::EndTournament { .. }
         // Rotation REPLACES the stored secret, so it writes tournament state
@@ -570,6 +571,12 @@ mod tests {
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+                deck: Default::default(),
                 request_id: None,
             },
             LobbyClientMessage::DropFromTournament {

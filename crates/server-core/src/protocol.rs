@@ -615,6 +615,13 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
     },
+    SubmitTournamentDeck {
+        code: String,
+        player_token: String,
+        deck: DeckData,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
     DropFromTournament {
         code: String,
         player_token: String,

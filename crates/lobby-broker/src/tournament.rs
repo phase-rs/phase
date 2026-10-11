@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use engine::starter_decks::DeckData;
 use engine::types::format::GameFormat;
 pub use engine::types::match_config::MatchType;
 
@@ -934,7 +935,12 @@ pub fn prior_opponents(player_key: &str, pairings: &[TournamentPairing]) -> Hash
 /// A registered entrant. `had_bye`/`had_short_pod` are deliberately absent as
 /// fields — they are derived queries over the pairing history (see
 /// [`had_bye`]), so there is nothing to fall out of sync with a correction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: the submitted [`DeckData`] carries a
+/// `CommanderBracketTier`/`Vec<String>` payload that is only `PartialEq`, and
+/// nothing uses a `TournamentPlayer` as a hash-set/map key, so the stronger
+/// bound is neither available nor needed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TournamentPlayer {
     pub player_key: String,
     /// Minted at join via [`TournamentCredential::mint`], NOT socket-bound:
@@ -945,6 +951,20 @@ pub struct TournamentPlayer {
     pub player_token: TournamentCredential,
     pub display_name: String,
     pub dropped: bool,
+    /// The deck this entrant submitted for **server-hosted** play, or `None`
+    /// until they submit one (see [`TournamentManager::submit_deck`]). Held as
+    /// the raw client-submitted [`DeckData`] — the same shape a casual
+    /// `CreateGameWithSettings` carries — and resolved into a game deck only when
+    /// the server spawns the pairing's table (a later PR). The tournament itself
+    /// enforces no deck legality and never touches `GameState`; this is just the
+    /// deck to hand the hosted game.
+    ///
+    /// **Private, never projected.** A decklist must not leak to opponents before
+    /// the match, so this field is NOT carried on the wire `PlayerSummary` — only
+    /// a derived `deck_submitted: bool` is (readiness display). `#[serde(default)]`
+    /// so an entrant persisted before hosting existed deserializes cleanly.
+    #[serde(default)]
+    pub deck: Option<DeckData>,
 }
 
 /// The match structure an event runs at a given arity when the organizer names
@@ -1213,6 +1233,20 @@ impl TournamentMeta {
             && self.arity == MatchArity::HEAD_TO_HEAD
             && self.match_type == MatchType::Bo3
             && pairing.players.len() == 2
+    }
+
+    /// Whether every seat in `pairing` has submitted a deck
+    /// ([`TournamentManager::submit_deck`]) — the readiness gate the server
+    /// checks before it can host the pairing's game, since a player without a
+    /// deck cannot be seated at a server-authoritative table. Orthogonal to
+    /// [`Self::is_hosted_eligible`] (the bracket/arity/match-type shape check): a
+    /// pairing must pass BOTH to be hosted.
+    pub fn pairing_decks_submitted(&self, pairing: &TournamentPairing) -> bool {
+        pairing.players.iter().all(|key| {
+            self.players
+                .iter()
+                .any(|p| &p.player_key == key && p.deck.is_some())
+        })
     }
 
     pub fn report_gate(&self, pairing: &TournamentPairing) -> ReportGate {
@@ -2270,6 +2304,7 @@ impl TournamentManager {
             player_token,
             display_name: display_name.to_string(),
             dropped: false,
+            deck: None,
         });
         meta.last_activity_at = now;
         Ok(minted)
@@ -2642,6 +2677,47 @@ impl TournamentManager {
             ));
         }
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
+        meta.last_activity_at = now;
+        Ok(())
+    }
+
+    /// Records the deck an entrant submits for server-hosted play. The broker
+    /// authorizes the presented token down to `player_key` first
+    /// ([`crate::broker::Broker::authorize_player`]), exactly as it does for a
+    /// match report, so this takes an already-resolved, non-dropped `player_key`.
+    /// Refused once the tournament is terminal (nothing left to host); otherwise
+    /// it overwrites any prior submission — a player may resubmit until their
+    /// pairing is hosted. Pure registration data: no deck legality is enforced
+    /// and no `GameState` is touched.
+    pub fn submit_deck(
+        &mut self,
+        code: &str,
+        player_key: &str,
+        deck: DeckData,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
+        let now = env.now_ms() / 1000;
+        let meta = self.meta_mut(code)?;
+        if meta.status.is_terminal() {
+            return Err(format!(
+                "Tournament {code} is no longer running (status {:?})",
+                meta.status
+            ));
+        }
+        if meta.pairings.iter().any(|pairing| {
+            meta.hosted.contains_key(&pairing.id)
+                && pairing.players.iter().any(|key| key == player_key)
+        }) {
+            return Err(format!(
+                "Player {player_key} cannot change their deck after their pairing is hosted"
+            ));
+        }
+        let player = meta
+            .players
+            .iter_mut()
+            .find(|p| p.player_key == player_key)
+            .ok_or_else(|| format!("Player {player_key} is not registered in {code}"))?;
+        player.deck = Some(deck);
         meta.last_activity_at = now;
         Ok(())
     }
@@ -3118,6 +3194,7 @@ mod tests {
                 ),
                 display_name: (*k).to_string(),
                 dropped: false,
+                deck: None,
             })
             .collect()
     }
@@ -4081,6 +4158,98 @@ mod tests {
             mgr.get("T").expect("t").pairing(id).expect("p").outcome,
             Some(PairingOutcome::Reported(PodOutcome::Draw))
         );
+    }
+
+    fn deck_of(name: &str) -> DeckData {
+        DeckData {
+            main_deck: vec![name.to_string(); 40],
+            ..Default::default()
+        }
+    }
+
+    /// `submit_deck` stores a per-entrant deck and `pairing_decks_submitted`
+    /// flips to `true` only once every seat has one; a resubmission overwrites.
+    #[test]
+    fn submit_deck_stores_and_readiness_needs_every_seat() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let pairing = mgr.get("T").expect("t").pairings[0].clone();
+
+        assert!(!mgr.get("T").expect("t").pairing_decks_submitted(&pairing));
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("submit p0");
+        assert!(!mgr.get("T").expect("t").pairing_decks_submitted(&pairing));
+        mgr.submit_deck("T", &key(1), deck_of("Forest"), &env)
+            .expect("submit p1");
+        assert!(mgr.get("T").expect("t").pairing_decks_submitted(&pairing));
+
+        // Resubmission overwrites the held deck (a player may change it until the
+        // pairing is hosted).
+        mgr.submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .expect("resubmit p0");
+        let stored = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .and_then(|p| p.deck.clone());
+        assert_eq!(stored, Some(deck_of("Mountain")));
+    }
+
+    #[test]
+    fn submit_deck_cannot_change_a_hosted_entrants_deck() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("initial deck");
+        mgr.begin_hosting("T", id, &env).expect("host");
+
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .is_err());
+        mgr.begin_hosting("T", id, &env).expect("rehost");
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .is_err());
+        let player = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .expect("player");
+        assert_eq!(player.deck, Some(deck_of("Island")));
+    }
+
+    /// `submit_deck` refuses an unregistered player and a terminal tournament.
+    #[test]
+    fn submit_deck_rejects_unregistered_and_terminal() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        assert!(mgr
+            .submit_deck("T", "ghost", deck_of("Swamp"), &env)
+            .is_err());
+
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.report_result(
+            "T",
+            id,
+            PodOutcome::Decisive {
+                winner: key(0),
+                game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+            },
+            &env,
+        )
+        .expect("report");
+        mgr.complete_tournament("T", &env).expect("complete");
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Plains"), &env)
+            .is_err());
     }
 
     // -- unit 7: drops --------------------------------------------------------

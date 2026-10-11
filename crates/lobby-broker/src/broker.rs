@@ -731,6 +731,16 @@ impl Broker {
                 self.settle_gated(request_id, outcome)
             }
 
+            LobbyClientMessage::SubmitTournamentDeck {
+                code,
+                player_token,
+                deck,
+                request_id,
+            } => {
+                let outcome = self.handle_submit_tournament_deck(code, player_token, deck, env);
+                self.settle_gated(request_id, outcome)
+            }
+
             LobbyClientMessage::DropFromTournament {
                 code,
                 player_token,
@@ -1730,6 +1740,43 @@ impl Broker {
         // so broadcasting the whole list here would be a no-op re-render for
         // every subscriber. That reasoning is now the justification for a typed
         // field rather than for an unwritten convention.
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Unchanged,
+        })
+    }
+
+    /// Player-gated: store the token owner's submitted deck for hosted play.
+    /// Resolving the token to its owner ([`Self::authorize_player`]) confines a
+    /// submission to the presenting entrant — the key is never taken from the
+    /// payload, so a client cannot submit a deck on someone else's behalf. Unlike
+    /// [`Self::handle_report_match_result`], no pairing-seat check applies: a deck
+    /// is per-event, not per-pairing.
+    fn handle_submit_tournament_deck(
+        &mut self,
+        code: String,
+        player_token: String,
+        deck: engine::starter_decks::DeckData,
+        env: &impl BrokerEnv,
+    ) -> Result<GatedEffect, String> {
+        let player_key = match self.authorize_player(&code, &player_token, env) {
+            Ok(key) => key,
+            Err(reason) => {
+                warn!(tournament = %code, %reason, "SubmitTournamentDeck rejected — player not authorized");
+                return Err(reason);
+            }
+        };
+        self.tournaments
+            .submit_deck(&code, &player_key, deck, env)?;
+        let Some(view) = self.tournament_view(&code) else {
+            return Err(format!("Tournament not found: {code}"));
+        };
+        info!(tournament = %code, player = %player_key, "tournament deck submitted");
+
+        // A submission flips only `PlayerSummary.deck_submitted`, a detail-view
+        // field — no `TournamentSummary` field changes, so the list row is
+        // untouched, exactly like a result report.
         Ok(GatedEffect {
             code,
             view,
@@ -4675,6 +4722,144 @@ mod tests {
         assert!(
             has_list_update(&ended),
             "completion moves status: {ended:?}"
+        );
+    }
+
+    /// Drives submission through `Broker::handle`, proving its dispatch,
+    /// token-to-entrant authority, private storage, and correlated settlement.
+    #[test]
+    fn submit_tournament_deck_via_broker_handle_stores_privately_and_correlates_outcomes() {
+        const SUBMISSION_ID: TournamentRequestId = TournamentRequestId(51);
+        const REFUSAL_ID: TournamentRequestId = TournamentRequestId(52);
+        const PRIVATE_CARD: &str = "Private Submission Card Sentinel";
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut alice = ConnState::default();
+        let mut bob = ConnState::default();
+
+        let (code, _organizer_token) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let alice_token = join_tournament(&mut alice, &mut broker, &env, &code, "key-a", "Alice");
+        join_tournament(&mut bob, &mut broker, &env, &code, "key-b", "Bob");
+
+        let submitted_deck = engine::starter_decks::DeckData {
+            main_deck: vec![PRIVATE_CARD.into()],
+            ..Default::default()
+        };
+        let submitted = broker.handle(
+            &mut alice,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: alice_token.clone(),
+                deck: submitted_deck.clone(),
+                request_id: Some(SUBMISSION_ID),
+            },
+            &env,
+        );
+
+        let (ack_id, ack_code, ack_view) = ack_of(&submitted);
+        assert_eq!(ack_id, SUBMISSION_ID);
+        assert_eq!(ack_code, code);
+        assert_eq!(correlators(&submitted), vec![SUBMISSION_ID]);
+        let public_view = subscriber_update_view(&submitted);
+        assert_eq!(ack_view, public_view);
+        assert_eq!(subscriber_msgs(&submitted).len(), 1);
+        assert!(!has_list_update(&submitted));
+        assert!(
+            public_view
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is in the public view")
+                .deck_submitted,
+            "the submission broadcast must expose updated readiness"
+        );
+        assert!(
+            !public_view
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is in the public view")
+                .deck_submitted,
+            "Alice's submission must not make the opponent appear ready"
+        );
+        assert!(
+            !outbounds_contain(&submitted, PRIVATE_CARD),
+            "the private deck card leaked in submission outbounds: {submitted:?}"
+        );
+        assert!(
+            !outbounds_contain(&submitted, &alice_token),
+            "the player's credential leaked in submission outbounds: {submitted:?}"
+        );
+
+        let event = broker.tournaments().get(&code).expect("event");
+        assert_eq!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is registered")
+                .deck
+                .as_ref(),
+            Some(&submitted_deck),
+            "Broker::handle must store the exact submitted deck for its token owner"
+        );
+        assert!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is registered")
+                .deck
+                .is_none(),
+            "Alice's submission must not change the opponent's stored deck"
+        );
+
+        let refused = broker.handle(
+            &mut alice,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: "valid-shape-wrong-token".into(),
+                deck: engine::starter_decks::DeckData {
+                    main_deck: vec!["Rejected Submission Card Sentinel".into()],
+                    ..Default::default()
+                },
+                request_id: Some(REFUSAL_ID),
+            },
+            &env,
+        );
+        let (refusal_id, reason) = rejection_of(&refused);
+        assert_eq!(refusal_id, REFUSAL_ID);
+        assert!(
+            reason.starts_with("Invalid player token for tournament "),
+            "valid-shape wrong token must reach player authorization, got: {reason}"
+        );
+        assert_eq!(correlators(&refused), vec![REFUSAL_ID]);
+        assert!(subscriber_msgs(&refused).is_empty());
+
+        let event = broker.tournaments().get(&code).expect("event");
+        assert_eq!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is registered")
+                .deck
+                .as_ref(),
+            Some(&submitted_deck),
+            "a refused submission must leave Alice's stored deck unchanged"
+        );
+        assert!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is registered")
+                .deck
+                .is_none(),
+            "a refused submission must leave Bob's stored deck unchanged"
         );
     }
 

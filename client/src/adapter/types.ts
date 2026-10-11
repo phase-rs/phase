@@ -5392,6 +5392,16 @@ export interface PlayerSummary {
   player_key: string;
   display_name: string;
   dropped: boolean;
+  /**
+   * Whether this entrant has submitted a deck for server-hosted play (lobby
+   * protocol v17). A readiness flag only — the deck itself is private and never
+   * crosses the wire, so an opponent cannot see a decklist before the match.
+   *
+   * Optional here so a snapshot from a pre-v17 broker (which omits it) still
+   * types, and so existing fixtures need no churn; a v17 broker always sends it.
+   * `undefined` reads as "not submitted", the same tolerance `report_gate` uses.
+   */
+  deck_submitted?: boolean;
 }
 
 /**

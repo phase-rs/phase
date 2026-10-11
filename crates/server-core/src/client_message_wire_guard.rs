@@ -22,9 +22,10 @@ use lobby_broker::validation::{
     validate_end_tournament_fields, validate_get_tournament_fields,
     validate_join_tournament_fields, validate_renew_tournament_credential_fields,
     validate_report_match_result_fields, validate_start_tournament_round_fields,
-    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
-    CreateTournamentFields, DropFromTournamentFields, EndTournamentFields, JoinTournamentFields,
-    RenewTournamentCredentialFields, ReportMatchResultFields, StartTournamentRoundFields,
+    validate_submit_tournament_deck_fields, validate_unregister_lobby_fields,
+    validate_update_lobby_metadata_fields, CreateTournamentFields, DropFromTournamentFields,
+    EndTournamentFields, JoinTournamentFields, RenewTournamentCredentialFields,
+    ReportMatchResultFields, StartTournamentRoundFields, SubmitTournamentDeckFields,
     UpdateLobbyMetadataFields,
 };
 
@@ -262,6 +263,16 @@ pub fn guard_client_message_before_dispatch(
             player_token,
             outcome,
         }),
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+            code,
+            player_token,
+            deck,
+        }),
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -409,6 +420,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => ServerMessage::error(reason),
@@ -538,6 +550,16 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             player_token,
             outcome,
         }),
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+            code,
+            player_token,
+            deck,
+        }),
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -641,6 +663,7 @@ mod tests {
         ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
+    use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
 
     #[test]
@@ -1044,6 +1067,18 @@ mod tests {
                 },
             ),
             (
+                "deck.main_deck",
+                ClientMessage::SubmitTournamentDeck {
+                    code: "TOUR01".into(),
+                    player_token: "tok".into(),
+                    deck: crate::protocol::DeckData {
+                        main_deck: vec!["Forest".into(); MAX_MAIN_DECK_ENTRIES + 1],
+                        ..Default::default()
+                    },
+                    request_id: None,
+                },
+            ),
+            (
                 "player_token",
                 ClientMessage::DropFromTournament {
                     code: "TOUR01".into(),
@@ -1115,6 +1150,15 @@ mod tests {
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            ClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+                deck: crate::protocol::DeckData {
+                    main_deck: vec!["Forest".into()],
+                    ..Default::default()
+                },
                 request_id: None,
             },
             ClientMessage::DropFromTournament {
