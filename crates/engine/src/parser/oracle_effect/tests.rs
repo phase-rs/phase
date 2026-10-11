@@ -8904,32 +8904,42 @@ fn effect_counter_unless_pays_plus_additional_for_each_concerted_defense() {
 // `parse_for_each_clause` mis-models it (it folds " in each graveyard" into
 // the card name and counts on the battlefield, yielding a silently-wrong
 // dynamic cost). The off-battlefield-zone honesty guard
-// (`for_each_clause_references_offbattlefield_zone`) declines that case, so
-// the unless-for-each arm returns None and parsing falls through to the flat
-// cost: Rune Snag STAYS GAPPED as a static `Mana{generic:2}` (the announced
-// {2} base), preserving its honest SwallowedClause/DynamicQty warning until
-// the shared name/zone parser is fixed. (Spell Stutter / Concerted Defense
-// reference battlefield subjects and still flip to a correct dynamic cost.)
+// (`for_each_clause_references_offbattlefield_zone`) declines that case, and
+// the unless mana-cost tail (`parse_unless_mana_cost_tail`) treats the decline
+// as final: the counter fails closed (`unless_payment`) instead of charging the
+// flat {2} base with the per-card increment dropped. A riderless unless cost
+// still lowers to the flat cost. (Spell Stutter / Concerted Defense reference
+// battlefield subjects and still flip to a correct dynamic cost.)
 #[test]
-fn effect_counter_unless_pays_plus_additional_for_each_rune_snag_offbattlefield_zone_stays_gapped()
-{
+fn effect_counter_unless_plus_additional_offbattlefield_rider_fails_closed() {
     let def = parse_effect_chain(
             "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard",
             AbilityKind::Spell,
         );
-    let unless_pay = def.unless_pay.expect("should attach unless_pay");
-    // The guard declines → fall through to the flat-cost fallthrough, which
-    // constructs `AbilityCost::Mana { cost: ManaCost::Cost { shards: [], generic: 2 } }`
-    // from the parsed base {2}. NOT a ManaDynamic.
+    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+        panic!(
+            "an untyped plus-additional rider must fail the counter closed, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(name, "unless_payment");
     assert!(
-        matches!(
-            &unless_pay.cost,
-            AbilityCost::Mana {
-                cost: ManaCost::Cost { shards, generic: 2 }
-            } if shards.is_empty()
-        ),
-        "off-battlefield-zone for-each must stay gapped as flat Mana{{generic:2}}, got {:?}",
-        unless_pay.cost
+        def.unless_pay.is_none(),
+        "the dropped rider must not leave a flat unless cost: {:?}",
+        def.unless_pay
+    );
+
+    // Positive control: the riderless unless cost is the flat {2}.
+    let riderless = parse_effect_chain(
+        "Counter target spell unless its controller pays {2}.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*riderless.effect, Effect::Counter { .. }));
+    assert_eq!(
+        riderless.unless_pay.expect("riderless unless_pay").cost,
+        AbilityCost::Mana {
+            cost: ManaCost::generic(2)
+        }
     );
 }
 
@@ -9055,13 +9065,12 @@ fn issue_3308_full_card_parse_has_no_swallow_warnings() {
 
 // Issue #3308 GAP A — honest gap preserved. Rune Snag's off-battlefield
 // for-each subject is declined by the honesty guard, so its full-card parse
-// must STILL surface a SwallowedClause/DynamicQty warning (the dynamic
-// "for each card named Rune Snag in each graveyard" increment is not
-// faithfully captured). This is the coverage-honest counterpart to the
-// no-warnings test above: a correct dynamic flip would clear the warning,
-// but a silently-wrong flip must not — the gap stays visible to CI.
+// fails closed: the counter is `Unimplemented{unless_payment}` carrying the
+// unparsed rider, never a `Counter` charging the flat {2} base with the
+// per-card increment dropped. This is the coverage-honest counterpart to the
+// no-warnings test above — the gap stays visible to CI.
 #[test]
-fn issue_3308_rune_snag_keeps_swallow_warning() {
+fn issue_3308_rune_snag_fails_closed_on_additional_per_card_rider() {
     let instant = ["Instant".to_string()];
     let r = crate::parser::parse_oracle_text(
             "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard.",
@@ -9070,17 +9079,604 @@ fn issue_3308_rune_snag_keeps_swallow_warning() {
             &instant,
             &[],
         );
+    assert_eq!(
+        r.abilities.len(),
+        1,
+        "expected one ability: {:?}",
+        r.abilities
+    );
+    let Effect::Unimplemented { name, description } = r.abilities[0].effect.as_ref() else {
+        panic!(
+            "Rune Snag must fail closed, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    assert_eq!(name, "unless_payment");
     assert!(
-        r.parse_warnings.iter().any(|warning| matches!(
+        description
+            .as_deref()
+            .is_some_and(|d| d.contains("plus an additional {2} for each card named Rune Snag")),
+        "the marker must carry the unparsed rider: {description:?}"
+    );
+    assert!(
+        r.abilities[0].unless_pay.is_none(),
+        "no flat unless cost may survive: {:?}",
+        r.abilities[0].unless_pay
+    );
+}
+
+/// CR 118.12a + CR 608.2h: the unless mana-cost tail is the single authority for
+/// everything after the unless mana symbols. Inputs are lowercased, as every
+/// caller hands them over.
+#[test]
+fn unless_mana_cost_tail_cells() {
+    let green = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 0,
+    };
+    let blue = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+    let per_counter = |counter: CounterType, base: &ManaCost| AbilityCost::PerCounter {
+        counter,
+        target: TargetFilter::SelfRef,
+        base: Box::new(AbilityCost::Mana { cost: base.clone() }),
+    };
+
+    // Riderless → flat; a sentence boundary is not a rider.
+    assert_eq!(
+        parse_unless_mana_cost_tail("", &green),
+        Some(AbilityCost::Mana {
+            cost: green.clone()
+        })
+    );
+    assert_eq!(
+        parse_unless_mana_cost_tail(". if they do, surveil 2.", &ManaCost::generic(2)),
+        Some(AbilityCost::Mana {
+            cost: ManaCost::generic(2)
+        })
+    );
+
+    // A counter on the source → PerCounter, colored or generic base.
+    assert_eq!(
+        parse_unless_mana_cost_tail(" for each wind counter on it", &green),
+        Some(per_counter(
+            CounterType::Generic("wind".to_string()),
+            &green
+        ))
+    );
+    assert_eq!(
+        parse_unless_mana_cost_tail(" for each +1/+1 counter on it", &ManaCost::generic(1)),
+        Some(per_counter(CounterType::Plus1Plus1, &ManaCost::generic(1)))
+    );
+
+    // A generic base with any other for-each rider keeps its dynamic-mana shape.
+    let creatures =
+        parse_unless_mana_cost_tail(" for each creature you control", &ManaCost::generic(1));
+    assert!(
+        matches!(
+            &creatures,
+            Some(AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            })
+        ),
+        "{creatures:?}"
+    );
+    let doubled =
+        parse_unless_mana_cost_tail(" for each creature you control", &ManaCost::generic(2));
+    assert!(
+        matches!(
+            &doubled,
+            Some(AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Multiply { factor: 2, .. }
+            })
+        ),
+        "{doubled:?}"
+    );
+    // Counters that are not a typed kind on the source (another object's counters;
+    // an untyped "counter on it") are not `PerCounter`: generic → dynamic mana.
+    for not_per_counter in [
+        " for each +1/+1 counter on that creature",
+        " for each counter on it",
+    ] {
+        let scaled = parse_unless_mana_cost_tail(not_per_counter, &ManaCost::generic(1));
+        assert!(
+            matches!(
+                &scaled,
+                Some(AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn { .. }
+                    }
+                })
+            ),
+            "{not_per_counter:?}: {scaled:?}"
+        );
+        // …and a colored base has no typed representation for them → None.
+        assert_eq!(
+            parse_unless_mana_cost_tail(not_per_counter, &green),
+            None,
+            "{not_per_counter:?}"
+        );
+    }
+
+    // A colored base with a rider that is not a counter on the source has no typed
+    // representation → None (the caller fails closed), never a flat {U}.
+    assert_eq!(
+        parse_unless_mana_cost_tail(" for each creature you control", &blue),
+        None
+    );
+    let def = parse_effect_chain(
+        "Counter target spell unless its controller pays {U} for each creature you control",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        unimplemented_name(&def),
+        Some("unless_payment"),
+        "{:?}",
+        def.effect
+    );
+    assert!(def.unless_pay.is_none(), "{:?}", def.unless_pay);
+}
+
+/// Every definition on `def`'s `sub_ability` / `else_ability` tree, root first.
+fn chain_defs(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut defs = vec![def];
+    for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        defs.extend(chain_defs(child));
+    }
+    defs
+}
+
+/// Does `parsed` carry an `Unimplemented` node named `name` on any ability or trigger chain?
+fn parsed_has_unimplemented_named(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+    name: &str,
+) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+        .flat_map(chain_defs)
+        .any(|def| unimplemented_name(def) == Some(name))
+}
+
+fn has_dynamic_qty_warning(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+    parsed.parse_warnings.iter().any(|warning| {
+        matches!(
             warning,
             crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
                 detector,
                 ..
             } if detector == "DynamicQty"
-        )),
-        "Rune Snag's off-battlefield for-each must keep a DynamicQty swallow warning, got {:?}",
-        r.parse_warnings
+        )
+    })
+}
+
+fn parse_card(
+    text: &str,
+    name: &str,
+    keywords: &[&str],
+    types: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let owned = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    parse_oracle_text(text, name, &owned(keywords), &owned(types), &[])
+}
+
+const CYCLONE_ORACLE: &str = "At the beginning of your upkeep, put a wind counter on this \
+     enchantment, then sacrifice this enchantment unless you pay {G} for each wind counter on \
+     it. If you pay, this enchantment deals damage equal to the number of wind counters on it \
+     to each creature and each player.";
+
+const PHANTASMAL_SPHERE_ORACLE: &str = "Flying\nAt the beginning of your upkeep, put a +1/+1 \
+     counter on this creature, then sacrifice this creature unless you pay {1} for each +1/+1 \
+     counter on it.\nWhen this creature leaves the battlefield, target opponent creates an X/X \
+     blue Orb creature token with flying, where X is the number of +1/+1 counters on this \
+     creature.";
+
+/// CR 118.12a + CR 608.2h: Energy Vortex's chosen player pays {1} per vortex counter.
+/// No ", then " sequences the sentence, so the trigger-level hoist still applies and
+/// keeps the non-controller payer; only the cost representation moves to `PerCounter`.
+#[test]
+fn energy_vortex_per_counter_keeps_chosen_player_payer() {
+    let parsed = parse_card(
+        "As this enchantment enters, choose an opponent.\nAt the beginning of your upkeep, \
+         remove all vortex counters from this enchantment.\nAt the beginning of the chosen \
+         player's upkeep, this enchantment deals 3 damage to that player unless they pay {1} \
+         for each vortex counter on this enchantment.\n{X}: Put X vortex counters on this \
+         enchantment. Activate only during your upkeep.",
+        "Energy Vortex",
+        &[],
+        &["Enchantment"],
     );
+    let damage = parsed
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute.as_deref().is_some_and(|e| {
+                matches!(
+                    *e.effect,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("the 3-damage upkeep trigger");
+    assert_eq!(
+        damage.unless_pay,
+        Some(UnlessPayModifier {
+            cost: AbilityCost::PerCounter {
+                counter: CounterType::Generic("vortex".to_string()),
+                target: TargetFilter::SelfRef,
+                base: Box::new(AbilityCost::Mana {
+                    cost: ManaCost::generic(1)
+                }),
+            },
+            payer: TargetFilter::TriggeringPlayer,
+        })
+    );
+    // The controller-side removal trigger is untouched.
+    let removal = parsed
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(|e| matches!(*e.effect, Effect::RemoveCounter { .. }))
+        })
+        .expect("the vortex-removal trigger");
+    assert!(removal.unless_pay.is_none());
+    assert!(
+        !has_dynamic_qty_warning(&parsed),
+        "{:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 608.2c + CR 118.12a + CR 608.2h: Cyclone puts the counter, then sacrifices
+/// unless {G} is paid per wind counter (read after the counter). The unless binds to
+/// the sacrifice, not the trigger root. The "If you pay, …" continuation has no
+/// connector arm, so it fails closed instead of dealing damage unconditionally.
+#[test]
+fn cyclone_paid_continuation_fails_closed() {
+    let parsed = parse_card(CYCLONE_ORACLE, "Cyclone", &[], &["Enchantment"]);
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    assert!(trigger.unless_pay.is_none(), "{:?}", trigger.unless_pay);
+    let execute = trigger.execute.as_deref().expect("execute");
+    let defs = chain_defs(execute);
+    assert_eq!(
+        defs.len(),
+        3,
+        "counter → sacrifice → continuation: {execute:#?}"
+    );
+    assert!(
+        matches!(
+            &*defs[0].effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic(kind),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            } if kind == "wind"
+        ),
+        "{:?}",
+        defs[0].effect
+    );
+    assert!(
+        matches!(
+            &*defs[1].effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "{:?}",
+        defs[1].effect
+    );
+    assert_eq!(
+        defs[1].unless_pay,
+        Some(UnlessPayModifier {
+            cost: AbilityCost::PerCounter {
+                counter: CounterType::Generic("wind".to_string()),
+                target: TargetFilter::SelfRef,
+                base: Box::new(AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Green],
+                        generic: 0,
+                    }
+                }),
+            },
+            payer: TargetFilter::Controller,
+        })
+    );
+    let Effect::Unimplemented { name, description } = &*defs[2].effect else {
+        panic!(
+            "the paid continuation must fail closed: {:?}",
+            defs[2].effect
+        );
+    };
+    assert_eq!(name, "unless_paid_continuation_dropped");
+    assert_eq!(
+        description.as_deref(),
+        Some(
+            "If you pay, ~ deals damage equal to the number of wind counters on it to each \
+             creature and each player"
+        )
+    );
+}
+
+/// CR 608.2c + CR 118.12a: Phantasmal Sphere's unless binds to the sacrifice after
+/// the counter, charging {1} per +1/+1 counter; the LTB Orb's P/T binder is untouched.
+#[test]
+fn phantasmal_sphere_unless_binds_to_the_sacrifice() {
+    let parsed = parse_card(
+        PHANTASMAL_SPHERE_ORACLE,
+        "Phantasmal Sphere",
+        &["Flying"],
+        &["Creature"],
+    );
+    let upkeep = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("upkeep trigger");
+    assert!(upkeep.unless_pay.is_none(), "{:?}", upkeep.unless_pay);
+    let defs = chain_defs(upkeep.execute.as_deref().expect("execute"));
+    assert!(matches!(
+        &*defs[0].effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            ..
+        }
+    ));
+    assert!(matches!(&*defs[1].effect, Effect::Sacrifice { .. }));
+    assert_eq!(
+        defs[1].unless_pay.as_ref().map(|u| &u.cost),
+        Some(&AbilityCost::PerCounter {
+            counter: CounterType::Plus1Plus1,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::generic(1)
+            }),
+        })
+    );
+    let orb = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::LeavesBattlefield)
+        .and_then(|t| t.execute.as_deref())
+        .expect("LTB trigger");
+    assert!(
+        matches!(
+            &*orb.effect,
+            Effect::Token {
+                power: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn { .. }
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        orb.effect
+    );
+    assert!(
+        !has_dynamic_qty_warning(&parsed),
+        "{:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 608.2c: the ", then " hoist decline changes nothing for a non-payment unless —
+/// Katara's discard stays an unsupported unless clause after the draw.
+#[test]
+fn katara_non_payment_unless_unchanged_by_hoist_decline() {
+    let parsed = parse_card(
+        "As an additional cost to cast this spell, you may waterbend {2}. (While paying a \
+         waterbend cost, you can tap your artifacts and creatures to help. Each one pays for \
+         {1}.)\nWhen Katara enters, draw a card, then discard a card unless her additional \
+         cost was paid.\nKatara gets +1/+1 for each Lesson card in your graveyard.",
+        "Katara, Seeking Revenge",
+        &["Waterbend"],
+        &["Creature"],
+    );
+    let etb = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .expect("ETB trigger");
+    assert!(etb.unless_pay.is_none());
+    let defs = chain_defs(etb.execute.as_deref().expect("execute"));
+    assert_eq!(defs.len(), 2, "{defs:#?}");
+    assert!(
+        matches!(
+            &*defs[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "{:?}",
+        defs[0].effect
+    );
+    assert_eq!(
+        unimplemented_name(defs[1]),
+        Some("Unsupported unless clause")
+    );
+}
+
+/// CR 118.12 + CR 608.2c: a reflexive "If they do / If that player doesn't"
+/// continuation after an unless payment keeps its condition; the honesty rule
+/// fires only when the head lowered to nothing.
+#[test]
+fn paid_unless_reflexive_continuation_keeps_its_condition() {
+    type ContinuationShape = fn(&Effect) -> bool;
+    let cards: [(&str, &str, &[&str], ContinuationShape); 5] = [
+        (
+            "Assimilate Essence",
+            "Counter target creature or battle spell unless its controller pays {4}. If they \
+             do, you incubate 2. (Create an Incubator token with two +1/+1 counters on it and \
+             \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact \
+             creature.)",
+            &["Incubate", "Transform"],
+            |e| {
+                matches!(
+                    e,
+                    Effect::Incubate {
+                        count: QuantityExpr::Fixed { value: 2 }
+                    }
+                )
+            },
+        ),
+        (
+            "Divert Disaster",
+            "Counter target spell unless its controller pays {2}. If they do, you create a \
+             Lander token. (It's an artifact with \"{2}, {T}, Sacrifice this token: Search \
+             your library for a basic land card, put it onto the battlefield tapped, then \
+             shuffle.\")",
+            &[],
+            |e| matches!(e, Effect::Token { name, .. } if name == "Lander"),
+        ),
+        (
+            "Don't Make a Sound",
+            "Counter target spell unless its controller pays {2}. If they do, surveil 2. (Look \
+             at the top two cards of your library, then put any number of them into your \
+             graveyard and the rest on top of your library in any order.)",
+            &["Surveil"],
+            |e| {
+                matches!(
+                    e,
+                    Effect::Surveil {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    }
+                )
+            },
+        ),
+        (
+            "Power Sink",
+            "Counter target spell unless its controller pays {X}. If that player doesn't, they \
+             tap all lands with mana abilities they control and lose all unspent mana.",
+            &[],
+            |e| {
+                matches!(
+                    e,
+                    Effect::SetTapState {
+                        scope: EffectScope::All,
+                        state: TapStateChange::Tap,
+                        ..
+                    }
+                )
+            },
+        ),
+        (
+            "Rhystic Lightning",
+            "Rhystic Lightning deals 4 damage to any target unless that permanent's controller \
+             or that player pays {2}. If they do, Rhystic Lightning deals 2 damage to the \
+             permanent or player.",
+            &[],
+            |e| {
+                matches!(
+                    e,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::ParentTarget,
+                        ..
+                    }
+                )
+            },
+        ),
+    ];
+    for (name, text, keywords, is_continuation) in cards {
+        let parsed = parse_card(text, name, keywords, &["Instant"]);
+        let continuation = parsed
+            .abilities
+            .iter()
+            .flat_map(chain_defs)
+            .find(|def| is_continuation(&def.effect))
+            .unwrap_or_else(|| panic!("{name}: continuation clause: {:#?}", parsed.abilities));
+        assert!(
+            continuation.condition.is_some(),
+            "{name}: the continuation keeps its condition"
+        );
+        assert!(
+            !parsed_has_unimplemented_named(&parsed, "unless_paid_continuation_dropped"),
+            "{name}: {:#?}",
+            parsed.abilities
+        );
+    }
+}
+
+/// CR 118.12a + CR 608.2c: the honesty rule is class-level — an unless-outcome head
+/// ("If it deals damage to you this way,") that lowers to no condition fails closed,
+/// instead of tapping the creature every upkeep.
+#[test]
+fn unless_outcome_continuation_without_condition_fails_closed() {
+    let cards: [(&str, &str, &[&str], &[&str]); 2] = [
+        (
+            "Mishra's War Machine",
+            "Banding (Any creatures with banding, and up to one without, can attack in a band. \
+             Bands are blocked as a group. If any creatures with banding you control are \
+             blocking or being blocked by a creature, you divide that creature's combat \
+             damage, not its controller, among any of the creatures it's being blocked by or \
+             is blocking.)\nAt the beginning of your upkeep, this creature deals 3 damage to \
+             you unless you discard a card. If it deals damage to you this way, tap it.",
+            &["Banding"],
+            &["Artifact", "Creature"],
+        ),
+        (
+            "Minion of Leshrac",
+            "Protection from black\nAt the beginning of your upkeep, this creature deals 5 \
+             damage to you unless you sacrifice a creature other than this creature. If this \
+             creature deals damage to you this way, tap it.\n{T}: Destroy target creature or \
+             land.",
+            &["Protection"],
+            &["Creature"],
+        ),
+    ];
+    for (name, text, keywords, types) in cards {
+        let parsed = parse_card(text, name, keywords, types);
+        let upkeep = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Phase)
+            .unwrap_or_else(|| panic!("{name}: upkeep trigger"));
+        let defs = chain_defs(upkeep.execute.as_deref().expect("execute"));
+        // Reach guard: the unless-bearing damage clause is in the same chain.
+        assert!(
+            defs.iter()
+                .any(|def| matches!(*def.effect, Effect::DealDamage { .. })
+                    && def.unless_pay.is_some()),
+            "{name}: {defs:#?}"
+        );
+        let dropped = defs
+            .iter()
+            .find_map(|def| match &*def.effect {
+                Effect::Unimplemented { name, description }
+                    if name == "unless_paid_continuation_dropped" =>
+                {
+                    description.as_deref()
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: the tap continuation must fail closed: {defs:#?}"));
+        assert!(
+            dropped.ends_with("deals damage to you this way, tap it"),
+            "{name}: {dropped:?}"
+        );
+        assert!(
+            !defs
+                .iter()
+                .any(|def| matches!(*def.effect, Effect::SetTapState { .. })),
+            "{name}: no unconditional tap may survive"
+        );
+    }
 }
 
 #[test]

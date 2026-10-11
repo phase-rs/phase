@@ -33,7 +33,7 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
     ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
     DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
     ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
@@ -3048,6 +3048,14 @@ fn detect_dynamic_qty(
     if evidence.any::<UnlessPayScaling>(|s| matches!(s, UnlessPayScaling::PerAffectedCreature)) {
         return;
     }
+    //   CR 118.12a  "unless … pays {cost} for each <kind> counter on <self>" lowers to
+    //              `AbilityCost::PerCounter`, whose multiplier is the counter kind the variant
+    //              carries — there is no `QuantityExpr` for the probes above to see.
+    //              Unanchored is safe: `AbilityCost` is internally tagged and `PerCounter`
+    //              names no variant of any other enum.
+    if evidence.any::<AbilityCost>(|c| matches!(c, AbilityCost::PerCounter { .. })) {
+        return;
+    }
     //   CR 608.2c + CR 701.38  "For each player who chose <choice>" vote bodies resolve
     //              against the ballot ledger via `PlayerFilter::VotedFor`.
     if evidence.any::<PlayerFilter>(|p| matches!(p, PlayerFilter::VotedFor { .. })) {
@@ -6035,14 +6043,15 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint,
+        Chooser, Comparator, ContinuousModification, CopyRetargetPermission, DamageModification,
+        Effect, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
         QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, ZoneChoiceCandidateSource,
-        ZoneOwner,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
+        ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::{Keyword, WardCost};
     use crate::types::mana::{ManaCost, ManaSpellGrant};
@@ -10864,6 +10873,139 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             "a sibling unrepresented \"for each \" clause beside an Affinity keyword must \
              warn: {diagnostics:?}"
         );
+    }
+
+    /// A self-sacrifice carrying the given unless cost, paid by its controller.
+    fn self_sacrifice_unless(cost: AbilityCost) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        )
+        .unless_pay(UnlessPayModifier {
+            cost,
+            payer: TargetFilter::Controller,
+        })
+    }
+
+    /// CR 118.12a: "unless you pay {1} for each +1/+1 counter on it" lowers to
+    /// `AbilityCost::PerCounter`, whose multiplier is the counter kind — no
+    /// `QuantityExpr` exists for the quantity probes to see, so the detector credits
+    /// the variant. The control is parser-independent: the same text with a flat
+    /// `{1}` (the multiplier swallowed) must still warn.
+    #[test]
+    fn dynamic_qty_credits_per_counter_unless_cost() {
+        let cleaned = "at the beginning of your upkeep, put a +1/+1 counter on this creature, \
+                       then sacrifice this creature unless you pay {1} for each +1/+1 counter \
+                       on it.";
+        let per_counter = parsed_with_ability(self_sacrifice_unless(AbilityCost::PerCounter {
+            counter: CounterType::Plus1Plus1,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }),
+        }));
+        let flat = parsed_with_ability(self_sacrifice_unless(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        }));
+        let per_counter_evidence = UnitEvidence::of(&per_counter);
+        let flat_evidence = UnitEvidence::of(&flat);
+        // Reach guard: the fixture raises the dynamic marker for both units, so the
+        // verdicts below are about the carrier, not a marker gate that never engaged.
+        assert!(!super::active_dynamic_markers(cleaned, &per_counter_evidence).is_empty());
+        assert!(!super::active_dynamic_markers(cleaned, &flat_evidence).is_empty());
+
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &per_counter,
+            &per_counter_evidence,
+            &mut diagnostics,
+        );
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "a PerCounter unless cost represents the per-counter multiplier: {diagnostics:?}"
+        );
+
+        let mut flat_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &flat,
+            &flat_evidence,
+            &mut flat_diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&flat_diagnostics).len(),
+            1,
+            "a flat unless cost swallows the per-counter multiplier and must warn: \
+             {flat_diagnostics:?}"
+        );
+    }
+
+    /// Full-parse twin of `dynamic_qty_credits_per_counter_unless_cost`: the printed
+    /// per-counter unless cards (verbatim Oracle text, MTGJSON keyword names passed)
+    /// carry `PerCounter` and gain no `DynamicQty` warning.
+    #[test]
+    fn dynamic_qty_silent_for_printed_per_counter_unless_cards() {
+        let cards: [(&str, &str, &[&str], &[&str]); 2] = [
+            (
+                "Energy Vortex",
+                "As this enchantment enters, choose an opponent.\n\
+                 At the beginning of your upkeep, remove all vortex counters from this \
+                 enchantment.\n\
+                 At the beginning of the chosen player's upkeep, this enchantment deals 3 \
+                 damage to that player unless they pay {1} for each vortex counter on this \
+                 enchantment.\n\
+                 {X}: Put X vortex counters on this enchantment. Activate only during your \
+                 upkeep.",
+                &[],
+                &["Enchantment"],
+            ),
+            (
+                "Phantasmal Sphere",
+                "Flying\n\
+                 At the beginning of your upkeep, put a +1/+1 counter on this creature, then \
+                 sacrifice this creature unless you pay {1} for each +1/+1 counter on it.\n\
+                 When this creature leaves the battlefield, target opponent creates an X/X \
+                 blue Orb creature token with flying, where X is the number of +1/+1 counters \
+                 on this creature.",
+                &["Flying"],
+                &["Creature"],
+            ),
+        ];
+        for (name, text, keywords, types) in cards {
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &keywords
+                    .iter()
+                    .map(|k| (*k).to_string())
+                    .collect::<Vec<_>>(),
+                &types.iter().map(|t| (*t).to_string()).collect::<Vec<_>>(),
+                &[],
+            );
+            // Reach guards: the unit carries the per-counter cost, and no
+            // `Unimplemented` lets `check_swallowed_clauses` skip it.
+            assert!(
+                UnitEvidence::of(&parsed)
+                    .any::<AbilityCost>(|c| matches!(c, AbilityCost::PerCounter { .. })),
+                "{name}: the unless cost must be PerCounter"
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: no Unimplemented may short-circuit the detectors"
+            );
+            assert!(
+                swallows_for(&parsed, "DynamicQty").is_empty(),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     /// One `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`

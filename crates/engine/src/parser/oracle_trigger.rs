@@ -4241,11 +4241,7 @@ fn parse_unless_mana_payment(cost_str: &str) -> Option<AbilityCost> {
     {
         return None;
     }
-    if let Some(cost) = super::oracle_effect::parse_unless_for_each_payment(after_cost, &mana_cost)
-    {
-        return Some(cost);
-    }
-    Some(AbilityCost::Mana { cost: mana_cost })
+    super::oracle_effect::parse_unless_mana_cost_tail(after_cost, &mana_cost)
 }
 
 /// CR 608.2f + CR 118.12a: true for a payer whose identity the `player_scope`
@@ -4328,6 +4324,15 @@ fn hoist_unless_pay_modifier(
     .1
     .is_some()
     {
+        return (text.to_string(), None);
+    }
+    // CR 608.2c + CR 118.12a: instructions are followed in the order written, and an
+    // "unless" binds to its own instruction. When the unless-bearing sentence sequences
+    // instructions with ", then ", hoisting the unless to the trigger root would ask for
+    // the payment before the earlier instructions run (Cyclone, Phantasmal Sphere: the
+    // prompt must follow the counter). Decline; the per-clause path
+    // (`extract_resolution_unless_pay_modifier`) attaches it to its own clause.
+    if nom_primitives::split_once_on(enclosing, ", then ").is_ok() {
         return (text.to_string(), None);
     }
 

@@ -4899,9 +4899,18 @@ fn parse_wedge_clan_colors(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
 /// (Outrage Shaman, Primalcrux). The graveyard-scope and single-object Chroma
 /// forms are a different population and intentionally not matched here.
 fn parse_chroma_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the number of ").parse(input)?;
-    let (rest, color) = super::primitives::parse_color(rest)?;
-    let (rest, _) = tag(" mana symbols in the mana costs of permanents you control").parse(rest)?;
+    preceded(tag("the number of "), parse_chroma_permanents_symbols).parse(input)
+}
+
+/// CR 700.5: "<color> mana symbol[s] in the mana costs of permanents you control"
+/// counts the mana symbols devotion counts, so it is `QuantityRef::Devotion` with a
+/// fixed color. Shared tail of the "the number of …" Chroma ref and the
+/// "for each …" Chroma rider (Springjack Shepherd).
+fn parse_chroma_permanents_symbols(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, color) = parse_color(input)?;
+    let (rest, _) = tag(" mana symbol").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" in the mana costs of permanents you control").parse(rest)?;
     Ok((
         rest,
         QuantityRef::Devotion {
@@ -5247,7 +5256,15 @@ fn parse_for_each_clause_ref_with_they_controller(
             parse_object_colors_for_each,
             parse_object_name_word_count_for_each,
             parse_object_typeline_component_count_for_each,
-            parse_mana_symbols_in_object_mana_cost_for_each,
+            // CR 700.5: the Chroma permanents tail ("… in the mana costs of
+            // permanents you control") is devotion; it shares the "<color> mana
+            // symbol[s] in " prefix with the per-object arm and goes first as the
+            // more specific tail. Nested to keep the outer `alt` within nom's
+            // tuple arity (21 items).
+            alt((
+                parse_chroma_permanents_symbols,
+                parse_mana_symbols_in_object_mana_cost_for_each,
+            )),
             // CR 205.2a: "for each card type among <population>" and "card type
             // they share with <population>" share the population grammar; nested
             // to keep the outer `alt` within nom's tuple arity (21 items).
@@ -12577,6 +12594,49 @@ mod tests {
                 colors: DevotionColors::Fixed(vec![ManaColor::Red])
             }
         );
+    }
+
+    /// CR 700.5: the "for each" form of the Chroma permanents count (Springjack
+    /// Shepherd) is the same devotion quantity, singular or plural; the arm is
+    /// exact about the population, so other Chroma scopes stay off `Devotion`.
+    #[test]
+    fn test_parse_chroma_for_each_devotion() {
+        let (rest, q) = parse_for_each_clause_ref(
+            "white mana symbol in the mana costs of permanents you control",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(vec![ManaColor::White])
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref(
+            "green mana symbols in the mana costs of permanents you control",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(vec![ManaColor::Green])
+            }
+        );
+        assert_eq!(rest, "");
+
+        for other_population in [
+            "green mana symbol in the mana costs of permanents your opponents control",
+            "blue mana symbol in the mana costs of the revealed cards",
+        ] {
+            assert!(
+                !matches!(
+                    parse_for_each_clause_ref(other_population),
+                    Ok((_, QuantityRef::Devotion { .. }))
+                ),
+                "{other_population:?} must not parse as devotion"
+            );
+        }
     }
 
     #[test]
