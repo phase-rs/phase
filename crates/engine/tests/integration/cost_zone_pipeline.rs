@@ -7456,8 +7456,7 @@ fn count_mana_added_from(events: &[GameEvent], source: ObjectId) -> usize {
 fn pips_produced_by(state: &GameState, source: ObjectId) -> usize {
     state.players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.source_id == source)
         .count()
 }
@@ -10584,8 +10583,7 @@ impl DelveWitness {
     fn markers(&self) -> Vec<ObjectId> {
         self.runner.state().players[0]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .filter(|unit| unit.is_convoke_payment())
             .map(|unit| unit.source_id)
             .collect()

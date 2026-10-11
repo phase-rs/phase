@@ -2,6 +2,7 @@
 
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     validate_library_shuffle_receipt, ResolvedLibraryShuffleCommand,
@@ -32,7 +33,10 @@ pub fn resolve_and_apply_library_shuffle(
     let pre_word_pos = state.rng_word_pos;
     let mut receipt_rng = state.rng.clone();
     let mut resulting_order = im::Vector::from(precondition_order.clone());
-    crate::util::im_ext::shuffle_vector(&mut resulting_order, &mut receipt_rng);
+    crate::util::im_ext::shuffle_vector(
+        &mut resulting_order,
+        receipt_rng.draw(RandomDraw::Placement),
+    );
     let command = ResolvedLibraryShuffleCommand {
         player,
         precondition_order,
@@ -117,8 +121,6 @@ pub fn apply_resolved_library_shuffle(
 
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
 
     use super::*;
     use crate::game::zones::create_object;
@@ -157,7 +159,10 @@ mod tests {
         let mut state = state_with_library(0x733);
         let mut expected_order = state.players[0].library.clone();
         let mut expected_rng = state.rng.clone();
-        crate::util::im_ext::shuffle_vector(&mut expected_order, &mut expected_rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut expected_order,
+            expected_rng.draw(crate::types::game_state::RandomDraw::Placement),
+        );
         let mut events = Vec::new();
 
         crate::game::effects::change_zone::shuffle_library(&mut state, PlayerId(0), &mut events);
@@ -192,7 +197,7 @@ mod tests {
         let mut replay = pre_state;
         // A different stream seed proves the applier cannot recreate the order
         // by shuffling. Its stream position still satisfies the receipt.
-        replay.rng = ChaCha20Rng::seed_from_u64(0x0BAD_5EED);
+        replay.rng = crate::types::game_state::GameRng::seed_from_u64(0x0BAD_5EED);
         replay.rng_word_pos = command.pre_word_pos;
         let mut replay_events = Vec::new();
         apply_resolved_library_shuffle(&mut replay, &command, &mut replay_events).unwrap();

@@ -47,12 +47,11 @@ export function ManaPaymentUI() {
 
   const isManaPayment = waitingFor?.type === "ManaPayment";
   const isPhyrexianPayment = waitingFor?.type === "PhyrexianPayment";
-  const isAnyPayment = isManaPayment || isPhyrexianPayment;
-  const playerId = isManaPayment
+  const isManaAbilityPayment = waitingFor?.type === "ManaAbilityManaPayment";
+  const isAnyPayment = isManaPayment || isPhyrexianPayment || isManaAbilityPayment;
+  const playerId = isManaPayment || isPhyrexianPayment || isManaAbilityPayment
     ? waitingFor.data.player
-    : isPhyrexianPayment
-      ? waitingFor.data.player
-      : null;
+    : null;
   const convokeMode = isManaPayment ? waitingFor.data.convoke_mode : undefined;
   const player = playerId != null ? gameState?.players[playerId] : null;
 
@@ -320,6 +319,31 @@ export function ManaPaymentUI() {
   // decisions for the caster alone; opponents see the mid-cast state via the
   // stack display, not an interactive panel.
   if (!isAnyPayment || !player || !canAct) return null;
+
+  // CR 605.3a + CR 117.1d: a mana ability's payment window is paid only by board
+  // taps, so it shows the prompt and the cancel that withdraws the activation.
+  if (isManaAbilityPayment) {
+    return (
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4">
+        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            {t("mana.payMana")}
+          </h3>
+          <p className="mb-3 text-center text-xs text-gray-400">
+            {t("mana.paymentPending")}
+          </p>
+          <div className="flex justify-center">
+            <button
+              onClick={handleCancel}
+              className={gameButtonClass({ tone: "slate", size: "md" })}
+            >
+              {t("common:actions.cancel")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <AnimatePresence>

@@ -690,6 +690,7 @@ pub(crate) fn begin_variable_speed_payment(
     ability_index: usize,
     target_selection: ActivationTargetSelection,
     activation_cost_snapshot: Option<Box<ActivationCostSnapshot>>,
+    activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
 ) -> WaitingFor {
     let max_speed = effective_speed(state, player);
     let (min, max) = variable_speed_payment_range(&cost, max_speed).unwrap_or((0, max_speed));
@@ -702,6 +703,9 @@ pub(crate) fn begin_variable_speed_payment(
     );
     pending.activation_cost = Some(cost);
     pending.activation_target_selection = target_selection;
+    // CR 602.2b + CR 603.2: the speed choice is one more announcement step;
+    // target-declaration triggers already collected stay with the activation.
+    pending.activation_trigger_collection = activation_trigger_collection;
     state.pending_cast = Some(Box::new(pending));
     WaitingFor::NamedChoice {
         player,
@@ -3663,6 +3667,29 @@ fn has_exile_cast_permission(
         } else {
             exile_cast_permission_source(state, player, obj.id).is_some()
         }
+        || own_exile_cast_permission(state, obj, player)
+}
+
+/// CR 604.6 + CR 113.6f: a card's own "You may cast this card from exile"
+/// functions while it is in exile; its owner may cast it there (CR 109.5 +
+/// CR 108.4a).
+fn own_exile_cast_permission(state: &GameState, obj: &GameObject, player: PlayerId) -> bool {
+    obj.zone == Zone::Exile
+        && obj.owner == player
+        && active_static_definitions(state, obj).any(|definition| {
+            matches!(
+                definition.mode,
+                StaticMode::GraveyardCastPermission {
+                    play_mode: CardPlayMode::Cast,
+                    frequency: CastFrequency::Unlimited,
+                    extra_cost: None,
+                    enters_with_counter: None,
+                    graveyard_destination_replacement: None,
+                    required_cast_keyword: None,
+                    pool: GraveyardPermissionPool::OwnGraveyard,
+                }
+            ) && matches!(definition.affected, Some(TargetFilter::SelfRef))
+        })
 }
 
 /// CR 305.9 + CR 300.2a: an object that is both a land and another card type can be
@@ -7721,7 +7748,7 @@ mod pool_payability_tests {
             "the public predicate must reuse the exact production pool-payment authority"
         );
         let mut unfunded = scenario.state.clone();
-        unfunded.players[caster.0 as usize].mana_pool.mana.clear();
+        unfunded.players[caster.0 as usize].mana_pool.clear();
         assert!(
             !spell_cost_is_payable_from_pool(&unfunded, caster, spell),
             "removing only pool coverage makes the exact predicate false"
@@ -18474,6 +18501,10 @@ fn announce_spell_on_stack(
     // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
     clear_cast_scoped_creature_type_choice(state, prepared.object_id);
 
+    // CR 601.2a + CR 603.2: the announcement owns this action's events from
+    // here on, wherever in the action it began.
+    super::announcement_triggers::begin_announcement(state, events.len());
+
     // CR 601.2a + CR 400.7: a new identity for this spell, carried through
     // targeting, payment and the finalization move to the stack.
     let announcement = state.mint_spell_announcement();
@@ -21394,7 +21425,7 @@ pub(crate) fn has_manual_mana_ability_for_spell_payment(
 ) -> bool {
     let spell_meta = build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+    super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
         state,
         player,
         Some(source_id),
@@ -21891,7 +21922,7 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
     // mana ability that requires a manual choice can make the cast reachable.
     // Do not re-estimate tap-cost or unambiguous self-sacrifice sources here:
     // their resource dependencies belong exclusively to the exact probe.
-    if !super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+    if !super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
         state,
         player,
         source_id,
@@ -22475,7 +22506,7 @@ fn cleanup_unused_convoke_payments(
     }
 
     if let Some(player_data) = state.players.iter_mut().find(|p| p.id == player) {
-        player_data.mana_pool.mana.retain(|unit| {
+        player_data.mana_pool.retain_shapes(|unit| {
             !(unit.is_convoke_payment() && unused_sources.contains(&unit.source_id))
         });
     }
@@ -26305,6 +26336,9 @@ fn activate_with_cost_carrier(
     if !state.objects.contains_key(&source_id) {
         return Err(EngineError::InvalidAction("Object not found".to_string()));
     }
+    // CR 602.2a + CR 603.2: the activation's announcement owns this action's
+    // events from here on.
+    super::announcement_triggers::begin_announcement(state, events.len());
 
     // CR 602.2: Only players permitted by `activator_filter` may begin activation.
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
@@ -27445,6 +27479,7 @@ fn activate_with_cost_carrier(
                 ability_index,
                 ActivationTargetSelection::Pending,
                 carrier.clone(),
+                None,
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
@@ -27853,8 +27888,7 @@ pub fn handle_cancel_cast(
     for player in &mut state.players {
         player
             .mana_pool
-            .mana
-            .retain(|unit| !unit.is_convoke_payment());
+            .retain_shapes(|unit| !unit.is_convoke_payment());
     }
     if let Some(obj) = state.objects.get_mut(&pending.object_id) {
         obj.convoked_creatures.clear();

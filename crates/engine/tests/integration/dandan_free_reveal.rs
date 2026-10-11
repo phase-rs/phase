@@ -345,7 +345,10 @@ fn free_reveal_round(db: &CardDatabase, starting: PlayerId, declarer: PlayerId) 
     replay_pile.extend(&old_hand);
     let mut shuffled: im::Vector<ObjectId> = replay_pile.iter().copied().collect();
     let mut rng = state.rng.clone();
-    engine::util::im_ext::shuffle_vector(&mut shuffled, &mut rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut shuffled,
+        rng.draw(engine::types::game_state::RandomDraw::Placement),
+    );
     let shuffled: Vec<ObjectId> = shuffled.into_iter().collect();
 
     let events = act(&mut state, keeper, MulliganChoice::Keep);

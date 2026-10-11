@@ -2,9 +2,8 @@ use std::collections::HashSet;
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActiveSearchDecisionAuthority, CollectEvidenceResume, CostResume, DeferredLifeCostResume,
-    GameEnd, GameState, PayCostKind, PendingCast, PendingCostMoveResume,
-    PendingDiscardForCostResume, PendingSacrificeCostCompletion, WaitingFor,
+    ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, PayCostKind, PendingCast,
+    PendingCostMoveResume, PendingSacrificeCostCompletion, WaitingFor,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
@@ -35,85 +34,30 @@ fn is_abandoned_spell(
                 .is_some_and(|object| object.controller == departing_player))
 }
 
-fn abandon_pending_spell_casts(
+/// CR 800.4a: an announced spell or activated ability whose controller leaves
+/// is abandoned wherever its [`PendingCast`] is parked (every
+/// [`PendingCastOwner`]); none may resume into finalization after the
+/// announcement stack entry has been removed. CR 603.2: the events it already
+/// produced still occurred, so its staged triggers are published before the
+/// departure's own trigger settlement (CR 800.4d retires the departed
+/// controllers' contexts).
+fn abandon_pending_casts(
     state: &mut GameState,
     departing_player: PlayerId,
     spell_ids: &[crate::types::identifiers::ObjectId],
 ) {
-    if state
-        .pending_cast
-        .as_ref()
-        .is_some_and(|pending| is_abandoned_spell(state, departing_player, spell_ids, pending))
-    {
-        state.pending_cast = None;
-    }
-
-    if state
-        .waiting_for
-        .pending_cast_ref()
-        .is_some_and(|pending| is_abandoned_spell(state, departing_player, spell_ids, pending))
-    {
-        state.waiting_for = WaitingFor::Priority {
-            player: state.active_player,
+    for owner in state.live_pending_cast_owners() {
+        let Some(pending) = state.pending_cast_at(owner) else {
+            continue;
         };
-    }
-
-    if matches!(
-        state.pending_deferred_life_cost_resume.as_ref(),
-        Some(DeferredLifeCostResume::Cast {
-            pending: Some(pending),
-            ..
-        }) if is_abandoned_spell(state, departing_player, spell_ids, pending)
-    ) {
-        state.pending_deferred_life_cost_resume = None;
-    }
-
-    if let Some(resume) = state.pending_cost_move_resume.take() {
-        let abandons_spell = match &resume {
-            PendingCostMoveResume::Cast {
-                pending: Some(pending),
-                ..
-            } => is_abandoned_spell(state, departing_player, spell_ids, pending),
-            PendingCostMoveResume::SacrificeForCost {
-                pending: Some(pending),
-                ..
-            } => is_abandoned_spell(state, departing_player, spell_ids, pending),
-            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => matches!(
-                resume.as_ref(),
-                CollectEvidenceResume::Casting { pending_cast, .. }
-                    if is_abandoned_spell(state, departing_player, spell_ids, pending_cast)
-            ),
-            PendingCostMoveResume::ActivationMillPayment { pending, .. } => {
-                is_abandoned_spell(state, departing_player, spell_ids, pending)
-            }
-            PendingCostMoveResume::Cast { pending: None, .. }
-            | PendingCostMoveResume::SacrificeForCost { pending: None, .. }
-            | PendingCostMoveResume::WardSacrificePayment { .. }
-            | PendingCostMoveResume::ReplacementMayCost { .. }
-            | PendingCostMoveResume::Foretell { .. }
-            | PendingCostMoveResume::UnlessBouncePayment { .. }
-            | PendingCostMoveResume::ManaAbilityPayment { .. }
-            | PendingCostMoveResume::LoyaltyActivation { .. }
-            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(..) => false,
-        };
-        if !abandons_spell {
-            state.pending_cost_move_resume = Some(resume);
+        let abandoned = is_abandoned_spell(state, departing_player, spell_ids, pending)
+            || (pending.activation_ability_index.is_some()
+                && pending.ability.controller == departing_player);
+        if !abandoned {
+            continue;
         }
-    }
-
-    if state
-        .pending_discard_for_cost
-        .as_ref()
-        .is_some_and(|resume| {
-            let pending = match resume.as_ref() {
-                PendingDiscardForCostResume::Chosen { pending, .. }
-                | PendingDiscardForCostResume::Random { pending, .. } => pending,
-            };
-            is_abandoned_spell(state, departing_player, spell_ids, pending)
-        })
-    {
-        state.pending_discard_for_cost = None;
+        super::announcement_triggers::publish_abandoned_announcement(state, owner);
+        state.retire_pending_cast_owner(owner, departing_player);
     }
 }
 
@@ -618,6 +562,9 @@ pub fn eliminate_players_simultaneously(
             }
         }
     }
+    // CR 800.4a: the departure's events belong to the departure, not to a
+    // surviving player's paused announcement.
+    super::announcement_triggers::disown_events_through(state, events.len());
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -799,7 +746,20 @@ fn drain_or_clear_deferred_triggers_after_elimination(
         return;
     }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+        // CR 603.3 + CR 117.5: abilities that triggered are put on the stack
+        // before the next player receives priority. With no resolution in
+        // progress, a spell still on the stack is a passive announced object
+        // (another player's spell below an abandoned announcement), so the
+        // post-announcement settlement authority applies; a live resolution
+        // keeps the resolution-safe drain (issue #1793).
+        let resolution_live =
+            state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
+        let settled = if resolution_live {
+            super::triggers::drain_deferred_trigger_queue(state, events)
+        } else {
+            super::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+        };
+        if let Some(wf) = settled {
             state.waiting_for = wf;
         }
     }
@@ -1068,7 +1028,7 @@ fn remove_stack_objects_controlled_by_leaving_players(
                 abandoned_spell_ids.push(removed.entry.id);
             }
         }
-        abandon_pending_spell_casts(state, player, &abandoned_spell_ids);
+        abandon_pending_casts(state, player, &abandoned_spell_ids);
 
         // CR 800.4a fourth step: a CARD-represented stack object is EXILED, not
         // merely un-stacked. A leaver-OWNED spell already left in step 1 (which
@@ -1101,7 +1061,7 @@ fn remove_stack_objects_controlled_by_leaving_players(
     // gates on `pending_trigger`) back into target selection for a dead entry
     // id, panicking in `mutate_pending_trigger_entry`. Clear the cursor only
     // when the entry it tracks is no longer on the stack, mirroring the early
-    // `abandon_pending_spell_casts` teardown above.
+    // `abandon_pending_casts` teardown above.
     if state
         .pending_trigger_entry
         .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
@@ -1401,7 +1361,7 @@ fn do_eliminate(
     // Drop only THAT seat's owed lifelink gains — the rest of the batch belongs to
     // other controllers and must still land, and the batch itself must still
     // complete so its CR 603.3b triggers fire. Per-entry, mirroring
-    // `abandon_pending_spell_casts`, never a blanket null.
+    // `abandon_pending_casts`, never a blanket null.
     //
     // CR 800.4j: when the seat that left is the ACTIVE player, the turn still
     // continues to its completion, so the batch DOES complete — `auto_advance_once`
@@ -3451,12 +3411,13 @@ mod tests {
                 actual_mana_spent: 0,
             },
         });
-        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
-            player: PlayerId(1),
-            pending: Some(leaving_pending),
-            remaining_life_payments: vec![],
-            resume_at_resolution_depth: 0,
-        });
+        state.pending_deferred_life_cost_resume =
+            Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                player: PlayerId(1),
+                pending: Some(leaving_pending),
+                remaining_life_payments: vec![],
+                resume_at_resolution_depth: 0,
+            });
         let result = super::super::engine::apply_as_current(
             &mut state,
             GameAction::Concede {

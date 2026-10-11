@@ -118,8 +118,7 @@ fn issue_3993_cancel_during_delve_payment_returns_graveyard_cards() {
     assert!(
         runner.state().players[P0.0 as usize]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .all(|unit| !unit.is_convoke_payment()),
         "delve mana markers must be removed from the pool on cancel"
     );
@@ -147,10 +146,7 @@ fn graveyard_names(runner: &GameRunner) -> Vec<String> {
 fn delve_marker_count(runner: &GameRunner) -> usize {
     runner.state().players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.is_convoke_payment())
-        .count()
+        .count_where(|shape| shape.is_convoke_payment())
 }
 
 fn cast_manual(runner: &mut GameRunner, spell: ObjectId) {
@@ -371,8 +367,7 @@ fn cancel_after_signet_activation_leaves_selected_fuel_in_graveyard() {
 
     let marker_sources: Vec<ObjectId> = runner.state().players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.is_convoke_payment())
         .map(|unit| unit.source_id)
         .collect();
@@ -878,4 +873,146 @@ fn x_delve_max_excludes_spell_cast_from_graveyard() {
         }
         other => panic!("expected ChooseXValue, got {other:?}"),
     }
+}
+
+/// CR 118.3a: with Dimir Signet's mana ability activated mid-payment (CR 601.2g),
+/// the pool-mana choices follow pool order, and cancelling (CR 733.1) leaves the
+/// graveyard in its pre-cast order (CR 404.2), not the delve markers' pool order.
+#[test]
+fn a_mana_ability_before_cancel_keeps_pool_order_for_choices_and_graveyard_order() {
+    use crate::loop_shortcut_mana_engine::mana_ability_index;
+    use crate::support::shared_card_db;
+    use engine::game::interaction::{
+        bind_interaction_authority, derive_viewer_interaction, interaction_action_id,
+    };
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionPresentationSurface, InteractionSessionId,
+    };
+
+    let db = shared_card_db().expect("the integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let signet = scenario.add_real_card(P0, "Dimir Signet", Zone::Battlefield, db);
+    let cruise = scenario.add_real_card(P0, "Treasure Cruise", Zone::Hand, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Graveyard, db);
+    let shock = scenario.add_real_card(P0, "Shock", Zone::Graveyard, db);
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&cruise].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: cruise,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("begin casting Treasure Cruise");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment {
+            convoke_mode: Some(ConvokeMode::Delve),
+            ..
+        }
+    ));
+    for (source_id, name) in [(forest, "Forest"), (signet, "Dimir Signet")] {
+        if source_id == signet {
+            for card in [bolt, shock] {
+                runner
+                    .act(GameAction::TapForConvoke {
+                        object_id: card,
+                        mana_type: ManaType::Colorless,
+                    })
+                    .expect("delve a graveyard card");
+            }
+        }
+        let ability_index =
+            mana_ability_index(runner.state(), source_id).expect("the source has a mana ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            })
+            .unwrap_or_else(|error| panic!("{name}'s mana ability: {error:?}"));
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment {
+            convoke_mode: Some(ConvokeMode::Delve),
+            ..
+        }
+    ));
+
+    let state = runner.state();
+    let pool_pips: Vec<_> = state.players[0]
+        .mana_pool
+        .units()
+        .map(|unit| unit.pip_id)
+        .filter(|pip| pip.0 != 0)
+        .collect();
+    assert!(
+        pool_pips.windows(2).any(|pair| pair[0] > pair[1]),
+        "reach: pool order is not pip order: {pool_pips:?}"
+    );
+
+    let mut bound = state.clone();
+    bind_interaction_authority(&mut bound, InteractionSessionId("pool-order".to_string()))
+        .expect("the interaction authority binds");
+    let view = derive_viewer_interaction(&bound, &bound, P0);
+    let pip_of = |id: &engine::types::interaction::InteractionActionId| {
+        pool_pips.iter().copied().find(|pip_id| {
+            interaction_action_id(&GameAction::SpendPoolMana { pip_id: *pip_id }) == *id
+        })
+    };
+    let choice_pips: Vec<_> = view
+        .opportunities
+        .iter()
+        .flat_map(|opportunity| match &opportunity.response {
+            InteractionOpportunityResponse::ExactChoices { choices } => choices.iter(),
+            InteractionOpportunityResponse::Schema { candidates, .. } => candidates.iter(),
+        })
+        .flat_map(|choice| choice.surfaces.iter())
+        .filter_map(|surface| match surface {
+            InteractionPresentationSurface::Action {
+                action_id: Some(id),
+                ..
+            } => pip_of(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        choice_pips, pool_pips,
+        "the pool-mana choices follow pool order"
+    );
+
+    let delved_in_pool_order: Vec<String> = state.players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.is_convoke_payment())
+        .map(|unit| state.objects[&unit.source_id].name.clone())
+        .collect();
+    assert_eq!(
+        delved_in_pool_order.len(),
+        2,
+        "reach: both delve markers are pooled"
+    );
+
+    runner.act(GameAction::CancelCast).expect("cancel the cast");
+    let state = runner.state();
+    let graveyard: Vec<String> = state.players[0]
+        .graveyard
+        .iter()
+        .map(|id| state.objects[id].name.clone())
+        .collect();
+    assert_ne!(
+        delved_in_pool_order,
+        ["Lightning Bolt", "Shock"],
+        "reach: the mana ability reordered the delve markers"
+    );
+    assert_eq!(
+        graveyard,
+        ["Lightning Bolt", "Shock"],
+        "cancelling leaves the delved cards at their graveyard positions"
+    );
 }

@@ -212,7 +212,7 @@ fn add_generic_cost_artifact_to_hand(
 // activated once" — which over-counts in the chain-sacrifice case (KCI
 // sacrificing a creature, that creature being a Scrap Trawler triggering
 // returns, etc.) but never under-counts the single-shot floor. For pure-KCI
-// + no auxiliary sac fodder, the floor is exactly `max_mana_yield = 2`, so
+// + no auxiliary sac fodder, the floor is exactly `feasible_mana_capacity = 2`, so
 // a {3} cost is unaffordable.
 #[test]
 fn castability_gate_rejects_spell_when_capacity_below_cost() {

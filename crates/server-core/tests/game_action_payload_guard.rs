@@ -2,9 +2,9 @@
 //! `server_core::game_action_payload_guard`).
 
 use engine::analysis::decision_template::{
-    AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
-    IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode, TargetPin,
-    TargetSchedule,
+    AnnouncementSubject, ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot,
+    DecisionTemplate, IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode,
+    TargetPin, TargetSchedule,
 };
 use engine::game::engine::apply;
 use engine::game::scenario::{GameScenario, P0};
@@ -370,6 +370,7 @@ fn shortcut_template(decision_count: usize) -> DecisionTemplate {
             card_id: CardId(1),
             trigger_description: None,
         },
+        point: ChoicePoint::MayGate,
         index: 0,
     };
     DecisionTemplate {
@@ -459,6 +460,7 @@ fn rejects_over_cap_shortcut_schedule() {
     };
     let slot = DecisionSlot {
         source: src.clone(),
+        point: ChoicePoint::AnnouncedTarget,
         index: 0,
     };
     let action = GameAction::DeclareShortcut {
@@ -509,6 +511,7 @@ fn rejects_over_cap_shortcut_ranking_on_every_scheduled_arm() {
     };
     let slot = DecisionSlot {
         source: src.clone(),
+        point: ChoicePoint::AnnouncedTarget,
         index: 0,
     };
     // `Ranking::new` refuses duplicates, so the entries must be distinct. `PlayerId` is a

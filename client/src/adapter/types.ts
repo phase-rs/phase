@@ -2649,6 +2649,7 @@ export type WaitingFor =
     }
   | { type: "BlightChoice"; data: { player: PlayerId; counters: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
+  | { type: "ManaAbilityManaPayment"; data: { player: PlayerId; pending_mana_ability: unknown } }
   | {
       type: "ChooseManaColor";
       data: {
@@ -2668,7 +2669,7 @@ export type WaitingFor =
   | { type: "ResolutionOptionalPaymentChoice"; data: { player: PlayerId; source_id: ObjectId; costs: Array<{ index: number; cost: SerializedAbilityCost }> } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
-  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
+  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema; road: OfferRoad } }
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
   | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
@@ -3667,11 +3668,6 @@ export type UnboundedFamily =
   | "turns"
   | "triggers";
 
-/** Whether the boundary can still fail to apply a scheduled collapse. Mirrors
- *  `engine::game::derived_views::CollapseCertainty`. `Conditional` means the collapse may be
- *  declined or may park, and the axis then stays unbounded. */
-export type CollapseCertainty = "Committed" | "Conditional";
-
 /**
  * One display family's collapse coverage. Mirrors
  * `engine::game::derived_views::FamilyCollapseState` (serde `tag`/`content`).
@@ -3684,7 +3680,6 @@ export type FamilyCollapseState =
   | {
       type: "Scheduled";
       data: {
-        certainty: CollapseCertainty;
         /**
          * The seat the engine will ask to name the collapse count (CR 732.2a's "specified number
          * of times") — the loop's CONTROLLER. It is emitted because it is NOT recoverable from
@@ -3711,9 +3706,9 @@ export type FamilyCollapseState =
  * only the engine can answer.
  *
  * `state` is NOT a guarantee that the growth lands, and that is typed rather than disclosed:
- * `Scheduled(Conditional)` is exactly the case where a `Counters`/`Life` axis can be declined (a
+ * `Scheduled` is exactly the case where a `Counters`/`Life` axis can be declined (a
  * counter/life observer appeared between accept and boundary) or a `Tokens` mint can park, leaving
- * the axis unbounded with nothing applied. Only `Scheduled(Committed)` promises a bound.
+ * the axis unbounded with nothing applied.
  */
 export interface UnboundedFamilyView {
   player: PlayerId;
@@ -3827,9 +3822,30 @@ export type DecisionPointKind =
   | "MayChoice"
   | "UnlessBreak";
 
-/** Mirrors `engine::analysis::decision_template::DecisionSlot` (`index` is Rust `u8`). */
+/**
+ * Mirrors `engine::analysis::decision_template::ChoicePoint` (serde unit variants ⇒ bare
+ * strings on the wire). WHICH CHOICE a slot names, as distinct from which instance of it.
+ */
+export type ChoicePoint =
+  | "AnnouncedTarget"
+  | "MayGate"
+  | "TriggerOrder"
+  | "TapCost"
+  | "ProliferateSet"
+  | "ResolutionSet"
+  | "ManaColor"
+  | "ConvokeTaps"
+  | "Mode"
+  | "UnlessBreak";
+
+/**
+ * Mirrors `engine::analysis::decision_template::DecisionSlot` (`index` is Rust `u8`).
+ * Three axes: who asked (`source`), which choice (`point`), which instance of that choice
+ * on that source (`index`).
+ */
 export interface DecisionSlot {
   source: DecisionSource;
+  point: ChoicePoint;
   index: number;
 }
 
@@ -3849,11 +3865,16 @@ export type DecisionSource =
  */
 export type DecisionTemplate = Record<string, unknown>;
 
+/** Mirrors `engine::analysis::loop_check::OfferRoad`: which producer minted a loop-shortcut offer. */
+export type OfferRoad = "Ring" | "RecordedPeriod";
+
 /**
- * Mirrors `engine::analysis::loop_check::ShortcutProposal`. `shortened_by` is the responder
- * whose named place is the proposal's current ending point (CR 732.2b); it is `skip_serializing_if
- * none` on the wire, so an unshortened proposal serializes exactly as before and no protocol
- * version moves — the same posture the two optional fields this interface does not mirror ship.
+ * Mirrors `engine::analysis::loop_check::ShortcutProposal`, less the optional fields the frontend
+ * never reads. `shortened_by` is the responder whose named place is the proposal's current ending
+ * point (CR 732.2b); it is `skip_serializing_if none` on the wire, so an unshortened proposal
+ * serializes exactly as before. No protocol version moved for it because the count a shortening
+ * names rides in `count` itself. The serde posture alone never decides that: an omitted field
+ * whose absence changes what a peer drives still owes a bump.
  */
 export interface ShortcutProposal {
   proposer: PlayerId;
@@ -3862,6 +3883,7 @@ export interface ShortcutProposal {
   unbounded: ResourceAxis[];
   win_kind: WinKind;
   shortened_by?: PlayerId;
+  road: OfferRoad;
 }
 
 /**

@@ -864,7 +864,7 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         "paying {{1}} must place one +1/+1 counter on the lone Shrine"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "the {{1}} must actually be paid on accept"
     );

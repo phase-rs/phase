@@ -1,7 +1,7 @@
 use engine::analysis::decision_template::{
-    AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
-    IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode, TargetPin,
-    TargetSchedule, UnlessPaymentOption,
+    AnnouncementSubject, ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot,
+    DecisionTemplate, IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode,
+    TargetPin, TargetSchedule, UnlessPaymentOption,
 };
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{
@@ -205,13 +205,14 @@ fn related_object_ids_cover_battle_and_nested_source_carriers() {
     };
     let slot = DecisionSlot {
         source: source(ObjectId(6)),
+        point: ChoicePoint::AnnouncedTarget,
         index: 0,
     };
     let template = DecisionTemplate {
         owner: P0,
         decisions: vec![
             PinnedDecision::Order {
-                source: source(ObjectId(6)),
+                slot: DecisionSlot::first(source(ObjectId(6)), ChoicePoint::TriggerOrder),
                 pos: 0,
             },
             PinnedDecision::Targets {
@@ -233,6 +234,7 @@ fn related_object_ids_cover_battle_and_nested_source_carriers() {
             PinnedDecision::Mode {
                 slot: DecisionSlot {
                     source: source(ObjectId(11)),
+                    point: ChoicePoint::Mode,
                     index: 0,
                 },
                 indices: vec![0],
@@ -240,6 +242,7 @@ fn related_object_ids_cover_battle_and_nested_source_carriers() {
             PinnedDecision::MayChoice {
                 slot: DecisionSlot {
                     source: source(ObjectId(12)),
+                    point: ChoicePoint::MayGate,
                     index: 0,
                 },
                 take: MayChoiceOption::Take,
@@ -247,6 +250,7 @@ fn related_object_ids_cover_battle_and_nested_source_carriers() {
             PinnedDecision::UnlessBreak {
                 slot: DecisionSlot {
                     source: source(ObjectId(13)),
+                    point: ChoicePoint::UnlessBreak,
                     index: 0,
                 },
                 pay: UnlessPaymentOption::Pay,
@@ -254,12 +258,14 @@ fn related_object_ids_cover_battle_and_nested_source_carriers() {
             PinnedDecision::ConvokeTaps {
                 slot: DecisionSlot {
                     source: source(ObjectId(14)),
+                    point: ChoicePoint::ConvokeTaps,
                     index: 0,
                 },
             },
             PinnedDecision::ManaColor {
                 slot: DecisionSlot {
                     source: source(ObjectId(15)),
+                    point: ChoicePoint::ManaColor,
                     index: 0,
                 },
                 color: ManaColor::Blue,

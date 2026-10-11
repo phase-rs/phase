@@ -371,6 +371,121 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
     }
 }
 
+/// CR 702.95e: a pair breaks when either half changes controller (layer 2,
+/// CR 613.1b) or stops being a creature (layer 4, CR 613.1d), so the unpaired
+/// verdict reads both kinds.
+pub(crate) const UNPAIRED_READS: CharacteristicKinds =
+    CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES);
+
+/// CR 301.5f + CR 303.4: true when every object `filter` admits must stand in an
+/// attachment relation — be what the source is attached to, or carry an
+/// attachment — because it requires `EquippedBy`/`EnchantedBy` on every branch.
+///
+/// EXHAUSTIVE and wildcard-free, mirroring `affected_filter_uses_object_population`:
+/// adding a `TargetFilter` variant forces a decision here. `false` means "cannot
+/// prove", so every arm that is not a conjunction or disjunction of such
+/// requirements answers `false`.
+pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter) -> bool {
+    match filter {
+        // `TypedFilter::properties` are conjunctive: one attachment prop binds
+        // every admitted object.
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::EquippedBy | FilterProp::EnchantedBy)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(affected_filter_requires_attachment_relation),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty()
+                && filters
+                    .iter()
+                    .all(affected_filter_requires_attachment_relation)
+        }
+        // Negating an attachment requirement admits exactly the objects WITHOUT
+        // the relation, so it never binds one.
+        TargetFilter::Not { .. } => false,
+        // No other arm carries an attachment-relation property: each is a fixed
+        // object/player reference, a zone or ledger reference, or a player set.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// CR 301.5f + CR 303.4: `filter`, evaluated from `source_id`, provably rejects
+/// `object_id` — it requires an attachment relation and `object_id` has none
+/// with anything. The object matcher's `EquippedBy`/`EnchantedBy` arms admit an
+/// object only when the source is attached to it, or when the source is
+/// unattached and the object carries an attachment; no layer writes either
+/// fact. `false` means "cannot prove", never "admits".
+pub(crate) fn attachment_relation_rejects(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    object_id: ObjectId,
+) -> bool {
+    affected_filter_requires_attachment_relation(filter)
+        && state
+            .objects
+            .get(&source_id)
+            .is_some_and(|source| source.attached_to.and_then(|t| t.as_object()) != Some(object_id))
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| obj.attachments.is_empty())
+}
+
 /// CR 613.1: Which layer-writable characteristic kinds does this filter's
 /// verdict read?
 ///
@@ -723,9 +838,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // CR 702.95e: a pair breaks when either half changes controller (layer 2,
         // CR 613.1b) or stops being a creature (layer 4, CR 613.1d), so the
         // unpaired verdict reads both kinds.
-        FilterProp::Unpaired => {
-            CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES)
-        }
+        FilterProp::Unpaired => UNPAIRED_READS,
 
         // ---- Undeterminable: conservatively every kind. ----
         // CR 109.4: an arbitrary player predicate over the object's controller
@@ -15199,7 +15312,9 @@ mod tests {
         let mut causes = std::collections::HashMap::new();
         causes.insert(sacrificed, ThisWayCause::Sacrificed);
         causes.insert(exiled, ThisWayCause::Exiled);
-        state.tracked_set_member_causes.insert(populated, causes);
+        state
+            .tracked_set_member_causes
+            .insert(populated, causes.into_iter().collect());
         // The shadowing empty set that previously broke sentinel resolution.
         let empty = crate::types::identifiers::TrackedSetId(8);
         state.tracked_object_sets.insert(empty, Vec::new());
@@ -15228,7 +15343,9 @@ mod tests {
         state.tracked_object_sets.insert(bound, vec![member]);
         let mut causes = std::collections::HashMap::new();
         causes.insert(member, ThisWayCause::Exiled);
-        state.tracked_set_member_causes.insert(bound, causes);
+        state
+            .tracked_set_member_causes
+            .insert(bound, causes.into_iter().collect());
         // Chain and later sets exist but must be ignored for a concrete id.
         let later = crate::types::identifiers::TrackedSetId(9);
         state.tracked_object_sets.insert(later, Vec::new());
@@ -20202,6 +20319,143 @@ mod tests {
             plain_spell,
             &not_prepared,
             source
+        ));
+    }
+
+    fn add_artifact(state: &mut GameState, name: &str, subtypes: &[&str]) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types
+            .subtypes
+            .extend(subtypes.iter().map(|s| s.to_string()));
+        id
+    }
+
+    /// Writes both sides of an attachment, as `attach_to` does, without its
+    /// CR 701.3b legality gate.
+    fn attach(state: &mut GameState, attachment: ObjectId, host: ObjectId) {
+        state.objects.get_mut(&attachment).unwrap().attached_to = Some(host.into());
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .attachments
+            .push(attachment);
+    }
+
+    fn equipped_creature() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+    }
+
+    /// CR 301.5f: `attachment_relation_rejects` proves rejection only for an
+    /// object outside every attachment relation, and each `true` agrees with
+    /// the matcher. The `false` legs are objects the matcher admits.
+    #[test]
+    fn attachment_relation_rejects_only_objects_outside_every_attachment_relation() {
+        let mut state = setup();
+        // A non-Equipment source, so `EquippedBy` falls back to "carries an
+        // Equipment" while the source is unattached.
+        let source = add_artifact(&mut state, "Relic", &[]);
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+        let carrier = add_creature(&mut state, PlayerId(0), "Carrier");
+        let sword = add_artifact(&mut state, "Sword", &["Equipment"]);
+        attach(&mut state, sword, carrier);
+        let filter = equipped_creature();
+
+        // Unattached object without attachments: provably rejected.
+        assert!(attachment_relation_rejects(&state, &filter, source, bear));
+        assert!(!matches_target_filter(&state, bear, &filter, source));
+        // Object carrying an attachment: not provable, and the matcher admits it.
+        assert!(!attachment_relation_rejects(
+            &state, &filter, source, carrier
+        ));
+        assert!(matches_target_filter(&state, carrier, &filter, source));
+
+        // The object the source is attached to: not provable, and admitted.
+        attach(&mut state, source, bear);
+        assert!(!attachment_relation_rejects(&state, &filter, source, bear));
+        assert!(matches_target_filter(&state, bear, &filter, source));
+    }
+
+    /// CR 301.5f + CR 303.4: the attachment requirement must hold on every
+    /// branch of the filter; a branch without it, or a negation, cannot prove
+    /// rejection. A missing source or object is never proof.
+    #[test]
+    fn attachment_relation_rejects_requires_the_relation_on_every_branch() {
+        let mut state = setup();
+        let source = add_artifact(&mut state, "Relic", &[]);
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let enchanted =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+
+        let and_required = TargetFilter::And {
+            filters: vec![creature.clone(), equipped_creature()],
+        };
+        assert!(attachment_relation_rejects(
+            &state,
+            &and_required,
+            source,
+            bear
+        ));
+        assert!(attachment_relation_rejects(
+            &state, &enchanted, source, bear
+        ));
+        let or_all_required = TargetFilter::Or {
+            filters: vec![equipped_creature(), enchanted.clone()],
+        };
+        assert!(attachment_relation_rejects(
+            &state,
+            &or_all_required,
+            source,
+            bear
+        ));
+
+        // A disjunct without the relation admits the bear.
+        let or_partial = TargetFilter::Or {
+            filters: vec![equipped_creature(), creature],
+        };
+        assert!(!attachment_relation_rejects(
+            &state,
+            &or_partial,
+            source,
+            bear
+        ));
+        assert!(matches_target_filter(&state, bear, &or_partial, source));
+        // A negated requirement admits exactly the unattached bear.
+        let negated = TargetFilter::Not {
+            filter: Box::new(equipped_creature()),
+        };
+        assert!(!attachment_relation_rejects(&state, &negated, source, bear));
+        assert!(matches_target_filter(&state, bear, &negated, source));
+        // An empty disjunction proves nothing.
+        assert!(!attachment_relation_rejects(
+            &state,
+            &TargetFilter::Or { filters: vec![] },
+            source,
+            bear
+        ));
+
+        // Missing source or object: cannot prove.
+        let missing = ObjectId(9999);
+        assert!(!attachment_relation_rejects(
+            &state,
+            &equipped_creature(),
+            missing,
+            bear
+        ));
+        assert!(!attachment_relation_rejects(
+            &state,
+            &equipped_creature(),
+            source,
+            missing
         ));
     }
 }

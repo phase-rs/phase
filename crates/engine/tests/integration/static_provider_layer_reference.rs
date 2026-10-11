@@ -1598,12 +1598,31 @@ fn late_carrier_receives_ordinary_granted_static_through_static_orderer() {
                 keyword: Keyword::Flying,
             }]),
     );
+    // A foreign layer-4 CARD_TYPES writer that cannot make R a land. It keeps B's
+    // late child for R in the collection (`late_grant_writable_kinds` clause 1),
+    // so the negative B assertions below still test that a late child does not
+    // apply through another grant's set. Without it, B would have no late child
+    // for R and those assertions would pass vacuously.
+    attach_synthetic_static(
+        &mut runner,
+        writer,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddSubtype {
+                subtype: "Elf".to_string(),
+            }]),
+    );
     assert!(runner.state().objects[&host_a].timestamp < runner.state().objects[&writer].timestamp);
     assert!(!runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
 
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
 
+    assert!(runner.state().objects[&writer]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Elf"));
     // CR 613.8a + CR 611.3a: the later Flying grant puts R into A's affected set
     // in layer 6, so A's granted Vigilance applies from that live set. B's grant
     // never covers R, so its own late child must not apply through A's set.
@@ -1921,4 +1940,311 @@ fn outside_slice_ordinary_granted_anthem_escalates_for_entrant() {
     assert_eq!(counters.layers_escalated, 1);
     assert_eq!(counters.layers_incremental, 0);
     assert_eq!(power_toughness(&runner, entrant), (Some(3), Some(3)));
+}
+
+/// Dan Lewis's granted "Equipped creature gets +1/+0", read from its parsed
+/// `GrantStaticAbility`.
+fn dan_lewis_granted_pump(
+    runner: &engine::game::scenario::GameRunner,
+    dan: engine::types::identifiers::ObjectId,
+) -> StaticDefinition {
+    runner.state().objects[&dan]
+        .base_static_definitions
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantStaticAbility { definition } => {
+                Some(definition.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("Dan Lewis must parse its granted static")
+}
+
+fn has_subtype(
+    runner: &engine::game::scenario::GameRunner,
+    id: engine::types::identifiers::ObjectId,
+    subtype: &str,
+) -> bool {
+    runner.state().objects[&id]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|s| s == subtype)
+}
+
+#[test]
+fn dan_lewis_creature_entry_stays_incremental() {
+    for equipped in [false, true] {
+        let mut scenario = GameScenario::new();
+        let dan = scenario
+            .add_creature_from_oracle(P0, "Dan Lewis", 2, 2, DAN_LEWIS)
+            .as_legendary()
+            .with_subtypes(vec!["Human"])
+            .id();
+        let ring = scenario
+            .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            })
+            .id();
+        let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let entrant = scenario.add_creature_to_graveyard(P0, "Entrant", 2, 2).id();
+        let mut runner = scenario.build();
+        let pump = dan_lewis_granted_pump(&runner, dan);
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+        if equipped {
+            attach_to(runner.state_mut(), ring, bear);
+            mark_layers_full(runner.state_mut());
+            flush_layers(runner.state_mut());
+        }
+        // CR 613.6 + CR 301.5f: Sol Ring is in Dan Lewis's set when the effect
+        // starts in layer 4, so it holds the granted pump; the creature it is
+        // attached to gets +1/+0.
+        let bear_pt = if equipped {
+            (Some(3), Some(2))
+        } else {
+            (Some(2), Some(2))
+        };
+        assert!(has_subtype(&runner, ring, "Equipment"));
+        assert!(holds_static(&runner, ring, &pump));
+        assert_eq!(power_toughness(&runner, bear), bear_pt);
+
+        move_to_zone(
+            runner.state_mut(),
+            entrant,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            runner.state().layers_dirty,
+            LayersDirty::EnteredObjects([entrant].into())
+        );
+        engine::game::perf_counters::reset();
+        flush_layers(runner.state_mut());
+        let counters = engine::game::perf_counters::snapshot();
+
+        // CR 301.5f: the entering creature is not equipped, so no "equipped
+        // creature" grant can reach it; the restricted pass derives it alone.
+        assert_eq!(power_toughness(&runner, entrant), (Some(2), Some(2)));
+        assert_eq!(power_toughness(&runner, bear), bear_pt);
+        assert!(has_subtype(&runner, ring, "Equipment"));
+        assert!(holds_static(&runner, ring, &pump));
+        assert_eq!(counters.layers_incremental, 1, "equipped={equipped}");
+        assert_eq!(counters.layers_escalated, 0, "equipped={equipped}");
+    }
+}
+
+#[test]
+fn dan_lewis_noncreature_artifact_entry_still_escalates() {
+    let mut scenario = GameScenario::new();
+    let dan = scenario
+        .add_creature_from_oracle(P0, "Dan Lewis", 2, 2, DAN_LEWIS)
+        .as_legendary()
+        .with_subtypes(vec!["Human"])
+        .id();
+    let entrant = scenario
+        .add_creature_to_graveyard(P0, "Entering Relic", 0, 0)
+        .as_artifact()
+        .id();
+    let mut runner = scenario.build();
+    let pump = dan_lewis_granted_pump(&runner, dan);
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    move_to_zone(
+        runner.state_mut(),
+        entrant,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        runner.state().layers_dirty,
+        LayersDirty::EnteredObjects([entrant].into())
+    );
+    engine::game::perf_counters::reset();
+    flush_layers(runner.state_mut());
+    let counters = engine::game::perf_counters::snapshot();
+
+    // CR 613.6 + CR 611.3a: a noncreature, non-Equipment artifact entering under
+    // P0 is in Dan Lewis's set when it starts in layer 4, so it becomes Equipment
+    // (CR 613.1d) and gains the granted static (CR 613.1f). The entrant sources a
+    // predicate-filtered grant child, so the flush re-derives the whole board.
+    assert_eq!(counters.layers_escalated, 1);
+    assert_eq!(counters.layers_incremental, 0);
+    assert!(has_subtype(&runner, entrant, "Equipment"));
+    assert!(holds_static(&runner, entrant, &pump));
+}
+
+#[test]
+fn prototype_color_joins_pure_grant_host_late() {
+    for prototyped in [true, false] {
+        let mut scenario = GameScenario::new();
+        let host = scenario.add_creature(P0, "Host", 1, 1).id();
+        let golem = scenario
+            .add_creature(P0, "Prototype Golem", 3, 3)
+            .as_artifact_creature()
+            .id();
+        let mut runner = scenario.build();
+        if prototyped {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&golem)
+                .unwrap()
+                .prototype_form = Some(engine::game::game_object::PrototypeFormState {
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 1,
+                },
+                power: 1,
+                toughness: 1,
+                colors: vec![ManaColor::Red],
+            });
+        }
+        let inner = self_pump();
+        attach_synthetic_static(
+            &mut runner,
+            host,
+            grant_static(
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    },
+                ])),
+                &inner,
+            ),
+        );
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+
+        if prototyped {
+            // CR 718.3b: the prototyped golem is a red 1/1 before the grant
+            // starts in layer 6 (CR 613.6), so it gets +1/+1.
+            assert_eq!(power_toughness(&runner, golem), (Some(2), Some(2)));
+            assert!(holds_static(&runner, golem, &inner));
+        } else {
+            // Colorless throughout: never in the set.
+            assert_eq!(power_toughness(&runner, golem), (Some(3), Some(3)));
+            assert!(!holds_static(&runner, golem, &inner));
+        }
+    }
+}
+
+#[test]
+fn transient_grant_you_binds_effect_controller_not_source_controller() {
+    let mut scenario = GameScenario::new();
+    let grant_source = scenario.add_creature(P1, "Grant Source", 1, 1).id();
+    let own_bear = scenario.add_creature(P0, "Own Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    flush_layers(runner.state_mut());
+    let inner = self_pump();
+    runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            grant_source,
+            P0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner.clone()),
+            }],
+            None,
+        )
+        .expect("the transient grant must install");
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 109.5 + CR 611.2c: the effect P0 created binds "you" to P0, whoever
+    // controls its source, so P0's creature is in the set and P1's is not.
+    assert_eq!(power_toughness(&runner, own_bear), (Some(3), Some(3)));
+    assert!(holds_static(&runner, own_bear, &inner));
+    assert_eq!(power_toughness(&runner, grant_source), (Some(1), Some(1)));
+    assert!(!holds_static(&runner, grant_source, &inner));
+}
+
+#[test]
+fn soulbond_pair_break_joins_unpaired_grant_host() {
+    let mut scenario = GameScenario::new();
+    let host = scenario.add_creature(P0, "Unpaired Host", 1, 1).id();
+    let half = scenario.add_creature(P0, "Soulbond Half", 2, 2).id();
+    let partner = scenario.add_creature(P1, "Returned Partner", 2, 2).id();
+    let mut runner = scenario.build();
+    for (id, other) in [(half, partner), (partner, half)] {
+        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+        obj.paired_with = Some(other);
+        obj.pair_controller = Some(P0);
+    }
+    let inner = self_pump();
+    attach_synthetic_static(
+        &mut runner,
+        host,
+        grant_static(
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Unpaired]),
+            ),
+            &inner,
+        ),
+    );
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 702.95e: P1 controls the partner, so the pair breaks in the layer pass,
+    // before the grant starts in layer 6 (CR 613.6). The half is then an
+    // unpaired creature P0 controls and gets +1/+1; the partner is P1's.
+    assert_eq!(runner.state().objects[&half].paired_with, None);
+    assert_eq!(power_toughness(&runner, half), (Some(3), Some(3)));
+    assert!(holds_static(&runner, half, &inner));
+    assert_eq!(power_toughness(&runner, partner), (Some(2), Some(2)));
+}
+
+#[test]
+fn land_type_change_joins_mana_ability_grant_host() {
+    let mut scenario = GameScenario::new();
+    let host = scenario.add_creature(P0, "Mana Host", 1, 1).id();
+    let becomes_forest = scenario.add_creature(P0, "Becomes Forest", 2, 2).id();
+    let type_writer = scenario.add_creature(P0, "Type Writer", 1, 1).id();
+    let mut runner = scenario.build();
+    let inner = self_pump();
+    attach_synthetic_static(
+        &mut runner,
+        host,
+        grant_static(
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasManaAbility]),
+            ),
+            &inner,
+        ),
+    );
+    attach_synthetic_static(
+        &mut runner,
+        type_writer,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: becomes_forest })
+            .modifications(vec![
+                ContinuousModification::AddType {
+                    core_type: CoreType::Land,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Forest".to_string(),
+                },
+            ]),
+    );
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.1d + CR 305.6: the layer-4 writer makes the creature a Forest land,
+    // which has the intrinsic "{T}: Add {G}" (a mana ability, CR 605.1a) when
+    // the grant starts in layer 6 (CR 613.6). It is in the set and gets +1/+1.
+    let forest = &runner.state().objects[&becomes_forest];
+    assert!(forest.card_types.core_types.contains(&CoreType::Land));
+    assert!(has_subtype(&runner, becomes_forest, "Forest"));
+    assert!(holds_static(&runner, becomes_forest, &inner));
+    assert_eq!(power_toughness(&runner, becomes_forest), (Some(3), Some(3)));
+    // The host has no mana ability and is never in the set.
+    assert_eq!(power_toughness(&runner, host), (Some(1), Some(1)));
+    assert!(!holds_static(&runner, host, &inner));
 }

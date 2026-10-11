@@ -37,8 +37,7 @@ fn advance_one_phase(runner: &mut GameRunner) -> Vec<GameEvent> {
 fn pool_count(runner: &GameRunner, player: PlayerId, color: ManaType) -> usize {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.color == color)
         .count()
 }
@@ -78,7 +77,7 @@ fn full_oracle_parses_and_activation_adds_brg_to_each_player() {
             assert_eq!(pool_count(&runner, player, color), 1);
         }
     }
-    assert_eq!(runner.state().players[0].mana_pool.mana.len(), 3);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
 }
 
 #[test]
@@ -109,7 +108,7 @@ fn phase_boundary_loses_actual_unspent_mana_once_per_player() {
         .state()
         .players
         .iter()
-        .all(|player| player.mana_pool.mana.is_empty()));
+        .all(|player| player.mana_pool.is_empty()));
     let life_changes: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -188,7 +187,7 @@ fn retained_transformed_and_cant_lose_life_mana_have_distinct_outcomes() {
     assert_eq!(pool_count(&runner, P1, ManaType::Colorless), 2);
     // P2 really lost both mana, but CR 119.8 suppresses the life loss.
     assert_eq!(runner.state().players[2].life, 20);
-    assert!(runner.state().players[2].mana_pool.mana.is_empty());
+    assert!(runner.state().players[2].mana_pool.is_empty());
 
     assert_eq!(
         events
@@ -248,7 +247,7 @@ fn life_loss_replacement_choice_resumes_phase_drain_exactly_once() {
     // Double applies first, then the sole remaining Plus-one replacement:
     // (1 * 2) + 1 = 3 life lost.
     assert_eq!(runner.state().players[1].life, 17);
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(runner.state().phase, Phase::BeginCombat);
     assert!(runner.state().pending_phase_transition_progress.is_none());
     assert_eq!(
@@ -309,7 +308,7 @@ fn prevented_life_loss_choice_resumes_phase_drain() {
     events.extend(result.events);
 
     assert_eq!(runner.state().players[1].life, 20);
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(runner.state().phase, Phase::BeginCombat);
     assert!(runner.state().pending_phase_transition_progress.is_none());
     assert!(!events.iter().any(
@@ -375,7 +374,7 @@ fn cross_event_life_loss_substitution_resumes_phase_drain_after_substitute() {
 
     assert_eq!(runner.state().players[1].life, 20);
     assert_eq!(runner.state().players[0].life, 21);
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(runner.state().phase, Phase::BeginCombat);
     assert!(runner.state().pending_phase_transition_progress.is_none());
     assert_eq!(
@@ -474,7 +473,7 @@ fn interactive_cross_event_substitution_resumes_remaining_apnap_drain_once() {
         "the phase cursor must remain owned while the substitute waits"
     );
     assert_eq!(
-        runner.state().players[2].mana_pool.mana.len(),
+        runner.state().players[2].mana_pool.total(),
         2,
         "the next APNAP player must not drain before the substitute completes"
     );
@@ -499,12 +498,11 @@ fn interactive_cross_event_substitution_resumes_remaining_apnap_drain_once() {
         20,
         "the independent active retention prevents actual mana loss"
     );
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
-    assert_eq!(runner.state().players[2].mana_pool.mana.len(), 2);
+    assert!(runner.state().players[1].mana_pool.is_empty());
+    assert_eq!(runner.state().players[2].mana_pool.total(), 2);
     assert!(runner.state().players[2]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .all(|unit| unit.expiry.is_none()));
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert!(runner.state().pending_phase_transition_progress.is_none());
@@ -658,7 +656,7 @@ fn nested_life_loss_choice_cannot_bypass_outer_substitute_phase_owner() {
         waiting => panic!("expected nested life-loss replacement choice, got {waiting:?}"),
     };
     assert_eq!(
-        runner.state().players[2].mana_pool.mana.len(),
+        runner.state().players[2].mana_pool.total(),
         2,
         "remaining APNAP mana must wait while the outer substitute frame is paused"
     );
@@ -693,7 +691,11 @@ fn nested_life_loss_choice_cannot_bypass_outer_substitute_phase_owner() {
         WaitingFor::ChooseOneOfBranch { player: P2, .. }
     ));
     assert_eq!(
-        runner.state().players[2].mana_pool.mana[0].expiry,
+        runner.state().players[2]
+            .mana_pool
+            .unit_at(0)
+            .unwrap()
+            .expiry,
         Some(ManaExpiry::EndOfCombat),
         "the phase queue must remain untouched until every outer chooser finishes"
     );
@@ -709,11 +711,10 @@ fn nested_life_loss_choice_cannot_bypass_outer_substitute_phase_owner() {
     assert_eq!(runner.state().players[0].life, 26);
     assert!(runner.state().pending_phase_transition_progress.is_none());
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
-    assert_eq!(runner.state().players[2].mana_pool.mana.len(), 2);
+    assert_eq!(runner.state().players[2].mana_pool.total(), 2);
     assert!(runner.state().players[2]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .all(|unit| unit.expiry.is_none()));
 
     let life_changes: Vec<_> = events
@@ -940,7 +941,7 @@ fn end_of_combat_retention_expiry_counts_as_actual_mana_loss() {
 
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert_eq!(runner.state().players[1].life, 18);
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(
         events
             .iter()
@@ -968,11 +969,10 @@ fn end_of_turn_retention_survives_cleanup_entry_then_counts_loss_at_cleanup_exit
 
     assert_eq!(runner.state().phase, Phase::Cleanup);
     assert_eq!(runner.state().players[1].life, 20);
-    assert_eq!(runner.state().players[1].mana_pool.mana.len(), 2);
+    assert_eq!(runner.state().players[1].mana_pool.total(), 2);
     assert!(runner.state().players[1]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .all(|unit| unit.expiry == Some(ManaExpiry::EndOfTurn)));
     assert!(!entry_events
         .iter()
@@ -984,14 +984,13 @@ fn end_of_turn_retention_survives_cleanup_entry_then_counts_loss_at_cleanup_exit
     );
     assert!(runner.state().players[1]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .all(|unit| unit.expiry.is_none()));
     cleanup_events.extend(advance_one_phase(&mut runner));
 
     assert_eq!(runner.state().phase, Phase::Untap);
     assert_eq!(runner.state().players[1].life, 18);
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(
         cleanup_events
             .iter()
@@ -1026,8 +1025,15 @@ fn expired_retention_still_composes_with_another_active_retention() {
 
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert_eq!(runner.state().players[1].life, 20);
-    assert_eq!(runner.state().players[1].mana_pool.mana.len(), 1);
-    assert_eq!(runner.state().players[1].mana_pool.mana[0].expiry, None);
+    assert_eq!(runner.state().players[1].mana_pool.total(), 1);
+    assert_eq!(
+        runner.state().players[1]
+            .mana_pool
+            .unit_at(0)
+            .unwrap()
+            .expiry,
+        None
+    );
     assert!(!events
         .iter()
         .any(|event| matches!(event, GameEvent::ManaPoolEmptied { player_id: P1, .. })));

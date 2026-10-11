@@ -49,14 +49,14 @@ fn creature_spell_haste_grant() -> ManaSpellGrant {
     }
 }
 
-fn mana_pool_units(runner: &GameRunner) -> &[ManaUnit] {
+fn mana_pool_units(runner: &GameRunner) -> Vec<ManaUnit> {
     let player = runner
         .state()
         .players
         .iter()
         .find(|player| player.id == P0)
         .expect("P0 must exist");
-    &player.mana_pool.mana
+    player.mana_pool.units().collect()
 }
 
 /// Exert route observed: after the activation and before the cast, the pool

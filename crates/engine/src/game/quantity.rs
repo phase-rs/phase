@@ -7178,13 +7178,6 @@ fn object_for_scope<'a>(
 }
 
 /// Resolve an [`ObjectScope`] to a concrete object id under `ctx`.
-///
-/// `pub(crate)` for ONE reason: the resource loop firewall's
-/// `counters_on_source_provably_excludes_class` arm must ask THE SAME scope
-/// authority the `QuantityRef::CountersOn` resolver asks, rather than
-/// re-implementing "`ObjectScope::Source` means the ability's own source". Do not
-/// read this widened visibility as an invitation to resolve quantities outside
-/// `game::quantity` — every other caller is in this module.
 pub(crate) fn object_id_for_scope(
     state: &GameState,
     scope: ObjectScope,
@@ -22654,7 +22647,9 @@ mod tests {
         causes.insert(sacrificed, ThisWayCause::Sacrificed);
         causes.insert(milled, ThisWayCause::Milled);
         causes.insert(sacrificed_to_exile, ThisWayCause::Sacrificed);
-        state.tracked_set_member_causes.insert(set_id, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set_id, causes.into_iter().collect());
 
         let creature_filter = Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
         let count_for = |caused_by| {
@@ -22928,7 +22923,9 @@ mod tests {
         causes.insert(disc_creature_a, ThisWayCause::Discarded);
         causes.insert(disc_creature_b, ThisWayCause::Discarded);
         causes.insert(disc_instant, ThisWayCause::Discarded);
-        state.tracked_set_member_causes.insert(set_id, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set_id, causes.into_iter().collect());
 
         let count_for = |caused_by| {
             let expr = QuantityExpr::Ref {
@@ -23003,7 +23000,9 @@ mod tests {
         let mut causes = HashMap::new();
         causes.insert(cr_a, ThisWayCause::Discarded);
         causes.insert(cr_b, ThisWayCause::Discarded);
-        state.tracked_set_member_causes.insert(set_id, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set_id, causes.into_iter().collect());
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::DistinctCardTypes {

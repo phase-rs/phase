@@ -357,10 +357,7 @@ fn jeweled_amulet_second_note_replaces_not_appends() {
             ability_index: 1,
         })
         .expect("removing the charge counter must succeed");
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     // Ability 1 taps the amulet as part of its own {T} cost; untap it so the
     // second `activate_note_ability` call can pay ability 0's own {T} cost.
     runner

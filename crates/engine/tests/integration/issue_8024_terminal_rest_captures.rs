@@ -82,7 +82,7 @@ fn gunzip(gz: &[u8]) -> String {
 /// live state. Nothing else is touched; in particular the terminal carrier and
 /// its frames cross verbatim. This mirrors
 /// `mycoloth_devour_drain_strand::projected_capture_snapshot`.
-fn projected_capture_snapshot(gz: &[u8]) -> serde_json::Value {
+pub(crate) fn projected_capture_snapshot(gz: &[u8]) -> serde_json::Value {
     let json = gunzip(gz);
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");

@@ -210,6 +210,24 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 130 — `GameState::linked_exile_lki` holds one incarnation-bounded
+ *      `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
+ *      non-empty map. Wire 112 moves with it; no lobby frame names it.
+ * 129 — Loop-shortcut and period-confirmation shapes, one bump over 128:
+ *      ShortcutDecisionSchema replaced max_iterations with the pair
+ *      measured_repetition_bound and deliverable_capacity, so
+ *      WaitingFor.LoopShortcut publishes the threshold the reduction measured
+ *      separately from the count this engine will deliver (every field
+ *      involved carries a serde default, so a v128 peer reads a count neither
+ *      side measured, and the handshake is the only place that can be
+ *      refused); WaitingFor.LoopShortcut and ShortcutProposal gained a
+ *      required road naming the producer that minted the offer, which a v128
+ *      peer drops from every frame it re-encodes;
+ *      WaitingFor.ManaAbilityManaPayment and its ManaAbilityResume root are
+ *      new variants a v128 peer cannot parse, and ResolvedAbility gains the
+ *      optional delayed_origin; GameState drops the recorded loop-action
+ *      sequence; ConfirmedPeriod gains its reach and PeriodicDelta its
+ *      cleanup pair. Wire 111 moves with it; no lobby frame names it.
  * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
  *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
  *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
@@ -233,9 +251,6 @@ export class NativeEngineVersionMismatchError extends Error {
  *      delayed ability's creating chain named by group, omitted when empty;
  *      amended in place, not bumped. P2P moves in lockstep (wire 110); lobby
  *      messages are unchanged.
- * 129 — `GameState::linked_exile_lki` holds one incarnation-bounded
- *      `LinkedExileLki` per departure (CR 400.7); a v128 peer cannot decode a
- *      non-empty map. Wire 111 moves with it; no lobby frame names it.
  * 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the
  *      destination object holds) inside `GameState` and the resolved-rules
  *      journal's zone-change commands; a v125 peer rejects the journal when the
@@ -807,7 +822,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 129;
+export const PROTOCOL_VERSION = 130;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

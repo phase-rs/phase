@@ -120,8 +120,32 @@ fn run_post_action_pipeline_from_with_policy(
 ) -> Result<WaitingFor, EngineError> {
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_post_action_pipeline_pass();
-    stage_pending_activation_trigger_events(state, events, event_start);
+    super::announcement_triggers::stage_announcement_trigger_events(state, events, event_start);
+    let settled = run_post_action_pipeline_core(
+        state,
+        events,
+        event_start,
+        default_wf,
+        skip_trigger_scan,
+        drain_policy,
+        carried_priority_recipient,
+    );
+    // The pass scanned the buffer through its end; later announcement staging
+    // in this action starts after it.
+    state.announcement_event_scope = state.announcement_event_scope.advanced_to(events.len());
+    settled
+}
 
+#[allow(clippy::too_many_arguments)]
+fn run_post_action_pipeline_core(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+    drain_policy: DeferredTriggerDrainPolicy,
+    carried_priority_recipient: Option<PlayerId>,
+) -> Result<WaitingFor, EngineError> {
     // CR 117.3c + CR 117.5: the wait a completed no-choice pass hands back. With
     // no carried recipient this is exactly baseline's active-player wait.
     let settled_priority_wait = WaitingFor::Priority {
@@ -184,34 +208,7 @@ fn run_post_action_pipeline_from_with_policy(
         // retained ZoneChanged occurrences into deferred trigger contexts. Do
         // not rediscover those records through the generic post-action scan;
         // its batched definitions remain reserved for final settlement.
-        let mut retained_logical_zone_events = Vec::new();
-        if let Some(pending) = state
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-        {
-            retained_logical_zone_events.extend(
-                pending
-                    .logical_zone_change_group
-                    .all_origin_occurrences
-                    .iter()
-                    .map(|occurrence| &occurrence.event),
-            );
-            if let Some(paused_current) = pending.paused_current.as_ref() {
-                retained_logical_zone_events.extend(&paused_current.delivery_events);
-            }
-        }
-        if let Some(pending) = state.active_batch_delivery() {
-            retained_logical_zone_events.extend(
-                pending
-                    .logical_zone_change_group
-                    .all_origin_occurrences
-                    .iter()
-                    .map(|occurrence| &occurrence.event),
-            );
-            if let Some(paused_current) = pending.paused_current.as_ref() {
-                retained_logical_zone_events.extend(&paused_current.delivery_events);
-            }
-        }
+        let retained_logical_zone_events = retained_logical_zone_events(state);
         // A completed logical owner has already collected its segment and
         // settlement contexts into the deferred queue, and a paused owner that
         // drained may instead have claimed them in the consumed ledger.
@@ -710,38 +707,38 @@ fn persist_carried_recipient_across_prompt(
     triggers::preserve_trigger_construction_priority_recipient(state, player);
 }
 
-/// Route events emitted while a target-bearing activation remains pending into
-/// its private trigger transaction before the ordinary post-action collector
-/// can observe them.
-///
-/// CR 602.2a-b + CR 603.2: target declaration and cost payment can create
-/// trigger events before the activated ability reaches the stack. These events
-/// remain pending until the activation commits; recording their occurrences in
-/// the consumed buffer preserves the generic collector's exactly-once contract
-/// for this action without making the transaction public state.
-fn stage_pending_activation_trigger_events(
-    state: &mut GameState,
-    events: &[GameEvent],
-    event_start: usize,
-) {
-    let new_events = &events[event_start..];
-    if new_events.is_empty() {
-        return;
+/// The zone-change occurrences a paused logical zone-change owner retains for
+/// its own final settlement (CR 603.2c: collected once, by that owner).
+pub(crate) fn retained_logical_zone_events(state: &GameState) -> Vec<GameEvent> {
+    let mut retained = Vec::new();
+    if let Some(pending) = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+    {
+        retained.extend(
+            pending
+                .logical_zone_change_group
+                .all_origin_occurrences
+                .iter()
+                .map(|occurrence| occurrence.event.clone()),
+        );
+        if let Some(paused_current) = pending.paused_current.as_ref() {
+            retained.extend(paused_current.delivery_events.iter().cloned());
+        }
     }
-    let Some(mut collection) = state.take_pending_activation_trigger_collection() else {
-        return;
-    };
-    collection.collect(state, new_events);
-    state.restore_pending_activation_trigger_collection(collection);
-    state
-        .consumed_before_priority_trigger_events
-        .extend(new_events.iter().enumerate().map(|(offset, event)| {
-            triggers::ConsumedTriggerEventOccurrence {
-                event: event.clone(),
-                occurrence: triggers::trigger_event_occurrence(events, event_start + offset),
-                scope: triggers::ConsumedTriggerEventScope::AllCollectors,
-            }
-        }));
+    if let Some(pending) = state.active_batch_delivery() {
+        retained.extend(
+            pending
+                .logical_zone_change_group
+                .all_origin_occurrences
+                .iter()
+                .map(|occurrence| occurrence.event.clone()),
+        );
+        if let Some(paused_current) = pending.paused_current.as_ref() {
+            retained.extend(paused_current.delivery_events.iter().cloned());
+        }
+    }
+    retained
 }
 
 /// CR 603.3b + CR 608.2g: settles a terminal resolution marker only after its

@@ -192,7 +192,7 @@ fn well_of_lost_dreams_yes_then_pay_three_draws_three() {
     // {X=3} would leave 4 mana here; a regression that paid all 5 mana
     // would leave 0.
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         2,
         "3 of 5 generic mana must be spent on the X cost"
     );
@@ -246,7 +246,7 @@ fn well_of_lost_dreams_no_does_nothing() {
         "declining must not draw any cards (IfYouDo gate evaluates false)"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         5,
         "declining must not spend any mana"
     );

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::HashSet;
 
@@ -42,7 +43,7 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
         debug_assert!(false, "CR 706.1: a die roll must have at least one side");
         return 1;
     }
-    state.rng.random_range(1..=sides)
+    state.rng.draw(RandomDraw::Outcome).random_range(1..=sides)
 }
 
 /// CR 706.2: Apply a die roll's (optional) modifier to a natural result.

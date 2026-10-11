@@ -1963,12 +1963,9 @@ mod tests {
                 generic: 0,
             }));
         }
-        state.players[0].mana_pool.mana.push(ManaUnit::new(
-            ManaType::Red,
-            ObjectId(0),
-            false,
-            vec![],
-        ));
+        state.players[0]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
 
         assert!(
             !can_cast_prepared_copy_now(&state, PlayerId(0), source_id),

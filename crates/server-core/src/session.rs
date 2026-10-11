@@ -39,7 +39,7 @@ use lobby_broker::protocol::code_in_use_message;
 use phase_ai::auto_play::AiActionsStop;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
@@ -1561,7 +1561,7 @@ impl GameSession {
                 // deterministic sequences identical across all restored games)
                 let fresh_seed: u64 = rand::rng().random();
                 state.rng_seed = fresh_seed;
-                state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);
+                state.rng = engine::types::game_state::GameRng::seed_from_u64(fresh_seed);
                 // A fresh stream starts at word 0, so the saved high-water — which indexes into the
                 // OLD keystream and is meaningless against this one — has to go with the old seed.
                 state.rng_word_pos = 0;
@@ -2961,7 +2961,6 @@ mod tests {
     use engine::types::mana::ManaCost;
     use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use engine::types::zones::Zone;
-    use rand::SeedableRng;
     use seat_reducer::types::SeatMutation;
 
     /// The two production statements a join is now made of: the session issues
@@ -10389,7 +10388,7 @@ mod tests {
         state.active_player = p0;
         state.current_starting_player = p0;
         state.rng_seed = seed;
-        state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
+        state.rng = engine::types::game_state::GameRng::seed_from_u64(seed);
     }
 
     /// The human keeps seven Islands, so the AI is offered the reveal on every

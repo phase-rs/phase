@@ -19,7 +19,7 @@
 //! - `Tap { target }` → `TapAll { target }`
 //! - `Bounce { target, destination }` → `BounceAll { target, destination }`
 //!   (the canonical mass-bounce variant; mirrors `Destroy` → `DestroyAll`
-//!   and `Pump` → `PumpAll` in shape — see CR 400.7 + CR 611.2c).
+//!   and `Pump` → `PumpAll` in shape — see CR 400.7).
 //! - `ChangeZone { destination, target, ... }` → `ChangeZoneAll { origin, destination, target }`
 //!   (Winds of Abandon: "Exile target creature you don't control" → exile
 //!   each. The single-target flags `enter_tapped`/`enter_transformed`/
@@ -121,7 +121,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             scope: EffectScope::All,
             state,
         },
-        // CR 702.96b + CR 400.7 + CR 611.2c: Cyclonic Rift overload — promote
+        // CR 702.96b + CR 400.7: Cyclonic Rift overload — promote
         // single-target Bounce to the canonical mass-bounce variant. Preserves
         // `destination` so top-of-library overloads (none in current corpus
         // but type-system-supported) thread through unchanged.
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn bounce_becomes_bounce_all_with_destination_preserved() {
-        // CR 702.96b + CR 400.7 + CR 611.2c: Cyclonic Rift overload promotes
+        // CR 702.96b + CR 400.7: Cyclonic Rift overload promotes
         // single-target `Bounce` to the canonical mass-bounce variant. Default
         // destination (`None`) means owner's hand at resolve time, matching
         // the single-target Bounce semantics.

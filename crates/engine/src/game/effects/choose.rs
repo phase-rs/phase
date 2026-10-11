@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
 use crate::game::players;
@@ -159,7 +160,10 @@ pub(crate) fn resolve_random_in_chain(
     }
 
     // CR 608.2d (override): the game selects uniformly at random.
-    let index = state.rng.random_range(0..options.len());
+    let index = state
+        .rng
+        .draw(RandomDraw::Outcome)
+        .random_range(0..options.len());
     let chosen = options[index].clone();
 
     let (mut source, persist_player) =

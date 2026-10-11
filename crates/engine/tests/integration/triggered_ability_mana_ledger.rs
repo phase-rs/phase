@@ -205,7 +205,7 @@ fn drive_until(
         trace.p0_pool.push(PoolReading {
             phase: state.phase,
             green: p0_pool.count_color(ManaType::Green),
-            total: p0_pool.mana.len(),
+            total: p0_pool.total(),
         });
         if stop(state, trace) {
             return;
@@ -271,10 +271,7 @@ fn pool_count(runner: &GameRunner, player: PlayerId, mana_type: ManaType) -> usi
 }
 
 fn pool_total(runner: &GameRunner, player: PlayerId) -> usize {
-    runner.state().players[player.0 as usize]
-        .mana_pool
-        .mana
-        .len()
+    runner.state().players[player.0 as usize].mana_pool.total()
 }
 
 /// Stop once an entry from `source` has been seen and the stack has drained
@@ -1298,9 +1295,9 @@ fn ref_less_resolution_mana_cost_records_nothing() {
         .expect("fixed mana effect cost is payable");
 
     // Reach: the cost arm deposited both units.
-    let pool = &runner.state().players[P0.0 as usize].mana_pool.mana;
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
     assert_eq!(
-        pool.iter().map(|unit| unit.color).collect::<Vec<_>>(),
+        pool.units().map(|unit| unit.color).collect::<Vec<_>>(),
         vec![ManaType::Blue, ManaType::Red]
     );
     assert!(ledger(&runner).is_empty());

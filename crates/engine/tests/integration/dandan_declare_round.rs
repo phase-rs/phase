@@ -266,7 +266,10 @@ fn v4c_both_redraw_together_from_one_shuffled_pile_active_player_first() {
         replay_pile.extend(old_second.iter().chain(&old_first));
         let mut shuffled: im::Vector<ObjectId> = replay_pile.iter().copied().collect();
         let mut rng = state.rng.clone();
-        engine::util::im_ext::shuffle_vector(&mut shuffled, &mut rng);
+        engine::util::im_ext::shuffle_vector(
+            &mut shuffled,
+            rng.draw(engine::types::game_state::RandomDraw::Placement),
+        );
         let shuffled: Vec<ObjectId> = shuffled.into_iter().collect();
 
         let events = act(&mut state, second, MulliganChoice::Mulligan);

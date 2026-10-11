@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
 use crate::game::game_object::AttachTarget;
@@ -755,7 +756,7 @@ pub fn resolve(
         Effect::ChangeZone { target, .. } => target.clone(),
         _ => TargetFilter::Any,
     };
-    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser
+    // CR 608.2c: Resolve the `TrackedSetId(0)` sentinel emitted by the parser
     // for "from among the milled cards" / "X cards revealed this way"
     // continuations to the most recent non-empty tracked set. Done up front so
     // every downstream path (interactive scan, `matches_target_filter`,
@@ -1065,7 +1066,10 @@ pub fn resolve(
             && !choice_up_to
             && choice_count == 1
         {
-            let index = state.rng.random_range(0..eligible.len());
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..eligible.len());
             let chosen = eligible[index];
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
@@ -2053,7 +2057,7 @@ pub fn resolve_all(
         crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
 
-    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for
+    // CR 608.2c: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for
     // inline "the exiled card[s]" continuations (e.g., Sword of Hearth and Home's
     // chain: exile creature → search land → return the exiled card). The
     // delayed-trigger resolver performs the same binding at delayed-trigger
@@ -2292,7 +2296,7 @@ pub fn resolve_all(
     let mut matching = matching;
     if random_order {
         use rand::seq::SliceRandom;
-        matching.shuffle(&mut state.rng);
+        matching.shuffle(state.rng.draw(RandomDraw::Placement));
     }
 
     let mut moved_count: i32 = 0;
@@ -8420,7 +8424,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7 + CR 400.7: Sword of Hearth and Home's triggered ability chains
+    /// CR 608.2c + CR 400.7: Sword of Hearth and Home's triggered ability chains
     /// `ChangeZone` (exile target creature) → `SearchLibrary` → `ChangeZone`
     /// (land → battlefield) → `ChangeZoneAll { target: TrackedSet(0) }` (return
     /// the exiled creature). The final step uses the sentinel `TrackedSetId(0)`
@@ -8789,7 +8793,7 @@ mod tests {
         assert_eq!(state.objects[&creature].zone, Zone::Library);
     }
 
-    /// CR 603.7: `TrackedSetId(0)` must bind through `chain_tracked_set_id`
+    /// CR 608.2c: `TrackedSetId(0)` must bind through `chain_tracked_set_id`
     /// before falling back to the globally latest tracked set, matching the
     /// target-filter resolver used by `matches_target_filter`.
     #[test]

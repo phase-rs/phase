@@ -379,6 +379,77 @@ pub(super) fn resolve_random_modal_trigger(
     Ok(Some(waiting_for))
 }
 
+/// CR 603.3c: choosing a modal trigger's modes is part of putting that one
+/// ability on the stack, so the chosen modes keep every stamp the trigger
+/// received when it triggered and was pushed.
+fn carry_trigger_provenance(
+    pending: &crate::types::ability::ResolvedAbility,
+    chosen: &mut crate::types::ability::ResolvedAbility,
+) {
+    if let Some(source) = &pending.trigger_source {
+        chosen.set_trigger_source_recursive(source.clone());
+    }
+    if pending.source_incarnation.is_some() {
+        chosen.set_source_incarnation_recursive(pending.source_incarnation);
+    }
+    if let Some(player) = pending.original_controller {
+        chosen.set_original_controller_recursive(player);
+    }
+    if let Some(definition_ref) = &pending.trigger_definition_ref {
+        chosen.set_trigger_definition_ref_recursive(definition_ref.clone());
+    }
+    if let Some(origin) = &pending.may_trigger_origin {
+        chosen.set_may_trigger_origin_recursive(origin.clone());
+    }
+    if let Some(player) = pending.scoped_player {
+        chosen.set_scoped_player_recursive(player);
+    }
+    if let Some(x) = pending.chosen_x {
+        chosen.set_chosen_x_recursive(x);
+    }
+    if let Some(snapshot) = &pending.cost_paid_object {
+        chosen.set_cost_paid_object_recursive(snapshot.clone());
+    }
+    if chosen.unless_pay.is_none() {
+        chosen.unless_pay.clone_from(&pending.unless_pay);
+    }
+    let context = &pending.context;
+    if context.source_transformation_count.is_some() {
+        chosen.set_source_transformation_count_recursive(context.source_transformation_count);
+    }
+    if context.source_ability_provenance.is_some() {
+        chosen.set_source_ability_provenance_recursive(context.source_ability_provenance);
+    }
+    if let Some(event) = &context.creation_lookback_event {
+        chosen.set_creation_lookback_event_recursive(event);
+    }
+    for &event in &context.duration_events {
+        chosen.record_duration_event_recursive(event);
+    }
+    // The trigger build stamps the source's cast facts on the root only.
+    chosen.context.cast_from_zone = chosen.context.cast_from_zone.or(context.cast_from_zone);
+    if !context.kickers_paid.is_empty() {
+        chosen
+            .context
+            .kickers_paid
+            .clone_from(&context.kickers_paid);
+    }
+    if !context.additional_cost_payments.is_empty() {
+        chosen
+            .context
+            .additional_cost_payments
+            .clone_from(&context.additional_cost_payments);
+    }
+    chosen.context.additional_cost_payment_count = context.additional_cost_payment_count;
+    chosen.context.additional_cost_paid |= context.additional_cost_paid;
+    chosen.bind_force_block_source_recursive(pending.source_incarnation.map(|incarnation| {
+        crate::types::identifiers::ObjectIncarnationRef {
+            object_id: pending.source_id,
+            incarnation,
+        }
+    }));
+}
+
 fn handle_triggered_mode_choice(
     state: &mut GameState,
     choice: TriggeredModeChoice,
@@ -387,7 +458,7 @@ fn handle_triggered_mode_choice(
     let TriggeredModeChoice {
         player,
         source_id,
-        resolved,
+        mut resolved,
         modal,
         mode_abilities,
         indices,
@@ -397,6 +468,13 @@ fn handle_triggered_mode_choice(
         .pending_trigger
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
+    // The stack entry holds the push-time stamps the pending carrier lacks.
+    let pending = state
+        .pending_trigger_entry
+        .and_then(|id| state.stack.iter().rev().find(|entry| entry.id == id))
+        .and_then(|entry| entry.ability())
+        .unwrap_or(trigger.ability.as_ref());
+    carry_trigger_provenance(pending, &mut resolved);
     // CR 603.2 + CR 109.4: Re-establish the trigger event context for
     // the duration of mode-target computation. The modal was paused for mode
     // choice (`trigger_dispatch`) AFTER restoring the context to its pre-dispatch

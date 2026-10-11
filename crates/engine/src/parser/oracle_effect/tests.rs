@@ -3880,7 +3880,7 @@ fn compound_mass_counter_first_conjunct_stays_put_counter_all() {
     assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
 }
 
-/// CR 603.7 + issue #6065: Inspiring Call — "Draw a card for each creature you
+/// CR 608.2c + issue #6065: Inspiring Call — "Draw a card for each creature you
 /// control with a +1/+1 counter on it. Those creatures gain indestructible until
 /// end of turn." Unlike Nalia (whose `PutCounterAll` publishes a tracked set),
 /// the `Draw` clause publishes NO tracked set — its target is the drawing player
@@ -4012,7 +4012,7 @@ fn nalia_de_arnise_counters_then_deathtouch_lowers_correctly() {
                 Some(Duration::UntilEndOfTurn),
                 "deathtouch grant must be UntilEndOfTurn"
             );
-            // CR 603.7: "those creatures" lowers to `ParentTarget` in the
+            // CR 608.2c: "those creatures" lowers to `ParentTarget` in the
             // subject-predicate parser, then the chain assembler rewrites
             // it to `TrackedSet(0)` because the prior clause
             // (`PutCounterAll`) publishes a tracked set at resolution.
@@ -10867,7 +10867,7 @@ fn effect_bounce() {
     assert!(matches!(e, Effect::Bounce { .. }));
 }
 
-/// CR 400.7 + CR 611.2c: Mass-bounce class — "return all/each [filter]"
+/// CR 400.7: Mass-bounce class — "return all/each [filter]"
 /// must lower to `Effect::BounceAll`, not single-target `Effect::Bounce`,
 /// so the runtime resolver iterates every matching permanent instead of
 /// prompting for one.
@@ -16204,7 +16204,7 @@ fn hunger_tide_rises_chapter_iv_sacrifice_search_put_chain() {
     );
 }
 
-/// CR 608.2c + CR 117.3a + CR 701.23a + CR 603.7: Winds of
+/// CR 608.2c + CR 117.3a + CR 701.23a: Winds of
 /// Abandon — iterated subject-anchored search. The structure mirrors
 /// Assassin's Trophy but the search step carries `repeat_for:
 /// TrackedSetSize` so each exiled creature's controller searches their own
@@ -20476,7 +20476,7 @@ fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
     );
 }
 
-/// CR 400.7i + CR 603.7: The Gonti impulse-play grant ("You may play that
+/// CR 400.7i + CR 608.2c: The Gonti impulse-play grant ("You may play that
 /// card for as long as it remains exiled, and mana of any type can be spent
 /// to cast that spell") must bind to the card the preceding face-down
 /// `ExileTop` published into the tracked set — without it the grant would
@@ -20522,7 +20522,7 @@ fn exile_then_play_from_exile_grant_binds_to_tracked_set() {
     );
 }
 
-/// CR 603.7 + CR 400.7h + CR 118.9: The free-cast cross-clause grant —
+/// CR 608.2c + CR 400.7h + CR 118.9: The free-cast cross-clause grant —
 /// "exile the top card. Until end of turn, you may play that card without
 /// paying its mana cost." (Urza, Lord High Artificer's {5}) — must rebind
 /// the cast clause's `ParentTarget` to the tracked set the exile published.
@@ -26980,7 +26980,7 @@ fn parse_play_the_exiled_card_this_turn_targets_tracked_set() {
     ));
 }
 
-/// CR 118.5 + CR 118.9 + CR 603.7 + CR 608.2c: Fallen Shinobi class —
+/// CR 118.5 + CR 118.9 + CR 608.2c: Fallen Shinobi class —
 /// "Until end of turn, you may play those cards without paying their mana
 /// costs" must lower to `CastFromZone { without_paying_mana_cost: true,
 /// target: TrackedSet(0), mode: Play }` (a free-cast alternative cost
@@ -27233,7 +27233,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
     }
 }
 
-/// CR 603.7 + CR 611.2a + CR 118.9: Daxos of Meletis class — "Until end
+/// CR 608.2c + CR 611.2a + CR 118.9: Daxos of Meletis class — "Until end
 /// of turn, you may cast that card" (single-card anaphor, no "without
 /// paying"). Without `without paying` this is a normal casting permission
 /// for the exiled card — i.e. `GrantCastingPermission { PlayFromExile }`
@@ -27277,7 +27277,7 @@ fn parse_daxos_shape_emits_play_from_exile_with_tracked_set() {
     }
 }
 
-/// CR 603.7 + CR 611.2a: Act on Impulse class — "Until end of turn, you
+/// CR 608.2c + CR 611.2a: Act on Impulse class — "Until end of turn, you
 /// may play those cards" (no "without paying" clause) keeps the
 /// `GrantCastingPermission { PlayFromExile }` shape but its target must
 /// be the tracked exile set, not `TargetFilter::Any` (which would cause
@@ -27737,7 +27737,7 @@ fn exile_then_investigate_then_return_exiled_cards_uses_tracked_set() {
 /// tracked set, followed by "create a token that's a copy of that card,
 /// except it's an enchantment and loses all other card types." The copy
 /// clause must (a) rebind its `that card` anaphor to the tracked set
-/// (CR 603.7) and (b) carry the `SetCardTypes` exception so the token is an
+/// (CR 608.2c) and (b) carry the `SetCardTypes` exception so the token is an
 /// enchantment, not a creature (CR 205.1a + CR 707.9d). Uses an explicit
 /// exile target so the chain stitches without trigger-subject context.
 #[test]
@@ -28180,7 +28180,7 @@ fn parse_impulse_draw_chain_next_turn() {
         def.effect
     );
     let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
-    // CR 603.7 + CR 611.2a: target must be the tracked exile set, not `Any`.
+    // CR 608.2c + CR 611.2a: target must be the tracked exile set, not `Any`.
     assert!(
         matches!(
             *sub.effect,

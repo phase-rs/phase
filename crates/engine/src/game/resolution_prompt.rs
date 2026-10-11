@@ -593,6 +593,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
+        delayed_origin: _, // delayed-trigger identity, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
         target_pins: _, // CR 400.7 selected-target pins, no choice

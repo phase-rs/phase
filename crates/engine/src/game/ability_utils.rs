@@ -10,6 +10,7 @@ use crate::types::ability::{
     SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
     TypeFilter, TypedFilter,
 };
+use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
 use super::target_occurrences::OccurrenceVerdict;
 use crate::types::ability::mana_multi_role;
@@ -1781,9 +1782,12 @@ pub fn random_select_targets_for_ability(
                 "No legal targets available for random selection".to_string(),
             ));
         }
-        let pick = candidate_targets.choose(&mut state.rng).cloned().ok_or(
-            EngineError::ActionNotAllowed("Random selection failed to draw a target".to_string()),
-        )?;
+        let pick = candidate_targets
+            .choose(state.rng.draw(RandomDraw::Outcome))
+            .cloned()
+            .ok_or(EngineError::ActionNotAllowed(
+                "Random selection failed to draw a target".to_string(),
+            ))?;
         chosen.push(Some(pick));
     }
     // Multi-slot constraints (e.g., DifferentTargetPlayers) — reuse the same
@@ -1851,11 +1855,13 @@ pub fn random_select_modal_indices(
             if affordable.is_empty() {
                 break;
             }
-            let pick = *affordable.choose(&mut state.rng)?;
+            let pick = *affordable.choose(state.rng.draw(RandomDraw::Outcome))?;
             spent += u32::from(modal.mode_pawprints[pick]);
             indices.push(pick);
             // "up to" — once the minimum is met, randomly decide to stop.
-            if indices.len() >= modal.min_choices && state.rng.random_bool(0.5) {
+            if indices.len() >= modal.min_choices
+                && state.rng.draw(RandomDraw::Outcome).random_bool(0.5)
+            {
                 break;
             }
         }
@@ -1883,7 +1889,7 @@ pub fn random_select_modal_indices(
         // Uniform over the inclusive count range.
         (min..=max)
             .collect::<Vec<_>>()
-            .choose(&mut state.rng)
+            .choose(state.rng.draw(RandomDraw::Outcome))
             .copied()
             .unwrap_or(min)
     };
@@ -1891,11 +1897,11 @@ pub fn random_select_modal_indices(
     let mut indices = Vec::with_capacity(count);
     if modal.allow_repeat_modes {
         for _ in 0..count {
-            indices.push(*legal.choose(&mut state.rng)?);
+            indices.push(*legal.choose(state.rng.draw(RandomDraw::Outcome))?);
         }
     } else {
         let mut pool = legal;
-        pool.shuffle(&mut state.rng);
+        pool.shuffle(state.rng.draw(RandomDraw::Outcome));
         indices.extend(pool.into_iter().take(count));
     }
     Some(indices)

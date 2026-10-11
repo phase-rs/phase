@@ -22,6 +22,7 @@ use engine::types::ability::{Effect, QuantityExpr, ReplacementPlayerScope};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -29,8 +30,6 @@ use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use std::collections::HashSet;
 
 /// Krark's Thumb printed Oracle text — byte-identical to card-data.json.
@@ -206,7 +205,7 @@ fn setup_single_flip(seed: u64) -> (engine::game::scenario::GameRunner, ObjectId
         },
     );
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(seed);
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
     (runner, spell)
 }
 
@@ -332,7 +331,7 @@ fn flip_coins_three_with_krark_prompts_three_times() {
         },
     );
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(7);
+    runner.state_mut().rng = GameRng::seed_from_u64(7);
 
     let mut result = cast_and_resolve(&mut runner, spell);
 
@@ -392,7 +391,7 @@ fn flip_until_lose_with_krark_resolves_via_per_flip_keep_choices() {
         },
     );
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(3);
+    runner.state_mut().rng = GameRng::seed_from_u64(3);
 
     let mut result = cast_and_resolve(&mut runner, spell);
 

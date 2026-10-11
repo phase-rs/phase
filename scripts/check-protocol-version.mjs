@@ -64,6 +64,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v127 folds FilterProp's attachment-referent siblings into
 // `FilterProp::AttachedTo { to: AttachmentReferent }`, and makes retarget
 // picks positional (`RetargetSpell` nullable picks, copy-walk keep fields).
+// v129 splits the shortcut schema's measured bound from its deliverable
+// capacity, stamps the minting road on shortcut offers, adds the mana ability
+// payment window, drops the recorded loop-action sequence, and adds the
+// confirmed period's reach and the periodic delta's cleanup pair.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -132,8 +136,11 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      FilterProp::AttachedTo and makes retarget picks positional (reserved as
 //      v119 and then v121 while under review; it landed after v126).
 // +57: v128 adds the TargetFilter::DeclaredPlayer reference.
-// +58: v129 bounds each `GameState::linked_exile_lki` entry to its departure's incarnations (`LinkedExileLki`).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 58;
+// +58: v129 carries the ShortcutDecisionSchema capacity split, the offer road
+//      stamp, the mana ability payment window, the retired loop-action sequence,
+//      and the period reach and cleanup pair.
+// +59: v130 bounds each `GameState::linked_exile_lki` entry to its departure's incarnations (`LinkedExileLki`).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 59;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -216,8 +223,11 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +54: wire 108 moves with full-game v126 for the zone-change record's arrival identity.
 // +55: wire 109 moves with full-game v127 for the FilterProp::AttachedTo reshape.
 // +56: wire 110 moves with full-game v128 for TargetFilter::DeclaredPlayer.
-// +57: wire 111 moves with full-game v129 for the incarnation-bounded linked-exile LKI.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 57;
+// +57: wire 111 moves with full-game v129 for the shortcut schema capacity split,
+//      the offer road stamp, the mana ability payment window, the retired
+//      loop-action sequence, and the period reach and cleanup pair.
+// +58: wire 112 moves with full-game v130 for the incarnation-bounded linked-exile LKI.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 58;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

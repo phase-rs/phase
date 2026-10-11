@@ -2368,7 +2368,7 @@ fn miracle_accept_casts_for_miracle_cost() {
     }
     // The {W} was paid — pool should be empty.
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "miracle cost of {{W}} should have consumed the white mana"
     );
 }
@@ -2563,9 +2563,9 @@ fn miracle_cost_is_reduced_by_medallion_static() {
         "spell should be on the stack via Miracle variant"
     );
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "the reduced miracle cost {{R}} should consume the single red mana, got {:?}",
-        runner.state().players[0].mana_pool.mana
+        runner.state().players[0].mana_pool
     );
 }
 

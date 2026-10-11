@@ -7108,13 +7108,13 @@ fn parse_normalized_oracle_ir(
                     continue;
                 }
             }
-            // CR 601.2a + CR 113.6b: a line headed by a recognized
-            // cast-from-graveyard permission whose permission parser declined is
-            // a STRICT gap. Falling through to the replacement/effect fallbacks
-            // reclaims it as a partial parse (e.g. the "exile it instead"
-            // sentence becomes a Moved replacement) and silently drops the
-            // permission's unmodeled prefix, so emit the same typed
-            // `static_structure` residual the generic unsupported dispatch would.
+            // CR 601.2a + CR 113.6b: a line headed by a recognized cast permission
+            // (graveyard, or the card's own exile tail) whose permission parser declined
+            // is a STRICT gap. Falling through to the replacement/effect fallbacks
+            // reclaims it as a partial parse (e.g. the "exile it instead" sentence
+            // becomes a Moved replacement) and silently drops the permission's unmodeled
+            // prefix, so emit the same typed `static_structure` residual the generic
+            // unsupported dispatch would.
             if is_graveyard_cast_permission_lead(&lower) {
                 emitter.unsupported_ir_at(
                     item_line,

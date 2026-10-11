@@ -3061,7 +3061,7 @@ fn resume_multiplayer_host_state_inner(
             .validate_for_player_count(player_count)?;
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
-        state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
+        state.rng = engine::types::game_state::GameRng::seed_from_u64(fresh_seed);
         state.rng_word_pos = 0;
         Ok(())
     })?;
@@ -3718,7 +3718,7 @@ fn scored_candidates_inner(
     // shuffle performs, and so does `export_game_state_json`. Overwrite all three,
     // exactly as `resume_multiplayer_host_state` does.
     state.rng_seed = rng_seed;
-    state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
+    state.rng = engine::types::game_state::GameRng::seed_from_u64(rng_seed);
     state.rng_word_pos = 0;
 
     let config = create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
@@ -6425,14 +6425,23 @@ mod rng_restore_bridge_tests {
         // Seed a live game and consume randomness as gameplay would.
         let mut state = GameState::new_two_player(0x51A7_C0DE);
         for _ in 0..9 {
-            state.rng.next_u32();
+            state
+                .rng
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u32();
         }
         GAME_STATE.with(|cell| cell.set(Some(state)));
 
         // The four values the live stream will produce next, captured from a
         // clone taken at the pre-export offset.
         let mut expected = with_state(|s| s.rng.clone()).unwrap();
-        let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
+        let expected_draws: Vec<u32> = (0..4)
+            .map(|_| {
+                expected
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u32()
+            })
+            .collect();
 
         // Serialize through the real bridge entry point (captures rng_word_pos).
         let json = export_game_state_json().unwrap();
@@ -6442,7 +6451,9 @@ mod rng_restore_bridge_tests {
         // origin (nine draws back), never matching `expected_draws`.
         with_state_mut(|s| {
             for _ in 0..3 {
-                s.rng.next_u32();
+                s.rng
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u32();
             }
         })
         .unwrap();
@@ -6452,8 +6463,16 @@ mod rng_restore_bridge_tests {
 
         // The restored stream must resume at the exported offset and produce the
         // continuation captured before export.
-        let restored_draws: Vec<u32> =
-            with_state_mut(|s| (0..4).map(|_| s.rng.next_u32()).collect()).unwrap();
+        let restored_draws: Vec<u32> = with_state_mut(|s| {
+            (0..4)
+                .map(|_| {
+                    s.rng
+                        .draw(engine::types::game_state::RandomDraw::Outcome)
+                        .next_u32()
+                })
+                .collect()
+        })
+        .unwrap();
         assert_eq!(
             restored_draws, expected_draws,
             "restored stream must resume where export left off, not rewind to origin"
@@ -6645,9 +6664,17 @@ mod ai_scoring_rng_bridge_tests {
         let mut expected = ChaCha20Rng::seed_from_u64(WORKER_SEED);
         let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
 
-        let live_draws: Vec<u32> =
-            with_state_mut(|state| (0..4).map(|_| state.rng.next_u32()).collect::<Vec<_>>())
-                .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+        let live_draws: Vec<u32> = with_state_mut(|state| {
+            (0..4)
+                .map(|_| {
+                    state
+                        .rng
+                        .draw(engine::types::game_state::RandomDraw::Outcome)
+                        .next_u32()
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
 
         assert_eq!(
             live_draws, expected_draws,
@@ -6674,9 +6701,17 @@ mod ai_scoring_rng_bridge_tests {
         clear_game_state();
         restore_game_state(&json).expect("a scored worker's export must be restorable");
 
-        let restored_draws: Vec<u32> =
-            with_state_mut(|state| (0..4).map(|_| state.rng.next_u32()).collect::<Vec<_>>())
-                .expect("GAME_STATE must be initialized after restore");
+        let restored_draws: Vec<u32> = with_state_mut(|state| {
+            (0..4)
+                .map(|_| {
+                    state
+                        .rng
+                        .draw(engine::types::game_state::RandomDraw::Outcome)
+                        .next_u32()
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("GAME_STATE must be initialized after restore");
 
         assert_eq!(
             restored_draws, expected_draws,
@@ -6703,8 +6738,10 @@ mod ai_scoring_rng_bridge_tests {
         plant_restored_worker_state();
 
         // Literally the pre-fix line, applied to the restored state.
-        with_state_mut(|state| state.rng = ChaCha20Rng::seed_from_u64(WORKER_SEED))
-            .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+        with_state_mut(|state| {
+            state.rng = engine::types::game_state::GameRng::seed_from_u64(WORKER_SEED)
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
 
         with_state_mut(|state| {
             engine::game::library::resolve_and_apply_library_shuffle(

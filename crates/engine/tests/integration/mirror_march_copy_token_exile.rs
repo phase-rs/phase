@@ -24,11 +24,10 @@
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::counter::CounterType;
+use engine::types::game_state::GameRng;
 use engine::types::keywords::KeywordKind;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 const CRAZED_FIRECAT: &str = "When this creature enters, flip a coin until you lose a flip. Put a +1/+1 counter on this creature for each flip you won.";
 const MIRROR_MARCH: &str = "Whenever a nontoken creature you control enters, flip a coin until you lose a flip. For each flip you won, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.";
@@ -57,7 +56,7 @@ fn mirror_march_exiles_only_copy_tokens_not_the_original() {
 
     let mut runner = scenario.build();
     // Seed the flip sequence to win, win, lose → exactly 2 copy tokens.
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(2);
+    runner.state_mut().rng = GameRng::seed_from_u64(2);
 
     // Cast the bear; on resolution it enters, firing Mirror March's ETB trigger.
     runner.cast(bear).resolve();
@@ -150,7 +149,7 @@ fn mirror_march_no_wins_creates_no_tokens() {
 
     let mut runner = scenario.build();
     // Seed 1: first flip is a loss → 0 wins.
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(1);
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
     runner.cast(bear).resolve();
     runner.advance_until_stack_empty();
 
@@ -182,7 +181,7 @@ fn crazed_firecat_counters_after_etb(seed: u64) -> u32 {
         .id();
 
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(seed);
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
     runner.cast(firecat).resolve();
     runner.advance_until_stack_empty();
 

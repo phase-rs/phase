@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::quantity::resolve_quantity_with_targets;
@@ -513,7 +514,7 @@ pub fn resolve(
             && target_filter.references_exiled_by_source()
         {
             randomized_targets = collected_targets.clone();
-            randomized_targets.shuffle(&mut state.rng);
+            randomized_targets.shuffle(state.rng.draw(RandomDraw::Placement));
             randomized_targets.as_slice()
         } else {
             collected_targets.as_slice()

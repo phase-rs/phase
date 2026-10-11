@@ -16,15 +16,15 @@
 //!   X = ObjectCount { Typed[Subtype(Equipment)] + FilterProp::AttachedTo { to: AttachmentReferent::Source } }
 //!
 //! That count enumerates the LIVE battlefield and asks each Equipment "are you attached to
-//! the source?" — i.e. `obj.attached_to == Some(source.id)`. SBA unattaches every Equipment
-//! the instant its host leaves the battlefield (CR 704.5n), so every candidate answers NO
-//! and X resolves to 0. The gate opens onto an effect that does nothing.
+//! the source?" — i.e. `obj.attached_to == Some(source.id)`. The host's departure unattaches
+//! every Equipment the instant it leaves the battlefield (CR 701.3d), so every candidate
+//! answers NO and X resolves to 0. The gate opens onto an effect that does nothing.
 //!
 //! THE DISCRIMINATING AXIS IS NOT THE CR 111.7 PURGE. Unlike the gate half (where a token's
 //! purge from `state.objects` was the whole defect), the quantity half breaks for a NONTOKEN
-//! dead source too: the unattachment is done by SBA on ANY battlefield exit, so the Equipment's
-//! `attached_to` is cleared whether the host went to the graveyard or ceased to exist. Both
-//! legs are witnessed below; both were red.
+//! dead source too: the departure itself unattaches on ANY battlefield exit (CR 701.3d), so
+//! the Equipment's `attached_to` is cleared whether the host went to the graveyard or ceased
+//! to exist. Both legs are witnessed below; both were red.
 //!
 //! CR 608.2h is the governing rule and it is explicit: "If the effect requires information
 //! from a specific object, INCLUDING THE SOURCE OF THE ABILITY ITSELF, the effect uses the
@@ -57,7 +57,7 @@ const WHIPLASH: &str = "Whiplash enters tapped.\nWhenever Whiplash attacks, if h
 
 /// Only a token ceases to exist under CR 111.7. For the GATE half (#5792) that was the
 /// discriminating axis; for the QUANTITY half under test here BOTH legs are broken, because
-/// SBA unattaches on any battlefield exit (CR 704.5n).
+/// the departure unattaches on any battlefield exit (CR 701.3d).
 #[derive(Clone, Copy, PartialEq)]
 enum SourceKind {
     Token,
@@ -188,8 +188,8 @@ fn whiplash_attacks_then_dies(
 
     if fate == SourceFate::Dies {
         // Kill Whiplash with his trigger already on the stack, through the REAL zone-change
-        // pipeline (which snapshots LKI) and the REAL SBA (which purges a token under
-        // CR 111.7 / CR 704.5d and unattaches the Equipment under CR 704.5n).
+        // pipeline (which snapshots LKI and unattaches the Equipment under CR 701.3d) and
+        // the REAL SBA (which purges a token under CR 111.7 / CR 704.5d).
         let mut events = Vec::new();
         zones::move_to_zone(runner.state_mut(), whiplash, Zone::Graveyard, &mut events);
         sba::check_state_based_actions(runner.state_mut(), &mut events);
@@ -211,8 +211,8 @@ fn whiplash_attacks_then_dies(
         }
 
         // THE DEFECT, STATED AS A FACT ABOUT THE BOARD. Every Equipment has been unattached
-        // by SBA (CR 704.5n). This is what makes the live count read 0 — and it is true for
-        // the NONTOKEN leg as well, which is why both legs are red.
+        // by the host's departure (CR 701.3d). This is what makes the live count read 0 —
+        // and it is true for the NONTOKEN leg as well, which is why both legs are red.
         for eq in &equipped {
             assert!(
                 runner
@@ -222,10 +222,10 @@ fn whiplash_attacks_then_dies(
                     .expect("the Equipment itself survives its host — it is not a token")
                     .attached_to
                     .is_none(),
-                "CR 704.5n: SBA unattaches Equipment the instant its host leaves the \
-                 battlefield. The live board therefore CANNOT answer 'how many Equipment are \
-                 attached to him' — that is precisely why CR 608.2h routes the question to \
-                 LAST KNOWN INFORMATION."
+                "CR 701.3d: the host's departure unattaches its Equipment the instant it \
+                 leaves the battlefield. The live board therefore CANNOT answer 'how many \
+                 Equipment are attached to him' — that is precisely why CR 608.2h routes the \
+                 question to LAST KNOWN INFORMATION."
             );
         }
     }
@@ -286,8 +286,8 @@ fn unequipped_whiplash_never_triggers() {
 /// equipped with 2 Equipment when he last existed, so X = 2.
 ///
 /// Before the fix, `FilterProp::AttachedTo { to: AttachmentReferent::Source }` asked each LIVE Equipment
-/// `attached_to == Some(source)`, SBA had already cleared that field (CR 704.5n), X resolved
-/// to 0, and the drain silently did nothing.
+/// `attached_to == Some(source)`, the departure had already cleared that field (CR 701.3d),
+/// X resolved to 0, and the drain silently did nothing.
 #[test]
 fn purged_token_source_counts_its_attachments_from_lki() {
     let drain = whiplash_attacks_then_dies(SourceKind::Token, 2, 0, SourceFate::Dies);
@@ -305,15 +305,15 @@ fn purged_token_source_counts_its_attachments_from_lki() {
 ///
 /// This leg is the one the task charter did not predict. The printed card dies the same way
 /// and STAYS in `state.objects` (graveyard), so — unlike the gate half repaired by #5792 —
-/// the subject was never invisible. But SBA unattached its Equipment all the same
-/// (CR 704.5n), so the live board could not answer the count either. The quantity half is
+/// the subject was never invisible. But its departure unattached its Equipment all the same
+/// (CR 701.3d), so the live board could not answer the count either. The quantity half is
 /// therefore broken on BOTH legs, and the CR 111.7 purge is NOT its discriminating axis.
 #[test]
 fn nontoken_dead_source_counts_its_attachments_from_lki() {
     let drain = whiplash_attacks_then_dies(SourceKind::Nontoken, 2, 0, SourceFate::Dies);
     assert_eq!(
         drain.opponent_lost, 2,
-        "CR 608.2h + CR 704.5n: the Equipment is unattached the instant the host leaves, so \
+        "CR 608.2h + CR 701.3d: the Equipment is unattached the instant the host leaves, so \
          'how many Equipment are attached to him' must be answered from LAST KNOWN \
          INFORMATION even for a source that is merely dead rather than purged"
     );

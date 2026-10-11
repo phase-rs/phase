@@ -196,6 +196,17 @@ fn extract_life_cost_root(
     if !is_complete_generated_candidate(state, candidate) {
         return None;
     }
+    // A spell announcement's trigger carrier is engine-private custody that
+    // `announcement_triggers` holds outside the `PendingCast` for the whole
+    // reducer action, so the witness names the announcement as the payment
+    // authority will see it.
+    let as_paid = |pending: &PendingCast| {
+        let mut pending = pending.clone();
+        if pending.activation_ability_index.is_none() {
+            pending.activation_trigger_collection = None;
+        }
+        pending
+    };
 
     match (&state.waiting_for, &candidate.action) {
         (
@@ -212,7 +223,7 @@ fn extract_life_cost_root(
                 player: *player,
                 offered_life_cost: *life_cost,
                 mana_reduction: mana_reduction.clone(),
-                pending_cast: *pending_cast.clone(),
+                pending_cast: as_paid(pending_cast),
                 candidate: candidate.clone(),
             },
         ))),
@@ -236,7 +247,7 @@ fn extract_life_cost_root(
                     times_kicked: *times_kicked,
                     origin: *origin,
                     gift_kind: gift_kind.clone(),
-                    pending_cast: *pending_cast.clone(),
+                    pending_cast: as_paid(pending_cast),
                     candidate: candidate.clone(),
                     branch,
                     materialized_cost,

@@ -492,6 +492,7 @@ fn rewrite_resolved_ability(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _,
         target_pins: _,

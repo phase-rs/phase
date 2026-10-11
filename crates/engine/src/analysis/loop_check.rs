@@ -159,13 +159,22 @@ impl LoopCertificate {
     }
 }
 
+/// Which producer minted a loop-shortcut offer: the ring sampler, or the priority holder's
+/// recorded period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OfferRoad {
+    Ring,
+    RecordedPeriod,
+}
+
 /// CR 732.2a: the log/display summary a `WaitingFor::RespondToShortcut` carries to each
 /// responding opponent — "the player with priority suggests repeating this loop N times".
 ///
-/// Every field EXCEPT [`ShortcutProposal::template`] is derived from public board state (the
-/// confirmed certificate + the proposer's declared count). `template` is NOT: it is the
-/// proposer's `DecisionTemplate` moved here verbatim by `game::engine::handle_declare_shortcut`,
-/// and its pins can name objects in hidden zones. It is redacted per viewer in
+/// Every field EXCEPT [`ShortcutProposal::template`] and
+/// [`ShortcutProposal::published_declaration`] is derived from public board state (the confirmed
+/// certificate + the proposer's declared count). Those two are NOT: each is a `DecisionTemplate`
+/// moved here by `game::engine::handle_declare_shortcut`, and their pins can name objects in
+/// hidden zones. It is redacted per viewer in
 /// `game::visibility::filter_state_for_viewer` through the shared `pins_name_hidden_source`
 /// authority — all-or-nothing per CR 732.2b, the whole template is dropped and never trimmed.
 /// The blanket "no hidden information to redact" this doc used to claim is exactly what let
@@ -214,6 +223,26 @@ pub struct ShortcutProposal {
     /// A seat identity is public board state, so this carries no redaction seam of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortened_by: Option<PlayerId>,
+    /// The producer that minted the offer this proposal was declared against, copied off it.
+    pub road: OfferRoad,
+    /// CR 732.2a: the confirmed period of the offer this proposal was declared against, copied
+    /// off it; stripped for every viewer.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::game::period_confirm::ConfirmedPeriod::is_empty"
+    )]
+    pub period: crate::game::period_confirm::ConfirmedPeriod,
+    /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
+    /// validated output, copied off the offer at declare — beside `template`, the declaration the
+    /// drive replays. The two differ wherever the declarer overrode the published aim, and
+    /// `game::engine::shortcut_consumption_bound` hands each to the charge authority in its own
+    /// role. An input to that re-derivation, never a prediction.
+    ///
+    /// `None` for an offer that published no declaration and for a save written before this field
+    /// existed. The seam does not stand `template` in for it: the charge authority answers an
+    /// absent observation on its refusing side in both bound directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_declaration: Option<DecisionTemplate>,
 }
 
 impl ShortcutProposal {

@@ -33,6 +33,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::PendingCopyTokenBatch;
+use crate::types::game_state::RandomDraw;
 use crate::types::mana::ManaCost;
 use crate::types::proposed_event::CopyTokenSpec;
 use rand::Rng;
@@ -100,7 +101,10 @@ pub fn resolve(
             if candidates == 0 {
                 return no_token(state, ability, events);
             }
-            let index = state.rng.random_range(0..candidates);
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..candidates);
             db.faces_in_scan_order()
                 .filter(eligible)
                 .nth(index)

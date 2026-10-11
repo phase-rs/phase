@@ -599,7 +599,7 @@ fn enter_phase(
 
 /// CR 732.2a: the APNAP-first player (turn order) who still holds a non-empty deferred
 /// persistent-axis materialization stash (one or more `PersistentAxisMaterialization`
-/// items — tokens, counters, life, or a drive sequence), or `None`. Filters
+/// items — tokens, counters or life), or `None`. Filters
 /// `players::apnap_order` — the same helper `enter_phase` uses to seed the mana-empty
 /// drain — so the collapse resolves in the same turn-based order and supports 2+ players
 /// (one prompt per drain iteration, each to its own controller). Guards on a NON-EMPTY
@@ -919,8 +919,8 @@ pub(super) fn drain_pending_phase_transition_progress(
             }
             // CR 732.2a: SECOND pass, after the CR 500.5 mana-empty APNAP drain
             // above — resolve any deferred persistent-axis materializations (one or
-            // more of tokens / beneficial counters / life gain / an observed-growth
-            // drive sequence) from accepted loop shortcuts, in APNAP turn order. A
+            // more of tokens / beneficial counters / life gain) from accepted loop
+            // shortcuts, in APNAP turn order. A
             // populated stash is present iff a materializable loop was accepted (§5);
             // prompt its controller for the finite count N.
             if let Some(controller) = next_apnap_player_with_pending_materialization(state) {
@@ -1036,8 +1036,8 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decision here would empty the very mana the card promises to keep.
         // Only `None`-expiry units flow into the pipeline as Drop-disposition
         // decisions. The `enumerate` runs over the full pool so `pool_index`
-        // stays aligned with the retained expiry units that remain in
-        // `mana_pool.mana`.
+        // stays aligned with the retained expiry units that remain in pool
+        // order (`ManaPool::units`).
         // CR 500.5: unspent mana empties as a step/phase ends. The ONLY exemption is the developer
         // `DebugAction::SetInfiniteMana` toggle (a documented debug departure). A loop-backed ∞-mana
         // axis is NOT exempt — it drains here and is de-realized in the queue-empty pass below. Gate
@@ -1051,8 +1051,7 @@ pub(super) fn drain_pending_phase_transition_progress(
             .find(|p| p.id == player_id)
             .map(|p| {
                 p.mana_pool
-                    .mana
-                    .iter()
+                    .units()
                     .enumerate()
                     .filter(|(_, u)| u.expiry.is_none())
                     .map(|(idx, u)| crate::types::mana::UnitDecision {
@@ -1697,7 +1696,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // empty, prompts are settled, and mana pools drained at step end per
     // CR 106.4). Truncating here bounds journal growth to one turn until the
     // CR 733 settlement consumer defines the real retention window.
-    state.resolved_rules_journal = Default::default();
+    state.reset_resolved_rules_journal();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
     // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn
@@ -2940,19 +2939,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 514.1 + CR 402.2: Only the *active* player discards down to maximum hand size.
     // Non-active players keep their cards regardless of hand size until their own cleanup.
-    // If the active player has "no maximum hand size" (CR 402.2), skip the discard check.
-    let has_no_max = super::static_abilities::check_static_ability(
-        state,
-        StaticMode::NoMaximumHandSize,
-        &super::static_abilities::StaticCheckContext {
-            player_id: Some(active),
-            ..Default::default()
-        },
-    );
-
-    if !has_no_max {
-        let max_hand_size = compute_maximum_hand_size(state, active);
-
+    if let Some(max_hand_size) = maximum_hand_size(state, active) {
         let player = state
             .players
             .iter()
@@ -3098,6 +3085,20 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     }
 
     None
+}
+
+/// CR 402.2 + CR 514.1: `player`'s maximum hand size, or `None` when they have no maximum hand
+/// size.
+pub(crate) fn maximum_hand_size(state: &GameState, player: PlayerId) -> Option<usize> {
+    let has_no_max = super::static_abilities::check_static_ability(
+        state,
+        StaticMode::NoMaximumHandSize,
+        &super::static_abilities::StaticCheckContext {
+            player_id: Some(player),
+            ..Default::default()
+        },
+    );
+    (!has_no_max).then(|| compute_maximum_hand_size(state, player))
 }
 
 /// CR 402.2 + CR 514.1: Compute the effective maximum hand size for a player.
@@ -5348,7 +5349,7 @@ card into your hand at the beginning of your next end step.";
         // ordinary cleanup-exit boundary then empties the now-unretained mana.
         execute_cleanup(&mut state, &mut Vec::new());
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
-        assert_eq!(state.players[0].mana_pool.mana[0].expiry, None);
+        assert_eq!(state.players[0].mana_pool.unit_at(0).unwrap().expiry, None);
         advance_phase(&mut state, &mut Vec::new());
         assert_eq!(state.phase, Phase::Untap);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
@@ -6010,8 +6011,7 @@ card into your hand at the beginning of your next end step.";
             // the other), the unit's final color is the survivor.
             state.players[0]
                 .mana_pool
-                .mana
-                .first()
+                .unit_at(0)
                 .map(|u| u.color)
                 .expect("unit survived")
         }

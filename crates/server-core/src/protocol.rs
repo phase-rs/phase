@@ -3346,6 +3346,12 @@ mod tests {
         }
     }
 
+    /// The bump this number is at: `WaitingFor::LoopShortcut` and
+    /// `ShortcutProposal` gained a required `road: OfferRoad`. A v128 peer drops
+    /// the key from every frame it re-encodes, so the handshake refuses the
+    /// pairing rather than leave the road to the legacy-offer migration's
+    /// inference.
+    ///
     /// The resolved-rules journal admits a land-play `rebound_from` on a
     /// `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield); a v123
     /// peer rejects that `GameState.resolved_rules_journal`, so it must be refused
@@ -3362,8 +3368,8 @@ mod tests {
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
     /// `GameState::linked_exile_lki` holds one incarnation-bounded `LinkedExileLki` per
-    /// departure (CR 400.7); a v128 peer cannot decode a non-empty map, so it must be
-    /// refused before it receives v129 state.
+    /// departure (CR 400.7); a v129 peer cannot decode a non-empty map, so it must be
+    /// refused before it receives v130 state.
     /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
     /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
     /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
@@ -3505,8 +3511,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_129_for_linked_exile_lki_bounds() {
-        assert_eq!(PROTOCOL_VERSION, 129);
+    fn protocol_version_is_130_for_linked_exile_lki_bounds() {
+        assert_eq!(PROTOCOL_VERSION, 130);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3517,7 +3523,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_129_for_linked_exile_lki_bounds` stays
+    /// `protocol_version_is_130_for_linked_exile_lki_bounds` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

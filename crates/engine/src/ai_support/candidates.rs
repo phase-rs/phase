@@ -982,6 +982,17 @@ pub fn candidate_actions_broad_with_probe(
             player,
             convoke_mode,
         } => mana_payment_actions(state, *player, *convoke_mode),
+        // CR 605.3a + CR 733.1: activate a mana ability toward the pending one's
+        // mana cost, or withdraw the pending activation.
+        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+            let mut actions = mana_tap_actions(state, *player);
+            actions.push(candidate(
+                GameAction::CancelCast,
+                TacticalClass::Pass,
+                Some(*player),
+            ));
+            actions
+        }
         WaitingFor::ManaSourceSelection {
             player, options, ..
         } => {
@@ -3466,8 +3477,8 @@ pub fn candidate_actions_broad_with_probe(
         //
         // AI-reachable since the bounded fast-forward landed, which is what stales the older
         // "the arm below only ever proposes `UntilLethal`" note this replaces: the
-        // `WaitingFor::LoopShortcut` arm below also proposes `Fixed(max_iterations)` against a
-        // bounded offer that publishes no pins, and only a `Fixed` count routes through
+        // `WaitingFor::LoopShortcut` arm below also proposes a capacity-valued `Fixed` against
+        // a bounded offer that publishes no pins, and only a `Fixed` count routes through
         // `materialize_fixed_shortcut` — the single path that registers the stash `turns.rs`
         // turns into this prompt. `UntilLethal` still routes to `apply_until_lethal_shortcut`
         // and never gets here; it is now also not offered against a bounded offer at all. A
@@ -3666,6 +3677,7 @@ pub fn candidate_actions_broad_with_probe(
             proposer,
             schema,
             declaration,
+            period,
             ..
         } => {
             // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
@@ -3678,10 +3690,10 @@ pub fn candidate_actions_broad_with_probe(
             // i.e. an illegal quantity choice wearing the shape of a legal one, which the
             // policy layer then has to know to score away.
             //
-            // Emit only the quantity choices the offer can actually take. A bounded offer
-            // gets `Fixed(max_iterations)` below when its pin set permits a `template: None`
-            // declaration; where neither applies, `DeclineShortcut` really is the only legal
-            // answer at the node, and representing that honestly is the point.
+            // Emit only the quantity choices the offer can actually take. A bounded offer gets
+            // `Fixed` at the published capacity below when its pin set permits a
+            // `template: None` declaration; where neither applies, `DeclineShortcut` really is
+            // the only legal answer at the node, and representing that honestly is the point.
             let mut v = Vec::new();
             if !schema.is_bounded() {
                 v.push(candidate(
@@ -3700,20 +3712,39 @@ pub fn candidate_actions_broad_with_probe(
             // authority for "this producer narrowed the bound"; do NOT re-spell it as a
             // comparison against `MAX_SHORTCUT_CYCLES`.
             //
-            // The two admissible pin states, and nothing else: an EMPTY published point set
-            // (nothing to pin, so `template: None` is the complete answer), or a published set
-            // the offer ALREADY carries a declaration for. That `template` is the ENGINE'S OWN
-            // published declaration — the very value `handle_declare_shortcut` will validate —
-            // so there is exactly one pin authority at this node and the AI never constructs
-            // one. An offer with published points and NO declaration (a seat that never
-            // answered, or a `Conflicted` latch) still fail-closes: `declaration` is `None`,
-            // the conjunct below is false, and `DeclineShortcut` remains the only candidate.
-            if schema.is_bounded() && (schema.points.is_empty() || declaration.is_some()) {
+            // The three admissible pin states, and nothing else: an EMPTY published point set
+            // (nothing to pin, so `template: None` is the complete answer), a published set
+            // the offer ALREADY carries a declaration for, or a recorded period the take replays,
+            // whose recorded answers `handle_declare_shortcut` admits with `template: None`. That
+            // `template` is the ENGINE'S OWN published declaration — the very value
+            // `handle_declare_shortcut` will validate — so there is exactly one pin authority at
+            // this node and the AI never constructs one. An offer with an empty period,
+            // published points and NO declaration (a seat that never answered, or a `Conflicted`
+            // latch) still fail-closes: the conjunct below is false, and `DeclineShortcut`
+            // remains the only candidate.
+            // CR 732.2a: THE SUGGESTION, not the capacity — and the two are no longer one number.
+            // The capacity is the widest count SOME legal declaration may specify; the suggestion
+            // is a count the offer's OWN published declaration drives, which is the declaration
+            // this candidate carries (and which `template: None` would resolve to anyway). A
+            // candidate at the capacity opens the CR 732.2b window and is then refused by the
+            // consumption seam's drivability gate, committing zero cycles — the engine refusing
+            // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
+            // one authority for that count, the producer's.
+            //
+            // WILDCARD-FREE over `IterationCount`: a bounded offer publishes `Fixed`, and the
+            // `UntilLethal` arm above already covers the unbounded case, so an `UntilLethal`
+            // suggestion here has no count to name and emits nothing rather than guessing one.
+            let suggested = match schema.iteration_count {
+                crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
+                crate::analysis::decision_template::IterationCount::UntilLethal => None,
+            };
+            if let Some(n) = suggested.filter(|_| {
+                schema.is_bounded()
+                    && (schema.points.is_empty() || declaration.is_some() || !period.is_empty())
+            }) {
                 v.push(candidate(
                     GameAction::DeclareShortcut {
-                        count: crate::analysis::decision_template::IterationCount::Fixed(
-                            schema.max_iterations,
-                        ),
+                        count: crate::analysis::decision_template::IterationCount::Fixed(n),
                         template: declaration.clone(),
                     },
                     TacticalClass::Utility,
@@ -6829,6 +6860,8 @@ mod tests {
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
+            road: crate::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         };
 
         let candidates = candidate_actions(&state);
@@ -9571,14 +9604,14 @@ mod tests {
     /// `WaitingFor::LoopShortcut` anchor exactly once (a counted site in
     /// `tests/integration/loop_shortcut_offer_writer_census.rs`).
     ///
-    /// `ShortcutDecisionSchema::default()` carries `MAX_SHORTCUT_CYCLES`, i.e. `is_bounded()` is
-    /// FALSE — so `max_iterations` is set explicitly below the cap or the row would measure the
-    /// wrong conjunct.
+    /// `ShortcutDecisionSchema::default()` measures no threshold, i.e. `is_bounded()` is FALSE —
+    /// so the measured bound is set explicitly here or the row would measure the wrong conjunct.
     fn d6n_offer(
         declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
     ) -> GameState {
         use crate::analysis::decision_template::{
-            DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
+            ChoicePoint, DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount,
+            ShortcutDecisionSchema,
         };
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::LoopShortcut {
@@ -9593,9 +9626,10 @@ mod tests {
             },
             schema: ShortcutDecisionSchema {
                 iteration_count: IterationCount::Fixed(5),
-                max_iterations: 5,
+                measured_repetition_bound: Some(5),
+                deliverable_capacity: 5,
                 points: vec![DecisionPoint {
-                    slot: DecisionSlot::target(d6n_source()),
+                    slot: DecisionSlot::first(d6n_source(), ChoicePoint::AnnouncedTarget),
                     kind: DecisionPointKind::Targets {
                         legal_targets: vec![TargetRef::Player(PlayerId(0))],
                         min_targets: 1,
@@ -9606,6 +9640,8 @@ mod tests {
                 convoke_tappable_count: 0,
             },
             declaration,
+            road: crate::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
         };
         state
     }
@@ -9642,8 +9678,8 @@ mod tests {
     #[test]
     fn d6n_a_points_carrying_offer_without_a_declaration_enumerates_only_decline() {
         use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
-            PinnedDecision, ReplayMode, TargetPin,
+            ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+            IterationCount, PinnedDecision, ReplayMode, TargetPin,
         };
 
         // ── the negative arm ──
@@ -9672,7 +9708,7 @@ mod tests {
         let declaration = DecisionTemplate {
             owner: D6N_PROPOSER,
             decisions: vec![PinnedDecision::Targets {
-                slot: DecisionSlot::target(d6n_source()),
+                slot: DecisionSlot::first(d6n_source(), ChoicePoint::AnnouncedTarget),
                 targets: vec![TargetPin::Player(PlayerId(0))],
             }],
             replay: ReplayMode::Scheduled {

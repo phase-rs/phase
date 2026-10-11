@@ -523,7 +523,7 @@ fn seed_records(state: &mut GameState) {
         .id;
     state
         .counter_added_this_turn
-        .push(engine::types::game_state::CounterAddedRecord {
+        .push_back(engine::types::game_state::CounterAddedRecord {
             actor: P1,
             object_id: bear,
             counter_type: CounterType::Plus1Plus1,

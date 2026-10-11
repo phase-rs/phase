@@ -14773,6 +14773,235 @@ fn graveyard_cast_permission_gravecrawler_self_ref_condition() {
     }
 }
 
+fn parse_creature_card(
+    text: &str,
+    name: &str,
+    keywords: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+    crate::parser::oracle::parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[])
+}
+
+fn cast_permissions(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> Vec<(StaticMode, Option<TargetFilter>, Vec<Zone>)> {
+    parsed
+        .statics
+        .iter()
+        .filter(|d| matches!(d.mode, StaticMode::GraveyardCastPermission { .. }))
+        .map(|d| (d.mode.clone(), d.affected.clone(), d.active_zones.clone()))
+        .collect()
+}
+
+fn own_unlimited_cast_permission(
+    zones: Vec<Zone>,
+) -> (StaticMode, Option<TargetFilter>, Vec<Zone>) {
+    (
+        StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+            required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
+        },
+        Some(TargetFilter::SelfRef),
+        zones,
+    )
+}
+
+fn holds_cast_from_zone(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+    serde_json::to_string(parsed)
+        .expect("parse serializes")
+        .contains(r#""type":"CastFromZone""#)
+}
+
+fn unimplemented_names(parsed: &crate::parser::oracle::ParsedAbilities) -> Vec<&str> {
+    parsed
+        .abilities
+        .iter()
+        .filter_map(|ability| match &*ability.effect {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 604.6 + CR 113.6f: each self cast-from-exile member's own permission
+/// names exactly the zones it may be cast from.
+#[test]
+fn self_exile_cast_permission_members_parse_to_their_zones() {
+    for (name, text, keywords, zones) in [
+        (
+            "Eternal Scourge",
+            "You may cast this card from exile.\nWhen this creature becomes the target of a spell or ability an opponent controls, exile this creature.",
+            &[][..],
+            vec![Zone::Exile],
+        ),
+        (
+            "Misthollow Griffin",
+            "Flying\nYou may cast this card from exile.",
+            &["Flying"][..],
+            vec![Zone::Exile],
+        ),
+        (
+            "Squee, the Immortal",
+            "You may cast this card from your graveyard or from exile.",
+            &[][..],
+            vec![Zone::Graveyard, Zone::Exile],
+        ),
+    ] {
+        let parsed = parse_creature_card(text, name, keywords);
+        assert_eq!(
+            cast_permissions(&parsed),
+            vec![own_unlimited_cast_permission(zones)],
+            "{name}"
+        );
+        assert!(!holds_cast_from_zone(&parsed), "{name}");
+    }
+
+    let gravecrawler = parse_creature_card(
+        "This creature can't block.\nYou may cast this card from your graveyard as long as you control a Zombie.",
+        "Gravecrawler",
+        &[],
+    );
+    let [permission] = gravecrawler
+        .statics
+        .iter()
+        .filter(|d| matches!(d.mode, StaticMode::GraveyardCastPermission { .. }))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("Gravecrawler statics: {:?}", gravecrawler.statics);
+    };
+    assert_eq!(permission.active_zones, vec![Zone::Graveyard]);
+    assert!(permission.condition.is_some());
+}
+
+/// A granted "You may cast this card from exile as long as …" is the same
+/// permission as its graveyard twin, in exile.
+#[test]
+fn granted_self_exile_cast_permission_matches_its_graveyard_twin() {
+    for exile_line in [
+        "You may cast this card from exile as long as you control a Lukka planeswalker.",
+        "You may cast this card from exile as long as you've cast another spell this turn.",
+    ] {
+        let twin = parse_static_line(&exile_line.replacen("from exile", "from your graveyard", 1))
+            .expect("graveyard twin parses");
+        let modifications = classify_quoted_inner(exile_line);
+        let [ContinuousModification::GrantStaticAbility { definition }] = modifications.as_slice()
+        else {
+            panic!("{exile_line}: {modifications:?}");
+        };
+        assert_eq!(definition.mode, twin.mode, "{exile_line}");
+        assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(definition.active_zones, vec![Zone::Exile]);
+        assert!(twin.condition.is_some());
+        assert_eq!(definition.condition, twin.condition, "{exile_line}");
+    }
+}
+
+/// A self exile permission whose condition text does not parse is not modeled,
+/// directly or as a granted ability.
+#[test]
+fn self_exile_cast_permission_with_unparsed_condition_declines() {
+    let is_permission =
+        |mode: &StaticMode| matches!(mode, StaticMode::GraveyardCastPermission { .. });
+    let granted_permissions = |line: &str| -> Vec<Option<StaticCondition>> {
+        classify_quoted_inner(line)
+            .into_iter()
+            .filter_map(|modification| match modification {
+                ContinuousModification::AddStaticMode { mode } if is_permission(&mode) => {
+                    Some(None)
+                }
+                ContinuousModification::GrantStaticAbility { definition }
+                    if is_permission(&definition.mode) =>
+                {
+                    Some(definition.condition)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let parsed = "You may cast this card from exile as long as you control a Zombie.";
+    let direct = parse_static_line(parsed).expect("parsed condition keeps the permission");
+    assert!(is_permission(&direct.mode) && direct.condition.is_some());
+    assert_eq!(granted_permissions(parsed), vec![direct.condition]);
+
+    let unparsed = "You may cast this card from exile as long as you control a ~ planeswalker.";
+    assert_eq!(
+        (
+            parse_static_line(unparsed).is_some_and(|definition| is_permission(&definition.mode)),
+            granted_permissions(unparsed),
+        ),
+        (false, vec![])
+    );
+}
+
+/// An exile tail outside a card's own unlimited cast permission is not
+/// modeled; a self graveyard permission keeps its zone.
+#[test]
+fn exile_tail_outside_own_unlimited_cast_permission_declines() {
+    for line in [
+        "Once during each of your turns, you may cast this card from exile.",
+        "You may cast this card from exile. If you do, it enters with a finality counter on it.",
+        "You may play this card from exile.",
+    ] {
+        assert!(parse_static_line(line).is_none(), "{line}");
+        let parsed = parse_creature_card(line, "Probe", &[]);
+        assert!(cast_permissions(&parsed).is_empty(), "{line}");
+        assert!(!holds_cast_from_zone(&parsed), "{line}");
+        assert_eq!(unimplemented_names(&parsed), ["static_structure"], "{line}");
+    }
+
+    let that_card = "You may cast that card from exile.";
+    assert!(parse_static_line(that_card).is_none());
+    assert!(holds_cast_from_zone(&parse_creature_card(
+        that_card,
+        "Probe",
+        &[]
+    )));
+
+    let graveyard = parse_static_line("You may cast this card from your graveyard.")
+        .expect("self graveyard permission parses");
+    assert_eq!(
+        (graveyard.mode, graveyard.affected, graveyard.active_zones),
+        own_unlimited_cast_permission(vec![Zone::Graveyard])
+    );
+}
+
+/// Neighbouring "from exile" and "from your graveyard" permissions keep their parse.
+#[test]
+fn neighbouring_cast_permissions_keep_their_parse() {
+    let evelyn = parse_creature_card(
+        "Flash\nWhenever Evelyn or another Vampire you control enters, exile the top card of each player's library with a collection counter on it.\nOnce each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.",
+        "Evelyn, the Covetous",
+        &["Flash"],
+    );
+    assert_eq!(
+        evelyn.statics.iter().map(|d| &d.mode).collect::<Vec<_>>(),
+        [&StaticMode::LinkedCollectionCounterPlayPermission]
+    );
+    assert!(unimplemented_names(&evelyn).is_empty());
+
+    let tinybones = parse_creature_card(
+        "Whenever an opponent discards a card, exile it from their graveyard with a stash counter on it.\nDuring your turn, you may play cards you don't own with stash counters on them from exile, and mana of any type can be spent to cast those spells.\n{3}{B}, {T}: Each opponent discards a card. Activate only as a sorcery.",
+        "Tinybones, Bauble Burglar",
+        &[],
+    );
+    assert!(tinybones.statics.is_empty());
+    assert_eq!(unimplemented_names(&tinybones), ["unknown"]);
+
+    let serra = parse_creature_card(
+        "Flying\nOnce during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard. If you do, it gains \"When this permanent is put into a graveyard from the battlefield, exile it and you gain 2 life.\"",
+        "Serra Paragon",
+        &["Flying"],
+    );
+    assert!(serra.statics.is_empty());
+    assert_eq!(unimplemented_names(&serra), ["static_structure"]);
+}
+
 #[test]
 fn graveyard_cast_permission_marang_river_prowler_color_disjunction_scoped_to_you() {
     let text = "You may cast this card from your graveyard as long as you control a black or green permanent.";

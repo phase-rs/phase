@@ -1845,16 +1845,14 @@ fn push_decision_template(ids: &mut Vec<ObjectId>, template: &DecisionTemplate) 
     }
     for decision in &template.decisions {
         match decision {
-            PinnedDecision::Order { source, .. } => {
-                push_yield_target(ids, source);
-            }
             PinnedDecision::Targets { slot, targets } => {
                 push_decision_slot(ids, slot);
                 for target in targets {
                     push_target_pin(ids, target);
                 }
             }
-            PinnedDecision::Mode { slot, .. }
+            PinnedDecision::Order { slot, .. }
+            | PinnedDecision::Mode { slot, .. }
             | PinnedDecision::MayChoice { slot, .. }
             | PinnedDecision::UnlessBreak { slot, .. }
             | PinnedDecision::ConvokeTaps { slot }

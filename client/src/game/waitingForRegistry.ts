@@ -13,16 +13,17 @@ import type { GameState, WaitingFor } from "../adapter/types";
 
 /**
  * CR 601.2g + CR 107.4f: WaitingFor variants resolved by the single
- * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt and the per-shard
- * `PhyrexianPayment` prompt share one panel because both are caster-only cost
- * decisions for the same spell — `ManaPaymentUI` discriminates internally.
+ * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt, the per-shard
+ * `PhyrexianPayment` prompt, and a mana ability's own payment window
+ * (`ManaAbilityManaPayment`, CR 605.3a) share one panel because all are
+ * caster-only cost decisions — `ManaPaymentUI` discriminates internally.
  *
  * This set is the single source of truth: `GamePage` gates the overlay's
  * mount on it, and `HANDLED_WAITING_FOR_TYPES` spreads it. Wiring the overlay
  * and registering it as "handled" therefore cannot drift apart.
  */
 export const MANA_PAYMENT_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
-  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment"]);
+  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment", "ManaAbilityManaPayment"]);
 
 /**
  * Discriminator strings the frontend has a user-facing UI handler for.
@@ -274,6 +275,7 @@ export function waitingForReason(
     case "PhyrexianPayment":
     case "PayCost":
     case "PayManaAbilityMana":
+    case "ManaAbilityManaPayment":
     case "UnlessPayment":
       return { key: "status.reason.payingCost" };
     case "MulliganDecision":

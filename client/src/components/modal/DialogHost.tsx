@@ -101,7 +101,7 @@ function isClickThroughDialog(
   // `ManaPayment` WaitingFor only ever reaches the UI when board taps are live.)
   // Convoke/improvise (CR 702.51a / CR 702.126a), which additionally tap
   // creatures/artifacts, are a subset of this same click-through behavior.
-  return waitingFor.type === "ManaPayment";
+  return waitingFor.type === "ManaPayment" || waitingFor.type === "ManaAbilityManaPayment";
 }
 
 export function DialogHost({ children }: { children: ReactNode }) {
