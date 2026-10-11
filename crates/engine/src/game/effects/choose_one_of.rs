@@ -6,7 +6,9 @@ use crate::types::ability::{
     AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
+use crate::types::game_state::{
+    GameState, ParentTargetOccurrences, PendingChooseOneOf, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::AppliedReplacementKey;
@@ -48,7 +50,7 @@ pub fn resolve(
             controller: ability.controller,
             source_id: ability.source_id,
             branches,
-            parent_targets: ability.targets.clone(),
+            parent_occurrences: ParentTargetOccurrences::of(ability),
             context: ability.context.clone(),
             continuation: ability.sub_ability.clone(),
             replacement_applied: ability.replacement_applied.clone(),
@@ -68,7 +70,7 @@ pub(crate) struct PromptRequest {
     pub controller: PlayerId,
     pub source_id: ObjectId,
     pub branches: Vec<AbilityDefinition>,
-    pub parent_targets: Vec<TargetRef>,
+    pub parent_occurrences: ParentTargetOccurrences,
     pub context: crate::types::ability::SpellContext,
     pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
@@ -80,7 +82,7 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         controller,
         source_id,
         branches,
-        parent_targets,
+        parent_occurrences,
         context,
         continuation,
         replacement_applied,
@@ -97,7 +99,7 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         source_id,
         branches,
         branch_descriptions,
-        parent_targets,
+        parent_occurrences,
         context,
         continuation,
         replacement_applied,
@@ -127,7 +129,7 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
             controller: pending.controller,
             source_id: pending.source_id,
             branches: pending.branches,
-            parent_targets: pending.parent_targets,
+            parent_occurrences: pending.parent_occurrences,
             context: *pending.context,
             continuation: pending.continuation,
             replacement_applied: pending.replacement_applied,
@@ -141,7 +143,7 @@ pub(crate) struct BranchSelection {
     pub controller: PlayerId,
     pub source_id: ObjectId,
     pub branches: Vec<AbilityDefinition>,
-    pub parent_targets: Vec<TargetRef>,
+    pub parent_occurrences: ParentTargetOccurrences,
     pub context: crate::types::ability::SpellContext,
     pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
@@ -159,7 +161,7 @@ pub(crate) fn resolve_branch(
         controller,
         source_id,
         branches,
-        parent_targets,
+        parent_occurrences,
         context,
         continuation,
         replacement_applied,
@@ -178,7 +180,7 @@ pub(crate) fn resolve_branch(
             controller,
             source_id,
             branches: branches.clone(),
-            parent_targets: parent_targets.clone(),
+            parent_occurrences: parent_occurrences.clone(),
             context: Box::new(context.clone()),
             continuation: continuation.clone(),
             replacement_applied: replacement_applied.clone(),
@@ -188,7 +190,8 @@ pub(crate) fn resolve_branch(
 
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
-    resolved.targets = parent_targets;
+    // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
+    resolved.replace_target_occurrences(parent_occurrences.occurrences());
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
     if !resolved
@@ -196,7 +199,7 @@ pub(crate) fn resolve_branch(
         .iter()
         .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
     {
-        resolved.targets.push(TargetRef::Player(player));
+        resolved.push_target(TargetRef::Player(player));
     }
 
     // CR 608.2c + CR 701.55d: Instructions after a multi-player branch choice

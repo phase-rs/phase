@@ -942,6 +942,7 @@
     "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
     "skipSacrifice": "Skip Sacrifice",
     "keepCurrentTargets": "Keep Current Targets",
+    "keepCurrentTarget": "Keep This Target",
     "skip": "Skip",
     "opponentChoice": "(opponent's choice)"
   },
@@ -2446,7 +2447,8 @@
     "confirm": "Confirm",
     "badgeNewTarget": "New target",
     "slotLabel": "Target {{index}}: {{current}} → {{chosen}}",
-    "unselected": "unchanged"
+    "unselected": "unchanged",
+    "keep": "Keep"
   },
   "separatePiles": {
     "chooserName": "Player {{number}}",

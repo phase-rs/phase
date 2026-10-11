@@ -947,6 +947,7 @@
     "confirmSacrifice": "生け贄に捧げる（{{selected}}/{{count}}）",
     "skipSacrifice": "生け贄に捧げない",
     "keepCurrentTargets": "現在の対象を維持",
+    "keepCurrentTarget": "この対象を維持",
     "skip": "スキップ",
     "opponentChoice": "（対戦相手が選択）"
   },
@@ -2451,7 +2452,8 @@
     "confirm": "確認",
     "badgeNewTarget": "新しい対象",
     "slotLabel": "対象{{index}}：{{current}} → {{chosen}}",
-    "unselected": "変更なし"
+    "unselected": "変更なし",
+    "keep": "維持"
   },
   "separatePiles": {
     "chooserName": "プレイヤー{{number}}",

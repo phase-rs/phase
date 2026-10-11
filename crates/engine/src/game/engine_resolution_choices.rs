@@ -37,7 +37,7 @@ use super::{
 /// settled selection, including clearing a previous result on an empty choice.
 fn bind_dig_continuation_targets(chain: &mut ResolvedAbility, selected: &[ObjectId]) {
     if !node_has_stack_target_declaration(chain) {
-        chain.targets = selected.iter().copied().map(TargetRef::Object).collect();
+        chain.set_unpinned_targets(selected.iter().copied().map(TargetRef::Object).collect());
     }
 }
 
@@ -1467,7 +1467,7 @@ fn finalize_standard_search_selection(
             );
         state.resolving_continuation_attach_host = frame.pending.search_attach_host;
         let targets = search_selection_targets(&frame.pending.chain, player, chosen);
-        frame.pending.chain.targets = targets.clone();
+        frame.pending.chain.set_unpinned_targets(targets.clone());
         propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
         state.push_ability_continuation(frame);
     } else if let Some(continuation) =
@@ -1483,7 +1483,10 @@ fn finalize_standard_search_selection(
             .outer_ability_continuation_of_active_post_replacement_draw_mut()
             .expect("checked paired continuation must remain resident while the draw is active");
         continuation.pending.search_attach_host = search_attach_host;
-        continuation.pending.chain.targets = targets.clone();
+        continuation
+            .pending
+            .chain
+            .set_unpinned_targets(targets.clone());
         propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
     }
     if has_delivery {
@@ -4996,7 +4999,10 @@ pub(super) fn handle_resolution_choice(
                     .clear_active_ability_continuation_or_batch_delivery_child()
                     .expect("accepted reveal cannot clear a buried continuation");
             } else if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                frame.pending.chain.targets = vec![TargetRef::Object(chosen_id)];
+                frame
+                    .pending
+                    .chain
+                    .set_unpinned_targets(vec![TargetRef::Object(chosen_id)]);
                 if optional {
                     frame.pending.chain.context.optional_effect_performed = true;
                 }
@@ -5428,8 +5434,9 @@ pub(super) fn handle_resolution_choice(
             }
 
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                frame.pending.chain.targets =
-                    chosen_ids.iter().map(|&id| TargetRef::Object(id)).collect();
+                frame.pending.chain.set_unpinned_targets(
+                    chosen_ids.iter().map(|&id| TargetRef::Object(id)).collect(),
+                );
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -5653,7 +5660,9 @@ pub(super) fn handle_resolution_choice(
                     }
                     cont.chain.set_effect_context_object_recursive(snapshot);
                 } else {
-                    cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                    cont.chain.set_unpinned_targets(
+                        chosen.iter().map(|&id| TargetRef::Object(id)).collect(),
+                    );
                 }
                 // CR 607.2a + CR 608.2g: A `FreeCastFromZones` continuation
                 // over "the other cards exiled this way" (Plargg and Nassari)
@@ -5674,7 +5683,9 @@ pub(super) fn handle_resolution_choice(
                     cont.chain.effect,
                     crate::types::ability::Effect::FreeCastFromZones { .. }
                 ) {
-                    cont.chain.targets = cards.iter().map(|&id| TargetRef::Object(id)).collect();
+                    cont.chain.set_unpinned_targets(
+                        cards.iter().map(|&id| TargetRef::Object(id)).collect(),
+                    );
                 }
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
                 // to the sub-ability ONLY for the zone-partition pattern
@@ -5708,8 +5719,9 @@ pub(super) fn handle_resolution_choice(
                             next_sub.effect,
                             crate::types::ability::Effect::CastCopyOfCard { .. }
                         ) {
-                            next_sub.targets =
-                                unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                            next_sub.set_unpinned_targets(
+                                unchosen.iter().map(|&id| TargetRef::Object(id)).collect(),
+                            );
                             // CR 608.2c + CR 609.3: hand the sub the completed
                             // empty complement so it is bound to nothing rather
                             // than left unbound. `resolve_chain_body` reads this
@@ -5758,7 +5770,7 @@ pub(super) fn handle_resolution_choice(
                 source_id,
                 branches,
                 branch_descriptions: _,
-                parent_targets,
+                parent_occurrences,
                 context,
                 continuation,
                 replacement_applied,
@@ -5774,7 +5786,7 @@ pub(super) fn handle_resolution_choice(
                     controller,
                     source_id,
                     branches,
-                    parent_targets,
+                    parent_occurrences,
                     context,
                     continuation,
                     replacement_applied,
@@ -10429,7 +10441,7 @@ fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targe
             return;
         };
         if next.targets.is_empty() {
-            next.targets = targets.to_vec();
+            next.set_unpinned_targets(targets.to_vec());
         }
         cursor = next;
     }
@@ -10702,10 +10714,20 @@ mod tests {
                     vec![TargetRef::Object(selected)]
                 }
             );
-            assert_eq!(
-                chain.selected_target_incarnations,
-                before.selected_target_incarnations
-            );
+            // Each rebound occurrence carries the pin of the first prior
+            // occurrence of its object (no pin invented).
+            let expected_pins: Vec<_> = chain
+                .targets
+                .iter()
+                .map(|target| {
+                    before
+                        .target_occurrences()
+                        .into_iter()
+                        .find(|(prior, _)| prior == target)
+                        .and_then(|(_, pin)| pin)
+                })
+                .collect();
+            assert_eq!(chain.aligned_target_pins(), expected_pins);
             assert_eq!(chain.target_incarnations, before.target_incarnations);
             assert_eq!(chain.source_id, before.source_id);
             assert_eq!(chain.controller, before.controller);
@@ -10778,7 +10800,7 @@ mod tests {
             for mut chain in [each.clone(), move_counters] {
                 chain.capture_target_incarnations_recursive(&state);
                 let before = chain.clone();
-                assert!(!chain.selected_target_incarnations.is_empty());
+                assert!(!chain.target_pins.is_empty());
                 bind_dig_continuation_targets(&mut chain, &[objects[3]]);
                 assert_eq!(chain, before);
                 bind_dig_continuation_targets(&mut chain, &[]);

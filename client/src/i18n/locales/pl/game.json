@@ -901,6 +901,7 @@
     },
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
+    "keepCurrentTarget": "Zachowaj ten cel",
     "skip": "Pomiń",
     "opponentChoice": "(wybór przeciwnika)",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -2408,7 +2409,8 @@
     "confirm": "Potwierdź",
     "badgeNewTarget": "Nowy cel",
     "slotLabel": "Cel {{index}}: {{current}} → {{chosen}}",
-    "unselected": "bez zmian"
+    "unselected": "bez zmian",
+    "keep": "Zachowaj"
   },
   "separatePiles": {
     "chooserName": "Gracz {{number}}",

@@ -746,8 +746,8 @@ fn peer_preserves_object_and_independent_splice_targets_and_rechecks_departed_ob
             first
         };
         assert_eq!(pump.targets, vec![TargetRef::Object(target)]);
-        assert_eq!(pump.selected_target_incarnations.len(), 1);
-        let original_pin = pump.selected_target_incarnations[0];
+        assert_eq!(pump.target_pins.len(), 1);
+        let original_pin = pump.target_pins[0].expect("announced pin");
         let mut events = Vec::new();
         if let Some(bounce) = bounce {
             let outcome = runner.cast(bounce).target_object(target).resolve();
@@ -886,7 +886,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
             .sub_ability(tail);
             head.capture_target_incarnations_recursive(runner.state());
             let expected_targets = head.targets.clone();
-            let expected_pins = head.selected_target_incarnations.clone();
+            let expected_pins = head.aligned_target_pins();
             let state = runner.state_mut();
             state.park_ability_continuation(PendingContinuation::new(Box::new(head), state));
             state.waiting_for = WaitingFor::DigChoice {
@@ -906,7 +906,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
             };
             let pending = runner.state().active_ability_continuation().unwrap();
             assert_eq!(pending.chain.targets, expected_targets);
-            assert_eq!(pending.chain.selected_target_incarnations, expected_pins);
+            assert_eq!(pending.chain.aligned_target_pins(), expected_pins);
             assert!(matches!(
                 &pending.chain.sub_ability.as_ref().unwrap().effect,
                 Effect::PutAtLibraryPosition {
@@ -997,7 +997,7 @@ fn paused_dig_action_preserves_own_target_and_binds_settled_result() {
             };
             head.capture_target_incarnations_recursive(runner.state());
             let targets = head.targets.clone();
-            let pins = head.selected_target_incarnations.clone();
+            let pins = head.aligned_target_pins();
             let state = runner.state_mut();
             state.park_ability_continuation(PendingContinuation::new(Box::new(head), state));
             state.waiting_for = WaitingFor::DigChoice {
@@ -1049,7 +1049,7 @@ fn paused_dig_action_preserves_own_target_and_binds_settled_result() {
                     })
                     .expect("the batch parks above the retained continuation");
                 assert_eq!(pending.chain.targets, targets);
-                assert_eq!(pending.chain.selected_target_incarnations, pins);
+                assert_eq!(pending.chain.aligned_target_pins(), pins);
                 assert_eq!(pending.chain.source_id, source);
                 assert_eq!(pending.chain.controller, P0);
                 events.extend(

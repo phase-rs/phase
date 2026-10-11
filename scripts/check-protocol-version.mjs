@@ -61,6 +61,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // to `SpentColor` (word versus symbol provenance, CR 612.2).
 // v124 admits a land-play `rebound_from` in the resolved-rules journal
 // (Library/Graveyard/Exile -> Battlefield).
+// v127 folds FilterProp's attachment-referent siblings into
+// `FilterProp::AttachedTo { to: AttachmentReferent }`, and makes retarget
+// picks positional (`RetargetSpell` nullable picks, copy-walk keep fields).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -125,7 +128,10 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +53: v124 admits a land-play `rebound_from` in the resolved-rules journal.
 // +54: v125 adds `free_reveals_taken` to `MulliganDecisionEntry` and `MulliganDeclaration`.
 // +55: v126 adds `arrival` (owner and controller held by the destination object) to `ZoneChangeRecord`.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 55;
+// +56: v127 folds the FilterProp attachment-referent siblings into
+//      FilterProp::AttachedTo and makes retarget picks positional (reserved as
+//      v119 and then v121 while under review; it landed after v126).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 56;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -206,7 +212,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +52: wire 106 moves with full-game v124 for the land-play journal `rebound_from`.
 // +53: wire 107 moves with full-game v125 for the mulligan free-reveal count.
 // +54: wire 108 moves with full-game v126 for the zone-change record's arrival identity.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 54;
+// +55: wire 109 moves with full-game v127 for the FilterProp::AttachedTo reshape.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 55;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

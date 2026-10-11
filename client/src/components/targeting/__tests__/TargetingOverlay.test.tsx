@@ -573,9 +573,10 @@ describe("TargetingOverlay", () => {
           player: 0,
           copy_id: 233,
           target_slots: [
-            { current: { Player: 0 }, legal_alternatives: [{ Player: 0 }, { Player: 1 }] },
+            { current: { Player: 0 }, legal_alternatives: [{ Player: 1 }], can_keep: true },
           ],
           current_slot: 0,
+          can_keep_rest: true,
         },
       },
     });
@@ -596,6 +597,89 @@ describe("TargetingOverlay", () => {
 
     expect(dispatch).toHaveBeenCalledWith({
       type: "KeepAllCopyTargets",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep This Target" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: null },
+    });
+  });
+
+  it("hides both keep buttons when the engine does not offer keeping", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    // CR 115.7d: the current target is present, but keeping it has no legal
+    // completion, so the engine reports `can_keep: false` and
+    // `can_keep_rest: false`; the overlay must not offer either keep.
+    const gameState = createGameState({
+      waiting_for: {
+        type: "CopyRetarget",
+        data: {
+          player: 0,
+          copy_id: 234,
+          target_slots: [
+            { current: { Object: 61 }, legal_alternatives: [{ Object: 91 }], can_keep: false },
+          ],
+          current_slot: 0,
+          can_keep_rest: false,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    // Positive reach guard: the copy prompt itself rendered, so the absences
+    // below are the engine's permissions, not an overlay that never mounted.
+    expect(screen.getByText("Choose new target for copy")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keep Current Targets" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Keep This Target" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+  });
+
+  it("shows Skip for a copy announcement slot the engine lets the player decline", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    // CR 115.6: an optional announcement slot ("up to two target creatures")
+    // may be declined; the engine reports it as `can_decline`, not as a keep.
+    const gameState = createGameState({
+      waiting_for: {
+        type: "CopyRetarget",
+        data: {
+          player: 0,
+          copy_id: 235,
+          target_slots: [
+            { legal_alternatives: [{ Object: 61 }, { Object: 91 }], can_decline: true },
+            { legal_alternatives: [{ Object: 61 }, { Object: 91 }] },
+          ],
+          current_slot: 0,
+          mode: "Announce",
+          can_keep_rest: false,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.queryByRole("button", { name: "Keep This Target" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: null },
     });
   });
 

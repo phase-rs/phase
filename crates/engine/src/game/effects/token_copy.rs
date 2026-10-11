@@ -190,9 +190,15 @@ pub fn resolve(
                 .any(|t| matches!(t, TargetRef::Player(_)))
             {
                 let mut narrowed = ability.clone();
-                narrowed
+                // An occurrence projection: object occurrences keep their pins.
+                let objects: Vec<usize> = narrowed
                     .targets
-                    .retain(|t| matches!(t, TargetRef::Object(_)));
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
+                    .map(|(position, _)| position)
+                    .collect();
+                narrowed.project_target_occurrences(&objects);
                 object_only_ability = narrowed;
                 &object_only_ability
             } else {

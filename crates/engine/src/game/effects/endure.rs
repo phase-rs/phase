@@ -128,7 +128,7 @@ pub fn resolve(
             controller: enduring_controller,
             source_id: enduring_id,
             branches,
-            parent_targets: ability.targets.clone(),
+            parent_occurrences: crate::types::game_state::ParentTargetOccurrences::of(ability),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
             continuation: None,

@@ -899,6 +899,7 @@
     },
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
+    "keepCurrentTarget": "Conservar este objetivo",
     "skip": "Omitir",
     "opponentChoice": "(elección del oponente)",
     "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
@@ -2408,7 +2409,8 @@
     "confirm": "Confirmar",
     "badgeNewTarget": "Nuevo objetivo",
     "slotLabel": "Objetivo {{index}}: {{current}} → {{chosen}}",
-    "unselected": "sin cambios"
+    "unselected": "sin cambios",
+    "keep": "Conservar"
   },
   "separatePiles": {
     "chooserName": "Jugador {{number}}",

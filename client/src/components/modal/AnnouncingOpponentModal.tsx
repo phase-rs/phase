@@ -1,26 +1,22 @@
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, PlayerId, WaitingFor } from "../../adapter/types.ts";
+import type { AnnouncerElection, GameAction, PlayerId } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { announcerElectionOf } from "./announcerElection.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
 
-type AnnouncingOpponentWaitingFor = Extract<
-  WaitingFor,
-  { type: "ChooseAnnouncingOpponent" }
->;
-
 interface AnnouncingOpponentModalContentProps {
-  waitingFor: AnnouncingOpponentWaitingFor;
+  election: AnnouncerElection;
   seatOrder?: PlayerId[];
   dispatch: (action: GameAction) => void | Promise<void>;
 }
 
 function targetLabel(
-  targetType: AnnouncingOpponentWaitingFor["data"]["target_type"],
+  targetType: AnnouncerElection["target_type"],
   t: TFunction<"game">,
 ) {
   if (targetType === "Land") return t("announcingOpponent.targetLand");
@@ -34,12 +30,12 @@ function targetLabel(
  * declaration begins.
  */
 export function AnnouncingOpponentModalContent({
-  waitingFor,
+  election,
   seatOrder,
   dispatch,
 }: AnnouncingOpponentModalContentProps) {
   const { t } = useTranslation("game");
-  const candidates = [...waitingFor.data.candidates].sort((a, b) => {
+  const candidates = [...election.candidates].sort((a, b) => {
     const aIdx = seatOrder?.indexOf(a) ?? a;
     const bIdx = seatOrder?.indexOf(b) ?? b;
     return aIdx - bIdx;
@@ -48,13 +44,13 @@ export function AnnouncingOpponentModalContent({
   return (
     <ChoiceModal
       title={t("announcingOpponent.title", {
-        current: waitingFor.data.choice_index,
-        total: waitingFor.data.choice_count,
+        current: election.choice_index,
+        total: election.choice_count,
       })}
       subtitle={t("announcingOpponent.subtitle", {
-        target: targetLabel(waitingFor.data.target_type, t),
-        current: waitingFor.data.choice_index,
-        total: waitingFor.data.choice_count,
+        target: targetLabel(election.target_type, t),
+        current: election.choice_index,
+        total: election.choice_count,
       })}
       options={candidates.map((opponent) => ({
         id: String(opponent),
@@ -76,12 +72,13 @@ export function AnnouncingOpponentModal() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
 
-  if (waitingFor?.type !== "ChooseAnnouncingOpponent") return null;
+  const election = announcerElectionOf(waitingFor);
+  if (!election) return null;
   if (!canActForWaitingState) return null;
 
   return (
     <AnnouncingOpponentModalContent
-      waitingFor={waitingFor}
+      election={election}
       seatOrder={seatOrder}
       dispatch={dispatch}
     />

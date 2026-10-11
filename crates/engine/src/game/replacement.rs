@@ -3851,7 +3851,7 @@ fn stamp_explore_chain(
 ) {
     ability.replacement_applied = applied.clone();
     if !matches!(&ability.effect, Effect::Scry { .. }) {
-        ability.targets = vec![TargetRef::Object(explorer)];
+        ability.set_unpinned_targets(vec![TargetRef::Object(explorer)]);
     }
     if let Some(sub) = ability.sub_ability.as_deref_mut() {
         stamp_explore_chain(sub, explorer, applied);
@@ -4004,7 +4004,7 @@ fn connive_applier(
                 ..
             } => {
                 let mut ability = build_resolved_from_def(def, rid.source, controller);
-                ability.targets = vec![TargetRef::Object(object_id)];
+                ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
                 let connive_count = crate::game::quantity::resolve_quantity_with_targets(
                     state,
                     connive_count_expr,
@@ -4041,7 +4041,7 @@ fn connive_applier(
                 let mut single = def.clone();
                 single.sub_ability = None;
                 let mut ability = build_resolved_from_def(&single, rid.source, controller);
-                ability.targets = vec![TargetRef::Object(object_id)];
+                ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
                 let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
 
                 // CR 701.50a + CR 614.5 + CR 616.1f: if this draw link parked an
@@ -4074,7 +4074,7 @@ fn connive_applier(
                         {
                             let mut next_ability =
                                 build_resolved_from_def(next, rid.source, controller);
-                            next_ability.targets = vec![TargetRef::Object(object_id)];
+                            next_ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
                             let connive_count =
                                 crate::game::quantity::resolve_quantity_with_targets(
                                     state,
@@ -5321,7 +5321,7 @@ fn untap_applier(
         let mut current = Some(execute.as_ref());
         while let Some(def) = current {
             let mut ability = build_resolved_from_def(def, object_id, controller);
-            ability.targets = vec![TargetRef::Object(object_id)];
+            ability.set_unpinned_targets(vec![TargetRef::Object(object_id)]);
             let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
             current = def.sub_ability.as_deref();
         }

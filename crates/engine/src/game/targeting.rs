@@ -85,6 +85,30 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
     )
 }
 
+/// CR 601.2c + CR 115.7: legal targets for a slot whose filter reads another
+/// declared target slot (`FilterProp::AttachedTo { to: DeclaredTarget }`),
+/// evaluated against `view` — the selected-slot prefix during announcement, or
+/// the edited selection during retargeting. Mirrors
+/// [`find_legal_targets_for_ability_with_controller`] with the view bound.
+pub(crate) fn find_legal_targets_for_ability_with_view(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    source_controller: PlayerId,
+    view: &[Option<DeclaredSlotBinding>],
+) -> Vec<TargetRef> {
+    let target_ctx =
+        super::filter::FilterContext::from_ability_with_controller(ability, source_controller)
+            .with_declared_slot_view(view);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        source_controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
 /// Enumerate object targets for per-opponent fanout where filter membership is
 /// bound to the opponent named by the effect (for example, "that player
 /// controls"), while CR 115.1 + CR 702.11b targeting restrictions are still
@@ -738,7 +762,7 @@ fn triggering_spell_resolved_ability(
     let mut resolved =
         crate::game::ability_utils::build_resolved_from_def(&def, spell_id, controller);
     if let Some(targets) = super::restrictions::triggering_spell_targets(state, spell_id) {
-        resolved.targets = targets;
+        resolved.set_unpinned_targets(targets);
     }
     Some(resolved)
 }
@@ -1453,6 +1477,85 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     resolve_parent_slot_from_root(state, ability, index).filter(|target| match target {
         TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
         TargetRef::Player(_) => true,
+    })
+}
+
+/// CR 601.2c + CR 608.2b: one position of a declared-target view supplied to a
+/// legality evaluation (target announcement, CR 608.2b validation, CR 115.7 /
+/// CR 707.10c retargeting). The two shapes keep an elected choice distinct from
+/// an announced target, so an unchanged announced reference is never rebound to
+/// a later object that reuses its storage id (CR 400.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredSlotBinding {
+    /// A target already announced for this slot, with the pin its declaring
+    /// node recorded. A missing pin answers nothing.
+    Announced {
+        target: TargetRef,
+        pin: Option<crate::types::identifiers::ObjectIncarnationRef>,
+    },
+    /// A target being chosen in this very choice — the live object, by
+    /// definition current (CR 601.2c).
+    Elected(TargetRef),
+}
+
+/// CR 601.2c + CR 400.7: the object a declared-slot referent names on the
+/// resolution path, with the announcement pin that identifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SlotReferent {
+    pub(crate) id: ObjectId,
+    pub(crate) pin: crate::types::identifiers::ObjectIncarnationRef,
+}
+
+/// CR 608.2c + CR 608.2b + CR 400.7: the object declared for slot `slot`
+/// (counted from `parent_slot_base`, the `declared_targets_in_chain`
+/// numbering) of the resolving chain `ability` belongs to, with the pin its
+/// DECLARING node recorded.
+///
+/// `None` when:
+/// - no stack entry carries `ability` — there is no chain to count from, and
+///   the node's own slots must never stand in for the chain's;
+/// - the slot failed the CR 608.2b legality check made as the chain began to
+///   resolve (an illegal target supplies no information), or that check did
+///   not judge it (an unjudged `PassThrough` occurrence supplies none either);
+/// - the slot holds a player, or is out of range;
+/// - the declaring node recorded no pin (a missing pin is never recovered from
+///   the live row).
+pub(crate) fn declared_slot_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    slot: usize,
+) -> Option<SlotReferent> {
+    let carried = resolution_carrier_entry(state, ability).is_some()
+        || state
+            .stack
+            .iter()
+            .any(|entry| entry_carries_ability(entry, ability));
+    if !carried {
+        return None;
+    }
+    let illegal_at_resolution = resolution_carrier_entry(state, ability)
+        .and_then(StackEntry::ability)
+        .is_some_and(|root| {
+            let base = parent_slot_base(state, ability);
+            let ahead = super::ability_utils::declared_slots_ahead_of(root, base);
+            // CR 608.2b: an illegal slot, or one the check did not judge
+            // (`PassThrough`), supplies no information.
+            root.illegal_target_slots.contains(&(ahead + slot))
+                || root.unjudged_target_slots.contains(&(ahead + slot))
+        });
+    if illegal_at_resolution {
+        return None;
+    }
+    let entry =
+        super::ability_utils::declared_target_entries_in_chain(parent_slot_base(state, ability))
+            .into_iter()
+            .nth(slot)?;
+    let TargetRef::Object(id) = entry.target else {
+        return None;
+    };
+    Some(SlotReferent {
+        id,
+        pin: entry.pin?,
     })
 }
 

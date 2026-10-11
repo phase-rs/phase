@@ -1040,7 +1040,7 @@ fn triggered_your_owner_survives_source_control_change_or_removal() {
             .sub_ability
             .as_ref()
             .unwrap()
-            .selected_target_pin_is_current(gy[0][2], r.state()));
+            .target_occurrence_is_current(0, r.state()));
         if !remove_source {
             r.act(GameAction::PassPriority).unwrap();
         }
@@ -1080,7 +1080,7 @@ fn selected_owner_target_does_not_follow_a_new_incarnation() {
             .sub_ability
             .as_ref()
             .unwrap();
-        assert!(selected.selected_target_pin_is_current(gy[0][2], r.state()));
+        assert!(selected.target_occurrence_is_current(0, r.state()));
         let old = r.state().objects[&gy[0][2]].incarnation;
         if round_trip {
             // CR 400.7 + CR 608.2b: an independent public-zone round trip invalidates the announced target.
@@ -1105,7 +1105,7 @@ fn selected_owner_target_does_not_follow_a_new_incarnation() {
                 .sub_ability
                 .as_ref()
                 .unwrap();
-            assert!(!selected.selected_target_pin_is_current(gy[0][2], r.state()));
+            assert!(!selected.target_occurrence_is_current(0, r.state()));
         }
         r.advance_until_stack_empty();
         assert_zones(

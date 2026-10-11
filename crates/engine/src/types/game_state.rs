@@ -83,6 +83,9 @@ use crate::analysis::resource::{
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, BlockHistoryPair, CombatState};
 use crate::game::deck_loading::DeckEntry;
+use crate::game::target_occurrences::{
+    legacy_keyed_pins_to_positional, pins_align_with, TargetPinAlignmentError,
+};
 use crate::game::triggers::trigger_source_context_for_latch;
 
 use crate::game::game_object::{AttachTarget, BackFaceData, CaseState, GameObject, PhaseStatus};
@@ -4754,6 +4757,71 @@ pub struct PendingRepeatUntil {
     pub stop_progress: Option<RepeatUntilStopWitness>,
 }
 
+/// CR 400.7 + CR 608.2c: a parent's target OCCURRENCES carried outside any
+/// `ResolvedAbility` (a resolution-time branch choice and its queued frame):
+/// the targets and, aligned with them, each occurrence's announced pin.
+///
+/// Decoded through a validating `Deserialize` (`remote = "Self"`): an absent or
+/// empty pin list is the legacy unpinned form; a nonempty list must align with
+/// `targets` through the shared alignment authority (`pins_align_with`), or the
+/// owner fails to decode. Flattened into its owners, so the wire keys stay
+/// `parent_targets` / `parent_target_pins`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
+pub struct ParentTargetOccurrences {
+    #[serde(
+        rename = "parent_targets",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub targets: Vec<TargetRef>,
+    #[serde(
+        rename = "parent_target_pins",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub pins: Vec<Option<ObjectIncarnationRef>>,
+}
+
+impl Serialize for ParentTargetOccurrences {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ParentTargetOccurrences::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ParentTargetOccurrences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let carrier = ParentTargetOccurrences::deserialize(deserializer)?;
+        crate::game::target_occurrences::pins_align_with(&carrier.targets, &carrier.pins)
+            .map_err(serde::de::Error::custom)?;
+        Ok(carrier)
+    }
+}
+
+impl ParentTargetOccurrences {
+    /// The occurrences `ability` holds now, pins included.
+    pub fn of(ability: &super::ability::ResolvedAbility) -> Self {
+        let pins = ability.aligned_target_pins();
+        Self {
+            targets: ability.targets.clone(),
+            pins: if pins.iter().all(Option::is_none) {
+                Vec::new()
+            } else {
+                pins
+            },
+        }
+    }
+
+    /// The carried occurrences as `(target, pin)` pairs.
+    pub fn occurrences(&self) -> Vec<(TargetRef, Option<ObjectIncarnationRef>)> {
+        self.targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| (target.clone(), self.pins.get(index).copied().flatten()))
+            .collect()
+    }
+}
+
 /// CR 701.55d: Remaining players queued to face the same resolution-time
 /// branch choice after the current chosen branch finishes resolving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4761,8 +4829,10 @@ pub struct PendingChooseOneOf {
     pub controller: PlayerId,
     pub source_id: ObjectId,
     pub branches: Vec<AbilityDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parent_targets: Vec<TargetRef>,
+    /// CR 400.7 + CR 608.2c: the parent's target occurrences the chosen branch
+    /// inherits (wire keys `parent_targets` / `parent_target_pins`).
+    #[serde(flatten)]
+    pub parent_occurrences: ParentTargetOccurrences,
     /// Boxed to keep the serializable resolution-frame enum compact. `Box` is
     /// serde-transparent, so suspended-game wire payloads remain unchanged.
     #[serde(default)]
@@ -13945,6 +14015,22 @@ pub enum PersistedRestoreError {
     PrioritySettlementFailed(String),
     #[error("persisted per-player choice cannot be restored: {0}")]
     InvalidPerPlayerChoice(String),
+    /// CR 707.10c / CR 601.2c: a parked copy target walk is structurally
+    /// malformed (its mode, decided picks, cursor or copy disagree).
+    #[error("persisted copy target walk cannot be restored: {0}")]
+    InvalidCopyTargetWalk(String),
+    /// CR 601.2c + CR 722.3c: a parked fresh-copy announcement (an old save,
+    /// reconstructed) has no legal announcement on the restored board. The
+    /// copy's cast is already recorded (CR 733.1), so it is neither resumable
+    /// nor silently undone: restore refuses the state.
+    #[error("persisted copy announcement for {copy_id:?} has no legal announcement and is not resumable")]
+    NonResumableCopyAnnouncement { copy_id: ObjectId },
+    /// CR 601.2c + CR 115.1: a parked copy announcement (an older save) has
+    /// announced targets while an "of an opponent's choice" group still has
+    /// no elected announcer. The election precedes every target, and is
+    /// never inferred, so the save is not resumable.
+    #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
+    UnelectedCopyAnnouncer { copy_id: ObjectId },
 }
 
 impl PreparedPersistedGameState {
@@ -14122,6 +14208,13 @@ impl PersistedGameState {
     /// Decode and repair a persisted state before runtime-only data is
     /// rehydrated. No priority pass, Resolve All resume, or other player action
     /// is manufactured here.
+    ///
+    /// CR 400.7: target-occurrence pins are validated where they are DECODED
+    /// (`ResolvedAbility`, `StackResolutionEntryFence` and
+    /// `ParentTargetOccurrences` deserialize through validating impls), not
+    /// here. A `PersistedGameState` built in memory by `capture` and handed
+    /// straight to this function never crosses that boundary: it is trusted
+    /// native state, whose pins the occurrence authority's writers kept aligned.
     pub fn prepare_for_restore(
         self,
         finalization: PersistedRestoreFinalization,
@@ -15113,8 +15206,10 @@ pub enum WaitingFor {
         /// Display labels for each branch, derived from branch ability descriptions.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         branch_descriptions: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        parent_targets: Vec<TargetRef>,
+        /// CR 400.7 + CR 608.2c: the parent's target occurrences the chosen
+        /// branch inherits (wire keys `parent_targets` / `parent_target_pins`).
+        #[serde(flatten)]
+        parent_occurrences: ParentTargetOccurrences,
         #[serde(default)]
         context: super::ability::SpellContext,
         /// CR 608.2c: Runtime continuation that follows the complete modal
@@ -16616,7 +16711,16 @@ pub enum WaitingFor {
     /// CR 707.10c: When a spell is copied, the controller may choose new targets.
     /// Each slot shows the current target and legal alternatives.
     CopyRetarget {
+        /// The player answering THIS prompt: the copy's controller, or, for an
+        /// announcement slot "of an opponent's choice", that slot's chooser
+        /// (CR 601.2c + CR 115.1).
         player: PlayerId,
+        /// CR 112.2: the copy's controller, when it differs from the player
+        /// answering this prompt. Finalization, priority and the
+        /// continuation/Paradigm handoff go to the controller. `None` means
+        /// `player` (every prompt the controller answers, and every older save).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<PlayerId>,
         copy_id: ObjectId,
         target_slots: Vec<CopyTargetSlot>,
         /// Effect metadata emitted when this retarget choice completes.
@@ -16631,6 +16735,32 @@ pub enum WaitingFor {
         /// chosen (issue #3660).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         paradigm_remaining_offers: Option<Vec<ObjectId>>,
+        /// CR 707.10c / CR 722.3c + CR 702.192a: which operation this walk is
+        /// — choosing new targets for a copy that holds targets, or announcing
+        /// a freshly cast copy's targets. `None` only on a pre-mode save; the
+        /// restore hook infers it from the walk's shape and never overwrites
+        /// an explicit mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<CopyChoiceMode>,
+        /// The decided prefix, aligned with `target_slots`
+        /// (`current_slot == picks.len()`): `None` keeps that position's
+        /// announced target (CR 707.10c), `Some(t)` chooses `t`. `None` (the
+        /// field absent) only on a pre-picks save, rebuilt at restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picks: Option<Vec<Option<TargetRef>>>,
+        /// CR 707.10c: engine-derived: keeping every remaining position's
+        /// current target completes a legal final set. Gates
+        /// `GameAction::KeepAllCopyTargets`.
+        #[serde(default)]
+        can_keep_rest: bool,
+        /// CR 601.2c + CR 115.1 (CR 707.12): an announcement walk's opening
+        /// step: the copy's controller chooses which opponent announces the
+        /// next "of an opponent's choice" target group, answered with
+        /// `GameAction::ChooseAnnouncingOpponent`. While set, no target slot
+        /// is being answered (`target_slots` is empty). Engine-derived at
+        /// every open, advance and restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        announcer_election: Option<AnnouncerElection>,
     },
     /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
     /// CR 702.19b/c: Trample requires lethal to each blocker before assigning excess.
@@ -16761,6 +16891,12 @@ pub enum WaitingFor {
         ///     "helpfully" collapse an all-empty `slot_pools` to `Vec::new()`.
         #[serde(default)]
         slot_pools: Vec<Vec<TargetRef>>,
+        /// CR 115.7d + CR 400.7: per position, whether keeping the announced
+        /// target and choosing the same object id name DIFFERENT objects (the
+        /// announced incarnation is gone, so choosing the id elects the
+        /// returned object). Engine-derived, for display only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep_is_distinct: Vec<bool>,
         /// CR 115.7d: the UNION — BASE's cascade verbatim, extended with every
         /// `slot_pools` member not already present. Read by `interaction.rs`'s
         /// projection and by the frontend, both of which stay width- and
@@ -16820,6 +16956,49 @@ pub struct CopyTargetSlot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<TargetRef>,
     pub legal_alternatives: Vec<TargetRef>,
+    /// CR 115.7d: where this position lives in the copy's chain (a retarget
+    /// walk). `None` for an announcement slot of a freshly cast copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<RetargetSlotAddress>,
+    /// CR 707.10c: engine-derived: keeping this position's current target
+    /// still admits a legal completion. Gates `ChooseTarget { target: None }`
+    /// in a retarget walk.
+    #[serde(default)]
+    pub can_keep: bool,
+    /// CR 115.6 + CR 601.2c: engine-derived: this announcement slot is
+    /// optional and declining it ("up to N") still completes. Gates
+    /// `ChooseTarget { target: None }` in an announcement walk. Distinct from
+    /// `can_keep`: there is no announced target to keep.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_decline: bool,
+}
+
+/// CR 601.2c + CR 115.1: one announcing-opponent election of a copy
+/// announcement walk. The same facts `WaitingFor::ChooseAnnouncingOpponent`
+/// carries for an ordinary cast, without a `PendingCast`: the copy is already
+/// on the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncerElection {
+    /// The choosable opponents.
+    pub candidates: Vec<PlayerId>,
+    /// One-based position of this opponent-choice group among the spell's.
+    pub choice_index: usize,
+    pub choice_count: usize,
+    /// The group's primary type constraint (a display fact only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_type: Option<crate::types::card_type::CoreType>,
+}
+
+/// CR 707.10c / CR 722.3c: the two operations a `WaitingFor::CopyRetarget`
+/// walk can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyChoiceMode {
+    /// CR 707.10c: a copy that holds targets; the controller may choose new
+    /// ones, leaving any unchanged.
+    Retarget,
+    /// CR 722.3c + CR 702.192a: a freshly cast copy announces its targets;
+    /// every position must be chosen and nothing can be kept.
+    Announce,
 }
 
 /// CR 510.1c: Optional combat-damage assignment mode for attackers with text like
@@ -18246,7 +18425,12 @@ impl<'de> Deserialize<'de> for StackResolutionBudget {
 /// the same entry authorized when a resolution session began. It reads only
 /// data stored on the entry; in particular it never rebinds a departed source
 /// through the live object map (CR 400.7 / CR 113.7a).
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): a legacy
+/// keyed pin list is folded into positional pins against the fence's OWN
+/// captured provenance, and misaligned or doubly-encoded pins are refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct StackResolutionEntryFence {
     pub entry_id: ObjectId,
     pub source_id: ObjectId,
@@ -18254,8 +18438,15 @@ pub struct StackResolutionEntryFence {
     pub provenance: StackResolutionEntryProvenance,
     /// CR 400.7 / CR 603.7c: delayed-trigger referent pins.
     pub target_incarnations: Vec<ObjectIncarnationRef>,
-    /// CR 400.7 / CR 601.2c: ordinary selected-target pins.
-    pub selected_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 400.7 / CR 601.2c: the captured entry's occurrence pins, aligned
+    /// with its provenance ability's `targets`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// Decode-only carrier for the pre-positional keyed fence pins; always
+    /// empty after decoding (folded into `target_pins` against the fence's
+    /// OWN captured provenance, never a later live entry).
+    #[serde(rename = "selected_target_incarnations", default, skip_serializing)]
+    pub legacy_selected_target_incarnations: Vec<ObjectIncarnationRef>,
 }
 
 /// Exhaustive provenance of one stack-entry kind. Keeping every field that is
@@ -18299,6 +18490,22 @@ pub struct TriggeredAbilityProvenance {
     subject_match_count: Option<u32>,
     die_result: Option<i32>,
     provenance: Option<SyntheticTriggerProvenance>,
+}
+
+impl Serialize for StackResolutionEntryFence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        StackResolutionEntryFence::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StackResolutionEntryFence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut fence = StackResolutionEntryFence::deserialize(deserializer)?;
+        fence
+            .normalize_decoded_target_pins()
+            .map_err(serde::de::Error::custom)?;
+        Ok(fence)
+    }
 }
 
 impl StackResolutionEntryFence {
@@ -18357,15 +18564,21 @@ impl StackResolutionEntryFence {
                 assignments: assignments.clone(),
             },
         };
-        let (target_incarnations, selected_target_incarnations) = entry
+        let (target_incarnations, target_pins) = entry
             .ability()
             .map(|ability| {
                 (
                     ability.target_incarnations.clone(),
-                    ability.selected_target_incarnations.clone(),
+                    ability.aligned_target_pins(),
                 )
             })
             .unwrap_or_default();
+        // Compact form: an all-unpinned entry stores no pins.
+        let target_pins = if target_pins.iter().all(Option::is_none) {
+            Vec::new()
+        } else {
+            target_pins
+        };
 
         Self {
             entry_id: entry.id,
@@ -18373,8 +18586,39 @@ impl StackResolutionEntryFence {
             controller: entry.controller,
             provenance,
             target_incarnations,
-            selected_target_incarnations,
+            target_pins,
+            legacy_selected_target_incarnations: Vec::new(),
         }
+    }
+
+    /// The ability captured in this fence's own provenance, if any.
+    fn provenance_ability(&self) -> Option<&ResolvedAbility> {
+        match &self.provenance {
+            StackResolutionEntryProvenance::Spell { ability, .. } => ability.as_deref(),
+            StackResolutionEntryProvenance::ActivatedAbility { ability, .. } => Some(ability),
+            StackResolutionEntryProvenance::TriggeredAbility(triggered) => Some(&triggered.ability),
+            StackResolutionEntryProvenance::KeywordAction { .. }
+            | StackResolutionEntryProvenance::CombatDamage { .. } => None,
+        }
+    }
+
+    /// CR 400.7: the fence decode boundary. A fence carrying both encodings
+    /// is refused BEFORE either is consumed; a legacy keyed list is folded
+    /// into positional pins against the fence's own provenance ability; the
+    /// result must align with that ability's targets.
+    fn normalize_decoded_target_pins(&mut self) -> Result<(), TargetPinAlignmentError> {
+        let targets: Vec<TargetRef> = self
+            .provenance_ability()
+            .map(|ability| ability.targets.clone())
+            .unwrap_or_default();
+        if !self.legacy_selected_target_incarnations.is_empty() {
+            if !self.target_pins.is_empty() {
+                return Err(TargetPinAlignmentError::AmbiguousLegacyAlias);
+            }
+            let legacy = std::mem::take(&mut self.legacy_selected_target_incarnations);
+            self.target_pins = legacy_keyed_pins_to_positional(&targets, &legacy);
+        }
+        pins_align_with(&targets, &self.target_pins)
     }
 
     /// Compares captured stack data only. This stays correct even when the
@@ -38428,6 +38672,232 @@ mod tests {
         );
     }
 
+    /// Rewrite every positional pin vector in a persisted wire into the
+    /// pre-positional keyed form (`selected_target_incarnations`: the pinned
+    /// objects in order), exactly as the base writer emitted it.
+    fn to_legacy_pin_wire(value: &mut serde_json::Value) -> usize {
+        let mut rewritten = 0;
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(pins) = map.remove("target_pins") {
+                    let keyed: Vec<serde_json::Value> = pins
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|pin| !pin.is_null())
+                        .cloned()
+                        .collect();
+                    map.insert(
+                        "selected_target_incarnations".to_string(),
+                        serde_json::Value::Array(keyed),
+                    );
+                    rewritten += 1;
+                }
+                for child in map.values_mut() {
+                    rewritten += to_legacy_pin_wire(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    rewritten += to_legacy_pin_wire(child);
+                }
+            }
+            _ => {}
+        }
+        rewritten
+    }
+
+    /// A state holding `ability` both on the stack and parked as an ability
+    /// continuation (a resolution-frame owner, not a stack sub-chain).
+    fn pinned_stack_and_parked_state(ability: ResolvedAbility) -> GameState {
+        let mut state = GameState::default();
+        state.stack.push_back(StackEntry {
+            id: ObjectId(6),
+            source_id: ObjectId(7),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(7),
+                ability: Box::new(ability.clone()),
+            },
+        });
+        let pending = PendingContinuation::new(Box::new(ability), &state);
+        state.park_ability_continuation(pending);
+        state
+    }
+
+    fn pinned_ability(pins: Vec<Option<ObjectIncarnationRef>>) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(8)),
+            ],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.target_pins = pins;
+        ability
+    }
+
+    fn restore_wire(wire: serde_json::Value) -> Result<GameState, String> {
+        serde_json::from_value::<PersistedGameState>(wire)
+            .map_err(|error| error.to_string())?
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .map_err(|error| error.to_string())?
+            .finalize_immediately()
+            .map_err(|error| error.to_string())
+    }
+
+    /// CR 400.7 (R10-1): both ChooseOneOf carriers of parent occurrences
+    /// (the prompt and its queued frame) refuse at decode a pin naming another
+    /// object, a length drift, and a pinned player; an absent or empty pin
+    /// list (the legacy unpinned form) and an aligned list decode.
+    #[test]
+    fn choose_one_of_parent_occurrences_are_validated_at_decode() {
+        let aligned = ParentTargetOccurrences {
+            targets: vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(8)),
+            ],
+            pins: vec![None, Some(ObjectIncarnationRef::of(ObjectId(8), 3))],
+        };
+        let prompt = WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(0),
+            controller: PlayerId(0),
+            source_id: ObjectId(7),
+            branches: Vec::new(),
+            branch_descriptions: Vec::new(),
+            parent_occurrences: aligned.clone(),
+            context: Default::default(),
+            continuation: None,
+            replacement_applied: HashSet::new(),
+            remaining_players: Vec::new(),
+        };
+        let frame = PendingChooseOneOf {
+            controller: PlayerId(0),
+            source_id: ObjectId(7),
+            branches: Vec::new(),
+            parent_occurrences: aligned,
+            context: Default::default(),
+            continuation: None,
+            replacement_applied: HashSet::new(),
+            remaining_players: Vec::new(),
+        };
+        let prompt_wire = serde_json::to_value(&prompt).unwrap();
+        let frame_wire = serde_json::to_value(&frame).unwrap();
+        // Wire keys are unchanged by the carrier.
+        assert!(prompt_wire["data"].get("parent_targets").is_some());
+        assert!(prompt_wire["data"].get("parent_target_pins").is_some());
+        assert!(frame_wire.get("parent_target_pins").is_some());
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(prompt_wire.clone()).unwrap(),
+            prompt
+        );
+        assert_eq!(
+            serde_json::from_value::<PendingChooseOneOf>(frame_wire.clone()).unwrap(),
+            frame
+        );
+
+        let corruptions: [(&str, serde_json::Value); 3] = [
+            (
+                "different object",
+                serde_json::json!([null, ObjectIncarnationRef::of(ObjectId(9), 3)]),
+            ),
+            (
+                "not aligned",
+                serde_json::json!([ObjectIncarnationRef::of(ObjectId(8), 3)]),
+            ),
+            (
+                "player",
+                serde_json::json!([ObjectIncarnationRef::of(ObjectId(8), 3), null]),
+            ),
+        ];
+        for (expected, pins) in corruptions {
+            let mut bad_prompt = prompt_wire.clone();
+            bad_prompt["data"]["parent_target_pins"] = pins.clone();
+            let error = serde_json::from_value::<WaitingFor>(bad_prompt)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "prompt: {error}");
+            let mut bad_frame = frame_wire.clone();
+            bad_frame["parent_target_pins"] = pins;
+            let error = serde_json::from_value::<PendingChooseOneOf>(bad_frame)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "frame: {error}");
+        }
+
+        // Legacy: no pin key at all, or an empty list, is unpinned.
+        let mut legacy = frame_wire;
+        legacy.as_object_mut().unwrap().remove("parent_target_pins");
+        let decoded = serde_json::from_value::<PendingChooseOneOf>(legacy.clone()).unwrap();
+        assert!(decoded.parent_occurrences.pins.is_empty());
+        assert_eq!(decoded.parent_occurrences.targets.len(), 2);
+        legacy["parent_target_pins"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<PendingChooseOneOf>(legacy).is_ok());
+    }
+
+    /// CR 400.7 (R9-1): a legacy-keyed save restores, re-saves and restores
+    /// again with NO occurrence write in between, and keeps its pins on the
+    /// stack ability and on the parked continuation.
+    #[test]
+    fn legacy_pins_survive_restore_resave_restore() {
+        let pinned = ObjectIncarnationRef::of(ObjectId(8), 3);
+        let state = pinned_stack_and_parked_state(pinned_ability(vec![None, Some(pinned)]));
+        let mut wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        assert_eq!(to_legacy_pin_wire(&mut wire), 2, "reach: both owners keyed");
+        let first = restore_wire(wire).expect("legacy save restores");
+        let resaved = serde_json::to_value(PersistedGameState::capture(first)).unwrap();
+        let second = restore_wire(resaved).expect("re-save restores");
+        let expected = vec![None, Some(pinned)];
+        assert_eq!(
+            second.stack[0].ability().unwrap().target_pins,
+            expected,
+            "the stack ability keeps its legacy pin"
+        );
+        assert_eq!(
+            second
+                .active_ability_continuation()
+                .expect("the parked continuation survives")
+                .chain
+                .target_pins,
+            expected,
+            "the parked continuation keeps its legacy pin"
+        );
+    }
+
+    /// CR 400.7 (R9-2): the restore boundary refuses, with an error and never
+    /// a panic, a parked continuation whose pin names another object, has a
+    /// length drift, or pins a player; the aligned control restores.
+    #[test]
+    fn restore_refuses_misaligned_pins_on_a_parked_owner() {
+        let restore_parked = |pins: Vec<Option<ObjectIncarnationRef>>| {
+            let mut state = pinned_stack_and_parked_state(pinned_ability(vec![]));
+            state
+                .take_active_ability_continuation()
+                .expect("parked")
+                .expect("parked");
+            let pending = PendingContinuation::new(Box::new(pinned_ability(pins)), &state);
+            state.park_ability_continuation(pending);
+            let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+            restore_wire(wire).map(|_| ())
+        };
+        let identity =
+            restore_parked(vec![None, Some(ObjectIncarnationRef::of(ObjectId(9), 1))]).unwrap_err();
+        assert!(identity.contains("different object"), "{identity}");
+        let length =
+            restore_parked(vec![Some(ObjectIncarnationRef::of(ObjectId(8), 1))]).unwrap_err();
+        assert!(length.contains("not aligned"), "{length}");
+        let player =
+            restore_parked(vec![Some(ObjectIncarnationRef::of(ObjectId(8), 1)), None]).unwrap_err();
+        assert!(player.contains("player"), "{player}");
+        assert_eq!(
+            restore_parked(vec![None, Some(ObjectIncarnationRef::of(ObjectId(8), 1))]),
+            Ok(()),
+            "control: an aligned parked pin restores"
+        );
+    }
+
     #[test]
     fn stack_resolution_entry_fence_uses_latched_lki_and_both_target_pin_vectors() {
         let mut ability = ResolvedAbility::new(
@@ -38438,7 +38908,7 @@ mod tests {
         );
         ability.source_incarnation = Some(3);
         ability.target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 4)];
-        ability.selected_target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 5)];
+        ability.target_pins = vec![Some(ObjectIncarnationRef::of(ObjectId(8), 5))];
         let entry = StackEntry {
             id: ObjectId(6),
             source_id: ObjectId(7),
@@ -38458,8 +38928,8 @@ mod tests {
             vec![ObjectIncarnationRef::of(ObjectId(8), 4)]
         );
         assert_eq!(
-            fence.selected_target_incarnations,
-            vec![ObjectIncarnationRef::of(ObjectId(8), 5)]
+            fence.target_pins,
+            vec![Some(ObjectIncarnationRef::of(ObjectId(8), 5))]
         );
         assert!(
             fence.matches_captured_entry(&entry),
@@ -38474,14 +38944,97 @@ mod tests {
         );
 
         let mut changed_selected_pin = entry;
-        changed_selected_pin
-            .ability_mut()
-            .unwrap()
-            .selected_target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 10)];
+        changed_selected_pin.ability_mut().unwrap().target_pins =
+            vec![Some(ObjectIncarnationRef::of(ObjectId(8), 10))];
         assert!(
             !fence.matches_captured_entry(&changed_selected_pin),
             "ordinary selected-target pins are independently fenced"
         );
+    }
+
+    /// CR 400.7: a legacy keyed fence is normalized against its OWN captured
+    /// provenance (first matching pin per occurrence, players none), never
+    /// against a later live entry; a misaligned fence pin is refused.
+    #[test]
+    fn stack_resolution_entry_fence_normalizes_legacy_pins_against_its_provenance() {
+        let a = ObjectId(8);
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(a),
+                TargetRef::Object(a),
+            ],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.target_pins = vec![
+            None,
+            Some(ObjectIncarnationRef::of(a, 5)),
+            Some(ObjectIncarnationRef::of(a, 5)),
+        ];
+        let entry = StackEntry {
+            id: ObjectId(6),
+            source_id: ObjectId(7),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(7),
+                ability: Box::new(ability),
+            },
+        };
+        let captured = StackResolutionEntryFence::capture(&entry);
+        let positional = serde_json::to_value(&captured).unwrap();
+        // The pre-positional wire: keyed pins on the fence AND on its
+        // captured provenance ability.
+        let mut legacy = positional.clone();
+        let keyed = serde_json::json!([
+            ObjectIncarnationRef::of(a, 5),
+            ObjectIncarnationRef::of(a, 6)
+        ]);
+        legacy.as_object_mut().unwrap().remove("target_pins");
+        legacy["selected_target_incarnations"] = keyed.clone();
+        let provenance_ability = &mut legacy["provenance"]["data"]["ability"];
+        provenance_ability
+            .as_object_mut()
+            .expect("activated provenance carries its ability")
+            .remove("target_pins");
+        provenance_ability["selected_target_incarnations"] = keyed.clone();
+        let fence: StackResolutionEntryFence = serde_json::from_value(legacy).unwrap();
+        assert!(fence.legacy_selected_target_incarnations.is_empty());
+        assert_eq!(
+            fence.target_pins,
+            vec![
+                None,
+                Some(ObjectIncarnationRef::of(a, 5)),
+                Some(ObjectIncarnationRef::of(a, 5)),
+            ]
+        );
+        assert_eq!(
+            fence, captured,
+            "normalized legacy fence equals its re-capture"
+        );
+        assert!(fence.matches_captured_entry(&entry));
+        // R9-1: a re-save carries the positional reading on the fence and on
+        // its provenance ability, so a second decode is identical.
+        let resaved: StackResolutionEntryFence =
+            serde_json::from_value(serde_json::to_value(&fence).unwrap()).unwrap();
+        assert_eq!(resaved, captured);
+
+        // R9-2: a fence carrying BOTH encodings is refused before either is
+        // consumed; a fence pin naming another object is refused.
+        let mut both = positional.clone();
+        both["selected_target_incarnations"] = keyed;
+        let ambiguous = serde_json::from_value::<StackResolutionEntryFence>(both)
+            .unwrap_err()
+            .to_string();
+        assert!(ambiguous.contains("legacy"), "{ambiguous}");
+        let mut forged = positional;
+        forged["target_pins"][1] =
+            serde_json::to_value(ObjectIncarnationRef::of(ObjectId(9), 1)).unwrap();
+        let identity = serde_json::from_value::<StackResolutionEntryFence>(forged)
+            .unwrap_err()
+            .to_string();
+        assert!(identity.contains("different object"), "{identity}");
     }
 
     #[test]
@@ -42570,7 +43123,7 @@ mod tests {
                 },
             )],
             branch_descriptions: vec!["Draw a card.".to_string()],
-            parent_targets: vec![],
+            parent_occurrences: ParentTargetOccurrences::default(),
             context: crate::types::ability::SpellContext::default(),
             continuation: None,
             replacement_applied: Default::default(),

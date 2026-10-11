@@ -164,6 +164,47 @@ impl TriggerZoneChangeProvenance {
     }
 }
 
+/// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
+/// an effect chain, for resolving a demonstrative ("that creature") to the
+/// declared slot it names. Only the stable prefix is numbered: once a clause
+/// announces a variable number of targets ("up to one target …", "any number
+/// of target …"), a declined slot would renumber every later declared slot at
+/// runtime, so that clause's slots and every later slot are recorded without
+/// an index — they still take part in ambiguity checks but cannot be bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeclaredSlotRegistry {
+    /// A clause shape whose declared numbering this walk cannot reproduce
+    /// (multi-slot effects, else-branches, …). Nothing binds.
+    Indeterminate,
+    /// Every announced slot of the earlier clauses, in declared order.
+    Known(Vec<DeclaredSlotEntry>),
+}
+
+impl Default for DeclaredSlotRegistry {
+    fn default() -> Self {
+        DeclaredSlotRegistry::Known(Vec::new())
+    }
+}
+
+/// One announced target slot of an earlier clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredSlotEntry {
+    /// The declared-slot index (the `declared_targets_in_chain` numbering),
+    /// `None` past the stable prefix.
+    pub index: Option<usize>,
+    /// The slot's target filter, matched against a demonstrative's noun.
+    pub filter: TargetFilter,
+}
+
+/// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
+/// of a modal spell or ability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum BodyScope {
+    #[default]
+    WholeAbility,
+    ModalMode,
+}
+
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
 /// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,6 +606,20 @@ pub(crate) struct ParseContext {
     /// lowered through them). `None` on the first chunk of every chain and on
     /// every standalone parse. Never serialized.
     pub chain_declared_object_target: Option<TargetFilter>,
+    /// CR 601.2c + CR 608.2c: every target slot announced by the EARLIER clauses
+    /// of this effect chain, in declared order, with its declared-slot index
+    /// where that index is exactly computable (see [`DeclaredSlotRegistry`]).
+    /// Same lifecycle as `chain_declared_object_target`: taken before the chunk
+    /// loop, reassigned as the first statement of every iteration as a pure
+    /// function of the pushed clauses, restored after. Empty on every standalone
+    /// parse. Never serialized.
+    pub chain_declared_slots: DeclaredSlotRegistry,
+    /// CR 700.2: whether the text being parsed is one mode of a modal spell or
+    /// ability. Declared-slot numbering is mode-local at runtime
+    /// (`targeting::parent_slot_base`), so declared-slot referents are not
+    /// admitted inside a mode. Set to `ModalMode` on each mode's context by
+    /// `parse_modal_mode_irs`; `WholeAbility` everywhere else.
+    pub body_scope: BodyScope,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
