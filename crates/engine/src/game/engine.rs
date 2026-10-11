@@ -43,6 +43,7 @@ use super::casting_costs;
 use super::companion;
 use super::crew_payment;
 use super::effects;
+use super::effects::{attribute_to_paused_clause, ClauseSite};
 use super::end_continuous_effect;
 use super::engine_casting;
 use super::engine_combat;
@@ -11298,6 +11299,24 @@ pub(super) fn auto_advance_settling_deferral(
     }
 }
 
+/// What a bracketed answer arm of [`apply_non_priority_pass_action`] hands back:
+/// the prompt its answer left (the dispatch continues below the match), or the
+/// arm's complete result, returned as is.
+enum AnswerArm {
+    Continue(WaitingFor),
+    Return(ActionResult),
+}
+
+/// An early-returned result carries the arm's whole moved event buffer.
+impl effects::MovedEvents for Result<AnswerArm, EngineError> {
+    fn moved_events(&self) -> Option<&[GameEvent]> {
+        match self {
+            Ok(AnswerArm::Return(result)) => Some(result.events.as_slice()),
+            Ok(AnswerArm::Continue(_)) | Err(_) => None,
+        }
+    }
+}
+
 fn apply_non_priority_pass_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -11377,7 +11396,14 @@ fn apply_non_priority_pass_action(
                 epoch,
                 representative,
             },
-        ) => revoke_resolve_all_consent(state, epoch, representative)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, _events| {
+                revoke_resolve_all_consent(state, epoch, representative)
+            },
+        )?,
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
@@ -11642,14 +11668,21 @@ fn apply_non_priority_pass_action(
                     },
             },
             GameAction::ChooseAdventureFace { creature },
-        ) => casting::handle_adventure_choice_with_payment_mode(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *object_id,
-            *card_id,
-            creature,
-            *payment_mode,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                casting::handle_adventure_choice_with_payment_mode(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    creature,
+                    *payment_mode,
+                    events,
+                )
+            },
         )?,
         // CR 712.12 (land face) / CR 712.11b (spell face): Player chooses which
         // face of an MDFC to play (land) or cast (spell).
@@ -11661,45 +11694,52 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => {
-            if state.priority_player
-                != turn_control::authorized_submitter_for_player(state, *player)
-            {
-                return Err(EngineError::NotYourPriority);
-            }
-            let permission_index = casting::current_resolution_cast_permission_index(
-                state,
-                *player,
-                *object_id,
-                *card_id,
-            )
-            .ok_or_else(|| {
-                EngineError::ActionNotAllowed(
-                    "Only a resolution-owned modal face election may be cancelled".to_string(),
-                )
-            })?;
-            let cleanup = casting::take_resolution_cast_cleanup(
-                state,
-                *player,
-                *object_id,
-                *card_id,
-                permission_index,
-            )
-            ?
-            .ok_or_else(|| {
-                EngineError::InvalidAction(
-                    "Resolution face choice permission provenance is stale or mismatched"
-                        .to_string(),
-                )
-            })?;
-            crate::game::engine_resolution_choices::abort_resolution_cast(
-                state,
-                *player,
-                *object_id,
-                cleanup,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if state.priority_player
+                        != turn_control::authorized_submitter_for_player(state, *player)
+                    {
+                        return Err(EngineError::NotYourPriority);
+                    }
+                    let permission_index = casting::current_resolution_cast_permission_index(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                    )
+                    .ok_or_else(|| {
+                        EngineError::ActionNotAllowed(
+                            "Only a resolution-owned modal face election may be cancelled".to_string(),
+                        )
+                    })?;
+                    let cleanup = casting::take_resolution_cast_cleanup(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        permission_index,
+                    )
+                    ?
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Resolution face choice permission provenance is stale or mismatched"
+                                .to_string(),
+                        )
+                    })?;
+                    crate::game::engine_resolution_choices::abort_resolution_cast(
+                        state,
+                        *player,
+                        *object_id,
+                        cleanup,
+                        events,
+                    )?
+                })
+            },
+        )?,
         (
             WaitingFor::ModalFaceChoice {
                 player,
@@ -11709,118 +11749,130 @@ fn apply_non_priority_pass_action(
                 resolution_additional_cost,
             },
             GameAction::ChooseModalFace { back_face },
-        ) => {
-            if state.priority_player
-                != turn_control::authorized_submitter_for_player(state, *player)
-            {
-                return Err(EngineError::NotYourPriority);
-            }
-            let resolution_permission = casting::current_resolution_cast_permission_index(
-                state,
-                *player,
-                *object_id,
-                *card_id,
-            );
-            // Validate the exact indexed paid-cleanup root before changing the
-            // visible face or its election flags. A forged receipt must leave
-            // the prompt, object, permissions, triggers, journal, and events
-            // byte-for-byte untouched.
-            if let Some(permission_index) = resolution_permission {
-                let cleanup = state
-                    .objects
-                    .get(object_id)
-                    .and_then(|object| object.casting_permissions.get(permission_index.0))
-                    .and_then(|permission| match permission {
-                        crate::types::ability::CastingPermission::ExileWithAltCost {
-                            granted_to: Some(grantee),
-                            resolution_cleanup: Some(cleanup),
-                            ..
-                        } if *grantee == *player => Some(cleanup.clone()),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        EngineError::InvalidAction(
-                            "Resolution face choice permission provenance is stale or mismatched"
-                                .to_string(),
-                        )
-                    })?;
-                crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
-                    *player, &cleanup,
-                )?;
-                crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
-                    state, &cleanup,
-                )?;
-            }
-            // A resolution-owned election has not announced anything yet.  If
-            // the selected face later fails its exact permission policy, put
-            // the object (including the appended temporary permission) back
-            // exactly as the public prompt exposed it.
-            let resolution_object_before = resolution_permission
-                .as_ref()
-                .and_then(|_| state.objects.get(object_id).cloned());
-            if let Some(obj) = state.objects.get_mut(object_id) {
-                if back_face {
-                    // Swap to back face — the shared swap preserves the stored
-                    // slot's layout_kind (#7565).
-                    super::printed_cards::swap_object_faces(obj);
-                    // CR 712.8a (MDFC) / CR 709.3 (split): non-front face showing;
-                    // `apply_zone_exit_cleanup` reverts when leaving the stack.
-                    obj.modal_back_face = true;
-                }
-                // CR 601.2b (#7565): remember that THIS cast's face choice is
-                // made so the handle_play_land / handle_cast_spell re-entry
-                // does not re-prompt. A transient flag, NOT
-                // `back_face.layout_kind = None`: that erasure was permanent,
-                // so a recast from hand (Rescue, bounce) silently auto-picked
-                // the front face and every other layout_kind consumer went
-                // blind. Cleared on any zone change off the stack and on
-                // cancel.
-                obj.cast_face_committed = true;
-            }
-            if let Some(permission_index) = resolution_permission {
-                let result = casting::continue_resolution_modal_face_choice(
-                    state,
-                    *player,
-                    *object_id,
-                    casting::ResolutionModalFaceChoice {
-                        permission_index,
-                        payment_mode: *payment_mode,
-                        additional_cost: resolution_additional_cost.clone(),
-                    },
-                    &mut events,
-                );
-                if result.is_err() {
-                    if let Some(object) = resolution_object_before {
-                        state.objects.insert(*object_id, object);
+        ) => match attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<AnswerArm, EngineError> {
+                Ok(AnswerArm::Continue({
+                    if state.priority_player
+                        != turn_control::authorized_submitter_for_player(state, *player)
+                    {
+                        return Err(EngineError::NotYourPriority);
                     }
-                }
-                return result.map(|waiting_for| ActionResult::applied(std::mem::take(&mut events), waiting_for));
-            }
-            // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
-            // type. A land face is put onto the battlefield via the play-land
-            // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
-            // // The Prismatic Bridge). After a swap
-            // the new back_face (from snapshot_object_face) has layout_kind: None,
-            // and a front-face choice clears it explicitly — so neither the
-            // both-faces-land intercept nor the spell-face intercept re-fires.
-            let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
-                obj.card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
+                    let resolution_permission = casting::current_resolution_cast_permission_index(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                    );
+                    // Validate the exact indexed paid-cleanup root before changing the
+                    // visible face or its election flags. A forged receipt must leave
+                    // the prompt, object, permissions, triggers, journal, and events
+                    // byte-for-byte untouched.
+                    if let Some(permission_index) = resolution_permission {
+                        let cleanup = state
+                            .objects
+                            .get(object_id)
+                            .and_then(|object| object.casting_permissions.get(permission_index.0))
+                            .and_then(|permission| match permission {
+                                crate::types::ability::CastingPermission::ExileWithAltCost {
+                                    granted_to: Some(grantee),
+                                    resolution_cleanup: Some(cleanup),
+                                    ..
+                                } if *grantee == *player => Some(cleanup.clone()),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                EngineError::InvalidAction(
+                                    "Resolution face choice permission provenance is stale or mismatched"
+                                        .to_string(),
+                                )
+                            })?;
+                        crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+                            *player, &cleanup,
+                        )?;
+                        crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+                            state, &cleanup,
+                        )?;
+                    }
+                    // A resolution-owned election has not announced anything yet.  If
+                    // the selected face later fails its exact permission policy, put
+                    // the object (including the appended temporary permission) back
+                    // exactly as the public prompt exposed it.
+                    let resolution_object_before = resolution_permission
+                        .as_ref()
+                        .and_then(|_| state.objects.get(object_id).cloned());
+                    if let Some(obj) = state.objects.get_mut(object_id) {
+                        if back_face {
+                            // Swap to back face — the shared swap preserves the stored
+                            // slot's layout_kind (#7565).
+                            super::printed_cards::swap_object_faces(obj);
+                            // CR 712.8a (MDFC) / CR 709.3 (split): non-front face showing;
+                            // `apply_zone_exit_cleanup` reverts when leaving the stack.
+                            obj.modal_back_face = true;
+                        }
+                        // CR 601.2b (#7565): remember that THIS cast's face choice is
+                        // made so the handle_play_land / handle_cast_spell re-entry
+                        // does not re-prompt. A transient flag, NOT
+                        // `back_face.layout_kind = None`: that erasure was permanent,
+                        // so a recast from hand (Rescue, bounce) silently auto-picked
+                        // the front face and every other layout_kind consumer went
+                        // blind. Cleared on any zone change off the stack and on
+                        // cancel.
+                        obj.cast_face_committed = true;
+                    }
+                    if let Some(permission_index) = resolution_permission {
+                        let result = casting::continue_resolution_modal_face_choice(
+                            state,
+                            *player,
+                            *object_id,
+                            casting::ResolutionModalFaceChoice {
+                                permission_index,
+                                payment_mode: *payment_mode,
+                                additional_cost: resolution_additional_cost.clone(),
+                            },
+                            events,
+                        );
+                        if result.is_err() {
+                            if let Some(object) = resolution_object_before {
+                                state.objects.insert(*object_id, object);
+                            }
+                        }
+                        return result.map(|waiting_for| {
+                AnswerArm::Return(ActionResult::applied(std::mem::take(events), waiting_for))
             });
-            if active_is_land {
-                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
-            } else {
-                casting::handle_cast_spell_with_payment_mode(
-                    state,
-                    *player,
-                    *object_id,
-                    *card_id,
-                    *payment_mode,
-                    &mut events,
-                )?
-            }
-        }
+                    }
+                    // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
+                    // type. A land face is put onto the battlefield via the play-land
+                    // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
+                    // // The Prismatic Bridge). After a swap
+                    // the new back_face (from snapshot_object_face) has layout_kind: None,
+                    // and a front-face choice clears it explicitly — so neither the
+                    // both-faces-land intercept nor the spell-face intercept re-fires.
+                    let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
+                        obj.card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Land)
+                    });
+                    if active_is_land {
+                        handle_play_land(state, *player, *object_id, *card_id, events)?
+                    } else {
+                        casting::handle_cast_spell_with_payment_mode(
+                            state,
+                            *player,
+                            *object_id,
+                            *card_id,
+                            *payment_mode,
+                            events,
+                        )?
+                    }
+                }))
+            },
+        )? {
+            AnswerArm::Continue(waiting_for) => waiting_for,
+            AnswerArm::Return(result) => return Ok(result),
+        },
         // CR 118.9: Player chooses between the printed mana cost and the
         // keyword-granted alternative cost. The `keyword` axis on the waiting
         // state drives dispatch to the per-keyword post-payment handler
@@ -11838,203 +11890,210 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseAlternativeCast { choice },
-        ) => {
-            use crate::types::game_state::AlternativeCastKeyword;
-            match keyword {
-                AlternativeCastKeyword::Warp => casting::handle_warp_cost_choice_with_payment_mode(
-                    state,
-                    *player,
-                    *object_id,
-                    *card_id,
-                    choice,
-                    *payment_mode,
-                    &mut events,
-                )?,
-                AlternativeCastKeyword::Evoke => {
-                    casting::handle_evoke_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Emerge => {
-                    casting::handle_emerge_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Dash => {
-                    casting::handle_dash_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Blitz => {
-                    casting::handle_blitz_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Spectacle => {
-                    casting::handle_spectacle_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Prowl => {
-                    casting::handle_prowl_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Overload => {
-                    casting::handle_overload_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Bestow => {
-                    casting::handle_bestow_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Awaken => {
-                    casting::handle_awaken_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Mutate => {
-                    // CR 702.140a: Handle the mutate alternative cost choice.
-                    casting::handle_mutate_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Cleave => {
-                    casting::handle_cleave_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::MoreThanMeetsTheEye => {
-                    casting::handle_mtmte_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Impending => {
-                    // CR 702.176a: Handle the impending alternative cost choice during casting.
-                    casting::handle_impending_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Prototype => {
-                    // CR 702.160a: Handle the prototype alternative cost choice during casting.
-                    casting::handle_prototype_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::FaceDown => {
-                    // CR 702.37c / CR 702.168b: Handle the "cast normally vs cast
-                    // face down for {3}" choice for a Morph/Megamorph/Disguise card.
-                    casting::handle_face_down_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-                AlternativeCastKeyword::Surge => {
-                    // CR 702.117a: Handle the "cast normally vs cast for the surge
-                    // cost" choice.
-                    casting::handle_surge_cost_choice_with_payment_mode(
-                        state,
-                        *player,
-                        *object_id,
-                        *card_id,
-                        choice,
-                        *payment_mode,
-                        &mut events,
-                    )?
-                }
-            }
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    use crate::types::game_state::AlternativeCastKeyword;
+                    match keyword {
+                        AlternativeCastKeyword::Warp => casting::handle_warp_cost_choice_with_payment_mode(
+                            state,
+                            *player,
+                            *object_id,
+                            *card_id,
+                            choice,
+                            *payment_mode,
+                            events,
+                        )?,
+                        AlternativeCastKeyword::Evoke => {
+                            casting::handle_evoke_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Emerge => {
+                            casting::handle_emerge_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Dash => {
+                            casting::handle_dash_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Blitz => {
+                            casting::handle_blitz_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Spectacle => {
+                            casting::handle_spectacle_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Prowl => {
+                            casting::handle_prowl_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Overload => {
+                            casting::handle_overload_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Bestow => {
+                            casting::handle_bestow_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Awaken => {
+                            casting::handle_awaken_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Mutate => {
+                            // CR 702.140a: Handle the mutate alternative cost choice.
+                            casting::handle_mutate_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Cleave => {
+                            casting::handle_cleave_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::MoreThanMeetsTheEye => {
+                            casting::handle_mtmte_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Impending => {
+                            // CR 702.176a: Handle the impending alternative cost choice during casting.
+                            casting::handle_impending_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Prototype => {
+                            // CR 702.160a: Handle the prototype alternative cost choice during casting.
+                            casting::handle_prototype_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::FaceDown => {
+                            // CR 702.37c / CR 702.168b: Handle the "cast normally vs cast
+                            // face down for {3}" choice for a Morph/Megamorph/Disguise card.
+                            casting::handle_face_down_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                        AlternativeCastKeyword::Surge => {
+                            // CR 702.117a: Handle the "cast normally vs cast for the surge
+                            // cost" choice.
+                            casting::handle_surge_cost_choice_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                choice,
+                                *payment_mode,
+                                events,
+                            )?
+                        }
+                    }
+                })
+            },
+        )?,
         (
             WaitingFor::CastingVariantChoice {
                 player,
@@ -12044,15 +12103,22 @@ fn apply_non_priority_pass_action(
                 options,
             },
             GameAction::ChooseCastingVariant { index },
-        ) => casting::handle_casting_variant_choice_with_payment_mode(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *object_id,
-            *card_id,
-            options,
-            index,
-            *payment_mode,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                casting::handle_casting_variant_choice_with_payment_mode(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    options,
+                    index,
+                    *payment_mode,
+                    events,
+                )
+            },
         )?,
         // CR 110.4: Player chose which permanent type slot to consume for a
         // multi-type graveyard cast via OncePerTurnPerPermanentType (Muldrotha).
@@ -12067,37 +12133,62 @@ fn apply_non_priority_pass_action(
                 permission,
             },
             GameAction::ChoosePermanentTypeSlot { slot },
-        ) => {
-            if !available_slots.contains(&slot) {
-                return Err(EngineError::InvalidAction(
-                    "Selected permanent type is not available for this cast".to_string(),
-                ));
-            }
-            let is_land_play = slot == crate::types::card_type::CoreType::Land;
-            if is_land_play {
-                state.pending_permanent_type_slot = Some((*source, slot));
-                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
-            } else {
-                casting::handle_permanent_type_slot_choice_with_payment_mode(
-                    state,
-                    *player,
-                    *object_id,
-                    *card_id,
-                    *source,
-                    slot,
-                    permission.as_ref(),
-                    *payment_mode,
-                    &mut events,
-                )?
-            }
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if !available_slots.contains(&slot) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected permanent type is not available for this cast".to_string(),
+                        ));
+                    }
+                    let is_land_play = slot == crate::types::card_type::CoreType::Land;
+                    if is_land_play {
+                        state.pending_permanent_type_slot = Some((*source, slot));
+                        handle_play_land(state, *player, *object_id, *card_id, events)?
+                    } else {
+                        casting::handle_permanent_type_slot_choice_with_payment_mode(
+                            state,
+                            *player,
+                            *object_id,
+                            *card_id,
+                            *source,
+                            slot,
+                            permission.as_ref(),
+                            *payment_mode,
+                            events,
+                        )?
+                    }
+                })
+            },
+        )?,
         // CR 110.4: Cancel during slot choice — return to priority.
-        (WaitingFor::ChoosePermanentTypeSlot { player, .. }, GameAction::CancelCast) => {
-            WaitingFor::Priority { player: *player }
-        }
-        (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
-            casting::handle_select_modes(state, *player, indices, &mut events)?
-        }
+        (
+            WaitingFor::ChoosePermanentTypeSlot { player, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |_state, _events| -> Result<WaitingFor, EngineError> {
+                Ok(WaitingFor::Priority { player: *player })
+            },
+        )?,
+        (
+            WaitingFor::ModeChoice { player, .. },
+            GameAction::SelectModes { indices },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    casting::handle_select_modes(state, *player, indices, events)?
+                })
+            },
+        )?,
         (
             WaitingFor::ModeChoice {
                 player,
@@ -12105,23 +12196,50 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
-        (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
-            engine_casting::handle_target_selection_select_targets(
-                state,
-                *player,
-                targets,
-                &mut events,
-            )?
-        }
-        (WaitingFor::TargetSelection { player, .. }, GameAction::ChooseTarget { target }) => {
-            engine_casting::handle_target_selection_choose_target(
-                state,
-                *player,
-                target,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
+        (
+            WaitingFor::TargetSelection { player, .. },
+            GameAction::SelectTargets { targets },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    engine_casting::handle_target_selection_select_targets(
+                        state,
+                        *player,
+                        targets,
+                        events,
+                    )?
+                })
+            },
+        )?,
+        (
+            WaitingFor::TargetSelection { player, .. },
+            GameAction::ChooseTarget { target },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    engine_casting::handle_target_selection_choose_target(
+                        state,
+                        *player,
+                        target,
+                        events,
+                    )?
+                })
+            },
+        )?,
         (
             WaitingFor::TargetSelection {
                 player,
@@ -12129,7 +12247,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         (
             WaitingFor::OptionalCostChoice {
                 player,
@@ -12138,13 +12263,20 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::DecideOptionalCost { pay },
-        ) => engine_casting::handle_optional_cost_choice(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            cost,
-            pay,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::handle_optional_cost_choice(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    cost,
+                    pay,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::OptionalCostChoice {
@@ -12153,7 +12285,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         (
             WaitingFor::ChooseGiftRecipient {
                 player,
@@ -12161,7 +12300,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 702.47a–e: Splice — caster reveals a card to splice onto the spell
         // (re-offering for the rest), or declines to finish and proceed to targets.
         (
@@ -12171,13 +12317,20 @@ fn apply_non_priority_pass_action(
                 eligible,
             },
             GameAction::RespondToSpliceOffer { card },
-        ) => splice::resolve_offer(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            eligible.clone(),
-            card,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                splice::resolve_offer(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    eligible.clone(),
+                    card,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::SpliceOffer {
@@ -12186,7 +12339,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 601.2b: Defiler cycle — player decides whether to pay life for mana reduction.
         (
             WaitingFor::DefilerPayment {
@@ -12197,15 +12357,22 @@ fn apply_non_priority_pass_action(
                 pending_cast,
             },
             GameAction::DecideOptionalCost { pay },
-        ) => engine_casting::handle_defiler_payment(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            *life_cost,
-            mana_reduction,
-            *reach,
-            pay,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::handle_defiler_payment(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *life_cost,
+                    mana_reduction,
+                    *reach,
+                    pay,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::DefilerPayment {
@@ -12214,7 +12381,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 601.2f: "If multiple cost reductions apply, the player may apply
         // them in any order." The caster submits that order here.
         (
@@ -12228,44 +12402,56 @@ fn apply_non_priority_pass_action(
                 order,
                 hybrid_announcement,
             },
-        ) if pending_cast.activation_cost_snapshot.is_some() => {
-            // CR 601.2f + CR 602.2b: an ACTIVATION's election. The election is
-            // raised by the cost lock — at announcement or once X is announced —
-            // and an activation is accepted where its cost locks, so it has not
-            // been accepted yet. The acceptance authority brackets the resume
-            // exactly as it brackets `ActivateAbility`, and records only if the
-            // activation continued.
-            let player = *player;
-            let (source_id, ability_index) = (
-                pending_cast.object_id,
-                pending_cast.activation_ability_index.ok_or_else(|| {
-                    EngineError::InvalidAction(
-                        "an activation election must name its ability index".to_string(),
-                    )
-                })?,
-            );
-            let _ = begin_non_mana_activation(state, player);
-            match engine_casting::resume_activation_cost_election(
-                state,
-                player,
-                pending_cast,
-                reductions,
-                &order,
-                &hybrid_announcement,
-                &mut events,
-            )? {
-                casting::ActivationElectionResume::Continued(wf) => {
-                    record_non_mana_activation_accepted(state, player, source_id, ability_index);
-                    *wf
-                }
-                // CR 601.2h: the elected total cannot be paid, so the activation
-                // is reversed. The action boundary restores its pre-action
-                // snapshot and applies only this `Priority`; nothing below runs.
-                casting::ActivationElectionResume::Reversed => {
-                    return Ok(ActionResult::reversed(WaitingFor::Priority { player }));
-                }
-            }
-        }
+        ) if pending_cast.activation_cost_snapshot.is_some() => match attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<AnswerArm, EngineError> {
+                Ok(AnswerArm::Continue({
+                    // CR 601.2f + CR 602.2b: an ACTIVATION's election. The election is
+                    // raised by the cost lock — at announcement or once X is announced —
+                    // and an activation is accepted where its cost locks, so it has not
+                    // been accepted yet. The acceptance authority brackets the resume
+                    // exactly as it brackets `ActivateAbility`, and records only if the
+                    // activation continued.
+                    let player = *player;
+                    let (source_id, ability_index) = (
+                        pending_cast.object_id,
+                        pending_cast.activation_ability_index.ok_or_else(|| {
+                            EngineError::InvalidAction(
+                                "an activation election must name its ability index".to_string(),
+                            )
+                        })?,
+                    );
+                    let _ = begin_non_mana_activation(state, player);
+                    match engine_casting::resume_activation_cost_election(
+                        state,
+                        player,
+                        pending_cast,
+                        reductions,
+                        &order,
+                        &hybrid_announcement,
+                        events,
+                    )? {
+                        casting::ActivationElectionResume::Continued(wf) => {
+                            record_non_mana_activation_accepted(state, player, source_id, ability_index);
+                            *wf
+                        }
+                        // CR 601.2h: the elected total cannot be paid, so the activation
+                        // is reversed. The action boundary restores its pre-action
+                        // snapshot and applies only this `Priority`; nothing below runs.
+                        casting::ActivationElectionResume::Reversed => {
+                            return Ok(AnswerArm::Return(ActionResult::reversed(
+                    WaitingFor::Priority { player },
+                )));
+                        }
+                    }
+                }))
+            },
+        )? {
+            AnswerArm::Continue(waiting_for) => waiting_for,
+            AnswerArm::Return(result) => return Ok(result),
+        },
         (
             WaitingFor::OrderCostReductions {
                 player,
@@ -12277,14 +12463,21 @@ fn apply_non_priority_pass_action(
                 order,
                 hybrid_announcement,
             },
-        ) => engine_casting::handle_order_cost_reductions(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            &reductions.clone(),
-            &order,
-            &hybrid_announcement,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::handle_order_cost_reductions(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    &reductions.clone(),
+                    &order,
+                    &hybrid_announcement,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::OrderCostReductions {
@@ -12293,7 +12486,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 118.3 + CR 601.2b + CR 605.3b: Player selected objects to pay a
         // cost. The single `PayCost` state dispatches on `kind` (which action)
         // and `resume` (spell-cast vs mana-ability pipeline) to the
@@ -12312,39 +12512,47 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseRemoveCounterCostDistribution { distribution },
-        ) => match resume {
-            CostResume::Spell {
-                spell: pending_cast,
-            }
-            | CostResume::SpellCost {
-                spell: pending_cast,
-                ..
-            } => {
-                casting_costs::handle_remove_counter_distribution_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *counter_count,
-                    counter_type.clone(),
-                    *selection,
-                    choices,
-                    &distribution,
-                    &mut events,
-                )?
-            }
-            CostResume::ManaAbility {
-                ..
-            } => {
-                return Err(EngineError::InvalidAction(
-                    "Counter-cost distribution is not valid for mana abilities".to_string(),
-                ));
-            }
-            CostResume::Resolution => {
-                return Err(EngineError::InvalidAction(
-                    "Counter-cost distribution is not valid for resolution costs".to_string(),
-                ));
-            }
-        },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok(match resume {
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    }
+                    | CostResume::SpellCost {
+                        spell: pending_cast,
+                        ..
+                    } => {
+                        casting_costs::handle_remove_counter_distribution_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *counter_count,
+                            counter_type.clone(),
+                            *selection,
+                            choices,
+                            &distribution,
+                            events,
+                        )?
+                    }
+                    CostResume::ManaAbility {
+                        ..
+                    } => {
+                        return Err(EngineError::InvalidAction(
+                            "Counter-cost distribution is not valid for mana abilities".to_string(),
+                        ));
+                    }
+                    CostResume::Resolution => {
+                        return Err(EngineError::InvalidAction(
+                            "Counter-cost distribution is not valid for resolution costs".to_string(),
+                        ));
+                    }
+                }
+                )
+            },
+        )?,
         (
             WaitingFor::PayCost {
                 player,
@@ -12355,352 +12563,360 @@ fn apply_non_priority_pass_action(
                 resume,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => match resume {
-            CostResume::Spell {
-                spell: pending_cast,
-            }
-            | CostResume::SpellCost {
-                spell: pending_cast,
-                ..
-            } => {
-                let paid_cost = match resume {
-                    CostResume::SpellCost { cost, source, .. } => {
-                        Some(casting_costs::SpellCostPayment {
-                            cost: cost.as_ref(),
-                            source: *source,
-                        })
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok(match resume {
+                    CostResume::Spell {
+                        spell: pending_cast,
                     }
-                    _ => None,
-                };
-                match kind {
-                PayCostKind::Discard => engine_casting::handle_discard_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
-                PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
-	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
-	                    state,
-	                    *player,
-	                    *pending_cast.clone(),
-	                    paid_cost,
-	                    casting_costs::CostSelection {
-	                        min_count: *min_count,
-	                        count: *count,
-	                        legal_permanents: choices,
-	                        chosen: &chosen,
-	                    },
-	                    &mut events,
-	                )?,
-                PayCostKind::ReturnToHand => engine_casting::handle_return_to_hand_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
-                // CR 601.2h: A ChangeZone effect-as-cost carries the optional
-                // any-number exile selection and its cast-time reduction.
-                PayCostKind::ExileFromZone { zone }
-                    if paid_cost.as_ref().is_some_and(|payment| {
-                        casting_costs::is_exile_any_number_effect_cost(payment.cost)
-                    }) =>
-                {
-                    casting_costs::handle_exile_any_number_for_cost(
-                        state,
-                        *player,
-                        *zone,
-                        *pending_cast.clone(),
-                        *count,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::ExileFromZone { zone } => engine_casting::handle_exile_for_cost(
-                    state,
-                    *player,
-                    *zone,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
-                // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
-                // controls as an additional/alternative cost (Food Chain class).
-                PayCostKind::ExilePermanent { filter } => {
-                    engine_casting::handle_exile_permanent_for_cost(
-                        state,
-                        *player,
-                        filter.clone(),
-                        *pending_cast.clone(),
-                        *count,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
-                // source as an activation cost (Captain America's Throw). The
-                // handler snapshots the detached Equipment as the cost-referent,
-                // then re-surfaces the deferred damage division.
-                PayCostKind::UnattachFrom { filter } => {
-                    casting_costs::handle_unattach_for_cost(
-                        state,
-                        *player,
-                        filter,
-                        *pending_cast.clone(),
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                // CR 702.167a/b: Craft materials exile across the
-                // battlefield/graveyard union.
-                PayCostKind::ExileMaterials { materials } => {
-                    engine_casting::handle_exile_materials_for_cost(
-                        state,
-                        *player,
-                        materials.clone(),
-                        *pending_cast.clone(),
-                        (*min_count, *count),
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                // CR 117.1 + CR 601.2b + CR 608.2c: Aggregate-threshold "exile
-                // any number" cost (Baron Helmut Zemo's Boast); the handler
-                // validates the threshold, exiles, publishes the tracked set, and
-                // binds the resolving ability's tracked-set sentinel to it.
-                PayCostKind::ExileAggregate {
-                    zone,
-                    function,
-                    property,
-                    comparator,
-                    value,
-                    filter,
-                } => engine_casting::handle_exile_aggregate_for_cost(
-                    state,
-                    *player,
-                    *zone,
-                    *function,
-                    *property,
-                    *comparator,
-                    *value,
-                    filter,
-                    *pending_cast.clone(),
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
-                PayCostKind::RemoveCounter {
-                    counter_type,
-                    count: counter_count,
-                    selection,
-                } => {
-                    casting_costs::handle_remove_counter_for_cost(
-                        state,
-                        *player,
-                        *pending_cast.clone(),
-                        *counter_count,
-                        counter_type.clone(),
-                        *selection,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::TapCreatures { mode } => {
-                    engine_casting::handle_tap_creatures_for_spell_cost(
-                        state,
-                        *player,
-                        *pending_cast.clone(),
-                        *min_count,
-                        *count,
-                        *mode,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Behold { action } => engine_casting::handle_behold_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    *action,
-                    &chosen,
-                    &mut events,
-                )?,
-                // ExileFromManaZone is mana-ability-only; never appears with a
-                // spell-cast resume.
-                PayCostKind::ExileFromManaZone { .. } => {
-                    return Err(EngineError::InvalidAction(
-                        "ExileFromManaZone cost cannot resume a spell cast".into(),
-                    ));
-                }
-                }
-            }
-            CostResume::ManaAbility {
-                mana_ability: pending_mana_ability,
-            } => match kind {
-                // CR 605.1a: the aggregate form never resumes a mana ability;
-                // fixed-count and X-sentinel forms both do.
-                PayCostKind::TapCreatures { mode } => {
-                    let wf = engine_casting::handle_tap_creatures_for_mana_ability(
-                        state,
-                        *min_count,
-                        *count,
-                        *mode,
-                        choices,
-                        pending_mana_ability,
-                        &chosen,
-                        &mut events,
-                    )?;
-                    // FIX-1 (CR 605.1a + CR 608.2b): record the tap-cost target choice on the
-                    // current loop-period step so the object-growth detection drive can replay
-                    // "tap this legendary (Kilo) for the Relic mana ability". Slot source = the
-                    // mana-ability cost source (distinct from the proliferate pin's Kilo source);
-                    // `index: 0` (the color pin on the same source takes `index: 1`).
-                    if let Some(source) =
-                        object_decision_source(state, pending_mana_ability.source_id)
-                    {
-                        let targets: Vec<crate::analysis::decision_template::TargetPin> = chosen
-                            .iter()
-                            .filter_map(|&id| {
-                                object_decision_source(state, id)
-                                    .map(crate::analysis::decision_template::TargetPin::ByIdentity)
-                            })
-                            .collect();
-                        if !targets.is_empty() {
-                            record_loop_pin(
+                    | CostResume::SpellCost {
+                        spell: pending_cast,
+                        ..
+                    } => {
+                        let paid_cost = match resume {
+                            CostResume::SpellCost { cost, source, .. } => {
+                                Some(casting_costs::SpellCostPayment {
+                                    cost: cost.as_ref(),
+                                    source: *source,
+                                })
+                            }
+                            _ => None,
+                        };
+                        match kind {
+                        PayCostKind::Discard => engine_casting::handle_discard_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            &chosen,
+                            events,
+                        )?,
+                        PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            &chosen,
+                            events,
+                        )?,
+        	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
+        	                    state,
+        	                    *player,
+        	                    *pending_cast.clone(),
+        	                    paid_cost,
+        	                    casting_costs::CostSelection {
+        	                        min_count: *min_count,
+        	                        count: *count,
+        	                        legal_permanents: choices,
+        	                        chosen: &chosen,
+        	                    },
+        	                    events,
+        	                )?,
+                        PayCostKind::ReturnToHand => engine_casting::handle_return_to_hand_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            &chosen,
+                            events,
+                        )?,
+                        // CR 601.2h: A ChangeZone effect-as-cost carries the optional
+                        // any-number exile selection and its cast-time reduction.
+                        PayCostKind::ExileFromZone { zone }
+                            if paid_cost.as_ref().is_some_and(|payment| {
+                                casting_costs::is_exile_any_number_effect_cost(payment.cost)
+                            }) =>
+                        {
+                            casting_costs::handle_exile_any_number_for_cost(
                                 state,
                                 *player,
-                                crate::analysis::decision_template::PinnedDecision::Targets {
-                                    slot: crate::analysis::decision_template::DecisionSlot {
-                                        source,
-                                        index: 0,
-                                    },
-                                    targets,
-                                },
-                            );
+                                *zone,
+                                *pending_cast.clone(),
+                                *count,
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        PayCostKind::ExileFromZone { zone } => engine_casting::handle_exile_for_cost(
+                            state,
+                            *player,
+                            *zone,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            &chosen,
+                            events,
+                        )?,
+                        // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
+                        // controls as an additional/alternative cost (Food Chain class).
+                        PayCostKind::ExilePermanent { filter } => {
+                            engine_casting::handle_exile_permanent_for_cost(
+                                state,
+                                *player,
+                                filter.clone(),
+                                *pending_cast.clone(),
+                                *count,
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
+                        // source as an activation cost (Captain America's Throw). The
+                        // handler snapshots the detached Equipment as the cost-referent,
+                        // then re-surfaces the deferred damage division.
+                        PayCostKind::UnattachFrom { filter } => {
+                            casting_costs::handle_unattach_for_cost(
+                                state,
+                                *player,
+                                filter,
+                                *pending_cast.clone(),
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        // CR 702.167a/b: Craft materials exile across the
+                        // battlefield/graveyard union.
+                        PayCostKind::ExileMaterials { materials } => {
+                            engine_casting::handle_exile_materials_for_cost(
+                                state,
+                                *player,
+                                materials.clone(),
+                                *pending_cast.clone(),
+                                (*min_count, *count),
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        // CR 117.1 + CR 601.2b + CR 608.2c: Aggregate-threshold "exile
+                        // any number" cost (Baron Helmut Zemo's Boast); the handler
+                        // validates the threshold, exiles, publishes the tracked set, and
+                        // binds the resolving ability's tracked-set sentinel to it.
+                        PayCostKind::ExileAggregate {
+                            zone,
+                            function,
+                            property,
+                            comparator,
+                            value,
+                            filter,
+                        } => engine_casting::handle_exile_aggregate_for_cost(
+                            state,
+                            *player,
+                            *zone,
+                            *function,
+                            *property,
+                            *comparator,
+                            *value,
+                            filter,
+                            *pending_cast.clone(),
+                            choices,
+                            &chosen,
+                            events,
+                        )?,
+                        PayCostKind::RemoveCounter {
+                            counter_type,
+                            count: counter_count,
+                            selection,
+                        } => {
+                            casting_costs::handle_remove_counter_for_cost(
+                                state,
+                                *player,
+                                *pending_cast.clone(),
+                                *counter_count,
+                                counter_type.clone(),
+                                *selection,
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        PayCostKind::TapCreatures { mode } => {
+                            engine_casting::handle_tap_creatures_for_spell_cost(
+                                state,
+                                *player,
+                                *pending_cast.clone(),
+                                *min_count,
+                                *count,
+                                *mode,
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        PayCostKind::Behold { action } => engine_casting::handle_behold_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            *action,
+                            &chosen,
+                            events,
+                        )?,
+                        // ExileFromManaZone is mana-ability-only; never appears with a
+                        // spell-cast resume.
+                        PayCostKind::ExileFromManaZone { .. } => {
+                            return Err(EngineError::InvalidAction(
+                                "ExileFromManaZone cost cannot resume a spell cast".into(),
+                            ));
+                        }
                         }
                     }
-                    wf
+                    CostResume::ManaAbility {
+                        mana_ability: pending_mana_ability,
+                    } => match kind {
+                        // CR 605.1a: the aggregate form never resumes a mana ability;
+                        // fixed-count and X-sentinel forms both do.
+                        PayCostKind::TapCreatures { mode } => {
+                            let wf = engine_casting::handle_tap_creatures_for_mana_ability(
+                                state,
+                                *min_count,
+                                *count,
+                                *mode,
+                                choices,
+                                pending_mana_ability,
+                                &chosen,
+                                events,
+                            )?;
+                            // FIX-1 (CR 605.1a + CR 608.2b): record the tap-cost target choice on the
+                            // current loop-period step so the object-growth detection drive can replay
+                            // "tap this legendary (Kilo) for the Relic mana ability". Slot source = the
+                            // mana-ability cost source (distinct from the proliferate pin's Kilo source);
+                            // `index: 0` (the color pin on the same source takes `index: 1`).
+                            if let Some(source) =
+                                object_decision_source(state, pending_mana_ability.source_id)
+                            {
+                                let targets: Vec<crate::analysis::decision_template::TargetPin> = chosen
+                                    .iter()
+                                    .filter_map(|&id| {
+                                        object_decision_source(state, id)
+                                            .map(crate::analysis::decision_template::TargetPin::ByIdentity)
+                                    })
+                                    .collect();
+                                if !targets.is_empty() {
+                                    record_loop_pin(
+                                        state,
+                                        *player,
+                                        crate::analysis::decision_template::PinnedDecision::Targets {
+                                            slot: crate::analysis::decision_template::DecisionSlot {
+                                                source,
+                                                index: 0,
+                                            },
+                                            targets,
+                                        },
+                                    );
+                                }
+                            }
+                            wf
+                        }
+                        PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
+                            state,
+                            *count,
+                            choices,
+                            pending_mana_ability,
+                            &chosen,
+                            events,
+                        )?,
+                        PayCostKind::ExileFromManaZone { .. } => {
+                            super::mana_abilities::handle_exile_for_mana_ability(
+                                state,
+                                *count,
+                                choices,
+                                pending_mana_ability,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        PayCostKind::Sacrifice => super::mana_abilities::handle_sacrifice_for_mana_ability(
+                            state,
+                            *count,
+                            choices,
+                            pending_mana_ability,
+                            &chosen,
+                            events,
+                        )?,
+                        // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
+                        // do not have mana-ability cost handlers wired today. If a
+                        // future mana ability uses one of these CR-valid cost shapes,
+                        // add the corresponding mana-ability handler instead of
+                        // routing it through the spell pipeline.
+                        PayCostKind::ReturnToHand
+                        | PayCostKind::Reveal
+                        | PayCostKind::ExileFromZone { .. }
+                        | PayCostKind::ExileMaterials { .. }
+                        | PayCostKind::ExilePermanent { .. }
+                        | PayCostKind::ExileAggregate { .. }
+                        | PayCostKind::RemoveCounter { .. }
+                        // CR 701.3d: an unattach-from cost is only ever surfaced via
+                        // `CostResume::Spell` (targeted activation), never as a mana
+                        // ability — unreachable here.
+                        | PayCostKind::UnattachFrom { .. }
+                        | PayCostKind::Behold { .. } => {
+                            debug_assert!(
+                                !matches!(kind, PayCostKind::UnattachFrom { .. }),
+                                "UnattachFrom cost cannot resume a mana ability",
+                            );
+                            return Err(EngineError::InvalidAction(
+                                "Cost kind cannot resume a mana ability".into(),
+                            ));
+                        }
+                    },
+                    CostResume::Resolution => match kind {
+                        PayCostKind::Sacrifice => {
+                            casting_costs::handle_resolution_optional_sacrifice_for_cost(
+                                state,
+                                *player,
+                                choices,
+                                &chosen,
+                                events,
+                            )?
+                        }
+                        PayCostKind::TapCreatures { mode } => {
+                            casting_costs::pay_tap_creatures_selection(
+                                state,
+                                *min_count,
+                                *count,
+                                *mode,
+                                choices,
+                                &chosen,
+                                events,
+                            )?;
+                            state.last_effect_count = Some(chosen.len() as i32);
+                            if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
+                                state.waiting_for = WaitingFor::Priority { player: *player };
+                            }
+                            effects::drain_pending_continuation(state, events);
+                            state.waiting_for.clone()
+                        }
+                        PayCostKind::Discard
+                        | PayCostKind::Reveal
+                        | PayCostKind::ReturnToHand
+                        | PayCostKind::ExileFromZone { .. }
+                        | PayCostKind::ExilePermanent { .. }
+                        | PayCostKind::UnattachFrom { .. }
+                        | PayCostKind::ExileMaterials { .. }
+                        | PayCostKind::ExileAggregate { .. }
+                        | PayCostKind::RemoveCounter { .. }
+                        | PayCostKind::Behold { .. }
+                        | PayCostKind::ExileFromManaZone { .. } => {
+                            return Err(EngineError::InvalidAction(
+                                "Cost kind cannot resume a resolution PayCost".into(),
+                            ));
+                        }
+                    },
                 }
-                PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
-                PayCostKind::ExileFromManaZone { .. } => {
-                    super::mana_abilities::handle_exile_for_mana_ability(
-                        state,
-                        *count,
-                        choices,
-                        pending_mana_ability,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Sacrifice => super::mana_abilities::handle_sacrifice_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
-                // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
-                // do not have mana-ability cost handlers wired today. If a
-                // future mana ability uses one of these CR-valid cost shapes,
-                // add the corresponding mana-ability handler instead of
-                // routing it through the spell pipeline.
-                PayCostKind::ReturnToHand
-                | PayCostKind::Reveal
-                | PayCostKind::ExileFromZone { .. }
-                | PayCostKind::ExileMaterials { .. }
-                | PayCostKind::ExilePermanent { .. }
-                | PayCostKind::ExileAggregate { .. }
-                | PayCostKind::RemoveCounter { .. }
-                // CR 701.3d: an unattach-from cost is only ever surfaced via
-                // `CostResume::Spell` (targeted activation), never as a mana
-                // ability — unreachable here.
-                | PayCostKind::UnattachFrom { .. }
-                | PayCostKind::Behold { .. } => {
-                    debug_assert!(
-                        !matches!(kind, PayCostKind::UnattachFrom { .. }),
-                        "UnattachFrom cost cannot resume a mana ability",
-                    );
-                    return Err(EngineError::InvalidAction(
-                        "Cost kind cannot resume a mana ability".into(),
-                    ));
-                }
+                )
             },
-            CostResume::Resolution => match kind {
-                PayCostKind::Sacrifice => {
-                    casting_costs::handle_resolution_optional_sacrifice_for_cost(
-                        state,
-                        *player,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::TapCreatures { mode } => {
-                    casting_costs::pay_tap_creatures_selection(
-                        state,
-                        *min_count,
-                        *count,
-                        *mode,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?;
-                    state.last_effect_count = Some(chosen.len() as i32);
-                    if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
-                        state.waiting_for = WaitingFor::Priority { player: *player };
-                    }
-                    effects::drain_pending_continuation(state, &mut events);
-                    state.waiting_for.clone()
-                }
-                PayCostKind::Discard
-                | PayCostKind::Reveal
-                | PayCostKind::ReturnToHand
-                | PayCostKind::ExileFromZone { .. }
-                | PayCostKind::ExilePermanent { .. }
-                | PayCostKind::UnattachFrom { .. }
-                | PayCostKind::ExileMaterials { .. }
-                | PayCostKind::ExileAggregate { .. }
-                | PayCostKind::RemoveCounter { .. }
-                | PayCostKind::Behold { .. }
-                | PayCostKind::ExileFromManaZone { .. } => {
-                    return Err(EngineError::InvalidAction(
-                        "Cost kind cannot resume a resolution PayCost".into(),
-                    ));
-                }
-            },
-        },
+        )?,
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
         (
@@ -12717,7 +12933,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -12726,13 +12949,20 @@ fn apply_non_priority_pass_action(
                 pending_cast,
             },
             GameAction::ChooseActivationCostBranch { index },
-        ) => engine_casting::handle_activation_cost_one_of_choice(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            costs,
-            index,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::handle_activation_cost_one_of_choice(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    costs,
+                    index,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -12741,7 +12971,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
         // behold cost; record it and resume behold payment.
         (
@@ -12752,13 +12989,20 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseOption { choice },
-        ) => casting_costs::handle_cost_type_choice(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            options,
-            &choice,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                casting_costs::handle_cost_type_choice(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    options,
+                    &choice,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::CostTypeChoice {
@@ -12767,7 +13011,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // Blight: player selected creature(s) to put -1/-1 counters on as cost.
         (
             WaitingFor::BlightChoice {
@@ -12777,14 +13028,21 @@ fn apply_non_priority_pass_action(
                 pending_cast,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => casting_costs::handle_blight_choice(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *pending_cast.clone(),
-            *counters,
-            creatures,
-            &chosen,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                casting_costs::handle_blight_choice(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *counters,
+                    creatures,
+                    &chosen,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::BlightChoice {
@@ -12793,7 +13051,14 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         (
             WaitingFor::ChooseManaColor {
                 choice, context, ..
@@ -12802,132 +13067,145 @@ fn apply_non_priority_pass_action(
                 choice: chosen,
                 count,
             },
-        ) => {
-            let events_before = events.len();
-            // CR 605.4a: which typed half of the colour seam this action is.
-            // A `ManaAbility` choice is a completed mana frame and has already
-            // recorded its exact occurrences through
-            // `mana_abilities::collect_completed_mana_frame_events` (the
-            // original source in `handle_choose_mana_color`, each sibling on its
-            // own finish path). A `ResolvingEffect` choice is not a mana frame
-            // at all and keeps its historical immediate scan.
-            let is_completed_mana_frame = matches!(
-                context,
-                crate::types::game_state::ManaChoiceContext::ManaAbility(_)
-            );
-            let wf = match context {
-                crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
-                    // CR 605.3a: validate the requested batch size BEFORE any mana
-                    // is produced, so an out-of-range count rejects cleanly with
-                    // no partial application. The cap is the just-activated source
-                    // plus its choice-free identical twins.
-                    if count as usize > pending_mana_ability.batch_siblings.len() + 1 {
-                        return Err(EngineError::InvalidAction(format!(
-                            "ChooseManaColor count {count} exceeds the {} batchable sources",
-                            pending_mana_ability.batch_siblings.len() + 1
-                        )));
-                    }
-                    let wf = engine_casting::handle_choose_mana_color(
-                        state,
-                        pending_mana_ability,
-                        choice,
-                        chosen.clone(),
-                        &mut events,
-                    )?;
-                    // FIX-1 (CR 608.2d): record the fixed mana-color choice on the current
-                    // loop-period step (slot `index: 1` — distinct from the tap-cost `Targets`
-                    // pin at `index: 0` on the SAME mana-ability source) so the object-growth
-                    // detection drive replays the exact color that keeps the loop mana-neutral
-                    // (Blue → Freed's `{U}`). Only a WUBRG `SingleColor` choice is pinnable.
-                    if let Some(color) = pinnable_mana_color(&chosen) {
-                        if let Some(source) =
-                            object_decision_source(state, pending_mana_ability.source_id)
-                        {
-                            record_loop_pin(
+        ) => match attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<AnswerArm, EngineError> {
+                Ok(AnswerArm::Continue({
+                    let events_before = events.len();
+                    // CR 605.4a: which typed half of the colour seam this action is.
+                    // A `ManaAbility` choice is a completed mana frame and has already
+                    // recorded its exact occurrences through
+                    // `mana_abilities::collect_completed_mana_frame_events` (the
+                    // original source in `handle_choose_mana_color`, each sibling on its
+                    // own finish path). A `ResolvingEffect` choice is not a mana frame
+                    // at all and keeps its historical immediate scan.
+                    let is_completed_mana_frame = matches!(
+                        context,
+                        crate::types::game_state::ManaChoiceContext::ManaAbility(_)
+                    );
+                    let wf = match context {
+                        crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
+                            // CR 605.3a: validate the requested batch size BEFORE any mana
+                            // is produced, so an out-of-range count rejects cleanly with
+                            // no partial application. The cap is the just-activated source
+                            // plus its choice-free identical twins.
+                            if count as usize > pending_mana_ability.batch_siblings.len() + 1 {
+                                return Err(EngineError::InvalidAction(format!(
+                                    "ChooseManaColor count {count} exceeds the {} batchable sources",
+                                    pending_mana_ability.batch_siblings.len() + 1
+                                )));
+                            }
+                            let wf = engine_casting::handle_choose_mana_color(
                                 state,
-                                pending_mana_ability.player,
-                                crate::analysis::decision_template::PinnedDecision::ManaColor {
-                                    slot: crate::analysis::decision_template::DecisionSlot {
-                                        source,
-                                        index: 1,
-                                    },
-                                    color,
-                                },
-                            );
+                                pending_mana_ability,
+                                choice,
+                                chosen.clone(),
+                                events,
+                            )?;
+                            // FIX-1 (CR 608.2d): record the fixed mana-color choice on the current
+                            // loop-period step (slot `index: 1` — distinct from the tap-cost `Targets`
+                            // pin at `index: 0` on the SAME mana-ability source) so the object-growth
+                            // detection drive replays the exact color that keeps the loop mana-neutral
+                            // (Blue → Freed's `{U}`). Only a WUBRG `SingleColor` choice is pinnable.
+                            if let Some(color) = pinnable_mana_color(&chosen) {
+                                if let Some(source) =
+                                    object_decision_source(state, pending_mana_ability.source_id)
+                                {
+                                    record_loop_pin(
+                                        state,
+                                        pending_mana_ability.player,
+                                        crate::analysis::decision_template::PinnedDecision::ManaColor {
+                                            slot: crate::analysis::decision_template::DecisionSlot {
+                                                source,
+                                                index: 1,
+                                            },
+                                            color,
+                                        },
+                                    );
+                                }
+                            }
+                            // CR 605.3a: one color choice may bulk-activate the player's
+                            // other identical, choice-free mana sources (their remaining
+                            // Treasures, etc.) with the same color. Sibling cost/mana
+                            // events append before the shared trigger scan below, so each
+                            // sacrifice's observers fire exactly once.
+                            if count > 1 {
+                                engine_casting::batch_activate_mana_siblings(
+                                    state,
+                                    pending_mana_ability,
+                                    &chosen,
+                                    count,
+                                    events,
+                                )?;
+                            }
+                            wf
                         }
+                        crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
+                            effects::mana::handle_choose_mana_effect(
+                                state,
+                                pending_effect,
+                                choice,
+                                chosen.clone(),
+                                events,
+                            )?
+                        }
+                    };
+                    // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
+                    // produces mana inline. Scan its events for TapsForMana mana
+                    // multipliers and for cost-payment triggers HERE, because for
+                    // `ManaPayment` / `UnlessPayment` resumes the post-action pipeline is
+                    // skipped (it is guarded by `matches!(waiting_for,
+                    // WaitingFor::Priority)`), so this is the only scan site — and
+                    // CR 605.4a requires the bonus mana to enter the pool before the
+                    // spell's payment step continues. Do NOT "simplify" this scan away
+                    // for non-Priority resumes.
+                    //
+                    // The `ManaAbility` half owns no aggregate scan: every source and
+                    // sibling already recorded exact occurrences through the typed
+                    // completed-frame seam, so a second scan here would rediscover
+                    // events the frame already claimed and dispatch an ordinary cost
+                    // observer separately from that frame's synthetic reflexive.
+                    if !is_completed_mana_frame && events.len() > events_before {
+                        let mana_events: Vec<_> = events[events_before..].to_vec();
+                        super::triggers::process_triggers(state, &mana_events);
                     }
-                    // CR 605.3a: one color choice may bulk-activate the player's
-                    // other identical, choice-free mana sources (their remaining
-                    // Treasures, etc.) with the same color. Sibling cost/mana
-                    // events append before the shared trigger scan below, so each
-                    // sacrifice's observers fire exactly once.
-                    if count > 1 {
-                        engine_casting::batch_activate_mana_siblings(
-                            state,
-                            pending_mana_ability,
-                            &chosen,
-                            count,
-                            &mut events,
-                        )?;
+                    // CR 603.3b (#531): if the inline trigger scan paused on an
+                    // OrderTriggers prompt (controller has 2+ simultaneous TapsForMana
+                    // multipliers, etc.), surface that prompt instead of overwriting
+                    // it with the resume `wf` (Priority/ManaPayment). Preserve `wf`
+                    // so `handle_order_triggers` can resume the interrupted chain
+                    // after the ordered triggered mana abilities dispatch.
+                    if let Some(order_wf) =
+                        super::triggers::preserve_order_triggers_resume(state, wf.clone())
+                    {
+                        return Ok(AnswerArm::Return(ActionResult::applied(
+                std::mem::take(events),
+                order_wf,
+            )));
+                    }
+                    // CR 603.2c: For a `Priority` resume the post-action pipeline WOULD
+                    // re-scan these same events, double-firing the multiplier (issue
+                    // #443: Delighted Halfling under a mana multiplier yields 5 not 3).
+                    // Claim the scan via `triggers_processed_inline` — the same
+                    // mechanism `DeclareAttackers` uses — so the pipeline runs SBAs,
+                    // delayed/state triggers, and layers but skips the trigger re-scan.
+                    //
+                    // The `ManaAbility` half must NOT use this broad suppression: its
+                    // occurrence journal already narrows the pipeline's scan to exactly
+                    // the events the mana frames did not claim, and the pipeline's
+                    // guarded deferred drain is what releases their queued contexts once.
+                    if !is_completed_mana_frame && matches!(wf, WaitingFor::Priority { .. }) {
+                        triggers_processed_inline = true;
                     }
                     wf
-                }
-                crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                    effects::mana::handle_choose_mana_effect(
-                        state,
-                        pending_effect,
-                        choice,
-                        chosen.clone(),
-                        &mut events,
-                    )?
-                }
-            };
-            // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
-            // produces mana inline. Scan its events for TapsForMana mana
-            // multipliers and for cost-payment triggers HERE, because for
-            // `ManaPayment` / `UnlessPayment` resumes the post-action pipeline is
-            // skipped (it is guarded by `matches!(waiting_for,
-            // WaitingFor::Priority)`), so this is the only scan site — and
-            // CR 605.4a requires the bonus mana to enter the pool before the
-            // spell's payment step continues. Do NOT "simplify" this scan away
-            // for non-Priority resumes.
-            //
-            // The `ManaAbility` half owns no aggregate scan: every source and
-            // sibling already recorded exact occurrences through the typed
-            // completed-frame seam, so a second scan here would rediscover
-            // events the frame already claimed and dispatch an ordinary cost
-            // observer separately from that frame's synthetic reflexive.
-            if !is_completed_mana_frame && events.len() > events_before {
-                let mana_events: Vec<_> = events[events_before..].to_vec();
-                super::triggers::process_triggers(state, &mana_events);
-            }
-            // CR 603.3b (#531): if the inline trigger scan paused on an
-            // OrderTriggers prompt (controller has 2+ simultaneous TapsForMana
-            // multipliers, etc.), surface that prompt instead of overwriting
-            // it with the resume `wf` (Priority/ManaPayment). Preserve `wf`
-            // so `handle_order_triggers` can resume the interrupted chain
-            // after the ordered triggered mana abilities dispatch.
-            if let Some(order_wf) =
-                super::triggers::preserve_order_triggers_resume(state, wf.clone())
-            {
-                return Ok(ActionResult::applied(events, order_wf));
-            }
-            // CR 603.2c: For a `Priority` resume the post-action pipeline WOULD
-            // re-scan these same events, double-firing the multiplier (issue
-            // #443: Delighted Halfling under a mana multiplier yields 5 not 3).
-            // Claim the scan via `triggers_processed_inline` — the same
-            // mechanism `DeclareAttackers` uses — so the pipeline runs SBAs,
-            // delayed/state triggers, and layers but skips the trigger re-scan.
-            //
-            // The `ManaAbility` half must NOT use this broad suppression: its
-            // occurrence journal already narrows the pipeline's scan to exactly
-            // the events the mana frames did not claim, and the pipeline's
-            // guarded deferred drain is what releases their queued contexts once.
-            if !is_completed_mana_frame && matches!(wf, WaitingFor::Priority { .. }) {
-                triggers_processed_inline = true;
-            }
-            wf
-        }
+                }))
+            },
+        )? {
+            AnswerArm::Continue(waiting_for) => waiting_for,
+            AnswerArm::Return(result) => return Ok(result),
+        },
         // CR 605.3a + CR 601.2h + CR 107.4e: Player submits the per-hybrid-shard
         // color vector for a mana-ability mana sub-cost (filter lands, etc.).
         (
@@ -12952,18 +13230,35 @@ fn apply_non_priority_pass_action(
                 resume,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => super::effects::collect_evidence::handle_choice(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            *minimum_mana_value,
-            legal_cards,
-            resume,
-            &chosen,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                super::effects::collect_evidence::handle_choice(
+                    state,
+                    *player,
+                    *minimum_mana_value,
+                    legal_cards,
+                    resume,
+                    &chosen,
+                    events,
+                )
+            },
         )?,
-        (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
-            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
-        }
+        (
+            WaitingFor::CollectEvidenceChoice { player, resume, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    engine_casting::handle_collect_evidence_cancel(state, *player, resume, events)?
+                })
+            },
+        )?,
         // CR 702.180b: Player chose which creature to tap for harmonize cost reduction.
         // CR 601.2b: Creature is tapped as part of paying the total cost.
         (
@@ -12973,13 +13268,20 @@ fn apply_non_priority_pass_action(
                 pending_cast,
             },
             GameAction::HarmonizeTap { creature_id },
-        ) => engine_casting::handle_harmonize_tap_choice(
+        ) => attribute_to_paused_clause(
             state,
-            *player,
-            eligible_creatures,
-            *pending_cast.clone(),
-            creature_id,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::handle_harmonize_tap_choice(
+                    state,
+                    *player,
+                    eligible_creatures,
+                    *pending_cast.clone(),
+                    creature_id,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::HarmonizeTapChoice {
@@ -12988,40 +13290,54 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_casting::cancel_pending_cast(state, *player, pending_cast, events)
+            },
+        )?,
         // CR 608.2d: Player decided whether to perform an optional effect ("You may X").
         (
             WaitingFor::OptionalEffectChoice {
                 player, source_id, ..
             },
             GameAction::DecideOptionalEffect { accept },
-        ) => {
-            // CR 603.5 + CR 732.2a: journal the answer BEFORE the handler runs — it
-            // replaces `waiting_for`, so the prompt's own seat and source are only
-            // readable here. The key comes from `object_decision_source`, the same
-            // producer `entry_publishes_pin_slots` uses, so publish-side and record-side
-            // keys agree by construction rather than by coincidence. `record_loop_answer`
-            // carries the `samples() && !in_simulation_probe()` gate.
-            let (answering_player, may_source) = (*player, *source_id);
-            if let Some(source) = object_decision_source(state, may_source) {
-                use crate::analysis::decision_template::{
-                    DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
-                };
-                // CR 603.5 rides sub-index 1, via `DecisionSlot::may` — the SAME
-                // constructor `entry_publishes_pin_slots` publishes the gate with, so the
-                // sub-index is a literal on neither side of the journal.
-                state.record_loop_answer(
-                    DecisionSlot::may(source),
-                    answering_player,
-                    LoopAnswer::Uniform(LoopAnswerValue::May(if accept {
-                        MayChoiceOption::Take
-                    } else {
-                        MayChoiceOption::Decline
-                    })),
-                );
-            }
-            engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // CR 603.5 + CR 732.2a: journal the answer BEFORE the handler runs — it
+                    // replaces `waiting_for`, so the prompt's own seat and source are only
+                    // readable here. The key comes from `object_decision_source`, the same
+                    // producer `entry_publishes_pin_slots` uses, so publish-side and record-side
+                    // keys agree by construction rather than by coincidence. `record_loop_answer`
+                    // carries the `samples() && !in_simulation_probe()` gate.
+                    let (answering_player, may_source) = (*player, *source_id);
+                    if let Some(source) = object_decision_source(state, may_source) {
+                        use crate::analysis::decision_template::{
+                            DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
+                        };
+                        // CR 603.5 rides sub-index 1, via `DecisionSlot::may` — the SAME
+                        // constructor `entry_publishes_pin_slots` publishes the gate with, so the
+                        // sub-index is a literal on neither side of the journal.
+                        state.record_loop_answer(
+                            DecisionSlot::may(source),
+                            answering_player,
+                            LoopAnswer::Uniform(LoopAnswerValue::May(if accept {
+                                MayChoiceOption::Take
+                            } else {
+                                MayChoiceOption::Decline
+                            })),
+                        );
+                    }
+                    engine_payment_choices::handle_optional_effect_choice(state, accept, events)?
+                })
+            },
+        )?,
         (
             WaitingFor::PairChoice {
                 player,
@@ -13029,48 +13345,69 @@ fn apply_non_priority_pass_action(
                 choices,
             },
             GameAction::ChoosePair { partner },
-        ) => {
-            if let Some(partner_id) = partner {
-                if !choices.contains(&partner_id) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected Soulbond partner is not legal".to_string(),
-                    ));
-                }
-                if super::pairing::is_unpaired_creature_you_control(state, *source_id, *player)
-                    && super::pairing::is_unpaired_creature_you_control(state, partner_id, *player)
-                {
-                    super::pairing::pair_objects(state, *source_id, partner_id, *player);
-                }
-            }
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::PairWith,
-                source_id: *source_id,
-            subject: None,});
-            state.waiting_for = WaitingFor::Priority { player: *player };
-            state.priority_player = *player;
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.waiting_for.clone()
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if let Some(partner_id) = partner {
+                        if !choices.contains(&partner_id) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected Soulbond partner is not legal".to_string(),
+                            ));
+                        }
+                        if super::pairing::is_unpaired_creature_you_control(state, *source_id, *player)
+                            && super::pairing::is_unpaired_creature_you_control(state, partner_id, *player)
+                        {
+                            super::pairing::pair_objects(state, *source_id, partner_id, *player);
+                        }
+                    }
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::PairWith,
+                        source_id: *source_id,
+                    subject: None,});
+                    state.waiting_for = WaitingFor::Priority { player: *player };
+                    state.priority_player = *player;
+                    resume_pending_continuation_if_priority(state, events)?;
+                    state.waiting_for.clone()
+                })
+            },
+        )?,
         (
             waiting_for @ WaitingFor::OptionalEffectChoice { .. },
             GameAction::DecideOptionalEffectAndRemember { choice, scope },
-        ) => engine_payment_choices::handle_optional_effect_choice_and_remember_with_scope(
+        ) => attribute_to_paused_clause(
             state,
-            waiting_for.clone(),
-            choice,
-            scope,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_payment_choices::handle_optional_effect_choice_and_remember_with_scope(
+                    state,
+                    waiting_for.clone(),
+                    choice,
+                    scope,
+                    events,
+                )
+            },
         )?,
         // CR 608.2d: Opponent decided on "any opponent may" effect.
         (
             waiting_for @ WaitingFor::OpponentMayChoice { .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
-            return engine_payment_choices::handle_opponent_may_choice(
+            return attribute_to_paused_clause(
                 state,
-                waiting_for.clone(),
-                accept,
                 &mut events,
+                ClauseSite::Answer,
+                |state, events| {
+                    engine_payment_choices::handle_opponent_may_choice(
+                        state,
+                        waiting_for.clone(),
+                        accept,
+                        events,
+                    )
+                },
             );
         }
         // CR 732.2a: the proposer declares the loop shortcut. The offered `schema` (the
@@ -13143,20 +13480,34 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::TributeChoice { .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
-            return engine_payment_choices::handle_tribute_choice(
+            return attribute_to_paused_clause(
                 state,
-                waiting_for.clone(),
-                accept,
                 &mut events,
+                ClauseSite::Answer,
+                |state, events| {
+                    engine_payment_choices::handle_tribute_choice(
+                        state,
+                        waiting_for.clone(),
+                        accept,
+                        events,
+                    )
+                },
             );
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {
-            return engine_payment_choices::handle_unless_payment(
+            return attribute_to_paused_clause(
                 state,
-                waiting_for.clone(),
-                pay,
                 &mut events,
+                ClauseSite::Answer,
+                |state, events| {
+                    engine_payment_choices::handle_unless_payment(
+                        state,
+                        waiting_for.clone(),
+                        pay,
+                        events,
+                    )
+                },
             );
         }
         // CR 118.12a: Player chose **which** sub-cost of a disjunctive
@@ -13169,11 +13520,18 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::UnlessPaymentChooseCost { .. },
             GameAction::ChooseUnlessCostBranch { choice },
         ) => {
-            return engine_payment_choices::handle_unless_payment_choose_cost(
+            return attribute_to_paused_clause(
                 state,
-                waiting_for.clone(),
-                choice,
                 &mut events,
+                ClauseSite::Answer,
+                |state, events| {
+                    engine_payment_choices::handle_unless_payment_choose_cost(
+                        state,
+                        waiting_for.clone(),
+                        choice,
+                        events,
+                    )
+                },
             );
         }
         // CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Player decided whether to
@@ -13223,45 +13581,76 @@ fn apply_non_priority_pass_action(
         (
             waiting_for @ WaitingFor::WardDiscardChoice { .. },
             GameAction::SelectCards { cards: chosen },
-        ) => engine_payment_choices::handle_ward_discard_choice(
+        ) => attribute_to_paused_clause(
             state,
-            waiting_for.clone(),
-            chosen,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_payment_choices::handle_ward_discard_choice(
+                    state,
+                    waiting_for.clone(),
+                    chosen,
+                    events,
+                )
+            },
         )?,
         // CR 702.21a: Player selected a permanent to sacrifice as ward cost payment.
         (
             waiting_for @ WaitingFor::WardSacrificeChoice { .. },
             GameAction::SelectCards { cards: chosen },
-        ) => engine_payment_choices::handle_ward_sacrifice_choice(
+        ) => attribute_to_paused_clause(
             state,
-            waiting_for.clone(),
-            chosen,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_payment_choices::handle_ward_sacrifice_choice(
+                    state,
+                    waiting_for.clone(),
+                    chosen,
+                    events,
+                )
+            },
         )?,
         // CR 118.12: Player selected a permanent to return to hand as unless cost.
         (
             waiting_for @ WaitingFor::UnlessBounceChoice { .. },
             GameAction::SelectCards { cards: chosen },
-        ) => engine_payment_choices::handle_unless_bounce_choice(
+        ) => attribute_to_paused_clause(
             state,
-            waiting_for.clone(),
-            chosen,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_payment_choices::handle_unless_bounce_choice(
+                    state,
+                    waiting_for.clone(),
+                    chosen,
+                    events,
+                )
+            },
         )?,
-        (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
-            // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
-            // the stack entry placed at announcement and return the object to
-            // its origin zone via `cancel_pending_cast`.
-            ensure_assist_cancellation_is_allowed(state)?;
-            let player = *player;
-            match state.pending_cast.take() {
-                Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
-                }
-                None => WaitingFor::Priority { player },
-            }
-        }
+        (
+            WaitingFor::ManaPayment { player, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
+                    // the stack entry placed at announcement and return the object to
+                    // its origin zone via `cancel_pending_cast`.
+                    ensure_assist_cancellation_is_allowed(state)?;
+                    let player = *player;
+                    match state.pending_cast.take() {
+                        Some(pending) => {
+                            engine_casting::cancel_pending_cast(state, player, &pending, events)?
+                        }
+                        None => WaitingFor::Priority { player },
+                    }
+                })
+            },
+        )?,
         (
             WaitingFor::ManaSourceSelection {
                 player,
@@ -13269,15 +13658,22 @@ fn apply_non_priority_pass_action(
                 convoke_mode,
             },
             GameAction::BackToManaPayment,
-        ) => {
-            // The selection window never consumes mana or changes pins. Restore
-            // the exact payment state rather than re-running the planner.
-            let _ = options;
-            WaitingFor::ManaPayment {
-                player: *player,
-                convoke_mode: *convoke_mode,
-            }
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |_state, _events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // The selection window never consumes mana or changes pins. Restore
+                    // the exact payment state rather than re-running the planner.
+                    let _ = options;
+                    WaitingFor::ManaPayment {
+                        player: *player,
+                        convoke_mode: *convoke_mode,
+                    }
+                })
+            },
+        )?,
         (
             WaitingFor::ManaSourceSelection {
                 player,
@@ -13305,26 +13701,41 @@ fn apply_non_priority_pass_action(
             triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
             waiting_for
         }
-        (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
-            // CR 601.2f + CR 601.2i: Caster may back out before committing to an
-            // X value. Pop the stack entry placed at announcement and restore.
-            ensure_assist_cancellation_is_allowed(state)?;
-            let player = *player;
-            match state.pending_cast.take() {
-                Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
-                }
-                None => WaitingFor::Priority { player },
-            }
-        }
-        (WaitingFor::ChooseXValue { .. }, GameAction::PassPriority) => {
-            // CR 601.2f: X must be chosen before the cast can proceed; passing priority
-            // is not a legal way to skip this step.
-            return Err(EngineError::ActionNotAllowed(
-                "Cannot pass priority while choosing a value for X — commit with ChooseX or CancelCast."
-                    .to_string(),
-            ));
-        }
+        (
+            WaitingFor::ChooseXValue { player, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // CR 601.2f + CR 601.2i: Caster may back out before committing to an
+                    // X value. Pop the stack entry placed at announcement and restore.
+                    ensure_assist_cancellation_is_allowed(state)?;
+                    let player = *player;
+                    match state.pending_cast.take() {
+                        Some(pending) => {
+                            engine_casting::cancel_pending_cast(state, player, &pending, events)?
+                        }
+                        None => WaitingFor::Priority { player },
+                    }
+                })
+            },
+        )?,
+        (WaitingFor::ChooseXValue { .. }, GameAction::PassPriority) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |_state, _events| -> Result<WaitingFor, EngineError> {
+                // CR 601.2f: X must be chosen before the cast can proceed; passing priority
+                // is not a legal way to skip this step.
+                Err(EngineError::ActionNotAllowed(
+                    "Cannot pass priority while choosing a value for X — commit with ChooseX or CancelCast."
+                        .to_string(),
+                ))
+            },
+        )?,
         // CR 107.1b + CR 601.2f: Commit the chosen X value, then advance to mana payment.
         (
             WaitingFor::ChooseXValue {
@@ -13335,135 +13746,142 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseX { value },
-        ) => {
-            if value < *min {
-                return Err(EngineError::InvalidAction(format!(
-                    "X={value} is below the minimum legal value of {min}",
-                    min = *min,
-                )));
-            }
-            if value > *max {
-                return Err(EngineError::InvalidAction(format!(
-                    "X={value} exceeds the maximum legal value of {max}",
-                    max = *max,
-                )));
-            }
-            let player = *player;
-            let convoke_mode = *convoke_mode;
-            if let Some(pending) = state.pending_cast.as_ref() {
-                // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
-                // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
-                // metadata in SpellMeta and enforced during mana payment.
-                let mut trial = pending.as_ref().clone();
-                trial.ability.set_chosen_x_recursive(value);
-                trial.cost.concretize_x(value);
-                if trial.activation_ability_index.is_some()
-                    && trial.activation_cost.as_ref().is_some_and(|cost| {
-                        !casting_costs::activation_cost_is_payable_after_x_choice(
-                            state,
-                            player,
-                            trial.object_id,
-                            cost,
-                            &trial.ability,
-                        )
-                    })
-                {
-                    return Err(EngineError::InvalidAction(format!(
-                        "X={value} cannot pay the activation cost"
-                    )));
-                }
-                if pending.deferred_target_selection {
-                    // CR 601.2c: A chosen X that determines target count must
-                    // have a legal target assignment before it is locked into
-                    // the pending cast.
-                    // CR 601.2f: The same X value then determines the total cost.
-                    let mut target_slots = build_target_slots(state, &trial.ability)?;
-                    // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
-                    // (now-known) pool so the legal-assignment probe matches what
-                    // the controller will actually be offered (issue #2856).
-                    cap_distribution_target_slots(
-                        state,
-                        &trial.ability,
-                        trial.distribute.as_ref(),
-                        &mut target_slots,
-                    );
-                    if !target_slots.is_empty()
-                        && !has_legal_target_assignment_for_ability(
-                            state,
-                            &trial.ability,
-                            &target_slots,
-                            &trial.target_constraints,
-                        )
-                    {
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if value < *min {
                         return Err(EngineError::InvalidAction(format!(
-                            "X={value} has no legal target assignment"
+                            "X={value} is below the minimum legal value of {min}",
+                            min = *min,
                         )));
                     }
-                }
-            }
-            let pending = state
-                .pending_cast
-                .as_mut()
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast awaiting X".to_string())
-                })?;
-            // CR 601.2b + CR 601.2f + CR 601.2h: Concretize {X} into generic mana in the cost structure.
-            // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
-            // metadata in SpellMeta and enforced during mana payment.
-            pending.ability.set_chosen_x_recursive(value);
-            pending.cost.concretize_x(value);
-            let object_id = pending.object_id;
-            events.push(GameEvent::XValueChosen {
-                player,
-                object_id,
-                value,
-            });
-            // CR 601.2b + CR 601.2f + CR 602.2b: an activation whose mana `{X}`
-            // deferred its cost lock locks it now, against the concrete cost —
-            // and may raise the reduction-order election here. The activation is
-            // accepted where its cost locks, so a lock that completes here (no
-            // election) runs the acceptance authority; an election accepts on
-            // its resume instead.
-            let x_lock_acceptance = state
-                .pending_cast
-                .as_deref()
-                .filter(|pending| {
-                    pending.activation_cost_snapshot.as_deref().is_some_and(|snapshot| {
-                        matches!(
-                            snapshot.lock,
-                            crate::types::casting_costs::ActivationCostLock::Open {
-                                point: crate::types::casting_costs::ActivationCostLockPoint::XAnnounced,
+                    if value > *max {
+                        return Err(EngineError::InvalidAction(format!(
+                            "X={value} exceeds the maximum legal value of {max}",
+                            max = *max,
+                        )));
+                    }
+                    let player = *player;
+                    let convoke_mode = *convoke_mode;
+                    if let Some(pending) = state.pending_cast.as_ref() {
+                        // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
+                        // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+                        // metadata in SpellMeta and enforced during mana payment.
+                        let mut trial = pending.as_ref().clone();
+                        trial.ability.set_chosen_x_recursive(value);
+                        trial.cost.concretize_x(value);
+                        if trial.activation_ability_index.is_some()
+                            && trial.activation_cost.as_ref().is_some_and(|cost| {
+                                !casting_costs::activation_cost_is_payable_after_x_choice(
+                                    state,
+                                    player,
+                                    trial.object_id,
+                                    cost,
+                                    &trial.ability,
+                                )
+                            })
+                        {
+                            return Err(EngineError::InvalidAction(format!(
+                                "X={value} cannot pay the activation cost"
+                            )));
+                        }
+                        if pending.deferred_target_selection {
+                            // CR 601.2c: A chosen X that determines target count must
+                            // have a legal target assignment before it is locked into
+                            // the pending cast.
+                            // CR 601.2f: The same X value then determines the total cost.
+                            let mut target_slots = build_target_slots(state, &trial.ability)?;
+                            // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
+                            // (now-known) pool so the legal-assignment probe matches what
+                            // the controller will actually be offered (issue #2856).
+                            cap_distribution_target_slots(
+                                state,
+                                &trial.ability,
+                                trial.distribute.as_ref(),
+                                &mut target_slots,
+                            );
+                            if !target_slots.is_empty()
+                                && !has_legal_target_assignment_for_ability(
+                                    state,
+                                    &trial.ability,
+                                    &target_slots,
+                                    &trial.target_constraints,
+                                )
+                            {
+                                return Err(EngineError::InvalidAction(format!(
+                                    "X={value} has no legal target assignment"
+                                )));
                             }
-                        )
-                    })
+                        }
+                    }
+                    let pending = state
+                        .pending_cast
+                        .as_mut()
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction("No pending cast awaiting X".to_string())
+                        })?;
+                    // CR 601.2b + CR 601.2f + CR 601.2h: Concretize {X} into generic mana in the cost structure.
+                    // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+                    // metadata in SpellMeta and enforced during mana payment.
+                    pending.ability.set_chosen_x_recursive(value);
+                    pending.cost.concretize_x(value);
+                    let object_id = pending.object_id;
+                    events.push(GameEvent::XValueChosen {
+                        player,
+                        object_id,
+                        value,
+                    });
+                    // CR 601.2b + CR 601.2f + CR 602.2b: an activation whose mana `{X}`
+                    // deferred its cost lock locks it now, against the concrete cost —
+                    // and may raise the reduction-order election here. The activation is
+                    // accepted where its cost locks, so a lock that completes here (no
+                    // election) runs the acceptance authority; an election accepts on
+                    // its resume instead.
+                    let x_lock_acceptance = state
+                        .pending_cast
+                        .as_deref()
+                        .filter(|pending| {
+                            pending.activation_cost_snapshot.as_deref().is_some_and(|snapshot| {
+                                matches!(
+                                    snapshot.lock,
+                                    crate::types::casting_costs::ActivationCostLock::Open {
+                                        point: crate::types::casting_costs::ActivationCostLockPoint::XAnnounced,
+                                    }
+                                )
+                            })
+                        })
+                        .and_then(|pending| {
+                            pending
+                                .activation_ability_index
+                                .map(|index| (pending.object_id, index))
+                        });
+                    if let Some(prompt) = casting::lock_activation_cost_at_x(state, player, convoke_mode)? {
+                        prompt
+                    } else {
+                        if x_lock_acceptance.is_some() {
+                            let _ = begin_non_mana_activation(state, player);
+                        }
+                        // CR 601.2b + CR 601.2f: X is now locked in. Re-derive the full
+                        // concrete cost from the captured base — all reductions, target-
+                        // dependent modifiers, and Strive re-applied, with floors
+                        // (Trinisphere class) run LAST — against the now-concrete total,
+                        // before payment is determined. (Legacy/in-flight pending casts
+                        // without a captured base fall back to flooring the
+                        // already-concretized cost.)
+                        casting::apply_post_x_cost_modifiers(state, player, object_id);
+                        let wf =
+                            casting_costs::enter_payment_step(state, player, convoke_mode, events)?;
+                        if let Some((source_id, ability_index)) = x_lock_acceptance {
+                            record_non_mana_activation_accepted(state, player, source_id, ability_index);
+                        }
+                        wf
+                    }
                 })
-                .and_then(|pending| {
-                    pending
-                        .activation_ability_index
-                        .map(|index| (pending.object_id, index))
-                });
-            if let Some(prompt) = casting::lock_activation_cost_at_x(state, player, convoke_mode)? {
-                prompt
-            } else {
-                if x_lock_acceptance.is_some() {
-                    let _ = begin_non_mana_activation(state, player);
-                }
-                // CR 601.2b + CR 601.2f: X is now locked in. Re-derive the full
-                // concrete cost from the captured base — all reductions, target-
-                // dependent modifiers, and Strive re-applied, with floors
-                // (Trinisphere class) run LAST — against the now-concrete total,
-                // before payment is determined. (Legacy/in-flight pending casts
-                // without a captured base fall back to flooring the
-                // already-concretized cost.)
-                casting::apply_post_x_cost_modifiers(state, player, object_id);
-                let wf =
-                    casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?;
-                if let Some((source_id, ability_index)) = x_lock_acceptance {
-                    record_non_mana_activation_accepted(state, player, source_id, ability_index);
-                }
-                wf
-            }
-        }
+            },
+        )?,
         // CR 601.2c + CR 115.1: The spell controller chose which opponent announces
         // an "of an opponent's choice" target slot. Record it on the in-flight cast
         // and resume the (deferred) target declaration; `resolve_effect_player_ref`
@@ -13476,27 +13894,34 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseAnnouncingOpponent { opponent },
-        ) => {
-            if !candidates.contains(&opponent) {
-                return Err(EngineError::InvalidAction(format!(
-                    "Player {opponent:?} is not an eligible announcing opponent"
-                )));
-            }
-            let caster = *player;
-            let chosen = opponent;
-            let mut pending = (**pending_cast).clone();
-            // CR 601.2c + CR 115.1: Record the announcer for the FIRST still-
-            // unassigned "of an opponent's choice" slot group only. Each such
-            // effect is decided independently; `begin_deferred_target_selection`
-            // re-prompts for any remaining groups, so the controller may pick the
-            // same or different opponents per effect (Volcanic Offering).
-            if !casting_costs::assign_next_announcing_opponent(&mut pending.ability, chosen) {
-                return Err(EngineError::InvalidAction(
-                    "No opponent-choice effect is awaiting an announcing opponent".to_string(),
-                ));
-            }
-            casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if !candidates.contains(&opponent) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Player {opponent:?} is not an eligible announcing opponent"
+                        )));
+                    }
+                    let caster = *player;
+                    let chosen = opponent;
+                    let mut pending = (**pending_cast).clone();
+                    // CR 601.2c + CR 115.1: Record the announcer for the FIRST still-
+                    // unassigned "of an opponent's choice" slot group only. Each such
+                    // effect is decided independently; `begin_deferred_target_selection`
+                    // re-prompts for any remaining groups, so the controller may pick the
+                    // same or different opponents per effect (Volcanic Offering).
+                    if !casting_costs::assign_next_announcing_opponent(&mut pending.ability, chosen) {
+                        return Err(EngineError::InvalidAction(
+                            "No opponent-choice effect is awaiting an announcing opponent".to_string(),
+                        ));
+                    }
+                    casting_costs::begin_deferred_target_selection(state, caster, pending, events)?
+                })
+            },
+        )?,
         // CR 702.174a: Caster chose which opponent receives the promised Gift.
         (
             WaitingFor::ChooseGiftRecipient {
@@ -13506,17 +13931,24 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseGiftRecipient { opponent },
-        ) => {
-            let caster = *player;
-            casting_costs::handle_choose_gift_recipient(
-                state,
-                caster,
-                (**pending_cast).clone(),
-                opponent,
-                candidates,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let caster = *player;
+                    casting_costs::handle_choose_gift_recipient(
+                        state,
+                        caster,
+                        (**pending_cast).clone(),
+                        opponent,
+                        candidates,
+                        events,
+                    )?
+                })
+            },
+        )?,
         // CR 702.132a: Assist — caster chooses another player to help pay generic,
         // or declines. `assist_state` was set to `Offered` when the offer was made,
         // so both branches simply (re)enter the payment step from where they resume.
@@ -13528,45 +13960,70 @@ fn apply_non_priority_pass_action(
                 convoke_mode,
             },
             GameAction::ChooseAssistPlayer { player: chosen },
-        ) => {
-            let caster = *player;
-            let convoke_mode = *convoke_mode;
-            match chosen {
-                None => {
-                    // CR 702.132a: declining proceeds to normal payment by the caster.
-                    casting_costs::enter_payment_step(state, caster, convoke_mode, &mut events)?
-                }
-                Some(p) => {
-                    if !candidates.contains(&p) {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Player {p:?} is not an eligible assist helper"
-                        )));
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let caster = *player;
+                    let convoke_mode = *convoke_mode;
+                    match chosen {
+                        None => {
+                            // CR 702.132a: declining proceeds to normal payment by the caster.
+                            casting_costs::enter_payment_step(state, caster, convoke_mode, events)?
+                        }
+                        Some(p) => {
+                            if !candidates.contains(&p) {
+                                return Err(EngineError::InvalidAction(format!(
+                                    "Player {p:?} is not an eligible assist helper"
+                                )));
+                            }
+                            WaitingFor::AssistPayment {
+                                caster,
+                                chosen: p,
+                                max_generic: *max_generic,
+                                convoke_mode,
+                            }
+                        }
                     }
-                    WaitingFor::AssistPayment {
-                        caster,
-                        chosen: p,
-                        max_generic: *max_generic,
-                        convoke_mode,
+                })
+            },
+        )?,
+        (
+            WaitingFor::AssistChoosePlayer { player, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    ensure_assist_cancellation_is_allowed(state)?;
+                    let player = *player;
+                    match state.pending_cast.take() {
+                        Some(pending) => {
+                            engine_casting::cancel_pending_cast(state, player, &pending, events)?
+                        }
+                        None => WaitingFor::Priority { player },
                     }
-                }
-            }
-        }
-        (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
-            ensure_assist_cancellation_is_allowed(state)?;
-            let player = *player;
-            match state.pending_cast.take() {
-                Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
-                }
-                None => WaitingFor::Priority { player },
-            }
-        }
-        (WaitingFor::AssistChoosePlayer { .. }, GameAction::PassPriority) => {
-            return Err(EngineError::ActionNotAllowed(
-                "Must choose an assisting player or decline with ChooseAssistPlayer { player: None }, or CancelCast."
-                    .to_string(),
-            ));
-        }
+                })
+            },
+        )?,
+        (
+            WaitingFor::AssistChoosePlayer { .. },
+            GameAction::PassPriority,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |_state, _events| -> Result<WaitingFor, EngineError> {
+                Err(EngineError::ActionNotAllowed(
+                    "Must choose an assisting player or decline with ChooseAssistPlayer { player: None }, or CancelCast."
+                        .to_string(),
+                ))
+            },
+        )?,
         // CR 702.132a + CR 601.2h: Assist records the selected generic
         // contribution and reduces the caster's owed generic now, but helper
         // resources stay untouched until final payment begins. The typed
@@ -13580,61 +14037,78 @@ fn apply_non_priority_pass_action(
                 convoke_mode,
             },
             GameAction::CommitAssistPayment { generic },
-        ) => {
-            let caster = *caster;
-            let chosen = *chosen;
-            let max_generic = *max_generic;
-            let convoke_mode = *convoke_mode;
-            if generic > max_generic {
-                return Err(EngineError::InvalidAction(format!(
-                    "Assist contribution {generic} exceeds the maximum {max_generic}"
-                )));
-            }
-            if generic > 0 {
-                use crate::types::mana::ManaCost;
-                // CR 702.132a: validate the helper can actually produce the committed
-                // generic (simulated auto-tap on a clone) before reducing the
-                // caster's cost. No real taps happen here — see `apply_committed_assist`.
-                let probe = ManaCost::Cost {
-                    shards: Vec::new(),
-                    generic,
-                };
-                let mut sim = state.clone();
-                let mut sink = Vec::new();
-                casting_costs::auto_tap_mana_sources(&mut sim, chosen, &probe, &mut sink, None);
-                let feasible = casting::mana_ability_cost_payment_is_paused(&sim)
-                    || sim
-                        .players
-                        .iter()
-                        .find(|p| p.id == chosen)
-                        .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
-                if !feasible {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Assisting player cannot produce {generic} generic mana"
-                    )));
-                }
-                // Reduce the caster's owed generic and record the commitment; the
-                // helper actually taps/spends at finalize.
-                let pending = state.pending_cast.as_mut().ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for assist".to_string())
-                })?;
-                if let ManaCost::Cost { generic: owed, .. } = &mut pending.cost {
-                    *owed = owed.saturating_sub(generic);
-                }
-                pending.assist_state = AssistState::Committed {
-                    helper: chosen,
-                    generic,
-                };
-            }
-            casting_costs::enter_payment_step(state, caster, convoke_mode, &mut events)?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let caster = *caster;
+                    let chosen = *chosen;
+                    let max_generic = *max_generic;
+                    let convoke_mode = *convoke_mode;
+                    if generic > max_generic {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Assist contribution {generic} exceeds the maximum {max_generic}"
+                        )));
+                    }
+                    if generic > 0 {
+                        use crate::types::mana::ManaCost;
+                        // CR 702.132a: validate the helper can actually produce the committed
+                        // generic (simulated auto-tap on a clone) before reducing the
+                        // caster's cost. No real taps happen here — see `apply_committed_assist`.
+                        let probe = ManaCost::Cost {
+                            shards: Vec::new(),
+                            generic,
+                        };
+                        let mut sim = state.clone();
+                        let mut sink = Vec::new();
+                        casting_costs::auto_tap_mana_sources(&mut sim, chosen, &probe, &mut sink, None);
+                        let feasible = casting::mana_ability_cost_payment_is_paused(&sim)
+                            || sim
+                                .players
+                                .iter()
+                                .find(|p| p.id == chosen)
+                                .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
+                        if !feasible {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Assisting player cannot produce {generic} generic mana"
+                            )));
+                        }
+                        // Reduce the caster's owed generic and record the commitment; the
+                        // helper actually taps/spends at finalize.
+                        let pending = state.pending_cast.as_mut().ok_or_else(|| {
+                            EngineError::InvalidAction("No pending cast for assist".to_string())
+                        })?;
+                        if let ManaCost::Cost { generic: owed, .. } = &mut pending.cost {
+                            *owed = owed.saturating_sub(generic);
+                        }
+                        pending.assist_state = AssistState::Committed {
+                            helper: chosen,
+                            generic,
+                        };
+                    }
+                    casting_costs::enter_payment_step(state, caster, convoke_mode, events)?
+                })
+            },
+        )?,
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
         // that both this branch and the auto-pay path in `enter_payment_step` share.
-        (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
-            // CR 118.3a: `finalize_mana_payment` clears `active_payment_pins`
-            // itself on every Ok/Err path, so no caller clear is needed.
-            casting_costs::finalize_mana_payment(state, *player, &mut events)?
-        }
+        (
+            WaitingFor::ManaPayment { player, .. },
+            GameAction::PassPriority,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // CR 118.3a: `finalize_mana_payment` clears `active_payment_pins`
+                    // itself on every Ok/Err path, so no caller clear is needed.
+                    casting_costs::finalize_mana_payment(state, *player, events)?
+                })
+            },
+        )?,
         // CR 107.4f + CR 601.2f + CR 601.2h: Caster submitted per-shard Phyrexian
         // choices. Validate choice count + current affordability, then resume the
         // cast via `finalize_mana_payment_with_phyrexian_choices`.
@@ -13645,123 +14119,140 @@ fn apply_non_priority_pass_action(
                 shards,
             },
             GameAction::SubmitPhyrexianChoices { choices },
-        ) => {
-            let player = *player;
-            let spell_object = *spell_object;
-            let expected_len = shards.len();
-            if choices.len() != expected_len {
-                return Err(EngineError::InvalidAction(format!(
-                    "Phyrexian choice count mismatch: expected {expected_len}, got {}",
-                    choices.len()
-                )));
-            }
-            // CR 118.3: Re-validate affordability against current state — life may have
-            // dropped mid-cast (e.g., a life-loss replacement fired), so `PayLife` choices
-            // on shards that now show `LifeOnly`/`ManaOrLife` must still have life available.
-            {
-                let pending_ref = state.pending_cast.as_ref().ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for Phyrexian payment".to_string())
-                })?;
-                let cost = pending_ref.cost.clone();
-                let player_pool = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.mana_pool.clone())
-                    .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-                let activation_ability_index = pending_ref.activation_ability_index;
-                let current_shards = if let Some(ability_index) = activation_ability_index {
-                    let activation_context =
-                        casting::activation_payment_context(
-                            state,
-                            spell_object,
-                            Some(ability_index),
-                        );
-                    let activation_ctx = activation_context.as_payment_context();
-                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
-                        state,
-                        player,
-                        Some(spell_object),
-                        Some(&activation_ctx),
-                    );
-                    let permissions = super::static_abilities::build_cost_permission_context(
-                        state, player, mana_spend_permission,
-                    );
-                    mana_payment::compute_phyrexian_shards(
-                        &player_pool,
-                        &cost,
-                        Some(&activation_ctx),
-                        permissions,
-                    )
-                } else {
-                    let spell_meta = casting::build_spell_meta(state, player, spell_object);
-                    let spell_ctx = spell_meta
-                        .as_ref()
-                        .map(crate::types::mana::PaymentContext::Spell);
-                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
-                        state,
-                        player,
-                        Some(spell_object),
-                        spell_ctx.as_ref(),
-                    );
-                    let permissions = super::static_abilities::build_cost_permission_context(
-                        state, player, mana_spend_permission,
-                    );
-                    mana_payment::compute_phyrexian_shards(
-                        &player_pool,
-                        &cost,
-                        spell_ctx.as_ref(),
-                        permissions,
-                    )
-                };
-                if current_shards.len() != expected_len {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Phyrexian shard count changed during pause".to_string(),
-                    ));
-                }
-                for (choice, shard) in choices.iter().zip(current_shards.iter()) {
-                    if let (
-                        crate::types::game_state::ShardChoice::PayLife,
-                        crate::types::game_state::ShardOptions::ManaOnly,
-                    ) = (choice, shard.options)
-                    {
-                        return Err(EngineError::ActionNotAllowed(
-                            "Cannot pay life for shard — only mana available".to_string(),
-                        ));
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let player = *player;
+                    let spell_object = *spell_object;
+                    let expected_len = shards.len();
+                    if choices.len() != expected_len {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Phyrexian choice count mismatch: expected {expected_len}, got {}",
+                            choices.len()
+                        )));
                     }
-                }
-                if !casting::pending_phyrexian_route_is_payable(
-                    state,
-                    player,
-                    spell_object,
-                    &choices,
-                ) {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot pay mana cost with selected Phyrexian route".to_string(),
-                    ));
-                }
-            }
-            // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
-            // `active_payment_pins` itself on every Ok/Err path; no caller clear.
-            casting_costs::finalize_mana_payment_with_phyrexian_choices(
-                state,
-                player,
-                &choices,
-                &mut events,
-            )?
-        }
+                    // CR 118.3: Re-validate affordability against current state — life may have
+                    // dropped mid-cast (e.g., a life-loss replacement fired), so `PayLife` choices
+                    // on shards that now show `LifeOnly`/`ManaOrLife` must still have life available.
+                    {
+                        let pending_ref = state.pending_cast.as_ref().ok_or_else(|| {
+                            EngineError::InvalidAction("No pending cast for Phyrexian payment".to_string())
+                        })?;
+                        let cost = pending_ref.cost.clone();
+                        let player_pool = state
+                            .players
+                            .iter()
+                            .find(|p| p.id == player)
+                            .map(|p| p.mana_pool.clone())
+                            .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+                        let activation_ability_index = pending_ref.activation_ability_index;
+                        let current_shards = if let Some(ability_index) = activation_ability_index {
+                            let activation_context =
+                                casting::activation_payment_context(
+                                    state,
+                                    spell_object,
+                                    Some(ability_index),
+                                );
+                            let activation_ctx = activation_context.as_payment_context();
+                            let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
+                                state,
+                                player,
+                                Some(spell_object),
+                                Some(&activation_ctx),
+                            );
+                            let permissions = super::static_abilities::build_cost_permission_context(
+                                state, player, mana_spend_permission,
+                            );
+                            mana_payment::compute_phyrexian_shards(
+                                &player_pool,
+                                &cost,
+                                Some(&activation_ctx),
+                                permissions,
+                            )
+                        } else {
+                            let spell_meta = casting::build_spell_meta(state, player, spell_object);
+                            let spell_ctx = spell_meta
+                                .as_ref()
+                                .map(crate::types::mana::PaymentContext::Spell);
+                            let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
+                                state,
+                                player,
+                                Some(spell_object),
+                                spell_ctx.as_ref(),
+                            );
+                            let permissions = super::static_abilities::build_cost_permission_context(
+                                state, player, mana_spend_permission,
+                            );
+                            mana_payment::compute_phyrexian_shards(
+                                &player_pool,
+                                &cost,
+                                spell_ctx.as_ref(),
+                                permissions,
+                            )
+                        };
+                        if current_shards.len() != expected_len {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Phyrexian shard count changed during pause".to_string(),
+                            ));
+                        }
+                        for (choice, shard) in choices.iter().zip(current_shards.iter()) {
+                            if let (
+                                crate::types::game_state::ShardChoice::PayLife,
+                                crate::types::game_state::ShardOptions::ManaOnly,
+                            ) = (choice, shard.options)
+                            {
+                                return Err(EngineError::ActionNotAllowed(
+                                    "Cannot pay life for shard — only mana available".to_string(),
+                                ));
+                            }
+                        }
+                        if !casting::pending_phyrexian_route_is_payable(
+                            state,
+                            player,
+                            spell_object,
+                            &choices,
+                        ) {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Cannot pay mana cost with selected Phyrexian route".to_string(),
+                            ));
+                        }
+                    }
+                    // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
+                    // `active_payment_pins` itself on every Ok/Err path; no caller clear.
+                    casting_costs::finalize_mana_payment_with_phyrexian_choices(
+                        state,
+                        player,
+                        &choices,
+                        events,
+                    )?
+                })
+            },
+        )?,
         // CR 601.2i: CancelCast during Phyrexian payment rolls back the cast —
         // mirrors the ManaPayment CancelCast path.
-        (WaitingFor::PhyrexianPayment { player, .. }, GameAction::CancelCast) => {
-            ensure_assist_cancellation_is_allowed(state)?;
-            let player = *player;
-            match state.pending_cast.take() {
-                Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
-                }
-                None => WaitingFor::Priority { player },
-            }
-        }
+        (
+            WaitingFor::PhyrexianPayment { player, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    ensure_assist_cancellation_is_allowed(state)?;
+                    let player = *player;
+                    match state.pending_cast.take() {
+                        Some(pending) => {
+                            engine_casting::cancel_pending_cast(state, player, &pending, events)?
+                        }
+                        None => WaitingFor::Priority { player },
+                    }
+                })
+            },
+        )?,
         // Allow mana abilities during mana payment (mid-cast)
         (
             WaitingFor::ManaPayment {
@@ -14318,51 +14809,95 @@ fn apply_non_priority_pass_action(
                 engine_combat::finish_declare_attackers(state, &mut events, false)?
             }
         }
-        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacementAndRemember { choice }) => {
-            // CR 616.1: validate the full response and eligibility before any mutation.
-            if !replacement::validate_remembered_replacement(state, &choice) {
-                return Err(EngineError::InvalidAction("Invalid remembered replacement choice".into()));
-            }
-            if let Some(waiting_for) = casting_costs::abandon_stale_resolution_sacrifice_cursor(state, &mut events) {
-                waiting_for
-            } else {
-                let index = replacement::remember_replacement_choice(state, choice);
-                engine_replacement::handle_replacement_choice(state, index, &mut events)?
-            }
-        }
-        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
-            if let Some(waiting_for) =
-                casting_costs::abandon_stale_resolution_sacrifice_cursor(state, &mut events)
-            {
-                waiting_for
-            } else {
-                engine_replacement::handle_replacement_choice(state, index, &mut events)?
-            }
-        }
+        (
+            WaitingFor::ReplacementChoice { .. },
+            GameAction::ChooseReplacementAndRemember { choice },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // CR 616.1: validate the full response and eligibility before any mutation.
+                    if !replacement::validate_remembered_replacement(state, &choice) {
+                        return Err(EngineError::InvalidAction("Invalid remembered replacement choice".into()));
+                    }
+                    if let Some(waiting_for) = casting_costs::abandon_stale_resolution_sacrifice_cursor(state, events) {
+                        waiting_for
+                    } else {
+                        let index = replacement::remember_replacement_choice(state, choice);
+                        engine_replacement::handle_replacement_choice(state, index, events)?
+                    }
+                })
+            },
+        )?,
+        (
+            WaitingFor::ReplacementChoice { .. },
+            GameAction::ChooseReplacement { index },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if let Some(waiting_for) =
+                        casting_costs::abandon_stale_resolution_sacrifice_cursor(state, events)
+                    {
+                        waiting_for
+                    } else {
+                        engine_replacement::handle_replacement_choice(state, index, events)?
+                    }
+                })
+            },
+        )?,
         (
             WaitingFor::EntryControllerChoice { .. },
             GameAction::ChooseEntryController { opponent },
-        ) => engine_replacement::handle_entry_controller_choice(state, opponent, &mut events)?,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_replacement::handle_entry_controller_choice(state, opponent, events)
+            },
+        )?,
         // CR 603.3b: Player submits the chosen order for their pending triggers.
         // `actor` is already authorized as the prompted player by
         // `check_actor_authorization` (via `WaitingFor::acting_player`).
-        (WaitingFor::OrderTriggers { .. }, GameAction::OrderTriggers { order }) => {
-            // Round-20 seam 1: this arm is the outermost handler return for the
-            // whole ordered batch, so it is where the construction finisher runs
-            // — covering the multi-group re-prompt, both early returns after
-            // `pending_trigger_order.take()`, and the terminal resume.
-            let produced = triggers::handle_order_triggers(state, order)?;
-            triggers::finish_trigger_construction_action(state, &mut events, produced)
-        }
+        (
+            WaitingFor::OrderTriggers { .. },
+            GameAction::OrderTriggers { order },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // Round-20 seam 1: this arm is the outermost handler return for the
+                    // whole ordered batch, so it is where the construction finisher runs
+                    // — covering the multi-group re-prompt, both early returns after
+                    // `pending_trigger_order.take()`, and the terminal resume.
+                    let produced = triggers::handle_order_triggers(state, order)?;
+                    triggers::finish_trigger_construction_action(state, events, produced)
+                })
+            },
+        )?,
         // CR 707.9: Player chose a permanent to copy for "enter as a copy of" replacement.
         (
             waiting_for @ WaitingFor::CopyTargetChoice { .. },
             GameAction::ChooseTarget { target },
-        ) => engine_replacement::handle_copy_target_choice(
+        ) => attribute_to_paused_clause(
             state,
-            waiting_for.clone(),
-            target,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_replacement::handle_copy_target_choice(
+                    state,
+                    waiting_for.clone(),
+                    target,
+                    events,
+                )
+            },
         )?,
         (
             WaitingFor::ExploreChoice {
@@ -14372,26 +14907,33 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseTarget { target },
-        ) => {
-            if turn_control::authorized_submitter(state) != Some(*player) {
-                return Err(EngineError::WrongPlayer);
-            }
-            let chosen = match target {
-                Some(TargetRef::Object(id)) => id,
-                _ => {
-                    return Err(EngineError::InvalidAction(
-                        "Invalid explore choice".to_string(),
-                    ));
-                }
-            };
-            super::effects::explore::handle_choice(
-                state,
-                chosen,
-                remaining,
-                pending_effect.as_ref(),
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if turn_control::authorized_submitter(state) != Some(*player) {
+                        return Err(EngineError::WrongPlayer);
+                    }
+                    let chosen = match target {
+                        Some(TargetRef::Object(id)) => id,
+                        _ => {
+                            return Err(EngineError::InvalidAction(
+                                "Invalid explore choice".to_string(),
+                            ));
+                        }
+                    };
+                    super::effects::explore::handle_choice(
+                        state,
+                        chosen,
+                        remaining,
+                        pending_effect.as_ref(),
+                        events,
+                    )?
+                })
+            },
+        )?,
         // CR 303.4 + CR 303.4f + CR 303.4g + CR 115.1: Player picked the
         // permanent to enchant for a return-as-Aura sub-effect or a non-spell
         // Aura battlefield entry. The picker is a CHOICE (not a target), so
@@ -14407,99 +14949,112 @@ fn apply_non_priority_pass_action(
                 pending_effect,
             },
             GameAction::ChooseTarget { target },
-        ) => {
-            if turn_control::authorized_submitter(state) != Some(*player) {
-                return Err(EngineError::WrongPlayer);
-            }
-            let chosen = match target {
-                Some(target) if legal_targets.contains(&target) => target.clone(),
-                _ => {
-                    return Err(EngineError::InvalidAction(
-                        "ReturnAsAuraTarget: invalid or missing legal target".to_string(),
-                    ));
-                }
-            };
-            let pending = pending_effect.clone();
-            let returned = *returned_id;
-            let active_player = *player;
-            let (filter, grants) = match &pending.effect {
-                crate::types::ability::Effect::ReturnAsAura {
-                    enchant_filter,
-                    grants,
-                } => (enchant_filter.clone(), grants.clone()),
-                _ => {
-                    // CR 303.4f + CR 701.3b: attach through the entering-Aura
-                    // authority, so the CR 701.3a gate judges the same entrant
-                    // the host list was offered for. Seams that park none get
-                    // the stored object, i.e. their prior behaviour exactly.
-                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
-                        state, returned, &chosen,
-                    );
-                    if let Some(old_target) = old_target {
-                        events.push(crate::types::events::GameEvent::Unattached {
-                            attachment_id: returned,
-                            old_target,
-                        });
+        ) => match attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<AnswerArm, EngineError> {
+                Ok(AnswerArm::Continue({
+                    if turn_control::authorized_submitter(state) != Some(*player) {
+                        return Err(EngineError::WrongPlayer);
                     }
-                    let resumes_change_zone_iteration = state
-                        .active_change_zone_frame()
-                        .is_some_and(|frame| frame.pending.is_some());
-                    if !resumes_change_zone_iteration {
-                        events.push(crate::types::events::GameEvent::EffectResolved {
-                            kind: crate::types::ability::EffectKind::ChangeZone,
-                            source_id: pending.source_id,
-                        subject: None,});
-                    }
+                    let chosen = match target {
+                        Some(target) if legal_targets.contains(&target) => target.clone(),
+                        _ => {
+                            return Err(EngineError::InvalidAction(
+                                "ReturnAsAuraTarget: invalid or missing legal target".to_string(),
+                            ));
+                        }
+                    };
+                    let pending = pending_effect.clone();
+                    let returned = *returned_id;
+                    let active_player = *player;
+                    let (filter, grants) = match &pending.effect {
+                        crate::types::ability::Effect::ReturnAsAura {
+                            enchant_filter,
+                            grants,
+                        } => (enchant_filter.clone(), grants.clone()),
+                        _ => {
+                            // CR 303.4f + CR 701.3b: attach through the entering-Aura
+                            // authority, so the CR 701.3a gate judges the same entrant
+                            // the host list was offered for. Seams that park none get
+                            // the stored object, i.e. their prior behaviour exactly.
+                            let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
+                                state, returned, &chosen,
+                            );
+                            if let Some(old_target) = old_target {
+                                events.push(crate::types::events::GameEvent::Unattached {
+                                    attachment_id: returned,
+                                    old_target,
+                                });
+                            }
+                            let resumes_change_zone_iteration = state
+                                .active_change_zone_frame()
+                                .is_some_and(|frame| frame.pending.is_some());
+                            if !resumes_change_zone_iteration {
+                                events.push(crate::types::events::GameEvent::EffectResolved {
+                                    kind: crate::types::ability::EffectKind::ChangeZone,
+                                    source_id: pending.source_id,
+                                subject: None,});
+                            }
+                            state.waiting_for = WaitingFor::Priority {
+                                player: active_player,
+                            };
+                            state.priority_player = active_player;
+                            // CR 603.10a + CR 616.1: an aura-attachment pause can carry a
+                            // deferred batch completion (a reveal-until / dig kept Aura
+                            // whose entry paused before the rest pile was moved). Drain it
+                            // here — the replacement-choice resume path drains it for the
+                            // CR 616.1 case, but the aura-host resume is the ONLY drain
+                            // site for an `NeedsAuraAttachmentChoice` pause.
+                            if state.active_batch_delivery().is_some() {
+                                super::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                            }
+                            resume_pending_continuation_if_priority(state, events)?;
+                            return Ok(AnswerArm::Return(ActionResult::applied(
+                    std::mem::take(events),
+                    state.waiting_for.clone(),
+                )));
+                        }
+                    };
+                    let chosen = match chosen {
+                        TargetRef::Object(id) => id,
+                        TargetRef::Player(_) => {
+                            return Err(EngineError::InvalidAction(
+                                "ReturnAsAuraTarget: ReturnAsAura requires an object host".to_string(),
+                            ));
+                        }
+                    };
+                    super::effects::return_as_aura::finalize_attach(
+                        state,
+                        pending.as_ref(),
+                        returned,
+                        chosen,
+                        &filter,
+                        grants,
+                        events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                    // After resolving the attach, return control to standard priority
+                    // flow under the picker's controller, then resume any chain that was
+                    // paused behind the picker.
                     state.waiting_for = WaitingFor::Priority {
                         player: active_player,
                     };
                     state.priority_player = active_player;
-                    // CR 603.10a + CR 616.1: an aura-attachment pause can carry a
-                    // deferred batch completion (a reveal-until / dig kept Aura
-                    // whose entry paused before the rest pile was moved). Drain it
-                    // here — the replacement-choice resume path drains it for the
-                    // CR 616.1 case, but the aura-host resume is the ONLY drain
-                    // site for an `NeedsAuraAttachmentChoice` pause.
+                    // CR 603.10a + CR 616.1: drain a deferred batch completion parked
+                    // behind this aura-attachment pause (see the sibling path above).
                     if state.active_batch_delivery().is_some() {
-                        super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+                        super::zone_pipeline::drain_pending_batch_deliveries(state, events);
                     }
-                    resume_pending_continuation_if_priority(state, &mut events)?;
-                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
-                }
-            };
-            let chosen = match chosen {
-                TargetRef::Object(id) => id,
-                TargetRef::Player(_) => {
-                    return Err(EngineError::InvalidAction(
-                        "ReturnAsAuraTarget: ReturnAsAura requires an object host".to_string(),
-                    ));
-                }
-            };
-            super::effects::return_as_aura::finalize_attach(
-                state,
-                pending.as_ref(),
-                returned,
-                chosen,
-                &filter,
-                grants,
-                &mut events,
-            )
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            // After resolving the attach, return control to standard priority
-            // flow under the picker's controller, then resume any chain that was
-            // paused behind the picker.
-            state.waiting_for = WaitingFor::Priority {
-                player: active_player,
-            };
-            state.priority_player = active_player;
-            // CR 603.10a + CR 616.1: drain a deferred batch completion parked
-            // behind this aura-attachment pause (see the sibling path above).
-            if state.active_batch_delivery().is_some() {
-                super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
-            }
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.waiting_for.clone()
-        }
+                    resume_pending_continuation_if_priority(state, events)?;
+                    state.waiting_for.clone()
+                }))
+            },
+        )? {
+            AnswerArm::Continue(waiting_for) => waiting_for,
+            AnswerArm::Return(result) => return Ok(result),
+        },
         (
             WaitingFor::EquipTarget {
                 player,
@@ -14776,68 +15331,75 @@ fn apply_non_priority_pass_action(
                 object_id: action_obj,
                 ..
             },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMiracle object_id does not match the outstanding miracle reveal"
-                        .to_string(),
-                ));
-            }
-            let p = *player;
-            let source = *object_id;
-            let miracle_cost = cost.clone();
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if *object_id != action_obj {
+                        return Err(EngineError::InvalidAction(
+                            "CastSpellAsMiracle object_id does not match the outstanding miracle reveal"
+                                .to_string(),
+                        ));
+                    }
+                    let p = *player;
+                    let source = *object_id;
+                    let miracle_cost = cost.clone();
 
-            // CR 702.94a: Emit the reveal event.
-            // CR 702.94a: Emit the reveal event.
-            let card_name = state
-                .objects
-                .get(&source)
-                .map(|o| o.name.clone())
-                .unwrap_or_default();
-            events.push(crate::types::events::GameEvent::CardsRevealed {
-                player: p,
-                card_ids: vec![source],
-                card_names: vec![card_name],
-            });
+                    // CR 702.94a: Emit the reveal event.
+                    // CR 702.94a: Emit the reveal event.
+                    let card_name = state
+                        .objects
+                        .get(&source)
+                        .map(|o| o.name.clone())
+                        .unwrap_or_default();
+                    events.push(crate::types::events::GameEvent::CardsRevealed {
+                        player: p,
+                        card_ids: vec![source],
+                        card_names: vec![card_name],
+                    });
 
-            // CR 702.94a: Push the miracle triggered ability onto the stack.
-            // "When you reveal this card this way, you may cast it by paying
-            // [miracle cost] rather than its mana cost."
-            let ability = crate::types::ability::ResolvedAbility::new(
-                crate::types::ability::Effect::MiracleCast { cost: miracle_cost },
-                vec![],
-                source,
-                p,
-            );
-            let trigger = super::triggers::PendingTrigger {
-                source_id: source,
-                controller: p,
-                condition: None,
-                ability: Box::new(ability),
-                timestamp: 0,
-                target_constraints: vec![],
-                distribute: None,
-                trigger_event: None,
-                modal: None,
-                mode_abilities: vec![],
-                description: Some("Miracle — you may cast this card".to_string()),
-                may_trigger_origin: None,
-                subject_match_count: None,
-        die_result: None,
-            provenance: None,
-            };
-            super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
+                    // CR 702.94a: Push the miracle triggered ability onto the stack.
+                    // "When you reveal this card this way, you may cast it by paying
+                    // [miracle cost] rather than its mana cost."
+                    let ability = crate::types::ability::ResolvedAbility::new(
+                        crate::types::ability::Effect::MiracleCast { cost: miracle_cost },
+                        vec![],
+                        source,
+                        p,
+                    );
+                    let trigger = super::triggers::PendingTrigger {
+                        source_id: source,
+                        controller: p,
+                        condition: None,
+                        ability: Box::new(ability),
+                        timestamp: 0,
+                        target_constraints: vec![],
+                        distribute: None,
+                        trigger_event: None,
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: Some("Miracle — you may cast this card".to_string()),
+                        may_trigger_origin: None,
+                        subject_match_count: None,
+                die_result: None,
+                    provenance: None,
+                    };
+                    super::triggers::push_pending_trigger_to_stack(state, trigger, events);
 
-            // Return to priority so the trigger can be responded to.
-            state.waiting_for = WaitingFor::Priority { player: p };
-            super::engine_priority::run_post_action_pipeline(
-                state,
-                &mut events,
-                &WaitingFor::Priority { player: p },
-                true,
-                false,
-            )?
-        }
+                    // Return to priority so the trigger can be responded to.
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    super::engine_priority::run_post_action_pipeline(
+                        state,
+                        events,
+                        &WaitingFor::Priority { player: p },
+                        true,
+                        false,
+                    )?
+                })
+            },
+        )?,
         // CR 702.94a: Miracle reveal — decline path. Reuses the generic
         // DecideOptionalEffect decline; flushes the next pending miracle
         // offer or returns to Priority. Flip `waiting_for` out of MiracleReveal
@@ -14847,17 +15409,24 @@ fn apply_non_priority_pass_action(
         (
             WaitingFor::MiracleReveal { player, .. },
             GameAction::DecideOptionalEffect { accept: false },
-        ) => {
-            let p = *player;
-            state.waiting_for = WaitingFor::Priority { player: p };
-            super::engine_priority::run_post_action_pipeline(
-                state,
-                &mut events,
-                &WaitingFor::Priority { player: p },
-                true,
-                false,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    super::engine_priority::run_post_action_pipeline(
+                        state,
+                        events,
+                        &WaitingFor::Priority { player: p },
+                        true,
+                        false,
+                    )?
+                })
+            },
+        )?,
         // CR 702.94a + CR 608.2g: Miracle cast offer — the miracle triggered
         // ability has resolved. The player may now cast for the miracle cost.
         // This cast happens during trigger resolution, so timing restrictions
@@ -14872,28 +15441,35 @@ fn apply_non_priority_pass_action(
                 card_id,
                 payment_mode,
             },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMiracle object_id does not match miracle cast offer".to_string(),
-                ));
-            }
-            let p = *player;
-            let obj = action_obj;
-            // CR 702.94a + CR 608.2g: forward the cost latched at offer-enqueue as
-            // the sole cost authority — live keywords are not re-read (the granting
-            // source may have left the battlefield, CR 608.2b).
-            let latched_cost = Some(cost.clone());
-            super::casting::handle_cast_spell_as_miracle_with_payment_mode(
-                state,
-                p,
-                obj,
-                card_id,
-                payment_mode,
-                latched_cost,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if *object_id != action_obj {
+                        return Err(EngineError::InvalidAction(
+                            "CastSpellAsMiracle object_id does not match miracle cast offer".to_string(),
+                        ));
+                    }
+                    let p = *player;
+                    let obj = action_obj;
+                    // CR 702.94a + CR 608.2g: forward the cost latched at offer-enqueue as
+                    // the sole cost authority — live keywords are not re-read (the granting
+                    // source may have left the battlefield, CR 608.2b).
+                    let latched_cost = Some(cost.clone());
+                    super::casting::handle_cast_spell_as_miracle_with_payment_mode(
+                        state,
+                        p,
+                        obj,
+                        card_id,
+                        payment_mode,
+                        latched_cost,
+                        events,
+                    )?
+                })
+            },
+        )?,
         // CR 702.94a: Miracle cast offer — decline. Resume resolution.
         (
             WaitingFor::CastOffer {
@@ -14901,17 +15477,24 @@ fn apply_non_priority_pass_action(
                 kind: CastOfferKind::Miracle { .. },
             },
             GameAction::DecideOptionalEffect { accept: false },
-        ) => {
-            let p = *player;
-            state.waiting_for = WaitingFor::Priority { player: p };
-            super::engine_priority::run_post_action_pipeline(
-                state,
-                &mut events,
-                &WaitingFor::Priority { player: p },
-                true,
-                false,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    super::engine_priority::run_post_action_pipeline(
+                        state,
+                        events,
+                        &WaitingFor::Priority { player: p },
+                        true,
+                        false,
+                    )?
+                })
+            },
+        )?,
         // CR 702.35a: Madness cast offer — the madness triggered ability has
         // resolved. The player may now cast the exiled card for its madness cost.
         (
@@ -14924,23 +15507,30 @@ fn apply_non_priority_pass_action(
                 card_id,
                 payment_mode,
             },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMadness object_id does not match madness cast offer".to_string(),
-                ));
-            }
-            let p = *player;
-            let obj = action_obj;
-            super::casting::handle_cast_spell_as_madness_with_payment_mode(
-                state,
-                p,
-                obj,
-                card_id,
-                payment_mode,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    if *object_id != action_obj {
+                        return Err(EngineError::InvalidAction(
+                            "CastSpellAsMadness object_id does not match madness cast offer".to_string(),
+                        ));
+                    }
+                    let p = *player;
+                    let obj = action_obj;
+                    super::casting::handle_cast_spell_as_madness_with_payment_mode(
+                        state,
+                        p,
+                        obj,
+                        card_id,
+                        payment_mode,
+                        events,
+                    )?
+                })
+            },
+        )?,
         // CR 702.35a: Madness decline — put the exiled card into its owner's graveyard.
         (
             WaitingFor::CastOffer {
@@ -14948,46 +15538,53 @@ fn apply_non_priority_pass_action(
                 kind: CastOfferKind::Madness { object_id, .. },
             },
             GameAction::DecideOptionalEffect { accept: false },
-        ) => {
-            let p = *player;
-            let obj = *object_id;
-            // CR 702.35a + CR 614.6: a declined madness card is put into its
-            // owner's graveyard from exile — route it through the zone-change
-            // pipeline so a `Moved` graveyard→exile redirect (Rest in Peace /
-            // Leyline of the Void) fires on it. The raw `move_to_zone` never
-            // proposed the inner ZoneChange, silently dropping those redirects.
-            // The card moves itself (no external source), so it anchors its own
-            // attribution. A CR 616.1 ordering choice (two simultaneous
-            // redirects) is parked centrally by `move_object`; bail before
-            // overwriting `waiting_for` / running the post-action pipeline so the
-            // parked prompt is not clobbered (its resume runs the pipeline).
-            match super::zone_pipeline::move_object(
-                state,
-                super::zone_pipeline::ZoneMoveRequest::effect(obj, Zone::Graveyard, obj),
-                &mut events,
-            ) {
-                super::zone_pipeline::ZoneMoveResult::Done => {
-                    state.waiting_for = WaitingFor::Priority { player: p };
-                    super::engine_priority::run_post_action_pipeline(
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    let obj = *object_id;
+                    // CR 702.35a + CR 614.6: a declined madness card is put into its
+                    // owner's graveyard from exile — route it through the zone-change
+                    // pipeline so a `Moved` graveyard→exile redirect (Rest in Peace /
+                    // Leyline of the Void) fires on it. The raw `move_to_zone` never
+                    // proposed the inner ZoneChange, silently dropping those redirects.
+                    // The card moves itself (no external source), so it anchors its own
+                    // attribution. A CR 616.1 ordering choice (two simultaneous
+                    // redirects) is parked centrally by `move_object`; bail before
+                    // overwriting `waiting_for` / running the post-action pipeline so the
+                    // parked prompt is not clobbered (its resume runs the pipeline).
+                    match super::zone_pipeline::move_object(
                         state,
-                        &mut events,
-                        &WaitingFor::Priority { player: p },
-                        true,
-                        false,
-                    )?
-                }
-                // The graveyard move paused on a CR 616.1 ordering choice; the
-                // parked prompt is already in `state.waiting_for`. Evaluate the
-                // arm to it (non-`Priority`), so the post-match block skips the
-                // post-action pipeline and the prompt is surfaced intact — its
-                // replacement-choice resume finishes the move and re-runs the
-                // pipeline.
-                super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
-                | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    state.waiting_for.clone()
-                }
-            }
-        }
+                        super::zone_pipeline::ZoneMoveRequest::effect(obj, Zone::Graveyard, obj),
+                        events,
+                    ) {
+                        super::zone_pipeline::ZoneMoveResult::Done => {
+                            state.waiting_for = WaitingFor::Priority { player: p };
+                            super::engine_priority::run_post_action_pipeline(
+                                state,
+                                events,
+                                &WaitingFor::Priority { player: p },
+                                true,
+                                false,
+                            )?
+                        }
+                        // The graveyard move paused on a CR 616.1 ordering choice; the
+                        // parked prompt is already in `state.waiting_for`. Evaluate the
+                        // arm to it (non-`Priority`), so the post-match block skips the
+                        // post-action pipeline and the prompt is surfaced intact — its
+                        // replacement-choice resume finishes the move and re-runs the
+                        // pipeline.
+                        super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                        | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            state.waiting_for.clone()
+                        }
+                    }
+                })
+            },
+        )?,
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             match engine_resolution_choices::handle_resolution_choice(
                 state,
@@ -15049,42 +15646,56 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::SelectTargets { targets },
-        ) => {
-            // CR 608.2b + CR 732.2a: journal the announcement BEFORE the handler runs — it
-            // replaces `waiting_for`, so the prompt's own seat and source are only readable
-            // here, and the key reads the source object's CR 400.7 incarnation, which
-            // resolution can invalidate. `apply_action_boundary_core` snapshots the whole
-            // state and restores it on every `Err` return, so a write made before a handler
-            // that then errors is rolled back with everything else.
-            record_trigger_target_answer(state, *source_id, *player, targets.as_slice());
-            engine_stack::handle_trigger_target_selection_select_targets(
-                state,
-                *player,
-                target_slots,
-                target_constraints,
-                targets,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // CR 608.2b + CR 732.2a: journal the announcement BEFORE the handler runs — it
+                    // replaces `waiting_for`, so the prompt's own seat and source are only readable
+                    // here, and the key reads the source object's CR 400.7 incarnation, which
+                    // resolution can invalidate. `apply_action_boundary_core` snapshots the whole
+                    // state and restores it on every `Err` return, so a write made before a handler
+                    // that then errors is rolled back with everything else.
+                    record_trigger_target_answer(state, *source_id, *player, targets.as_slice());
+                    engine_stack::handle_trigger_target_selection_select_targets(
+                        state,
+                        *player,
+                        target_slots,
+                        target_constraints,
+                        targets,
+                        events,
+                    )?
+                })
+            },
+        )?,
         (
             WaitingFor::TriggerTargetSelection {
                 player, source_id, ..
             },
             GameAction::ChooseTarget { target },
-        ) => {
-            // Same write authority and same before-the-handler reason as the `SelectTargets`
-            // arm above. `target: None` yields an empty slice, which the helper's
-            // `pins.is_empty()` guard refuses — the fail-closed reading of a no-target
-            // announcement.
-            record_trigger_target_answer(state, *source_id, *player, target.as_slice());
-            let waiting_for = state.waiting_for.clone();
-            engine_stack::handle_trigger_target_selection_choose_target(
-                state,
-                waiting_for,
-                target,
-                &mut events,
-            )?
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    // Same write authority and same before-the-handler reason as the `SelectTargets`
+                    // arm above. `target: None` yields an empty slice, which the helper's
+                    // `pins.is_empty()` guard refuses — the fail-closed reading of a no-target
+                    // announcement.
+                    record_trigger_target_answer(state, *source_id, *player, target.as_slice());
+                    let waiting_for = state.waiting_for.clone();
+                    engine_stack::handle_trigger_target_selection_choose_target(
+                        state,
+                        waiting_for,
+                        target,
+                        events,
+                    )?
+                })
+            },
+        )?,
         (
             WaitingFor::BetweenGamesSideboard { player, .. },
             GameAction::SubmitSideboard { main, sideboard },
@@ -15098,11 +15709,18 @@ fn apply_non_priority_pass_action(
         (
             waiting_for @ WaitingFor::AbilityModeChoice { .. },
             GameAction::SelectModes { indices },
-        ) => engine_modes::handle_ability_mode_choice(
+        ) => attribute_to_paused_clause(
             state,
-            waiting_for.clone(),
-            indices,
             &mut events,
+            ClauseSite::Answer,
+            |state, events| {
+                engine_modes::handle_ability_mode_choice(
+                    state,
+                    waiting_for.clone(),
+                    indices,
+                    events,
+                )
+            },
         )?,
         // CR 602.2b + CR 601.2b: The controller chooses modes for an activated modal
         // ability BEFORE any cost is paid, target is chosen, or stack object is created
@@ -15120,12 +15738,29 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => WaitingFor::Priority { player: *player },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |_state, _events| -> Result<WaitingFor, EngineError> {
+                Ok(WaitingFor::Priority { player: *player })
+            },
+        )?,
         // CR 601.2c: Player selected targets from a multi-target set ("any number of").
-        (WaitingFor::MultiTargetSelection { .. }, GameAction::SelectCards { cards: selected }) => {
-            let waiting_for = state.waiting_for.clone();
-            engine_stack::handle_multi_target_selection(state, waiting_for, &selected, &mut events)?
-        }
+        (
+            WaitingFor::MultiTargetSelection { .. },
+            GameAction::SelectCards { cards: selected },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let waiting_for = state.waiting_for.clone();
+                    engine_stack::handle_multi_target_selection(state, waiting_for, &selected, events)?
+                })
+            },
+        )?,
         // CR 702.139a: Pre-game companion reveal
         (
             WaitingFor::CompanionReveal { player, .. },
@@ -15192,39 +15827,46 @@ fn apply_non_priority_pass_action(
                 kind: CastOfferKind::Paradigm { offers },
             },
             GameAction::CastParadigmCopy { source },
-        ) => {
-            let src = source;
-            if !offers.contains(&src) {
-                return Err(EngineError::InvalidAction(format!(
-                    "CastParadigmCopy: source {src:?} not in current offer set"
-                )));
-            }
-            let p = *player;
-            let copy_id = effects::paradigm::cast_paradigm_copy(state, src, p, &mut events)
-                .map_err(EngineError::InvalidAction)?;
-            let remaining: Vec<ObjectId> = offers
-                .iter()
-                .copied()
-                .filter(|id| *id != src)
-                .collect();
-            // CR 707.10c: If the paradigm spell has target slots, open target
-            // selection via CopyRetarget. Otherwise re-offer any remaining
-            // paradigm sources before returning to priority.
-            if effects::prepare::open_copy_target_selection(
-                state,
-                copy_id,
-                p,
-                Some(remaining.clone()),
-            )
-            .map_err(EngineError::InvalidAction)?
-            {
-                state.waiting_for.clone()
-            } else {
-                // CR 601.2i: nothing to announce, so the copy is cast now.
-                super::casting_costs::commit_copy_cast(state, copy_id, p, &mut events)?;
-                effects::paradigm::waiting_after_remaining_offers(p, remaining)
-            }
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let src = source;
+                    if !offers.contains(&src) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "CastParadigmCopy: source {src:?} not in current offer set"
+                        )));
+                    }
+                    let p = *player;
+                    let copy_id = effects::paradigm::cast_paradigm_copy(state, src, p, events)
+                        .map_err(EngineError::InvalidAction)?;
+                    let remaining: Vec<ObjectId> = offers
+                        .iter()
+                        .copied()
+                        .filter(|id| *id != src)
+                        .collect();
+                    // CR 707.10c: If the paradigm spell has target slots, open target
+                    // selection via CopyRetarget. Otherwise re-offer any remaining
+                    // paradigm sources before returning to priority.
+                    if effects::prepare::open_copy_target_selection(
+                        state,
+                        copy_id,
+                        p,
+                        Some(remaining.clone()),
+                    )
+                    .map_err(EngineError::InvalidAction)?
+                    {
+                        state.waiting_for.clone()
+                    } else {
+                        // CR 601.2i: nothing to announce, so the copy is cast now.
+                        super::casting_costs::commit_copy_cast(state, copy_id, p, events)?;
+                        effects::paradigm::waiting_after_remaining_offers(p, remaining)
+                    }
+                })
+            },
+        )?,
         // CR 702.xxx: Paradigm (Strixhaven) — decline the turn-based offer.
         // Assign when WotC publishes SOS CR update.
         (
@@ -15233,7 +15875,14 @@ fn apply_non_priority_pass_action(
                 kind: CastOfferKind::Paradigm { .. },
             },
             GameAction::PassParadigmOffer,
-        ) => WaitingFor::Priority { player: *player },
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |_state, _events| -> Result<WaitingFor, EngineError> {
+                Ok(WaitingFor::Priority { player: *player })
+            },
+        )?,
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
             return install_auto_pass_and_pass_priority(state, *player, mode, &mut events);
         }
@@ -15241,101 +15890,117 @@ fn apply_non_priority_pass_action(
         (
             WaitingFor::ProliferateChoice { player, eligible },
             GameAction::SelectTargets { targets },
-        ) => {
-            let p = *player;
-            let eligible_set = eligible.clone();
-            // Validate all selected targets are in the eligible set.
-            for t in &targets {
-                if !eligible_set.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected target not eligible for proliferate".to_string(),
-                    ));
-                }
-            }
-            // CR 701.34a + issue #7384: take the frame BEFORE applying counters.
-            // A counter-placement replacement can pause mid-application, and any
-            // path that returns while this direct-choice frame is still resident
-            // strands it on the resolution stack — every later frame transition
-            // then fails `ResolutionStack::validate` against a prompt that has
-            // long since moved on. A wrong stack top degrades to a rejected
-            // action here rather than to silent corruption, because
-            // `take_active_proliferate_frame` reports `UnexpectedTop`.
-            let pending = state
-                .take_active_proliferate_frame()
-                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No active proliferate frame to resume".to_string())
-                })?;
-            let completion_source = pending.source_id;
-            // FIX-1 (CR 701.34a): record the proliferate-target choice on the current loop-period
-            // step so the object-growth detection drive replays the EXACT permanent(s) grown
-            // (Pentad's charge) — never "all eligible", which could grow an opponent's
-            // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
-            // `index: 0` (distinct source from the Relic tap-cost/color pins).
-            //
-            // Recorded BEFORE the counters are applied: a counter-placement
-            // replacement can pause `apply_proliferate`, and that path returns
-            // early. Leaving the pin below it would silently drop the pin on
-            // exactly the proliferate this fix made complete, falling back to
-            // the "all eligible" replay this comment rules out. Everything read
-            // here — `state`, `targets`, `p`, `completion_source` — is already
-            // settled, and `object_decision_source` resolves card identity,
-            // which the pending counters do not affect.
-            if let Some(source) = object_decision_source(state, completion_source) {
-                let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
-                    .iter()
-                    .filter_map(|t| match t {
-                        crate::types::ability::TargetRef::Object(id) => object_decision_source(
-                            state, *id,
-                        )
-                        .map(crate::analysis::decision_template::TargetPin::ByIdentity),
-                        crate::types::ability::TargetRef::Player(pl) => {
-                            Some(crate::analysis::decision_template::TargetPin::Player(*pl))
+        ) => match attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<AnswerArm, EngineError> {
+                Ok({
+                    let p = *player;
+                    let eligible_set = eligible.clone();
+                    // Validate all selected targets are in the eligible set.
+                    for t in &targets {
+                        if !eligible_set.contains(t) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected target not eligible for proliferate".to_string(),
+                            ));
                         }
-                    })
-                    .collect();
-                if !target_pins.is_empty() {
-                    record_loop_pin(
+                    }
+                    // CR 701.34a + issue #7384: take the frame BEFORE applying counters.
+                    // A counter-placement replacement can pause mid-application, and any
+                    // path that returns while this direct-choice frame is still resident
+                    // strands it on the resolution stack — every later frame transition
+                    // then fails `ResolutionStack::validate` against a prompt that has
+                    // long since moved on. A wrong stack top degrades to a rejected
+                    // action here rather than to silent corruption, because
+                    // `take_active_proliferate_frame` reports `UnexpectedTop`.
+                    let pending = state
+                        .take_active_proliferate_frame()
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction("No active proliferate frame to resume".to_string())
+                        })?;
+                    let completion_source = pending.source_id;
+                    // FIX-1 (CR 701.34a): record the proliferate-target choice on the current loop-period
+                    // step so the object-growth detection drive replays the EXACT permanent(s) grown
+                    // (Pentad's charge) — never "all eligible", which could grow an opponent's
+                    // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
+                    // `index: 0` (distinct source from the Relic tap-cost/color pins).
+                    //
+                    // Recorded BEFORE the counters are applied: a counter-placement
+                    // replacement can pause `apply_proliferate`, and that path returns
+                    // early. Leaving the pin below it would silently drop the pin on
+                    // exactly the proliferate this fix made complete, falling back to
+                    // the "all eligible" replay this comment rules out. Everything read
+                    // here — `state`, `targets`, `p`, `completion_source` — is already
+                    // settled, and `object_decision_source` resolves card identity,
+                    // which the pending counters do not affect.
+                    if let Some(source) = object_decision_source(state, completion_source) {
+                        let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
+                            .iter()
+                            .filter_map(|t| match t {
+                                crate::types::ability::TargetRef::Object(id) => object_decision_source(
+                                    state, *id,
+                                )
+                                .map(crate::analysis::decision_template::TargetPin::ByIdentity),
+                                crate::types::ability::TargetRef::Player(pl) => {
+                                    Some(crate::analysis::decision_template::TargetPin::Player(*pl))
+                                }
+                            })
+                            .collect();
+                        if !target_pins.is_empty() {
+                            record_loop_pin(
+                                state,
+                                p,
+                                crate::analysis::decision_template::PinnedDecision::Targets {
+                                    slot: crate::analysis::decision_template::DecisionSlot {
+                                        source,
+                                        index: 0,
+                                    },
+                                    targets: target_pins,
+                                },
+                            );
+                        }
+                    }
+                    // The player-action event and any remaining actions are owed once
+                    // the counters land, so they ride the completion rather than being
+                    // emitted here — `continue_proliferate_actions` is the single
+                    // authority for both, on the synchronous and paused paths alike.
+                    let completion = PendingEffectResolved::with_post_actions_without_effect(
+                        crate::types::ability::EffectKind::Proliferate,
+                        completion_source,
+                        vec![PendingCounterPostAction::ContinueProliferateActions {
+                            pending: pending.clone(),
+                        }],
+                    );
+                    if !effects::proliferate::apply_proliferate(
                         state,
                         p,
-                        crate::analysis::decision_template::PinnedDecision::Targets {
-                            slot: crate::analysis::decision_template::DecisionSlot {
-                                source,
-                                index: 0,
-                            },
-                            targets: target_pins,
-                        },
-                    );
-                }
-            }
-            // The player-action event and any remaining actions are owed once
-            // the counters land, so they ride the completion rather than being
-            // emitted here — `continue_proliferate_actions` is the single
-            // authority for both, on the synchronous and paused paths alike.
-            let completion = PendingEffectResolved::with_post_actions_without_effect(
-                crate::types::ability::EffectKind::Proliferate,
-                completion_source,
-                vec![PendingCounterPostAction::ContinueProliferateActions {
-                    pending: pending.clone(),
-                }],
-            );
-            if !effects::proliferate::apply_proliferate(
-                state,
-                p,
-                &targets,
-                completion,
-                &mut events,
-            ) {
-                return Ok(ActionResult::applied(events, state.waiting_for.clone()));
-            }
-            if !effects::proliferate::continue_proliferate_actions(state, pending, &mut events) {
-                return Ok(ActionResult::applied(events, state.waiting_for.clone()));
-            }
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.waiting_for.clone()
-        }
+                        &targets,
+                        completion,
+                        events,
+                    ) {
+                        return Ok(AnswerArm::Return(ActionResult::applied(
+                            std::mem::take(events),
+                            state.waiting_for.clone(),
+                        )));
+                    }
+                    if !effects::proliferate::continue_proliferate_actions(state, pending, events) {
+                        return Ok(AnswerArm::Return(ActionResult::applied(
+                            std::mem::take(events),
+                            state.waiting_for.clone(),
+                        )));
+                    }
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    state.priority_player = p;
+                    resume_pending_continuation_if_priority(state, events)?;
+                    AnswerArm::Continue(state.waiting_for.clone())
+                })
+            },
+        )? {
+            AnswerArm::Continue(waiting_for) => waiting_for,
+            AnswerArm::Return(result) => return Ok(result),
+        },
         // CR 701.56a: Time travel — player selected objects for the current phase
         // (remove a time counter, then add). Validate against the eligible set,
         // apply the per-object counter change, then advance to the add phase or
@@ -15347,54 +16012,61 @@ fn apply_non_priority_pass_action(
                 phase,
             },
             GameAction::SelectTargets { targets },
-        ) => {
-            let p = *player;
-            let phase = *phase;
-            let eligible_set = eligible.clone();
-            for t in &targets {
-                if !eligible_set.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected object not eligible for time travel".to_string(),
-                    ));
-                }
-            }
-            effects::time_travel::apply_phase(state, p, &targets, phase, &mut events);
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    let phase = *phase;
+                    let eligible_set = eligible.clone();
+                    for t in &targets {
+                        if !eligible_set.contains(t) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected object not eligible for time travel".to_string(),
+                            ));
+                        }
+                    }
+                    effects::time_travel::apply_phase(state, p, &targets, phase, events);
 
-            if phase == crate::types::game_state::TimeTravelPhase::Remove {
-                // CR 701.56a: after the remove phase, offer the add phase over the
-                // still-eligible objects, excluding any just chosen to remove.
-                let add_eligible: Vec<_> = effects::time_travel::eligible_objects(state, p)
-                    .into_iter()
-                    .filter(|t| !targets.contains(t))
-                    .collect();
-                if !add_eligible.is_empty() {
-                    state.waiting_for = WaitingFor::TimeTravelChoice {
-                        player: p,
-                        eligible: add_eligible,
-                        phase: crate::types::game_state::TimeTravelPhase::Add,
-                    };
-                    state.waiting_for.clone()
-                } else {
-                    events.push(GameEvent::EffectResolved {
-                        kind: crate::types::ability::EffectKind::TimeTravel,
-                        source_id: ObjectId(0),
-                    subject: None,});
-                    state.waiting_for = WaitingFor::Priority { player: p };
-                    state.priority_player = p;
-                    resume_pending_continuation_if_priority(state, &mut events)?;
-                    state.waiting_for.clone()
-                }
-            } else {
-                events.push(GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::TimeTravel,
-                    source_id: ObjectId(0),
-                subject: None,});
-                state.waiting_for = WaitingFor::Priority { player: p };
-                state.priority_player = p;
-                resume_pending_continuation_if_priority(state, &mut events)?;
-                state.waiting_for.clone()
-            }
-        }
+                    if phase == crate::types::game_state::TimeTravelPhase::Remove {
+                        // CR 701.56a: after the remove phase, offer the add phase over the
+                        // still-eligible objects, excluding any just chosen to remove.
+                        let add_eligible: Vec<_> = effects::time_travel::eligible_objects(state, p)
+                            .into_iter()
+                            .filter(|t| !targets.contains(t))
+                            .collect();
+                        if !add_eligible.is_empty() {
+                            state.waiting_for = WaitingFor::TimeTravelChoice {
+                                player: p,
+                                eligible: add_eligible,
+                                phase: crate::types::game_state::TimeTravelPhase::Add,
+                            };
+                            state.waiting_for.clone()
+                        } else {
+                            events.push(GameEvent::EffectResolved {
+                                kind: crate::types::ability::EffectKind::TimeTravel,
+                                source_id: ObjectId(0),
+                            subject: None,});
+                            state.waiting_for = WaitingFor::Priority { player: p };
+                            state.priority_player = p;
+                            resume_pending_continuation_if_priority(state, events)?;
+                            state.waiting_for.clone()
+                        }
+                    } else {
+                        events.push(GameEvent::EffectResolved {
+                            kind: crate::types::ability::EffectKind::TimeTravel,
+                            source_id: ObjectId(0),
+                        subject: None,});
+                        state.waiting_for = WaitingFor::Priority { player: p };
+                        state.priority_player = p;
+                        resume_pending_continuation_if_priority(state, events)?;
+                        state.waiting_for.clone()
+                    }
+                })
+            },
+        )?,
         // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
         // battlefield-permanent selection. Publish a fresh tracked set so the
         // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
@@ -15408,76 +16080,83 @@ fn apply_non_priority_pass_action(
                 trigger_event,
             },
             GameAction::SelectTargets { targets },
-        ) => {
-            let p = *player;
-            let eligible_set = eligible.clone();
-            let pending_event = trigger_event.clone();
-            let selected_count = targets.len();
-            if selected_count < *min as usize
-                || max.is_some_and(|maximum| selected_count > maximum as usize)
-            {
-                return Err(EngineError::InvalidAction(format!(
-                    "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
-                    max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
-                )));
-            }
-            // Validate all selected targets are distinct objects in the eligible set.
-            let mut selected_objects = HashSet::with_capacity(selected_count);
-            for t in &targets {
-                if !eligible_set.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected target not eligible for object selection".to_string(),
-                    ));
-                }
-                let TargetRef::Object(id) = t else {
-                    return Err(EngineError::InvalidAction(
-                        "Object selection accepts battlefield objects only".to_string(),
-                    ));
-                };
-                if !selected_objects.insert(*id) {
-                    return Err(EngineError::InvalidAction(
-                        "Duplicate object in object selection".to_string(),
-                    ));
-                }
-            }
-            let ids: Vec<ObjectId> = targets
-                .iter()
-                .map(|target| match target {
-                    TargetRef::Object(id) => *id,
-                    TargetRef::Player(_) => unreachable!("validated as objects above"),
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    let eligible_set = eligible.clone();
+                    let pending_event = trigger_event.clone();
+                    let selected_count = targets.len();
+                    if selected_count < *min as usize
+                        || max.is_some_and(|maximum| selected_count > maximum as usize)
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
+                            max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
+                        )));
+                    }
+                    // Validate all selected targets are distinct objects in the eligible set.
+                    let mut selected_objects = HashSet::with_capacity(selected_count);
+                    for t in &targets {
+                        if !eligible_set.contains(t) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected target not eligible for object selection".to_string(),
+                            ));
+                        }
+                        let TargetRef::Object(id) = t else {
+                            return Err(EngineError::InvalidAction(
+                                "Object selection accepts battlefield objects only".to_string(),
+                            ));
+                        };
+                        if !selected_objects.insert(*id) {
+                            return Err(EngineError::InvalidAction(
+                                "Duplicate object in object selection".to_string(),
+                            ));
+                        }
+                    }
+                    let ids: Vec<ObjectId> = targets
+                        .iter()
+                        .map(|target| match target {
+                            TargetRef::Object(id) => *id,
+                            TargetRef::Player(_) => unreachable!("validated as objects above"),
+                        })
+                        .collect();
+                    // CR 603.7: Always allocate a fresh tracked set — a player-chosen
+                    // "those creatures" set is a new resolution scope. An empty
+                    // selection yields an empty fresh set (size 0).
+                    effects::publish_fresh_tracked_set(state, ids);
+                    events.push(GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
+                        source_id: ObjectId(0), // Source not tracked through choice state
+                        subject: None,
+                    });
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    state.priority_player = p;
+                    // CR 608.2: restore the triggering event so the stashed
+                    // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
+                    // resolves the payer correctly — the trigger's resolution is still
+                    // in flight.
+                    // CR 603.2c + CR 608.2: the batched-trigger subject count is also
+                    // part of the trigger's resolution scope — mirror its save/restore
+                    // so an `EventContextAmount` inside the resumed continuation reads
+                    // the original "that many" instead of `None`.
+                    let previous_trigger_event = state.current_trigger_event.clone();
+                    let previous_trigger_match_count = state.current_trigger_match_count;
+                    state.current_trigger_event = pending_event;
+                    state.current_trigger_match_count = state
+                        .active_ability_continuation()
+                        .and_then(|continuation| continuation.trigger_context.as_ref())
+                        .and_then(|context| context.match_count);
+                    resume_pending_continuation_if_priority(state, events)?;
+                    state.current_trigger_event = previous_trigger_event;
+                    state.current_trigger_match_count = previous_trigger_match_count;
+                    state.waiting_for.clone()
                 })
-                .collect();
-            // CR 603.7: Always allocate a fresh tracked set — a player-chosen
-            // "those creatures" set is a new resolution scope. An empty
-            // selection yields an empty fresh set (size 0).
-            effects::publish_fresh_tracked_set(state, ids);
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
-                source_id: ObjectId(0), // Source not tracked through choice state
-                subject: None,
-            });
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            // CR 608.2: restore the triggering event so the stashed
-            // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
-            // resolves the payer correctly — the trigger's resolution is still
-            // in flight.
-            // CR 603.2c + CR 608.2: the batched-trigger subject count is also
-            // part of the trigger's resolution scope — mirror its save/restore
-            // so an `EventContextAmount` inside the resumed continuation reads
-            // the original "that many" instead of `None`.
-            let previous_trigger_event = state.current_trigger_event.clone();
-            let previous_trigger_match_count = state.current_trigger_match_count;
-            state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state
-                .active_ability_continuation()
-                .and_then(|continuation| continuation.trigger_context.as_ref())
-                .and_then(|context| context.match_count);
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.current_trigger_event = previous_trigger_event;
-            state.current_trigger_match_count = previous_trigger_match_count;
-            state.waiting_for.clone()
-        }
+            },
+        )?,
         // CR 707.10c / CR 601.2c: one position of the copy target walk. The
         // pick is answerable only when the engine-derived walk admits it (a
         // keep only where keeping completes; a choice only where it has a
@@ -15491,30 +16170,44 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseAnnouncingOpponent { opponent },
-        ) => {
-            let (walk, picks) =
-                effects::copy_choice::walk_of(&state.waiting_for).ok_or_else(|| {
-                    EngineError::InvalidAction("Copy target walk is not normalized".to_string())
-                })?;
-            effects::copy_choice::elect_announcing_opponent(state, &walk, opponent)?;
-            advance_copy_walk(state, &walk, picks, &mut events)?;
-            state.waiting_for.clone()
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let (walk, picks) =
+                        effects::copy_choice::walk_of(&state.waiting_for).ok_or_else(|| {
+                            EngineError::InvalidAction("Copy target walk is not normalized".to_string())
+                        })?;
+                    effects::copy_choice::elect_announcing_opponent(state, &walk, opponent)?;
+                    advance_copy_walk(state, &walk, picks, events)?;
+                    state.waiting_for.clone()
+                })
+            },
+        )?,
         (
             WaitingFor::CopyRetarget {
                 announcer_election: None,
                 ..
             },
             GameAction::ChooseTarget { target },
-        ) => {
-            let (walk, picks) = effects::copy_choice::walk_of(&state.waiting_for)
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("Copy target walk is not normalized".to_string())
-                })?;
-            let picks = effects::copy_choice::advance_walk(state, &walk, &picks, &target)?;
-            advance_copy_walk(state, &walk, picks, &mut events)?;
-            state.waiting_for.clone()
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let (walk, picks) = effects::copy_choice::walk_of(&state.waiting_for)
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction("Copy target walk is not normalized".to_string())
+                        })?;
+                    let picks = effects::copy_choice::advance_walk(state, &walk, &picks, &target)?;
+                    advance_copy_walk(state, &walk, picks, events)?;
+                    state.waiting_for.clone()
+                })
+            },
+        )?,
         // CR 707.10c: "Keep Current Targets" — keep every remaining position
         // in one action, offered only when keeping them completes.
         (
@@ -15523,19 +16216,26 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::KeepAllCopyTargets,
-        ) => {
-            let (walk, picks) = effects::copy_choice::walk_of(&state.waiting_for)
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("Copy target walk is not normalized".to_string())
-                })?;
-            if !effects::copy_choice::keep_rest_is_admissible(state, &walk, &picks) {
-                return Err(EngineError::InvalidAction(
-                    "Keeping the remaining copy targets does not complete".to_string(),
-                ));
-            }
-            finalize_copy_walk(state, &walk, picks, &mut events)?;
-            state.waiting_for.clone()
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let (walk, picks) = effects::copy_choice::walk_of(&state.waiting_for)
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction("Copy target walk is not normalized".to_string())
+                        })?;
+                    if !effects::copy_choice::keep_rest_is_admissible(state, &walk, &picks) {
+                        return Err(EngineError::InvalidAction(
+                            "Keeping the remaining copy targets does not complete".to_string(),
+                        ));
+                    }
+                    finalize_copy_walk(state, &walk, picks, events)?;
+                    state.waiting_for.clone()
+                })
+            },
+        )?,
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.
         (
             WaitingFor::AssignCombatDamage {
@@ -15600,20 +16300,30 @@ fn apply_non_priority_pass_action(
             )?
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
-        (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
-            ensure_assist_cancellation_is_allowed(state)?;
-            let player = *player;
-            match state.pending_cast.take() {
-                Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
-                }
-                None => {
-                    return Err(EngineError::InvalidAction(
-                        "No pending cast to cancel during distribution".to_string(),
-                    ));
-                }
-            }
-        }
+        (
+            WaitingFor::DistributeAmong { player, .. },
+            GameAction::CancelCast,
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    ensure_assist_cancellation_is_allowed(state)?;
+                    let player = *player;
+                    match state.pending_cast.take() {
+                        Some(pending) => {
+                            engine_casting::cancel_pending_cast(state, player, &pending, events)?
+                        }
+                        None => {
+                            return Err(EngineError::InvalidAction(
+                                "No pending cast to cancel during distribution".to_string(),
+                            ));
+                        }
+                    }
+                })
+            },
+        )?,
         (
             WaitingFor::DistributeAmong {
                 player,
@@ -15622,167 +16332,174 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::DistributeAmong { distribution },
-        ) => {
-            let p = *player;
-            let expected_total = *total;
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    let expected_total = *total;
 
-            // Validate: each target gets ≥ 1, and total matches.
-            let actual_total: u32 = distribution.iter().map(|(_, a)| *a).sum();
-            if actual_total != expected_total {
-                return Err(EngineError::InvalidAction(format!(
-                    "Distribution total {} != required {}",
-                    actual_total, expected_total
-                )));
-            }
-            for (t, amount) in &distribution {
-                if *amount == 0 {
-                    return Err(EngineError::InvalidAction(
-                        "Each target must receive at least 1".to_string(),
-                    ));
-                }
-                if !targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Distribution target not in legal set".to_string(),
-                    ));
-                }
-            }
+                    // Validate: each target gets ≥ 1, and total matches.
+                    let actual_total: u32 = distribution.iter().map(|(_, a)| *a).sum();
+                    if actual_total != expected_total {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Distribution total {} != required {}",
+                            actual_total, expected_total
+                        )));
+                    }
+                    for (t, amount) in &distribution {
+                        if *amount == 0 {
+                            return Err(EngineError::InvalidAction(
+                                "Each target must receive at least 1".to_string(),
+                            ));
+                        }
+                        if !targets.contains(t) {
+                            return Err(EngineError::InvalidAction(
+                                "Distribution target not in legal set".to_string(),
+                            ));
+                        }
+                    }
 
-            // Store on the pending cast's resolved ability if we're mid-casting.
-            // The distribution will be read during effect resolution.
-            if let Some(pending) = state.pending_cast.as_mut() {
-                pending.ability.distribution =
-                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-            }
+                    // Store on the pending cast's resolved ability if we're mid-casting.
+                    // The distribution will be read during effect resolution.
+                    if let Some(pending) = state.pending_cast.as_mut() {
+                        pending.ability.distribution =
+                            Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                    }
 
-            // CR 601.2d: Resume casting pipeline after distribution.
-            if state.pending_cast.is_some() {
-                let pending = state.pending_cast.take().unwrap();
-                if pending.activation_ability_index.is_some() {
-                    // CR 602.2b + CR 601.2d: an activated ability that divides
-                    // damage among targets goes on the stack as an ActivatedAbility
-                    // after the division is announced — not as a spell (Captain
-                    // America's Throw). The payment boundary retains the original
-                    // target-first root while it pays the residual mana leg.
-                    // The spell-only cost-determination authority used in the `else`
-                    // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
-                    // here: it routes into `finalize_cast`, which would commit the
-                    // source permanent to the stack as a spell.
-                    casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
-                        state,
-                        p,
-                        *pending,
-                        &mut events,
-                    )?
-                } else {
-                    // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
-                    // committed, so the total cost — including any target-dependent
-                    // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
-                    // the single cost-determination authority every other post-target-
-                    // selection path uses (`casting_targets::handle_select_targets` /
-                    // `handle_choose_target`) instead of calling `finalize_cast` directly
-                    // with the stale cost that was locked in at `ChooseXValue` time, before
-                    // targets (and hence any per-target surcharge) were known.
-                    //
-                    // CR 601.2h ("Unpayable costs can't be paid"): mirror
-                    // `finalize_mana_payment`'s `pending_for_restore` pattern
-                    // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
-                    // downstream chain has no restore-on-error wrapper of its own, and
-                    // `state.pending_cast` is already `None` here (unlike
-                    // `handle_select_targets`, whose `pending_cast` lives inside the
-                    // `WaitingFor::TargetSelection` variant and so is never destructively
-                    // taken). Without this clone-and-restore, a recomputed cost that turns
-                    // out unpayable would return `Err` with `state.pending_cast` gone while
-                    // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
-                    // `DistributeAmong` action would then fall through to the
-                    // resolution-time continuation branch below instead of being cleanly
-                    // rejected.
-                    let mut pending = pending;
-                    let pending_for_restore = pending.clone();
-                    // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
-                    // total cost, after the division is announced.
-                    let paid = casting_costs::pay_delve_after_distribution(
-                        state,
-                        p,
-                        &mut pending,
-                        &mut events,
-                    )
-                    .and_then(|parked| match parked {
-                        Some(waiting_for) => Ok(waiting_for),
-                        None => {
-                            let ability = pending.ability.clone();
-                            let cost = pending.cost.clone();
-                            casting_costs::finish_pending_cast_cost_or_pay(
+                    // CR 601.2d: Resume casting pipeline after distribution.
+                    if state.pending_cast.is_some() {
+                        let pending = state.pending_cast.take().unwrap();
+                        if pending.activation_ability_index.is_some() {
+                            // CR 602.2b + CR 601.2d: an activated ability that divides
+                            // damage among targets goes on the stack as an ActivatedAbility
+                            // after the division is announced — not as a spell (Captain
+                            // America's Throw). The payment boundary retains the original
+                            // target-first root while it pays the residual mana leg.
+                            // The spell-only cost-determination authority used in the `else`
+                            // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
+                            // here: it routes into `finalize_cast`, which would commit the
+                            // source permanent to the stack as a spell.
+                            casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                                 state,
                                 p,
                                 *pending,
-                                *ability,
-                                cost,
-                                &mut events,
+                                events,
+                            )?
+                        } else {
+                            // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
+                            // committed, so the total cost — including any target-dependent
+                            // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
+                            // the single cost-determination authority every other post-target-
+                            // selection path uses (`casting_targets::handle_select_targets` /
+                            // `handle_choose_target`) instead of calling `finalize_cast` directly
+                            // with the stale cost that was locked in at `ChooseXValue` time, before
+                            // targets (and hence any per-target surcharge) were known.
+                            //
+                            // CR 601.2h ("Unpayable costs can't be paid"): mirror
+                            // `finalize_mana_payment`'s `pending_for_restore` pattern
+                            // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
+                            // downstream chain has no restore-on-error wrapper of its own, and
+                            // `state.pending_cast` is already `None` here (unlike
+                            // `handle_select_targets`, whose `pending_cast` lives inside the
+                            // `WaitingFor::TargetSelection` variant and so is never destructively
+                            // taken). Without this clone-and-restore, a recomputed cost that turns
+                            // out unpayable would return `Err` with `state.pending_cast` gone while
+                            // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
+                            // `DistributeAmong` action would then fall through to the
+                            // resolution-time continuation branch below instead of being cleanly
+                            // rejected.
+                            let mut pending = pending;
+                            let pending_for_restore = pending.clone();
+                            // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
+                            // total cost, after the division is announced.
+                            let paid = casting_costs::pay_delve_after_distribution(
+                                state,
+                                p,
+                                &mut pending,
+                                events,
                             )
+                            .and_then(|parked| match parked {
+                                Some(waiting_for) => Ok(waiting_for),
+                                None => {
+                                    let ability = pending.ability.clone();
+                                    let cost = pending.cost.clone();
+                                    casting_costs::finish_pending_cast_cost_or_pay(
+                                        state,
+                                        p,
+                                        *pending,
+                                        *ability,
+                                        cost,
+                                        events,
+                                    )
+                                }
+                            });
+                            match paid {
+                                Ok(waiting_for) => waiting_for,
+                                Err(err) => {
+                                    state.pending_cast = Some(pending_for_restore);
+                                    return Err(err);
+                                }
+                            }
                         }
-                    });
-                    match paid {
-                        Ok(waiting_for) => waiting_for,
-                        Err(err) => {
-                            state.pending_cast = Some(pending_for_restore);
-                            return Err(err);
-                        }
-                    }
-                }
-            } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
-                // CR 601.2d + CR 603.3d: Triggered abilities divide effects
-                // while being put on the stack. The chosen per-target amounts
-                // are resolution data on the resolved ability. The entry is
-                // already on the stack (pushed at distribute-among pause time);
-                // mutate its ability with the distribution and release the
-                // construction cursors so the resolver may now fire it.
-                pending_trigger.ability.distribution =
-                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                let produced = if !triggers::finalize_pending_trigger_entry(
-                    state,
-                    &pending_trigger.ability,
-                ) {
-                    // Unexpected dangling cursor: the entry is no longer on the
-                    // stack. Recover per CR 608.1 (resolution selects the
-                    // spell or ability on top of the stack, so an entry absent
-                    // from it is never selected to begin resolving) — record
-                    // the diagnostic, abandon, and return priority instead of
-                    // panicking (re-normalized next pass; CR 117.3b would give
-                    // the active player).
-                    triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
-                    priority::clear_priority_passes(state);
-                    WaitingFor::Priority { player: p }
-                } else {
-                    priority::clear_priority_passes(state);
-                    // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
-                    // behind this distribute-among trigger so each independent
-                    // instance reaches the stack (issue #416).
-                    debug_assert!(
-                        !triggers::is_pending_trigger_construction_active(state),
-                        "deferred-trigger drain entered with construction still active",
-                    );
-                    if let Some(waiting_for) =
-                        triggers::drain_deferred_trigger_queue(state, &mut events)
-                    {
-                        waiting_for
+                    } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
+                        // CR 601.2d + CR 603.3d: Triggered abilities divide effects
+                        // while being put on the stack. The chosen per-target amounts
+                        // are resolution data on the resolved ability. The entry is
+                        // already on the stack (pushed at distribute-among pause time);
+                        // mutate its ability with the distribution and release the
+                        // construction cursors so the resolver may now fire it.
+                        pending_trigger.ability.distribution =
+                            Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                        let produced = if !triggers::finalize_pending_trigger_entry(
+                            state,
+                            &pending_trigger.ability,
+                        ) {
+                            // Unexpected dangling cursor: the entry is no longer on the
+                            // stack. Recover per CR 608.1 (resolution selects the
+                            // spell or ability on top of the stack, so an entry absent
+                            // from it is never selected to begin resolving) — record
+                            // the diagnostic, abandon, and return priority instead of
+                            // panicking (re-normalized next pass; CR 117.3b would give
+                            // the active player).
+                            triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
+                            priority::clear_priority_passes(state);
+                            WaitingFor::Priority { player: p }
+                        } else {
+                            priority::clear_priority_passes(state);
+                            // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                            // behind this distribute-among trigger so each independent
+                            // instance reaches the stack (issue #416).
+                            debug_assert!(
+                                !triggers::is_pending_trigger_construction_active(state),
+                                "deferred-trigger drain entered with construction still active",
+                            );
+                            if let Some(waiting_for) =
+                                triggers::drain_deferred_trigger_queue(state, events)
+                            {
+                                waiting_for
+                            } else {
+                                WaitingFor::Priority { player: p }
+                            }
+                        };
+                        // Round-20 seam 4: the trigger-owned division arm's produced
+                        // wait — dangling recovery, deferred sibling, or success — goes
+                        // through the construction finisher exactly once. The
+                        // resolution-time and cast-time distribution arms below are not
+                        // trigger-owned and are deliberately untouched.
+                        triggers::finish_trigger_construction_action(state, events, produced)
                     } else {
-                        WaitingFor::Priority { player: p }
+                        // Resolution-time distribution continuation path.
+                        state.waiting_for = WaitingFor::Priority { player: p };
+                        state.priority_player = p;
+                        resume_pending_continuation_if_priority(state, events)?;
+                        state.waiting_for.clone()
                     }
-                };
-                // Round-20 seam 4: the trigger-owned division arm's produced
-                // wait — dangling recovery, deferred sibling, or success — goes
-                // through the construction finisher exactly once. The
-                // resolution-time and cast-time distribution arms below are not
-                // trigger-owned and are deliberately untouched.
-                triggers::finish_trigger_construction_action(state, &mut events, produced)
-            } else {
-                // Resolution-time distribution continuation path.
-                state.waiting_for = WaitingFor::Priority { player: p };
-                state.priority_player = p;
-                resume_pending_continuation_if_priority(state, &mut events)?;
-                state.waiting_for.clone()
-            }
-        }
+                })
+            },
+        )?,
         (
             WaitingFor::MoveCountersDistribution {
                 player,
@@ -15793,23 +16510,30 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseCounterMoveDistribution { selections },
-        ) => {
-            let p = *player;
-            effects::counters::validate_and_queue_counter_move_distribution(
-                state,
-                &selections,
-                *source_id,
-                available,
-                destinations,
-                pending_effect,
-            )
-            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            effects::counters::drain_pending_counter_moves(state, &mut events);
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.waiting_for.clone()
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    effects::counters::validate_and_queue_counter_move_distribution(
+                        state,
+                        &selections,
+                        *source_id,
+                        available,
+                        destinations,
+                        pending_effect,
+                    )
+                    .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    state.priority_player = p;
+                    effects::counters::drain_pending_counter_moves(state, events);
+                    resume_pending_continuation_if_priority(state, events)?;
+                    state.waiting_for.clone()
+                })
+            },
+        )?,
         // CR 107.1c + CR 608.2d: Submit the "remove any number of counters"
         // resolution-time selection (Rhys, the Evermore; Tetravus). ORDERING
         // INVARIANT: apply removals (stamping `last_effect_count`) BEFORE draining
@@ -15823,22 +16547,29 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::ChooseCountersToRemove { selections },
-        ) => {
-            let p = *player;
-            effects::counters::validate_and_queue_counter_removal(
-                state,
-                &selections,
-                *source_id,
-                available,
-                pending_effect,
-            )
-            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            effects::counters::drain_pending_counter_removals(state, &mut events);
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.waiting_for.clone()
-        }
+        ) => attribute_to_paused_clause(
+            state,
+            &mut events,
+            ClauseSite::Answer,
+            |state, events| -> Result<WaitingFor, EngineError> {
+                Ok({
+                    let p = *player;
+                    effects::counters::validate_and_queue_counter_removal(
+                        state,
+                        &selections,
+                        *source_id,
+                        available,
+                        pending_effect,
+                    )
+                    .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    state.priority_player = p;
+                    effects::counters::drain_pending_counter_removals(state, events);
+                    resume_pending_continuation_if_priority(state, events)?;
+                    state.waiting_for.clone()
+                })
+            },
+        )?,
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
         // path — the multi-target (`All`-scope) UI submits every new target at
         // once.
@@ -15854,18 +16585,25 @@ fn apply_non_priority_pass_action(
                 legal_new_targets,
             },
             GameAction::RetargetSpell { new_targets },
-        ) => apply_retarget(
+        ) => attribute_to_paused_clause(
             state,
             &mut events,
-            RetargetSubmission {
-                player: *player,
-                stack_entry_index: *stack_entry_index,
-                scope,
-                current_targets,
-                slots,
-                slot_pools,
-                legal_new_targets,
-                new_targets,
+            ClauseSite::Answer,
+            |state, events| {
+                apply_retarget(
+                    state,
+                    events,
+                    RetargetSubmission {
+                        player: *player,
+                        stack_entry_index: *stack_entry_index,
+                        scope,
+                        current_targets,
+                        slots,
+                        slot_pools,
+                        legal_new_targets,
+                        new_targets,
+                    },
+                )
             },
         )?,
         // CR 115.7a: Retarget a single-target spell via a board click. The
@@ -15885,18 +16623,25 @@ fn apply_non_priority_pass_action(
                 legal_new_targets,
             },
             GameAction::ChooseTarget { target: Some(t) },
-        ) => apply_retarget(
+        ) => attribute_to_paused_clause(
             state,
             &mut events,
-            RetargetSubmission {
-                player: *player,
-                stack_entry_index: *stack_entry_index,
-                scope: &RetargetScope::Single,
-                current_targets,
-                slots,
-                slot_pools,
-                legal_new_targets,
-                new_targets: vec![Some(t)],
+            ClauseSite::Answer,
+            |state, events| {
+                apply_retarget(
+                    state,
+                    events,
+                    RetargetSubmission {
+                        player: *player,
+                        stack_entry_index: *stack_entry_index,
+                        scope: &RetargetScope::Single,
+                        current_targets,
+                        slots,
+                        slot_pools,
+                        legal_new_targets,
+                        new_targets: vec![Some(t)],
+                    },
+                )
             },
         )?,
         (waiting, action) => {

@@ -60,6 +60,13 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 128 — a paused player-scope clause is a `ResolutionFrame::PlayerScopeClause`
+///      owner frame (its detached tail, its clause span and the prompt it
+///      raised), and the continuation sidecar `player_scope_linked_exile` /
+///      `player_scope_queue_end` is retired; the resolution-state wire moves to
+///      version 6. A v127 peer cannot parse the new frame tag in `GameState`'s
+///      resolution stack. Lobby messages are unchanged, and P2P moves in lockstep
+///      (wire 110).
 /// 127 — `FilterProp`'s three attachment-referent siblings
 ///      (`AttachedToSource`, `AttachedToRecipient`, `AttachedToPlayer`) are one
 ///      parameterized prop, `{"type":"AttachedTo","to":{"type":"Source"}}`
@@ -957,7 +964,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 127;
+pub const PROTOCOL_VERSION: u32 = 128;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2214,12 +2221,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 127);
+        assert_eq!(PROTOCOL_VERSION, 128);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 126);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 127);
     }
 
     #[test]

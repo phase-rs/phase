@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  110 — game_setup and state_update carry GameState, whose resolution stack can
+ *       now hold a PlayerScopeClause owner frame for a paused player-scope
+ *       clause, and whose continuations no longer carry the player-scope
+ *       linked-exile sidecar. Bumped in lockstep with full-game protocol 128.
  *  109 — game_setup and state_update carry GameState, whose attachment filters
  *       are now one AttachedTo prop with a tagged `to` referent in place of the
  *       AttachedToSource / AttachedToRecipient / AttachedToPlayer tags. Both
@@ -628,7 +632,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 109 as const;
+export const WIRE_PROTOCOL_VERSION = 110 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

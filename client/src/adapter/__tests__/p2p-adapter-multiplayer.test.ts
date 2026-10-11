@@ -5569,19 +5569,19 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Reverting WIRE_PROTOCOL_VERSION itself (109 → 108) breaks both
-  // halves' premise: the v108 frame now equals the reverted constant and is
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (110 → 109) breaks both
+  // halves' premise: the v109 frame now equals the reverted constant and is
   // admitted instead of refused — this test would fail at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v109
+  // assertion ("promise resolved … instead of rejecting") — and the v110
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
-  // reach-guard — without it "refuses v108" is also satisfied by a client
+  // reach-guard — without it "refuses v109" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v108) and admits its own (v109)", async () => {
+  it("refuses the previous wire protocol (v109) and admits its own (v110)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(108));
+    await refusing.conn.simulateData(setupFrameAt(109));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -5593,7 +5593,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(109));
+    await admitting.conn.simulateData(setupFrameAt(110));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

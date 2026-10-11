@@ -2049,6 +2049,37 @@ pub(super) fn handle_resolution_choice(
                 .with_log_entries(result.log_entries),
         ));
     }
+    // CR 608.2c + CR 608.2d: the answer to a prompt a paused player-scope clause
+    // raised is that clause's work (decision 1, an answer site).
+    crate::game::effects::attribute_to_paused_clause(
+        state,
+        events,
+        crate::game::effects::ClauseSite::Answer,
+        |state, events| handle_resolution_choice_answer(state, waiting_for, action, events),
+    )
+}
+
+/// The answer an `ActionResult` outcome carries holds the site's whole moved
+/// event buffer.
+impl crate::game::effects::MovedEvents for Result<ResolutionChoiceOutcome, EngineError> {
+    fn moved_events(&self) -> Option<&[GameEvent]> {
+        match self {
+            Ok(ResolutionChoiceOutcome::ActionResult(result)) => Some(result.events.as_slice()),
+            Ok(ResolutionChoiceOutcome::WaitingFor(_))
+            | Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_))
+            | Err(_) => None,
+        }
+    }
+}
+
+/// Dispatches one resolution-choice answer (the body of
+/// [`handle_resolution_choice`], run inside its answer-site bracket).
+fn handle_resolution_choice_answer(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    action: GameAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionChoiceOutcome, EngineError> {
     let outcome = match (waiting_for, action) {
         // CR 608.2d: the resolving effect offers only its legal optional payment choices; CR 118.12: choosing a payable branch continues the payment whose success governs the reflexive "If you do" result.
         (
