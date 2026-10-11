@@ -370,6 +370,14 @@ pub(crate) struct ParseContext {
     /// resolver's outermost-repeat driver. Set and consumed within a single
     /// chunk parse; never serialized.
     pub pending_repeat_for: Option<QuantityExpr>,
+    /// CR 701.38a + CR 608.2c: A count a re-parsing caller already bound for a
+    /// count head whose binder it stripped before re-parsing (the vote tally's
+    /// "a number of <tokens> equal to the number of <choice> votes" reaches the
+    /// body as the binder-less "a number of <tokens>"). Read only by
+    /// `oracle_util::parse_count_slot`'s binder-less "a number of" / absent-head
+    /// arm; an in-text binder wins over it. `parse_effect_chain_ir_body` hands it
+    /// to the first chunk only (`take()`). Never serialized.
+    pub caller_bound_count: Option<QuantityExpr>,
     /// CR 601.2c + CR 115.4: The announced target count recovered by
     /// `parse_each_of_target_distribution` for a "… damage to each of ⟨N⟩
     /// ⟨noun⟩" head, produced by the SAME parse that produced the target

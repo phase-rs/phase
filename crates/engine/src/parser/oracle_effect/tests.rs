@@ -78320,10 +78320,26 @@ fn revealed_this_way_arm_ignores_mass_and_from_it_forms() {
         "Fall",
         &["Sorcery"],
     );
+    // CR 701.20a: "reveals two cards at random from their hand" reveals two.
+    let fall_root = &fall.abilities[0];
+    assert!(
+        matches!(
+            &*fall_root.effect,
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::None,
+                count: Some(QuantityExpr::Fixed { value: 2 }),
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "{:?}",
+        fall_root.effect
+    );
     assert_json_eq(
-        &fall.abilities[0],
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
-        "Fall",
+        &*fall_root.sub_ability.as_deref().expect("discard").effect,
+        r#"{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"}"#,
+        "Fall's mass discard",
     );
 
     let bat = parse_named_face(
@@ -78541,7 +78557,8 @@ fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
         "Denied!'s counter",
     );
 
-    // Friendly Fire's random reveal — same binding, count unchanged.
+    // Friendly Fire's random reveal — same binding; "reveals a card at random
+    // from their hand" reveals one card at random (CR 701.20a).
     let friendly = parse_named_face(FRIENDLY_FIRE, "Friendly Fire", &["Instant"]);
     let root = &friendly.abilities[0];
     assert_eq!(
@@ -78554,6 +78571,7 @@ fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
         target,
         card_filter,
         count,
+        selection,
         ..
     } = &*reveal.effect
     else {
@@ -78561,7 +78579,8 @@ fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
     };
     assert_eq!(*target, TargetFilter::ParentTargetController);
     assert_eq!(*card_filter, TargetFilter::None);
-    assert_eq!(*count, None, "unchanged from base");
+    assert_eq!(*count, Some(QuantityExpr::Fixed { value: 1 }));
+    assert_eq!(*selection, CardSelectionMode::Random);
 
     // The owner shift binds the owner; one grammar fixture per non-reveal
     // arm binds the controller.
@@ -82520,4 +82539,945 @@ fn a_mana_rider_conjunct_must_end_its_sentence() {
     assert!(!super::sequence::starts_bare_and_clause(&format!(
         "{bare}. draw a card"
     )));
+}
+
+// ── One count position, fail closed (`oracle_util::parse_count_slot`) ──────
+
+fn count_slot_effects(text: &str) -> Vec<Effect> {
+    chain_nodes(&parse_effect_chain(text, AbilityKind::Spell))
+        .into_iter()
+        .map(|node| (*node.effect).clone())
+        .collect()
+}
+
+fn is_gap(effect: &Effect) -> bool {
+    matches!(effect, Effect::Unimplemented { .. })
+}
+
+/// The serialized form of `value`, for structural comparison against parsed
+/// faces whose effects sit below nested containers (modes, votes, emblems).
+fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).expect("serializes")
+}
+
+/// Every serialized effect object whose `type` is `effect_type`, anywhere in
+/// `value`.
+fn serialized_effects<'v>(
+    value: &'v serde_json::Value,
+    effect_type: &str,
+) -> Vec<&'v serde_json::Value> {
+    let mut found = Vec::new();
+    let mut stack = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(serde_json::Value::as_str) == Some(effect_type) {
+                    found.push(node);
+                }
+                stack.extend(map.values());
+            }
+            serde_json::Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Whether some serialized `effect_type` effect in `value` has `field` equal to
+/// `expected`.
+fn has_effect_field<T: serde::Serialize>(
+    value: &serde_json::Value,
+    effect_type: &str,
+    field: &str,
+    expected: &T,
+) -> bool {
+    let expected = to_json(expected);
+    serialized_effects(value, effect_type)
+        .iter()
+        .any(|effect| effect[field] == expected)
+}
+
+fn object_count() -> impl Fn(&QuantityExpr) -> bool {
+    |count| {
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        )
+    }
+}
+
+/// CR 701.9a + CR 608.2h: an "equal to" the discard verb cannot read fails
+/// closed instead of discarding one card (Tormented Thoughts' class).
+#[test]
+fn discard_equal_to_unparsed_quantity_fails_closed() {
+    let gap =
+        count_slot_effects("Target player discards a number of cards equal to the gorbleflux.");
+    assert!(is_gap(&gap[0]), "{gap:?}");
+    assert!(
+        !gap.iter().any(|e| matches!(e, Effect::Discard { .. })),
+        "{gap:?}"
+    );
+
+    let read = count_slot_effects(
+        "Target player discards a number of cards equal to the sacrificed creature's power.",
+    );
+    assert!(
+        matches!(
+            &read[0],
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                ..
+            }
+        ),
+        "{read:?}"
+    );
+
+    let hymn = count_slot_effects("Target player discards two cards at random.");
+    assert!(
+        matches!(
+            &hymn[0],
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "{hymn:?}"
+    );
+}
+
+/// CR 701.20a: a counted reveal from a hand carries its count, owner and
+/// selection; whole-hand and typed single-card reveals keep their readings.
+#[test]
+fn counted_hand_reveal_shapes() {
+    let random = count_slot_effects("Target player reveals a card at random from their hand.");
+    assert!(
+        matches!(
+            &random[0],
+            Effect::RevealHand {
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "{random:?}"
+    );
+
+    let noggin = parse_named_face(
+        "Prowl {1}{B} (You may cast this for its prowl cost if you dealt combat damage to a player this turn with a Rogue.)\nTarget player reveals three cards from their hand. You choose two of them. That player discards those cards.",
+        "Noggin Whack",
+        &["Kindred", "Sorcery"],
+    );
+    let reveal = noggin
+        .abilities
+        .iter()
+        .flat_map(chain_nodes)
+        .find(|node| matches!(&*node.effect, Effect::RevealHand { .. }))
+        .expect("Noggin Whack reveals");
+    assert!(
+        matches!(
+            &*reveal.effect,
+            Effect::RevealHand {
+                count: Some(QuantityExpr::Fixed { value: 3 }),
+                selection: CardSelectionMode::Chosen,
+                ..
+            }
+        ),
+        "{:?}",
+        reveal.effect
+    );
+
+    let whole = count_slot_effects("Target player reveals their hand.");
+    assert!(
+        matches!(&whole[0], Effect::RevealHand { count: None, .. }),
+        "{whole:?}"
+    );
+    let single = count_slot_effects("Reveal a card from your hand.");
+    assert!(
+        matches!(&single[0], Effect::RevealHand { count: None, .. }),
+        "{single:?}"
+    );
+
+    let chooser = count_slot_effects(
+        "Target player reveals three cards from their hand and you choose one of them.",
+    );
+    assert!(is_gap(&chooser[0]), "{chooser:?}");
+    assert!(
+        !chooser
+            .iter()
+            .any(|e| matches!(e, Effect::RevealHand { .. })),
+        "{chooser:?}"
+    );
+}
+
+/// CR 119.3: "lose N life for each <unread>" fails closed instead of losing N.
+#[test]
+fn lose_life_for_each_unparsed_fails_closed() {
+    let gap = count_slot_effects("You lose 2 life for each gorbleflux you control.");
+    assert!(is_gap(&gap[0]), "{gap:?}");
+
+    let read = count_slot_effects("You lose 2 life for each creature you control.");
+    assert!(
+        matches!(
+            &read[0],
+            Effect::LoseLife {
+                amount: QuantityExpr::Multiply { factor: 2, inner },
+                ..
+            } if object_count()(inner)
+        ),
+        "{read:?}"
+    );
+
+    // CR 608.2c: "they" in a per-opponent count names the iterating opponent.
+    let scoped = count_slot_effects(
+        "Each opponent loses life equal to the number of creatures they control.",
+    );
+    let Effect::LoseLife {
+        amount: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        ..
+    } = &scoped[0]
+    else {
+        panic!("{scoped:?}");
+    };
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::ScopedPlayer),
+                ..
+            })
+        ),
+        "{filter:?}"
+    );
+
+    let fixed = count_slot_effects("Target player loses 3 life and you gain 3 life.");
+    assert!(
+        matches!(
+            &fixed[..],
+            [
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                },
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ]
+        ),
+        "{fixed:?}"
+    );
+}
+
+/// CR 111.1 + CR 107.3c: the token verb's for-each binder fails closed on a
+/// quantity it cannot read, and an unbound "a number of" no longer becomes a
+/// placeholder count.
+#[test]
+fn token_for_each_unparsed_fails_closed() {
+    let gap = count_slot_effects("Create a 0/1 white Goat creature token for each gorbleflux.");
+    assert!(is_gap(&gap[0]), "{gap:?}");
+    assert!(
+        !gap.iter().any(|e| matches!(e, Effect::Token { .. })),
+        "{gap:?}"
+    );
+
+    let springjack = parse_named_face(
+        "Chroma — When this creature enters, create a 0/1 white Goat creature token for each white mana symbol in the mana costs of permanents you control.",
+        "Springjack Shepherd",
+        &["Creature"],
+    );
+    let execute = springjack.triggers[0].execute.as_deref().expect("execute");
+    let Effect::Token { count, .. } = &*execute.effect else {
+        panic!("{:?}", execute.effect);
+    };
+    assert_ne!(*count, QuantityExpr::Fixed { value: 1 }, "{count:?}");
+    assert!(
+        count.any_ref(&mut |r| matches!(r, QuantityRef::Devotion { .. })),
+        "Springjack's count reads the white mana symbols: {count:?}"
+    );
+
+    let unbound = count_slot_effects("Create a number of 1/1 white Soldier creature tokens.");
+    assert!(is_gap(&unbound[0]), "{unbound:?}");
+}
+
+/// CR 701.38a + CR 608.2c: a caller-bound count answers the first chunk's
+/// binder-less count position only; the next chunk reads its own text.
+#[test]
+fn caller_bound_count_reaches_the_first_chunk_only() {
+    let bound = QuantityExpr::Ref {
+        qty: QuantityRef::VoteCount { choice_index: 0 },
+    };
+    let mut ctx = ParseContext {
+        caller_bound_count: Some(bound.clone()),
+        ..Default::default()
+    };
+    let def = parse_effect_chain_with_context(
+        "You create a number of Treasure tokens, then draw cards.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    let effects: Vec<_> = chain_nodes(&def).into_iter().map(|n| &*n.effect).collect();
+    assert!(
+        matches!(effects[0], Effect::Token { count, .. } if *count == bound),
+        "{effects:?}"
+    );
+    assert!(
+        effects.iter().skip(1).any(|e| is_gap(e)),
+        "the second chunk's bare \"draw cards\" must fail closed: {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+        "{effects:?}"
+    );
+}
+
+/// CR 608.2c: "the difference" is accepted only by the carrier the
+/// difference binding rebinds (token creation); the draw / lose verbs keep the
+/// trigger-level rewrite.
+#[test]
+fn difference_draw_keeps_the_trigger_rewrite_contract() {
+    let kozilek = parse_oracle_text(
+        "When you cast this spell, if you have fewer than seven cards in hand, draw cards equal to the difference.\nMenace\nDiscard a card with mana value X: Counter target spell with mana value X.",
+        "Kozilek, the Great Distortion",
+        &["Menace".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = kozilek.triggers[0]
+        .execute
+        .as_deref()
+        .expect("cast trigger");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::Draw {
+                count: QuantityExpr::Difference { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        execute.effect
+    );
+
+    let mother_lode = parse_named_face(
+        "Discover 10. If the discovered card's mana value is less than 10, create a number of tapped Treasure tokens equal to the difference. (To discover 10, exile cards from the top of your library until you exile a nonland card with mana value 10 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)",
+        "Hit the Mother Lode",
+        &["Sorcery"],
+    );
+    let token = mother_lode
+        .abilities
+        .iter()
+        .flat_map(chain_nodes)
+        .find_map(|node| match &*node.effect {
+            Effect::Token { count, .. } => Some(count.clone()),
+            _ => None,
+        })
+        .expect("Hit the Mother Lode creates Treasures");
+    assert!(
+        matches!(token, QuantityExpr::Difference { .. }),
+        "{token:?}"
+    );
+
+    let lolth = parse_named_face(
+        "Whenever a creature you control dies, put a loyalty counter on Lolth.\n[0]: You draw a card and you lose 1 life.\n[−3]: Create two 2/1 black Spider creature tokens with reach and menace.\n[−8]: You get an emblem with \"Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\"",
+        "Lolth, Spider Queen",
+        &["Planeswalker"],
+    );
+    let lolth = to_json(&lolth);
+    assert!(
+        serialized_effects(&lolth, "LoseLife").iter().any(|effect| {
+            effect["amount"]["type"] == "Difference"
+                && effect["target"] == to_json(&TargetFilter::ParentTarget)
+        }),
+        "Lolth's emblem keeps the difference loss on its parent target: {lolth}"
+    );
+}
+
+/// CR 119.3: the life verbs read their amount through the count position:
+/// the event-context offset through its one arm, " instead" removed once.
+#[test]
+fn life_count_slot_cells() {
+    let goblet = parse_oracle_text(
+        "Sunburst (This artifact enters with a charge counter on it for each color of mana spent to cast it.)\nAt the beginning of your upkeep, you may gain life equal to the number of charge counters on this artifact.",
+        "Clearwater Goblet",
+        &["Sunburst".to_string()],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let execute = goblet.triggers[0].execute.as_deref().expect("upkeep");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn { counter_type: Some(ct), .. }
+                },
+                ..
+            } if ct.as_str() == "charge"
+        ),
+        "{:?}",
+        execute.effect
+    );
+
+    let astarion = parse_oracle_text(
+        "Deathtouch, lifelink\nAt the beginning of your end step, choose one —\n• Feed — Target opponent loses life equal to the amount of life they lost this turn.\n• Friends — You gain life equal to the amount of life you gained this turn.",
+        "Astarion, the Decadent",
+        &["Deathtouch".to_string(), "Lifelink".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let astarion = to_json(&astarion);
+    assert!(
+        has_effect_field(
+            &astarion,
+            "LoseLife",
+            "amount",
+            &QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                },
+            },
+        ),
+        "Feed: {astarion}"
+    );
+    assert!(
+        has_effect_field(
+            &astarion,
+            "GainLife",
+            "amount",
+            &QuantityExpr::Ref {
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+            },
+        ),
+        "Friends: {astarion}"
+    );
+
+    let offset = |offset| QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }),
+        offset,
+    };
+    for (text, amount) in [
+        ("You gain that much life plus 1.", offset(1)),
+        ("You gain that much life plus 1 instead.", offset(1)),
+        ("You gain 2 life instead.", QuantityExpr::Fixed { value: 2 }),
+        (
+            "You gain life equal to its power instead.",
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Anaphoric,
+                },
+            },
+        ),
+    ] {
+        let effects = count_slot_effects(text);
+        assert!(
+            matches!(&effects[0], Effect::GainLife { amount: a, .. } if *a == amount),
+            "{text}: {effects:?}"
+        );
+    }
+    let lose = count_slot_effects("You lose that much life plus 1.");
+    assert!(
+        matches!(&lose[0], Effect::LoseLife { amount, .. } if *amount == offset(1)),
+        "{lose:?}"
+    );
+    let wrong_noun = count_slot_effects("You gain that many cards plus 1.");
+    assert!(is_gap(&wrong_noun[0]), "{wrong_noun:?}");
+
+    let chains = parse_named_face(
+        "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+        "Chains of Mephistopheles",
+        &["Enchantment"],
+    );
+    let replacements = to_json(&chains.replacements);
+    assert!(
+        !serialized_effects(&replacements, "Discard").is_empty(),
+        "Chains still discards: {replacements}"
+    );
+}
+
+/// CR 701.55a: a villainous choice keeps an option the parser cannot read as
+/// an `Unimplemented` branch instead of collapsing the choice.
+#[test]
+fn villainous_choice_keeps_unparsed_option_as_gap() {
+    let missy = parse_named_face(
+        "Whenever another nonartifact creature dies, return it to the battlefield under your control face down and tapped. It's a 2/2 Cyberman artifact creature.\nAt the beginning of your end step, each opponent faces a villainous choice — Each artifact creature you control deals 1 damage to that opponent, or you draw a card and chaos ensues.",
+        "Missy",
+        &["Creature"],
+    );
+    let execute = missy.triggers[1].execute.as_deref().expect("end step");
+    let Effect::ChooseOneOf { chooser, branches } = &*execute.effect else {
+        panic!("{:?}", execute.effect);
+    };
+    assert_eq!(*chooser, PlayerFilter::Opponent);
+    assert_eq!(branches.len(), 2, "{branches:?}");
+    assert!(
+        matches!(&*branches[0].effect, Effect::EachSourceDealsDamage { .. }),
+        "{:?}",
+        branches[0].effect
+    );
+    assert!(is_gap(&branches[1].effect), "{:?}", branches[1].effect);
+
+    // Highway Robbery's spell line (its Plot line is not under test).
+    let robbery = parse_named_face(
+        "You may discard a card or sacrifice a land. If you do, draw two cards.",
+        "Highway Robbery",
+        &["Sorcery"],
+    );
+    let choice = robbery
+        .abilities
+        .iter()
+        .flat_map(chain_nodes)
+        .find_map(|node| match &*node.effect {
+            Effect::ChooseOneOf { chooser, branches } => Some((chooser.clone(), branches.clone())),
+            _ => None,
+        })
+        .expect("Highway Robbery's choice");
+    assert_eq!(choice.0, PlayerFilter::Controller);
+    assert_eq!(choice.1.len(), 2, "{:?}", choice.1);
+    assert!(
+        choice.1.iter().all(|branch| !is_gap(&branch.effect)),
+        "{:?}",
+        choice.1
+    );
+}
+
+/// CR 121.1 + CR 701.17a: every single-verb "equal to" count goes through the
+/// one chain; the shared-tail compound reads the same chain.
+#[test]
+fn equal_to_counts_share_one_chain() {
+    let gap = count_slot_effects("Draw cards equal to the gorbleflux.");
+    assert!(is_gap(&gap[0]), "{gap:?}");
+    assert!(
+        !gap.iter().any(|e| matches!(e, Effect::Draw { .. })),
+        "{gap:?}"
+    );
+
+    let creatures = count_slot_effects("Draw cards equal to the number of creatures you control.");
+    assert!(
+        matches!(&creatures[0], Effect::Draw { count, .. } if object_count()(count)),
+        "{creatures:?}"
+    );
+    let swans = count_slot_effects(
+        "The source's controller draws cards equal to the damage prevented this way.",
+    );
+    assert!(
+        matches!(
+            &swans[0],
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                ..
+            }
+        ),
+        "{swans:?}"
+    );
+    let hydra = count_slot_effects("You gain life and draw cards equal to its power.");
+    let its_power = QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    };
+    assert!(
+        matches!(
+            &hydra[..],
+            [Effect::GainLife { amount, .. }, Effect::Draw { count, .. }]
+                if *amount == its_power && *count == its_power
+        ),
+        "{hydra:?}"
+    );
+    let chain_local = count_slot_effects(
+        "You gain life and draw cards equal to the number of counters removed this way.",
+    );
+    assert!(
+        matches!(&chain_local[0], Effect::Unimplemented { name, .. } if name == "shared_equal_to_quantity_compound"),
+        "{chain_local:?}"
+    );
+    let difference = count_slot_effects("Draw cards equal to the difference.");
+    assert!(is_gap(&difference[0]), "{difference:?}");
+}
+
+/// CR 119.3 + CR 608.2b: the subject-preserving gain-life count goes through
+/// the count position and keeps "its" on the parent target.
+#[test]
+fn subject_gain_life_count_slot_cells() {
+    let gap = count_slot_effects("Its controller gains life equal to the gorbleflux.");
+    assert!(is_gap(&gap[0]), "{gap:?}");
+    assert!(
+        !gap.iter().any(|e| matches!(e, Effect::GainLife { .. })),
+        "{gap:?}"
+    );
+
+    let swords = parse_named_face(
+        "Exile target creature. Its controller gains life equal to its power.",
+        "Swords to Plowshares",
+        &["Instant"],
+    );
+    let gain = swords
+        .abilities
+        .iter()
+        .flat_map(chain_nodes)
+        .find_map(|node| match &*node.effect {
+            Effect::GainLife { amount, player } => Some((amount.clone(), player.clone())),
+            _ => None,
+        })
+        .expect("Swords gains life");
+    assert_eq!(
+        gain,
+        (
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target
+                }
+            },
+            TargetFilter::ParentTargetController
+        )
+    );
+
+    let owner = count_slot_effects("Its owner gains 4 life.");
+    assert!(
+        matches!(
+            &owner[0],
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::ParentTargetOwner
+            }
+        ),
+        "{owner:?}"
+    );
+    let that_much = count_slot_effects("Its controller gains that much life.");
+    assert!(
+        matches!(
+            &that_much[0],
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                player: TargetFilter::ParentTargetController
+            }
+        ),
+        "{that_much:?}"
+    );
+}
+
+/// CR 614.1a + CR 107.1: the draw verb's "that many" count reads through the
+/// count position; the event-context offset comes from its one arm.
+#[test]
+fn draw_that_many_reads_through_the_slot() {
+    let requiem = parse_named_face(
+        "{T}: Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\" That creature's controller may have this artifact deal 1 damage to it. Activate only as a sorcery.",
+        "Requiem Monolith",
+        &["Artifact"],
+    );
+    let requiem = to_json(&requiem);
+    assert!(
+        !serialized_effects(&requiem, "Unimplemented").is_empty()
+            && serialized_effects(&requiem, "Draw").is_empty(),
+        "the granted trigger's dropped life loss is now an honest gap: {requiem}"
+    );
+
+    let offset = |offset| QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }),
+        offset,
+    };
+    for (text, count) in [
+        ("Draw that many cards plus one.", offset(1)),
+        ("Target player draws that many cards minus one.", offset(-1)),
+        (
+            "Draw that many cards.",
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        ),
+    ] {
+        let effects = count_slot_effects(text);
+        assert!(
+            matches!(&effects[0], Effect::Draw { count: c, .. } if *c == count),
+            "{text}: {effects:?}"
+        );
+    }
+    for (text, count) in [
+        ("Scry that many cards plus one instead.", offset(1)),
+        ("Mill that many cards plus four instead.", offset(4)),
+    ] {
+        let effects = count_slot_effects(text);
+        assert!(
+            matches!(&effects[0], Effect::Scry { count: c, .. } | Effect::Mill { count: c, .. } if *c == count),
+            "{text}: {effects:?}"
+        );
+    }
+    for text in [
+        "Draw that much life plus 1.",
+        "Draw that number of cards plus one.",
+        "Draw that many cards plus the gorbleflux.",
+    ] {
+        let effects = count_slot_effects(text);
+        assert!(is_gap(&effects[0]), "{text}: {effects:?}");
+    }
+}
+
+/// The equal-to chain's where-X rung cannot read a foreign possessive as the
+/// card's own name (One Ring to Rule Them All's "your Ring-bearer's power").
+#[test]
+fn equal_to_foreign_possessive_fails_closed() {
+    let ring = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — The Ring tempts you, then each player mills cards equal to your Ring-bearer's power.\nII — Destroy all nonlegendary creatures.\nIII — Each opponent loses 1 life for each creature card in that player's graveyard.",
+        "One Ring to Rule Them All",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let ring = to_json(&ring);
+    // Reach guard: the chapters parsed (chapter II's destroy is typed).
+    assert!(
+        !serialized_effects(&ring, "DestroyAll").is_empty(),
+        "{ring}"
+    );
+    assert!(
+        !serialized_effects(&ring, "Unimplemented").is_empty(),
+        "chapter I's mill stays an honest gap: {ring}"
+    );
+    assert!(
+        serialized_effects(&ring, "Mill").is_empty(),
+        "the Ring-bearer's power must not become the Saga's own power: {ring}"
+    );
+}
+
+/// The where-X wrapper keeps the printed-name possessive arm (Halana and
+/// Alena, Partners) — inside the "N plus …" recursion too; the core the
+/// equal-to chain reads declines it.
+#[test]
+fn where_x_core_declines_the_printed_name_possessive() {
+    let source_power = QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Source,
+        },
+    };
+    assert_eq!(
+        super::lower::parse_where_x_quantity_core("halana and alena's power"),
+        None
+    );
+    assert_eq!(
+        super::lower::parse_where_x_quantity_core("your ring-bearer's power"),
+        None
+    );
+    assert_eq!(
+        parse_where_x_quantity_expression("halana and alena's power"),
+        Some(source_power.clone())
+    );
+    assert_eq!(
+        parse_where_x_quantity_expression("2 plus halana and alena's power"),
+        Some(QuantityExpr::Offset {
+            inner: Box::new(source_power.clone()),
+            offset: 2
+        })
+    );
+    // Self-reference reads through the cda arm in both.
+    assert_eq!(
+        super::lower::parse_where_x_quantity_core("~'s power"),
+        Some(source_power.clone())
+    );
+    assert_eq!(
+        parse_where_x_quantity_expression("~'s power"),
+        Some(source_power.clone())
+    );
+    let mill = count_slot_effects("Mill cards equal to ~'s power.");
+    assert!(
+        matches!(&mill[0], Effect::Mill { count, .. } if *count == source_power),
+        "{mill:?}"
+    );
+}
+
+/// Preservation rows: each card's count is derived from its Oracle text and
+/// must read the same after the count position replaced the verb tables.
+#[test]
+fn count_slot_preserves_derived_readings() {
+    // P1 Palantír of Orthanc: mill X = influence counters on itself.
+    let palantir = parse_named_face(
+        "At the beginning of your end step, put an influence counter on Palantír of Orthanc and scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill X cards, where X is the number of influence counters on Palantír of Orthanc, and that player loses life equal to the total mana value of those cards.",
+        "Palantír of Orthanc",
+        &["Artifact"],
+    );
+    let palantir = to_json(&palantir);
+    assert!(
+        has_effect_field(
+            &palantir,
+            "Mill",
+            "count",
+            &QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(crate::types::counter::parse_counter_type("influence")),
+                },
+            },
+        ),
+        "P1: {palantir}"
+    );
+    assert!(
+        serialized_effects(&palantir, "Unimplemented").is_empty(),
+        "P1: {palantir}"
+    );
+
+    // P2 Emissary Green: Treasures = 2 × profit votes.
+    let emissary = parse_named_face(
+        "Whenever Emissary Green attacks, starting with you, each player votes for profit or security. You create a number of Treasure tokens equal to twice the number of profit votes. Put a number of +1/+1 counters on each creature you control equal to the number of security votes.",
+        "Emissary Green",
+        &["Creature"],
+    );
+    let emissary = to_json(&emissary);
+    assert!(
+        has_effect_field(
+            &emissary,
+            "Token",
+            "count",
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::VoteCount { choice_index: 0 },
+                }),
+            },
+        ),
+        "P2: {emissary}"
+    );
+    assert!(
+        serialized_effects(&emissary, "Unimplemented").is_empty(),
+        "P2: {emissary}"
+    );
+
+    // P3 Truth or Consequences: draw = truth votes.
+    let truth = parse_named_face(
+        "Secret council — Each player secretly votes for truth or consequences, then those votes are revealed. You draw cards equal to the number of truth votes. Then choose an opponent at random. Truth or Consequences deals 3 damage to that player for each consequences vote.",
+        "Truth or Consequences",
+        &["Sorcery"],
+    );
+    let truth = to_json(&truth);
+    assert!(
+        has_effect_field(
+            &truth,
+            "Draw",
+            "count",
+            &QuantityExpr::Ref {
+                qty: QuantityRef::VoteCount { choice_index: 0 },
+            }
+        ),
+        "P3: {truth}"
+    );
+
+    // P4 Liege of the Hollows: the parse pins `Variable("X")`, not the
+    // derived per-player count (that is the pay-any-amount runtime binding).
+    let liege = parse_named_face(
+        "When this creature dies, each player may pay any amount of mana. Then each player creates a number of 1/1 green Squirrel creature tokens equal to the amount of mana they paid this way.",
+        "Liege of the Hollows",
+        &["Creature"],
+    );
+    let liege = to_json(&liege);
+    assert!(
+        has_effect_field(
+            &liege,
+            "Token",
+            "count",
+            &QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        ),
+        "P4: {liege}"
+    );
+
+    // P6 Howling Mine: that player draws one additional card.
+    let mine = parse_named_face(
+        "At the beginning of each player's draw step, if this artifact is untapped, that player draws an additional card.",
+        "Howling Mine",
+        &["Artifact"],
+    );
+    let execute = mine.triggers[0].execute.as_deref().expect("draw step");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "P6: {:?}",
+        execute.effect
+    );
+
+    // P7 Hymn to Tourach: discard two at random.
+    let hymn = parse_named_face(
+        "Target player discards two cards at random.",
+        "Hymn to Tourach",
+        &["Sorcery"],
+    );
+    assert!(
+        matches!(
+            &*hymn.abilities[0].effect,
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "P7: {:?}",
+        hymn.abilities[0].effect
+    );
+
+    // P9 Katara, Seeking Revenge: draw one; the unless-discard stays phase 1's
+    // honest gap.
+    let katara = parse_oracle_text(
+        "As an additional cost to cast this spell, you may waterbend {2}. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)\nWhen Katara enters, draw a card, then discard a card unless her additional cost was paid.\nKatara gets +1/+1 for each Lesson card in your graveyard.",
+        "Katara, Seeking Revenge",
+        &["Waterbend".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = katara.triggers[0].execute.as_deref().expect("ETB");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "P9: {:?}",
+        execute.effect
+    );
+
+    // P10 False Cure: that player loses 2 × the life gained.
+    let false_cure = parse_named_face(
+        "Until end of turn, whenever a player gains life, that player loses 2 life for each 1 life they gained.",
+        "False Cure",
+        &["Instant"],
+    );
+    let false_cure = to_json(&false_cure);
+    assert!(
+        has_effect_field(
+            &false_cure,
+            "LoseLife",
+            "amount",
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+        ),
+        "P10: {false_cure}"
+    );
 }

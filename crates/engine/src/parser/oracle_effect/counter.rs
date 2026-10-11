@@ -796,7 +796,7 @@ fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)
 /// event-context amounts ("that much", "that many", "the result"). The
 /// equivalent token-creation and life-gain paths already fall back to
 /// `parse_event_context_quantity` after their primary quantity parse
-/// (`token.rs` count-expression resolution, `imperative.rs::parse_life_equal_quantity`);
+/// (`oracle_util::parse_equal_to_count`, the token and life count positions' chain);
 /// the counter path is the remaining gap, so it gets the same fallback here
 /// rather than leaking "the result" into the shared `parse_quantity_ref` leaf
 /// (which would break the `parse_cda_quantity` "returns None for the bare

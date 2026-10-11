@@ -224,20 +224,32 @@ pub(crate) fn parse_vote_block_ir(
             // the body per vote.
             let (rest, choice, head, multiplier) = parse_aggregate_tally_clause(walk, &choices)?;
             let idx = choices.iter().position(|c| c == &choice)?;
-            let mut parsed =
-                parse_effect_chain_with_context(head, kind, &mut ParseContext::default());
-            // CR 608.2c: bind the tally count into the parsed effect's count
-            // slot. A tally body whose effect exposes no bindable count slot
-            // (GAP 2 strict-failure) must NOT silently mis-parse with a wrong
-            // count — `?` falls through by returning None so dispatch can try
-            // another shape or emit a diagnostic, rather than producing an
-            // effect with the wrong (placeholder) count.
-            *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
+            let tally = QuantityExpr::Ref {
                 qty: QuantityRef::VoteCount {
                     choice_index: idx as u32,
                 },
             }
             .scaled_by(multiplier);
+            // CR 701.38a + CR 608.2c: the head lost its "equal to … votes"
+            // binder to the strip above, so stage the tally as the caller-bound
+            // count the head's count position reads ("You create a number of
+            // Treasure tokens").
+            let mut parsed = parse_effect_chain_with_context(
+                head,
+                kind,
+                &mut ParseContext {
+                    caller_bound_count: Some(tally.clone()),
+                    ..Default::default()
+                },
+            );
+            // CR 608.2c: bind the tally count into the parsed effect's count
+            // slot (the put-counter count position does not read the staged
+            // count). A tally body whose effect exposes no bindable count slot
+            // (GAP 2 strict-failure) must NOT silently mis-parse with a wrong
+            // count — `?` falls through by returning None so dispatch can try
+            // another shape or emit a diagnostic, rather than producing an
+            // effect with the wrong (placeholder) count.
+            *parsed.effect.count_expr_mut()? = tally;
             (rest, idx, parsed, false)
         };
         if slots[idx].is_some() {

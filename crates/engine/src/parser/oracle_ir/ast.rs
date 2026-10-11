@@ -1609,9 +1609,14 @@ pub(crate) enum HandRevealImperativeAst {
         target: TargetFilter,
         card_filter: TargetFilter,
     },
-    /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
+    /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
+    /// hand, where X is …", "reveals a card at random from their hand". `target`
+    /// is the hand's owner; `selection` is `Random` exactly when the text says
+    /// "at random".
     RevealPartial {
         count: crate::types::ability::QuantityExpr,
+        target: TargetFilter,
+        selection: crate::types::ability::CardSelectionMode,
     },
     /// CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
     /// "reveal those cards" — reveals a specific card identified by the parent

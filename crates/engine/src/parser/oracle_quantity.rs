@@ -6298,8 +6298,8 @@ mod tests {
     /// CR 107.x + CR 506.2: Mr. Foxglove's binary-minus draw count composes
     /// `Sum[left, Multiply{-1, right}]` over two dynamic hand-size quantities,
     /// the right one negated. This is the arithmetic-aware shape the draw
-    /// effect-construction fallback (`try_parse_equal_to_quantity_effect`)
-    /// reaches via `parse_cda_quantity`.
+    /// count position's equal-to chain (`oracle_util::parse_equal_to_count`)
+    /// reaches via `parse_cda_quantity_with_context`.
     #[test]
     fn parse_cda_quantity_defending_minus_your_hand() {
         let result = parse_cda_quantity(

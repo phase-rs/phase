@@ -13919,7 +13919,9 @@ fn make_a_splash_tap_cap_counts_us_in_name_stickers_on_self() {
 }
 
 /// SHAPE (negative): Disemvowel counts vowels in the creature's *name* (CR
-/// 201), not on a name sticker (CR 123.6), so it keeps its base parse.
+/// 201), not on a name sticker (CR 123.6), so it is not read as a sticker
+/// count. No count reads "unique vowel in the creature's name", so the life
+/// clause is an honest gap rather than a one-life loss (CR 119.3).
 #[test]
 fn disemvowel_is_not_a_name_sticker_count() {
     let parsed = parse_oracle_text(
@@ -13938,13 +13940,7 @@ fn disemvowel_is_not_a_name_sticker_count() {
     );
     let sub = spell.sub_ability.as_deref().expect("life-loss clause");
     assert!(
-        matches!(
-            sub.effect.as_ref(),
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: Some(TargetFilter::ParentTargetController),
-            }
-        ),
+        matches!(sub.effect.as_ref(), Effect::Unimplemented { .. }),
         "{:?}",
         sub.effect
     );

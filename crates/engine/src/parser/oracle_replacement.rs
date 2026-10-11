@@ -11202,8 +11202,9 @@ fn normalize_additional_token_descriptor(descriptor: &str) -> Option<String> {
 /// True when the descriptor needs a leading `"a "` before `parse_token_description`.
 /// Subtype-only specs (`"Food token"`) have no count and require an article.
 /// P/T-led specs (`"1/1 …"`, `"10/10 …"`) also require one: without it
-/// `parse_token_count_prefix` mis-reads the leading digits before `/` as a bare
-/// count and leaves `/toughness …`, breaking P/T parsing.
+/// the token count position (`oracle_util::parse_count_slot`'s `parse_count_expr`
+/// head) mis-reads the leading digits before `/` as a bare count and leaves
+/// `/toughness …`, breaking P/T parsing.
 fn additional_token_descriptor_needs_leading_article(descriptor: &str) -> bool {
     let trimmed = descriptor.trim_start();
     if nom_primitives::parse_pt_value(trimmed).is_ok() {

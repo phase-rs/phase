@@ -8244,7 +8244,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         let parsed = parse_named(
             "{G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
              If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.\n\
-             Draw a card if the moon is bright.",
+             Tap target creature if the moon is bright.",
             "Oviya, Automech Artisan",
             &["Creature"],
         );
@@ -8385,7 +8385,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     fn represented_tiered_counter_pair_does_not_hide_unrelated_if() {
         let tiered_line = "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
         let parsed = parse_named(
-            &format!("{tiered_line}\nDraw a card if the moon is bright."),
+            &format!("{tiered_line}\nTap target creature if the moon is bright."),
             "Thunderous Velocipede",
             &["Artifact"],
         );
@@ -8539,7 +8539,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         let parsed = parse_named(
             "Return target creature card from your graveyard to the battlefield. \
              If a Hero enters this way, it enters with two additional +1/+1 counters on it.\n\
-             Draw a card if the moon is bright.",
+             Tap target creature if the moon is bright.",
             "Heroic Return Compound Fixture",
             &["Instant"],
         );
@@ -9020,7 +9020,9 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         ));
 
         // Hostile: the extra sentence mentions "countered this way" but is a different
-        // " instead" clause, not the redirect shape -> must still warn.
+        // " instead" clause, not the redirect shape. The gain-life count position cannot
+        // read "life instead of drawing a card", so the sentence fails closed — stronger
+        // than the `Replacement_Instead` warning it used to raise.
         let second_countered_instead = parse_named(
             &format!(
                 "{memory_lapse_text} If it was countered this way, you gain 2 life instead of \
@@ -9029,18 +9031,16 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "Memory Lapse",
             &["Instant"],
         );
-        assert!(no_unimplemented(&second_countered_instead));
         assert!(
             matches!(counter_zone(&second_countered_instead), Some(Some(_))),
             "second-countered-instead fixture: expected Counter with countered_spell_zone"
         );
-        assert!(has_swallowed_detector(
-            &second_countered_instead,
-            "Replacement_Instead"
-        ));
+        assert!(!no_unimplemented(&second_countered_instead));
 
         // Hostile: same sentence — the redirect is followed by an unmodelled tail, so the
-        // shape must be anchored to the end of the sentence and keep the warning.
+        // shape must be anchored to the end of the sentence and must not discharge it. The
+        // tail's gain-life count position cannot read "life instead of drawing a card", so
+        // it fails closed — stronger than the warning it used to raise.
         let same_sentence_tail = parse_named(
             "Counter target spell. If that spell is countered this way, put it on top of its \
              owner's library instead of into that player's graveyard and you gain 2 life \
@@ -9048,15 +9048,11 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "Memory Lapse",
             &["Instant"],
         );
-        assert!(no_unimplemented(&same_sentence_tail));
         assert!(
             matches!(counter_zone(&same_sentence_tail), Some(Some(_))),
             "same-sentence-tail fixture: expected Counter with countered_spell_zone"
         );
-        assert!(has_swallowed_detector(
-            &same_sentence_tail,
-            "Replacement_Instead"
-        ));
+        assert!(!no_unimplemented(&same_sentence_tail));
 
         // Hostile: an " instead" sentence that ENDS with the redirect shape but carries an
         // unmodelled head must not be discharged — the shape is anchored to the start of

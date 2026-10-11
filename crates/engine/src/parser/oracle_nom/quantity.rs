@@ -3981,6 +3981,19 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
     .parse(input)
 }
 
+/// CR 119.3 + CR 608.2c: "life they|that player <verb> [this turn]" — the
+/// third-person anaphor names the clause's target player ("Target opponent
+/// loses life equal to the amount of life they lost this turn", Astarion), so
+/// the callers map it to `PlayerScope::Target`, which a per-player loop rebinds
+/// to `ScopedPlayer`.
+fn parse_third_person_life_change<'a>(input: &'a str, verb: &str) -> OracleResult<'a, ()> {
+    let (input, _) = tag("life ").parse(input)?;
+    let (input, _) = alt((tag("they "), tag("that player "))).parse(input)?;
+    let (input, _) = tag(verb).parse(input)?;
+    let (input, _) = nom::combinator::opt(tag(" this turn")).parse(input)?;
+    Ok((input, ()))
+}
+
 /// Parse life-lost references: "the life you've lost this turn", "life you've lost", etc.
 /// Includes duration-stripped forms (without "this turn") for post-duration-stripping contexts.
 /// Accepts an optional "(the) amount of " prefix so phrases like
@@ -3991,6 +4004,14 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     // downstream variant automatically supports it.
     let (input, _) =
         nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
+    if let Ok((rest, ())) = parse_third_person_life_change(input, "lost") {
+        return Ok((
+            rest,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Target,
+            },
+        ));
+    }
     alt((
         value(
             QuantityRef::LifeLostThisTurn {
@@ -4143,6 +4164,14 @@ fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 119.3: Optional "the amount of " / "amount of " prefix; see parse_life_lost_ref.
     let (input, _) =
         nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
+    if let Ok((rest, ())) = parse_third_person_life_change(input, "gained") {
+        return Ok((
+            rest,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Target,
+            },
+        ));
+    }
     alt((
         value(
             QuantityRef::LifeGainedThisTurn {
@@ -11331,9 +11360,9 @@ mod tests {
         // The article-only forms are the exact Wound Reflection / Archfiend /
         // Warlock / Blitzwing phrasings. The "amount of life they lost" gloss
         // (Astarion Feed) is consumed by `parse_life_lost_ref`'s leading
-        // `opt("the amount of ")` strip and routed through the imperative-level
-        // `parse_target_relative_life_change_this_turn` recognizer instead, which
-        // also yields `Target` — so it is asserted at that layer, not here.
+        // `opt("the amount of ")` strip and read by
+        // `parse_third_person_life_change`, which also yields `Target`
+        // (`parse_quantity_ref_third_person_life_change_amount_of_gloss`).
         for phrase in [
             "the life they lost this turn",
             "the life that player lost this turn",
@@ -11367,6 +11396,74 @@ mod tests {
                 },
                 "{phrase:?} must stay Controller-scoped, got {q:?}"
             );
+            assert_eq!(rest, "", "{phrase:?} left remainder {rest:?}");
+        }
+    }
+
+    /// CR 119.3 + CR 608.2c: the "(the) amount of life they|that player
+    /// lost|gained [this turn]" forms (Astarion's Feed / Friends glosses) map the
+    /// third-person anaphor to the clause's target player; the first-person
+    /// "you" form stays `Controller`.
+    #[test]
+    fn parse_quantity_ref_third_person_life_change_amount_of_gloss() {
+        for (phrase, expected) in [
+            (
+                "the amount of life they lost this turn",
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life that player lost this turn",
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life they lost",
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life that player lost",
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life they gained this turn",
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life that player gained this turn",
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life they gained",
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life that player gained",
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Target,
+                },
+            ),
+            (
+                "the amount of life you lost this turn",
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller,
+                },
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(q, expected, "{phrase:?}");
             assert_eq!(rest, "", "{phrase:?} left remainder {rest:?}");
         }
     }

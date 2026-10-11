@@ -107,8 +107,8 @@ use super::oracle_target::{
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
-    parse_creature_subtype, parse_mana_symbols, parse_number, split_around, starts_with_possessive,
-    strip_after, TextPair,
+    parse_count_slot, parse_creature_subtype, parse_equal_to_count, parse_mana_symbols,
+    parse_number, split_around, starts_with_possessive, strip_after, CountSlot, TextPair,
 };
 use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
@@ -7451,7 +7451,9 @@ fn retarget_put_counter_to_parent(effect: &mut Effect) {
 ///   3. Reject unless BOTH halves independently parse to a non-`Unimplemented`
 ///      effect. A half failing to parse means this isn't a true "A or B"
 ///      choice — it's probably noun-phrase disjunction ("creature or land")
-///      inside a larger imperative.
+///      inside a larger imperative. A villainous choice (CR 701.55a) is exempt:
+///      its prefix already proves the split, so an unreadable option stays an
+///      `Unimplemented` branch.
 ///   4. Only consider the FIRST `, or ` or first top-level ` or ` split. Cards
 ///      with 3+ branches are rare and handled by bulleted modal text instead.
 fn try_parse_choose_one_of_inline(
@@ -7671,8 +7673,12 @@ fn try_parse_choose_one_of_inline(
     // prevents false positives on noun-phrase disjunctions and "and/or"
     // coordinations inside larger imperatives. Inspect the chain head — a
     // multi-step branch's first effect — not a single flattened clause.
-    if matches!(*left_def.effect, Effect::Unimplemented { .. })
-        || matches!(*right_def.effect, Effect::Unimplemented { .. })
+    // CR 701.55a: a villainous choice is exactly "[option A], or [option B]",
+    // so an option the parser cannot read is a gap inside the choice, kept as
+    // an `Unimplemented` branch rather than collapsing the whole choice.
+    if !scoped_choice_player
+        && (matches!(*left_def.effect, Effect::Unimplemented { .. })
+            || matches!(*right_def.effect, Effect::Unimplemented { .. }))
     {
         ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
@@ -10394,10 +10400,10 @@ fn try_parse_player_draws_and_gains_control(
     })?;
 
     let recipient = parse_subject_application(subject.trim(), ctx)?.affected;
-    let (count, count_tail) = parse_count_expr(&draw_text)?;
-    if !matches!(count_tail.trim(), "card" | "cards") {
-        return None;
-    }
+    // CR 121.1: the draw count is the shared count position.
+    let count = parse_verb_count_slot(&draw_text, ctx)
+        .filter(|slot| imperative::is_draw_noun(slot.noun))?
+        .count;
 
     let (target, rest) = parse_target_with_ctx(target_text.trim(), ctx);
     if !rest.trim().trim_end_matches('.').is_empty() {
@@ -10930,7 +10936,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 608.2c: "you gain life and draw cards equal to <qty>" — one trailing
     // "equal to" shared by coordinated amount-elided verbs (Lifeblood Hydra).
-    if let Some(clause) = try_parse_shared_equal_to_quantity_compound(tp) {
+    if let Some(clause) = try_parse_shared_equal_to_quantity_compound(tp, ctx) {
         return clause;
     }
 
@@ -11421,12 +11427,6 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // "for each" patterns: "draw a card for each [filter]", etc.
     if let Some(clause) = try_parse_for_each_effect(text, ctx) {
-        return clause;
-    }
-
-    // CR 121.1 + CR 701.17a: "{verb} cards equal to {quantity}" — dynamic count
-    // from game state for draw or mill.
-    if let Some(clause) = try_parse_equal_to_quantity_effect(tp) {
         return clause;
     }
 
@@ -14185,8 +14185,8 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
 }
 
 /// Verb discriminant for the amount-elided "{verb} … equal to {quantity}"
-/// family (`try_parse_equal_to_quantity_effect` and
-/// `try_parse_shared_equal_to_quantity_compound`). Using a typed enum instead
+/// shared-tail compound (`try_parse_shared_equal_to_quantity_compound`) and its
+/// chunker guard. Using a typed enum instead
 /// of a matched `&str` keeps all dispatch inside the nom `alt()` combinator —
 /// the match arms below are exhaustive Rust enum arms, not string-literal
 /// dispatch (CLAUDE.md nom-combinator mandate).
@@ -14214,14 +14214,6 @@ impl EqualToQtyVerb {
             Self::GainLife => NumericImperativeAst::GainLife { amount: qty },
             Self::LoseLife => NumericImperativeAst::LoseLife { amount: qty },
         }
-    }
-
-    /// Card-count verbs (draw / mill) own the single-verb "equal to" arm.
-    /// Defensive: single-verb life clauses ("gain life equal to …") are owned by
-    /// `parse_life_equal_quantity` (imperative path); this gate keeps this arm from
-    /// becoming their authority if dispatch order changes.
-    fn counts_cards(self) -> bool {
-        matches!(self, Self::Mill | Self::Draw)
     }
 
     /// Lower one conjunct of a shared-tail compound. An explicit subject
@@ -14292,23 +14284,6 @@ fn parse_equal_to_qty_verb_run(input: &str) -> OracleResult<'_, Vec<EqualToQtyVe
         tag(" equal to "),
     )
     .parse(input)
-}
-
-/// Quantity ladder for the text after "equal to ". Single authority for the
-/// single-verb and shared-tail compound paths.
-fn parse_equal_to_quantity_tail(rest_lower: &str) -> Option<QuantityExpr> {
-    let rest = rest_lower.trim().trim_end_matches('.');
-    // Prefer event context quantity for triggered effects — keeps
-    // "that much"/"this way"/"that many" bound to the triggering-event amount.
-    // CR 121.1 + CR 107.1b: When the count is a static/dynamic CDA expression
-    // rather than an event-context reference (e.g. Narset's "spells you've cast
-    // this turn", Mr. Foxglove's "cards in defending player's hand minus the
-    // number of cards in your hand"), fall back to the arithmetic-aware
-    // `parse_cda_quantity` so binary minus / offset / fraction draw counts
-    // resolve instead of dropping the whole clause. Event-context FIRST is what
-    // preserves the trigger semantics for the cards that need them.
-    super::oracle_quantity::parse_event_context_quantity(rest)
-        .or_else(|| super::oracle_quantity::parse_cda_quantity(rest))
 }
 
 /// CR 608.2c + CR 608.2h: True when a shared "equal to" quantity reads a
@@ -14501,29 +14476,6 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
-}
-
-/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.1 + CR 701.17a).
-///
-/// Handles verbs whose count field is `QuantityExpr` (mill, draw). The
-/// `counts_cards` gate is defensive: single-verb life clauses belong to
-/// `parse_life_equal_quantity` (imperative path).
-fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause> {
-    let (rest_lower, verb) = terminated(
-        verify(parse_equal_to_qty_verb_head, |verb: &EqualToQtyVerb| {
-            verb.counts_cards()
-        }),
-        tag(" equal to "),
-    )
-    .parse(tp.lower)
-    .ok()?;
-    let qty = parse_equal_to_quantity_tail(rest_lower)?;
-    // CR 701.17a: No subject → controller mills. CR 121.1 + CR 601.2c: Default
-    // Controller target — `inject_subject_target` upgrades to
-    // `TargetFilter::Player` for "target player draws ..." subjects.
-    Some(parsed_clause(imperative::lower_numeric_imperative_ast(
-        verb.into_numeric_ast(qty),
-    )))
 }
 
 /// Parse "owner puts it on their choice of the top or bottom of their library".
@@ -19967,7 +19919,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
 
     // "Its controller gains life equal to its power/toughness" — subject must be preserved
     // because the life recipient is not the caster but the targeted permanent's controller.
-    if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
+    if let Some(clause) = try_parse_targeted_controller_gain_life(text, ctx) {
         return clause;
     }
 
@@ -19977,20 +19929,6 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // runs before generic subject stripping / damage-compound splitting.
     if let Some(clause) = try_parse_each_deals_damage_equal_to_power(text) {
         return clause;
-    }
-
-    // CR 121.1 + CR 615.5: "{verb} cards equal to {quantity}" inside a
-    // subject-aware predicate (e.g. "the source's controller draws cards equal
-    // to the damage prevented this way" — Swans of Bryn Argoll). Mirrors the
-    // bare-imperative arm at `parse_effect_clause`: must run BEFORE the
-    // simpler "draw cards" matchers to avoid being dropped to a default
-    // count of 1.
-    {
-        let lower = text.to_lowercase();
-        let tp = TextPair::new(text, lower.as_str());
-        if let Some(clause) = try_parse_equal_to_quantity_effect(tp) {
-            return clause;
-        }
     }
 
     // CR 707.12 + CR 707.12a + CR 118.9: "Copy <exiled-card anaphor>, and you may
@@ -23701,10 +23639,13 @@ fn text_is_compound_subject_distribution(text: &str) -> bool {
 /// each effect is applied; for a source-relative quantity ("its power") on a
 /// leaves-the-battlefield trigger that read comes from last known information.
 ///
-/// Compound life conjuncts use the equal-to seam's quantity ladder
-/// (`parse_equal_to_quantity_tail`), while single-verb life clauses keep
-/// `parse_life_equal_quantity` (see `EqualToQtyVerb::counts_cards`).
-fn try_parse_shared_equal_to_quantity_compound(tp: TextPair) -> Option<ParsedEffectClause> {
+/// The shared quantity reads through the count position's equal-to chain
+/// (`oracle_util::parse_equal_to_count`), the one authority every single-verb
+/// "equal to" count also uses.
+fn try_parse_shared_equal_to_quantity_compound(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let (rest_lower, (subject, verbs)) = verify(
         terminated(parse_equal_to_qty_conjuncts, tag(" equal to ")),
         |(_, verbs): &(Option<TargetFilter>, Vec<EqualToQtyVerb>)| verbs.len() >= 2,
@@ -23718,9 +23659,9 @@ fn try_parse_shared_equal_to_quantity_compound(tp: TextPair) -> Option<ParsedEff
     // (e.g. the gain-life "equal to" arm) would accept just the head conjunct
     // and silently drop the rest, so a decline must be an explicit
     // `Unimplemented` for the whole clause, never `None`.
-    let Some(qty) = parse_equal_to_quantity_tail(rest_lower)
-        .filter(|qty| !quantity_reads_chain_local_result(qty))
-    else {
+    let Some(qty) = parse_equal_to_count(rest_lower, ctx).filter(|qty| {
+        !is_difference_anaphor_placeholder(qty) && !quantity_reads_chain_local_result(qty)
+    }) else {
         return Some(parsed_clause(Effect::unimplemented(
             "shared_equal_to_quantity_compound",
             tp.original,
@@ -36606,6 +36547,19 @@ pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
     )
 }
 
+/// The count position of a verb that is not a "the difference" carrier (draw,
+/// mill, scry, surveil, discard, gain/lose life, reveal from hand). Only a
+/// carrier [`resolve_difference_anaphor_in_effect`] rebinds (token creation) may
+/// take the deferred placeholder; every other verb rejects it, so "draw cards
+/// equal to the difference" keeps the `Unimplemented` → trigger-rewrite contract
+/// in `lower_trigger_ir`.
+pub(super) fn parse_verb_count_slot<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<CountSlot<'a>> {
+    parse_count_slot(text, ctx).filter(|slot| !is_difference_anaphor_placeholder(&slot.count))
+}
+
 /// CR 608.2c: Resolve every deferred "the difference" count-anaphor placeholder
 /// anywhere in an ability's effect tree — the single authority for both the
 /// trigger seam (`lower_trigger_ir`, Drizzt Do'Urden) and the spell clause
@@ -43174,6 +43128,9 @@ fn parse_effect_chain_ir_body(
             // object's LKI. This struct literal REPLACES the parent context, so
             // the carry has to be spelled; `..Default::default()` would reset it.
             trigger_zone_change: ctx.trigger_zone_change.clone(),
+            // CR 701.38a + CR 608.2c: a caller-bound count belongs to the first
+            // chunk's count position only; later chunks read their own text.
+            caller_bound_count: ctx.caller_bound_count.take(),
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;

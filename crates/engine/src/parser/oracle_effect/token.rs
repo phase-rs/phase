@@ -7,7 +7,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::anychar;
 use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value, verify};
 use nom::multi::many_till;
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
@@ -25,8 +25,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
 use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
-    comma_short_self_name, normalize_card_name_refs, parse_count_expr, parse_rounding_suffix_only,
-    rewrite_quantity_expr_rounding, strip_reminder_text, TextPair,
+    comma_short_self_name, normalize_card_name_refs, parse_count_expr, parse_count_slot,
+    parse_rounding_suffix_only, rewrite_quantity_expr_rounding, strip_reminder_text, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -46,8 +46,7 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if let Ok((_, (tapped, enters_attacking, mut count))) = parse_copy_token_entry_modifiers(&lower)
-    {
+    if let Ok((_, (tapped, enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
         let tp = TextPair::new(&text, &lower);
         let after_copy_tp = tp
             .strip_after("copy of ")
@@ -103,27 +102,14 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         if let (TargetFilter::ParentTarget, Some(host)) = (&target, &ctx.host_self_reference) {
             target = host.clone();
         }
-        // CR 107.3: bind a variable "X" count to its "where X is <quantity>"
-        // clause (Devastating Onslaught, Nacatl War-Pride, Rionya), mirroring the
-        // non-copy token path. A bare X with no where-clause (Aggressive Biomancy)
-        // is left as `Variable("X")` for the spell's X cost to resolve.
-        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
-        {
-            if let Some(where_expression) = extract_token_where_x_expression(&text) {
-                // CR 107.3c: the clause DEFINES X. If the definition is not
-                // representable, this copy-token clause does not lower — fail the
-                // parse instead of fabricating a raw-text placeholder. The
-                // fabricated `QuantityRef::Variable { name: "<oracle text>" }` is
-                // well-typed but DEAD (game/quantity.rs resolves a non-`X` variable
-                // name to 0), so the effect copied ZERO tokens while the raw text
-                // still rendered as a supported dynamic quantity. This mirrors the
-                // sibling non-copy token path below.
-                count =
-                    super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
-                        crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
-                    })?;
-            }
-        }
+        // CR 107.3c + CR 111.1: the copy count is the shared count position
+        // ("X tokens …, where X is …" binds X — Devastating Onslaught, Nacatl
+        // War-Pride, Rionya; a bare X stays `Variable("X")` for the spell's X
+        // cost — Aggressive Biomancy). An unrepresentable binder fails the clause
+        // instead of fabricating a count.
+        let (_, after_create) =
+            nom_on_lower(&text, &lower, |i| value((), tag("create ")).parse(i))?;
+        let count = parse_count_slot(after_create, ctx)?.count;
         return Some(Effect::CopyTokenOf {
             target,
             // CR 109.4: Default to the controller; a "target [player] creates"
@@ -163,25 +149,22 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     })
 }
 
-pub(super) fn parse_copy_token_entry_modifiers(
-    input: &str,
-) -> OracleResult<'_, (bool, bool, QuantityExpr)> {
+pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
     let (rest, _) = tag("create ").parse(input)?;
-    // The bare article "a"/"one" → a count of 1. `parse_count_expr` intentionally
-    // excludes the article (to avoid matching the "a" in "another"), so handle it
-    // here; otherwise delegate to the shared count grammar so "X", "two", "twice
-    // X", "that many", etc. all parse uniformly — mirroring the non-copy token
-    // path's `parse_token_count_prefix`. Without this, "Create X tokens that are
-    // copies of …" failed to parse and the whole effect was dropped.
-    let (rest, count) =
+    // The count word ("a", "one", "X", "two", "twice X", "that many", …) is only
+    // recognized here to reach the copy wording; `try_parse_token` reads the
+    // count itself through the shared count position. Without this, "Create X
+    // tokens that are copies of …" failed to parse and the whole effect was
+    // dropped.
+    let (rest, has_count) =
         if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("a "), tag("one "))).parse(rest) {
-            (rest, Some(QuantityExpr::Fixed { value: 1 }))
-        } else if let Some((expr, rest_after)) = parse_count_expr(rest) {
-            (rest_after, Some(expr))
+            (rest, true)
+        } else if let Some((_, rest_after)) = parse_count_expr(rest) {
+            (rest_after, true)
         } else {
-            (rest, None)
+            (rest, false)
         };
-    let (rest, _) = if count.is_some() {
+    let (rest, _) = if has_count {
         opt(tag(" ")).parse(rest)?
     } else {
         (rest, None)
@@ -199,14 +182,7 @@ pub(super) fn parse_copy_token_entry_modifiers(
         tag("tokens that are copies of"),
     ))
     .parse(rest)?;
-    Ok((
-        rest,
-        (
-            flags.0,
-            flags.1,
-            count.unwrap_or(QuantityExpr::Fixed { value: 1 }),
-        ),
-    ))
+    Ok((rest, flags))
 }
 
 fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
@@ -548,6 +524,23 @@ fn parse_token_description_with_context(
             (before.original, Some(target))
         });
 
+    let (text, rider_count) = split_token_for_each_rider(text);
+    // CR 111.1 + CR 107.3c: the token count is the shared count position; its
+    // noun is the token descriptor. A body with no count word is a named-token
+    // preamble ("Tibalt, the Fiend-Blooded, a … token").
+    let text_lower = text.to_lowercase();
+    let has_count_head = nom_on_lower(text, &text_lower, |i| {
+        value((), tag("a number of ")).parse(i)
+    })
+    .is_some()
+        || parse_count_expr(text).is_some();
+    let (slot_count, text) = if has_count_head {
+        let slot = parse_count_slot(text, &mut ctx.clone())?;
+        (Some(slot.count), slot.noun)
+    } else {
+        (None, text)
+    };
+
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
     // "that is tapped and attacking" / "thats tapped and attacking" /
     // "that are tapped and attacking" / "that are attacking" suffix (singular
@@ -613,14 +606,13 @@ fn parse_token_description_with_context(
         Some((len, tapped)) => (&text[..len], true, tapped),
         None => (text, false, false),
     };
-    let (mut count, leading_name, mut rest) =
-        if let Some((count, rest)) = parse_token_count_prefix(text) {
-            (count, None, rest)
-        } else if let Some((name, rest)) = parse_named_token_preamble(text) {
+    let (mut count, leading_name, mut rest) = match slot_count {
+        Some(count) => (count, None, text),
+        None => {
+            let (name, rest) = parse_named_token_preamble(text)?;
             (QuantityExpr::Fixed { value: 1 }, Some(name), rest)
-        } else {
-            return None;
-        };
+        }
+    };
     // CR 603.2 + CR 603.4 + CR 107.4: "create that many tokens" on a colored-pip
     // cast trigger (Namor the Sub-Mariner) back-references the cast spell's
     // colored-symbol count (EventSource), not the generic EventContextAmount —
@@ -776,8 +768,7 @@ fn parse_token_description_with_context(
         // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
         // loop's accumulated total flows through. Falls back to the CDA path
         // (and then the raw variable name) for phrases neither layer recognizes.
-        let binds_x = matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
-            || matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
+        let binds_x = matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
             || matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X");
         if binds_x {
             // CR 107.3c: the clause DEFINES X. If the definition is not
@@ -794,10 +785,6 @@ fn parse_token_description_with_context(
                 super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
                     crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
                 })?;
-            if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
-            {
-                count = bound.clone();
-            }
             if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
                 power = Some(PtValue::Quantity(bound.clone()));
             }
@@ -809,135 +796,10 @@ fn parse_token_description_with_context(
     bind_bare_token_x_pt_to_cost_x(&mut power);
     bind_bare_token_x_pt_to_cost_x(&mut toughness);
 
-    if let Some(count_expression) = extract_token_count_expression(suffix) {
-        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
-        {
-            // CR 706.2: "the result" (die roll / coin flip) flows through
-            // `EventContextAmount`, consistent with the `"the result"` arm in
-            // `oracle_quantity::parse_event_context_quantity`.
-            // `parse_event_context_quantity` only fires when `parse_cda_quantity`
-            // returns None and itself returns None for unrecognized phrases, so
-            // it strictly widens coverage without disturbing existing matches.
-            // CR 122.1 + CR 608.2c: bind the deferred "a number of" count to the
-            // quantity its "equal to <expr>" clause names. An unrepresentable
-            // expression FAILS the token clause — the raw-text placeholder it used
-            // to fabricate is dead at runtime (game/quantity.rs resolves a non-`X`
-            // variable name to 0), so the card created ZERO tokens while still
-            // reading as supported.
-            // CR 107.3i + CR 601.2h: "equal to the amount of mana [they] paid
-            // this way" (Liege of the Hollows) is the same paid-mana binding as
-            // the "where X is …" token path above — reuse the shared recognizer
-            // so the count collapses to `Variable("X")` and reads the upstream
-            // PayCost loop's accumulated `chosen_x` total. Tried only after the
-            // CDA / event-context recognizers so no existing match changes; it
-            // strictly rescues phrases that previously fell to the dead
-            // raw-string `Variable` node this clause used to fabricate.
-            count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression)
-                .or_else(|| {
-                    crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)
-                })
-                .or_else(|| super::parse_where_x_quantity_expression(&count_expression))
-                .or_else(|| {
-                    // CR 608.2c: bare anaphoric "the difference" — the two operands
-                    // live on the enclosing ability's condition, not this clause
-                    // ("create a number of tapped Treasure tokens equal to the
-                    // difference" — Hit the Mother Lode). Emit the deferred
-                    // placeholder that the difference binding resolves against the
-                    // condition's `QuantityCheck` operands, mirroring the
-                    // put-counter parser. Distinct from the `parse_cda_quantity`
-                    // "the difference between A and B" form, which carries operands.
-                    all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
-                        .parse(count_expression.trim())
-                        .is_ok()
-                        .then(crate::parser::oracle_effect::difference_anaphor_placeholder)
-                })?;
-        }
-    }
-
-    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style trigger-context player
-    // counts do not always carry the literal "this way" ("for each opponent
-    // dealt damage"). Recognize that phrase before the tracked-set block below,
-    // whose object-set fallback would be the wrong anaphor class.
-    {
-        let suffix_lower = suffix.to_lowercase();
-        if let Ok((clause, _)) = take_until::<_, _, OracleError<'_>>("for each ")
-            .parse(suffix_lower.as_str())
-            .and_then(|(rest, _)| tag("for each ").parse(rest))
-        {
-            let clause = clause.trim_end_matches('.').trim();
-            if let Ok(("", qty)) =
-                crate::parser::oracle_nom::quantity::parse_event_context_opponent_dealt_damage(
-                    clause,
-                )
-            {
-                count = QuantityExpr::Ref { qty };
-            }
-        };
-    }
-
-    // CR 608.2c: "for each [thing] this way" -- the "this way" anaphor counts from
-    // the preceding zone moves in the same effect.
-    // Matches "for each card put into a graveyard this way", "for each creature
-    // exiled this way", etc.
-    {
-        let suffix_lower = suffix.to_lowercase();
-        if suffix_lower.contains("for each") && suffix_lower.contains("this way") {
-            // CR 608.2c + CR 205.2a: route ONLY "card type among cards <verb> this
-            // way" to the cause-filtered distinct-card-types count (Occult
-            // Epiphany #3307); every other "... this way" token keeps
-            // `TrackedSetSize`. The dispatch decision is the nom combinator's
-            // Ok/Err — the post-"for each " clause is extracted with nom
-            // (`take_until` + `tag`), not string-method splitting.
-            let after_for_each = take_until::<_, _, OracleError<'_>>("for each ")
-                .parse(suffix_lower.as_str())
-                .and_then(|(rest, _)| tag("for each ").parse(rest))
-                .map(|(clause, _)| clause.trim_end_matches('.').trim());
-            count = after_for_each
-                .ok()
-                .and_then(|clause| {
-                    crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(
-                        clause,
-                    )
-                    .ok()
-                    .filter(|(rest, _)| rest.is_empty())
-                    .map(|(_, qty)| QuantityExpr::Ref { qty })
-                    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style token
-                    // counts named players in the current trigger event batch,
-                    // not the previous chain tracked object set.
-                    .or_else(|| {
-                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
-                            .filter(|qty| {
-                                matches!(qty, QuantityRef::EventContextPlayerCount { .. })
-                            })
-                            .map(|qty| QuantityExpr::Ref { qty })
-                    })
-                    // CR 608.2c + CR 205.2a: a TYPE-restricted "for each <type> card
-                    // <verb> this way" (Dread Summons: "for each creature card put
-                    // into a graveyard this way") counts only the matching cards
-                    // moved this way — `FilteredTrackedSetSize` — not every card
-                    // moved (`TrackedSetSize`, which would create X tokens). Only a
-                    // restrictive type overrides; a bare/"card" filter keeps
-                    // `TrackedSetSize`.
-                    .or_else(|| {
-                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
-                            .filter(tracked_set_count_is_type_restricted)
-                            .map(|qty| QuantityExpr::Ref { qty })
-                    })
-                    // CR 608.2c + CR 400.7: a bare "card put into a/your/their
-                    // graveyard this way" TOKEN count (Dihada, Binder of
-                    // Wills). Tried last, after every TYPE-restricted count
-                    // above declines, so a Dread Summons-style "creature card
-                    // put into a graveyard this way" still binds to its own
-                    // FilteredTrackedSetSize rather than being re-tagged here.
-                    .or_else(|| {
-                        parse_bare_graveyard_this_way_token_count(clause)
-                            .map(|qty| QuantityExpr::Ref { qty })
-                    })
-                })
-                .unwrap_or(QuantityExpr::Ref {
-                    qty: QuantityRef::TrackedSetSize,
-                });
-        }
+    // CR 608.2c: a "for each … this way" / "for each opponent dealt damage"
+    // rider names the token count itself.
+    if let Some(rider_count) = rider_count {
+        count = rider_count;
     }
 
     if power.is_none() || toughness.is_none() {
@@ -986,6 +848,81 @@ fn parse_token_description_with_context(
     })
 }
 
+/// CR 608.2c + CR 120.1 + CR 603.2c: split a trailing token-count rider off a
+/// create-token body — "for each opponent dealt damage" (Malcolm) or "for each
+/// <thing> … this way" (the preceding instruction's tracked set). The rider's
+/// quantity IS the token count, so it is read ahead of the count position and
+/// the body before "for each" is the token descriptor. Any other "for each"
+/// stays in the body for the count position's for-each binder.
+fn split_token_for_each_rider(text: &str) -> (&str, Option<QuantityExpr>) {
+    let lower = text.to_lowercase();
+    let Ok((clause, before)) = terminated(
+        take_until::<_, _, OracleError<'_>>("for each "),
+        tag("for each "),
+    )
+    .parse(lower.as_str()) else {
+        return (text, None);
+    };
+    let clause = clause.trim_end_matches('.').trim();
+    let rider = if let Ok(("", qty)) =
+        crate::parser::oracle_nom::quantity::parse_event_context_opponent_dealt_damage(clause)
+    {
+        QuantityExpr::Ref { qty }
+    } else if nom_primitives::scan_contains(&lower, "this way") {
+        this_way_token_count(clause)
+    } else {
+        return (text, None);
+    };
+    let body = text[..before.len()]
+        .trim_end()
+        .trim_end_matches(',')
+        .trim_end();
+    (body, Some(rider))
+}
+
+/// CR 608.2c: "for each [thing] this way" — the "this way" anaphor counts from
+/// the preceding zone moves in the same effect ("for each card put into a
+/// graveyard this way", "for each creature exiled this way"). `clause` is the
+/// lowercased text after "for each ".
+fn this_way_token_count(clause: &str) -> QuantityExpr {
+    // CR 608.2c + CR 205.2a: route ONLY "card type among cards <verb> this way"
+    // to the cause-filtered distinct-card-types count (Occult Epiphany #3307);
+    // every other "... this way" token keeps `TrackedSetSize`.
+    crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(clause)
+        .ok()
+        .filter(|(rest, _)| rest.is_empty())
+        .map(|(_, qty)| qty)
+        // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style token counts named
+        // players in the current trigger event batch, not the previous chain
+        // tracked object set.
+        .or_else(|| {
+            crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                .filter(|qty| matches!(qty, QuantityRef::EventContextPlayerCount { .. }))
+        })
+        // CR 608.2c + CR 205.2a: a TYPE-restricted "for each <type> card <verb>
+        // this way" (Dread Summons: "for each creature card put into a graveyard
+        // this way") counts only the matching cards moved this way —
+        // `FilteredTrackedSetSize` — not every card moved (`TrackedSetSize`,
+        // which would create X tokens). Only a restrictive type overrides; a
+        // bare/"card" filter keeps `TrackedSetSize`.
+        .or_else(|| {
+            crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                .filter(tracked_set_count_is_type_restricted)
+        })
+        // CR 608.2c + CR 400.7: a bare "card put into a/your/their graveyard
+        // this way" TOKEN count (Dihada, Binder of Wills). Tried last, after
+        // every TYPE-restricted count above declines, so a Dread Summons-style
+        // "creature card put into a graveyard this way" still binds to its own
+        // FilteredTrackedSetSize rather than being re-tagged here.
+        .or_else(|| parse_bare_graveyard_this_way_token_count(clause))
+        .map_or(
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            |qty| QuantityExpr::Ref { qty },
+        )
+}
+
 fn bind_bare_token_x_pt_to_cost_x(value: &mut Option<PtValue>) {
     // CR 107.3a + CR 107.3i + CR 111.3: a bare X in token P/T shares the
     // spell or ability's chosen X unless an explicit "where X is" clause
@@ -997,40 +934,6 @@ fn bind_bare_token_x_pt_to_cost_x(value: &mut Option<PtValue>) {
             },
         }));
     }
-}
-
-fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
-    let trimmed = text.trim_start();
-    let lower = trimmed.to_lowercase();
-
-    // "that many " -> EventContextAmount
-    if let Some((_, rest)) =
-        nom_on_lower(trimmed, &lower, |i| value((), tag("that many ")).parse(i))
-    {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            },
-            rest,
-        ));
-    }
-    // "a number of " -> deferred count
-    if let Some((_, rest)) =
-        nom_on_lower(trimmed, &lower, |i| value((), tag("a number of ")).parse(i))
-    {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "count".to_string(),
-                },
-            },
-            rest,
-        ));
-    }
-    // Delegate to parse_count_expr for all numeric/variable/multiplied
-    // quantities: "X", "twice X", "three", "half X rounded up", etc.
-    let (count, rest) = parse_count_expr(trimmed)?;
-    Some((count, rest))
 }
 
 fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
@@ -1450,7 +1353,7 @@ fn push_parsed_statics(ability_text: &str, token_name: &str, out: &mut Vec<Stati
 ///     cannot pose as opening quotes).
 ///   - The closing `'` is the last `'` in `text` (so any internal apostrophe
 ///     from contractions or possessives is treated as content, not delimiter).
-fn find_anchored_single_quoted_span(text: &str) -> Option<&str> {
+pub(crate) fn find_anchored_single_quoted_span(text: &str) -> Option<&str> {
     let close = text.rfind('\'')?;
     let prefix = &text[..close];
 
@@ -1552,18 +1455,6 @@ pub(super) fn scope_token_for_each_to_iterating_player(expr: QuantityExpr) -> Qu
         },
         other => other,
     }
-}
-
-fn extract_token_count_expression(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-    Some(
-        tp.strip_after("equal to ")?
-            .original
-            .trim()
-            .trim_end_matches('.')
-            .to_string(),
-    )
 }
 
 fn extract_token_pt_expression(text: &str) -> Option<String> {

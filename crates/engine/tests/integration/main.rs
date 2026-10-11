@@ -208,6 +208,7 @@ mod cost_x_carrier_runtime;
 mod cost_zone_pipeline;
 mod council_of_four_nth_per_turn;
 mod count_form_draw_replacement;
+mod count_slot_fail_closed_runtime;
 mod counter_anaphor_binds_to_recipient;
 mod counter_anaphor_created_token_binding;
 mod counter_double_redirect_choice;
