@@ -1008,7 +1008,15 @@ fn deliver_resolved_spell_off_stack(
         // redirect INTO exile still records correctly.
         if spell_in_zone(state, spell_id, Zone::Exile) {
             if let Some(link_source) = stack_exile_link_source {
-                super::exile_links::push_tracked_by_source(state, spell_id, link_source);
+                // CR 607.2b + CR 113.7a: exiled with the Rod that stamped the
+                // rider, which may have left since (CR 400.7).
+                super::exile_links::push_with_kind_as(
+                    state,
+                    spell_id,
+                    link_source.object_id,
+                    Some(link_source.incarnation),
+                    ExileLinkKind::TrackedBySource,
+                );
             }
             // CR 603.7a + CR 702.170c: the exile-instead
             // replacement has now actually been APPLIED (the
@@ -1039,7 +1047,7 @@ fn deliver_resolved_spell_off_stack(
                     state,
                     spell_id,
                     spell_controller,
-                    stack_exile_link_source.unwrap_or(spell_id),
+                    stack_exile_link_source.map_or(spell_id, |source| source.object_id),
                     rider,
                     events,
                 );
@@ -1232,7 +1240,10 @@ fn top_pending_trigger_has_no_legal_required_targets(
 
 /// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
 /// exile-instead marker for Rod of Absorption's resolving-spell rider.
-fn stack_exile_linked_source(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
+fn stack_exile_linked_source(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
     state
         .objects
         .get(&object_id)

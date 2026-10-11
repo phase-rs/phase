@@ -358,3 +358,65 @@ fn rod_returned_to_the_battlefield_cannot_cast_its_predecessors_exiles() {
         );
     }
 }
+
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, \
+     then return those cards to the battlefield under your control.";
+
+/// Rod ruling: "Each Rod of Absorption tracks the cards it has exiled
+/// separately."
+///
+/// CR 607.2b + CR 113.7a + CR 400.7: Ghostly Flicker returns Rod while it
+/// resolves. Rod's trigger made Flicker exile itself, so Flicker is exiled
+/// with the Rod whose trigger did that, not with the Rod that came back.
+#[test]
+fn rod_returned_by_its_own_flicker_cannot_cast_that_flicker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rod = scenario
+        .add_creature(P0, "Rod of Absorption", 0, 0)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text(ROD_TEXT)
+        .id();
+    let land = scenario.add_land_from_oracle(P0, "Blank Land", "").id();
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let incarnation_before = runner.state().objects[&rod].incarnation;
+
+    runner.cast(flicker).target_objects(&[rod, land]).resolve();
+    assert_eq!(
+        runner.state().objects[&flicker].zone,
+        Zone::Exile,
+        "reach-guard: Rod's rider exiled Flicker as it resolved"
+    );
+    assert_eq!(runner.state().objects[&rod].zone, Zone::Battlefield);
+    assert_ne!(
+        runner.state().objects[&rod].incarnation,
+        incarnation_before,
+        "reach-guard: Rod came back as a new object"
+    );
+
+    let idx = rod_activated_index(runner.state(), rod);
+    runner.activate(rod, idx).x(0).accept_optional().resolve();
+
+    assert_ne!(
+        runner.state().objects[&rod].zone,
+        Zone::Battlefield,
+        "the returned Rod was sacrificed as the activation's cost"
+    );
+    let obj = &runner.state().objects[&flicker];
+    assert_eq!(obj.zone, Zone::Exile, "Flicker stays in exile");
+    assert!(
+        !obj.casting_permissions.iter().any(|p| matches!(
+            p,
+            CastingPermission::ExileWithAltCost { cost, .. }
+                if cost.is_without_paying_mana()
+        )),
+        "Flicker was exiled with the Rod that was flickered, not the returned one; \
+         permissions = {:?}",
+        obj.casting_permissions
+    );
+}

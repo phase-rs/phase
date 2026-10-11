@@ -29,13 +29,12 @@ use crate::types::ability::{AttackSubject, CombatHistoryScope};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::format::ZoneScope;
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
-    ExileLinkKind, GameState, LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey,
-    PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
-    PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    RepeatUntilStopWitness, ResolutionOptionalPaymentOption, ReturnResultOccurrenceId, WaitingFor,
-    ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
+    LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeLinkedExile,
+    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
+    PendingPlayerScopeSacrificeFollowUp, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
+    ReturnResultOccurrenceId, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -13336,11 +13335,9 @@ pub(super) fn linked_exile_batch_from_events(
                 .objects
                 .get(&id)
                 .is_some_and(|object| object.zone == Zone::Exile)
-            && state.exile_links.iter().any(|link| {
-                link.exiled_id == id
-                    && link.source_id == source_id
-                    && link.kind == ExileLinkKind::TrackedBySource
-            })
+            // CR 607.2a + CR 113.7a: this resolution's own tracked exile, as the
+            // acting incarnation made it.
+            && crate::game::exile_links::tracked_exile_of_acting_incarnation(state, source_id, id)
         {
             batch.push(ObjectIncarnationRef::from_object(&state.objects[&id]));
         }

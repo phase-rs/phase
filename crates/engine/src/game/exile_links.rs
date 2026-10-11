@@ -3,8 +3,9 @@ use serde::Serialize;
 use crate::game::game_object::LinkedAbilitySource;
 use crate::types::ability::{AbilityProvenance, Duration, ResolvedAbility};
 use crate::types::game_state::{
-    ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume, LookGrant,
-    RepeatUntilStopWitness, StackEntry, StackEntryKind,
+    ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume,
+    LinkedExileLki, LinkedExileSnapshot, LookGrant, RepeatUntilStopWitness, StackEntry,
+    StackEntryKind,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -103,10 +104,9 @@ pub(crate) fn push_look_link(
     grant: LookGrant,
     instructed: PlayerId,
 ) {
-    let source_incarnation = state
-        .objects
-        .get(&source_id)
-        .map_or(0, |src| src.incarnation);
+    // CR 702.75a + CR 113.7a: an old hideaway or heist exile is the old
+    // object's look link (CR 400.7).
+    let source_incarnation = linked_exile_incarnation(state, source_id).unwrap_or(0);
     let lookers = std::iter::once(instructed)
         .chain(look_grant_admits(
             state,
@@ -184,6 +184,65 @@ pub(crate) fn live_links_for_source(
                 | ExileLinkKind::CraftMaterial => true,
             }
     })
+}
+
+/// CR 607.2a + CR 607.2b + CR 113.7a + CR 400.7: The linked-exile LKI piles the
+/// incarnation `reader` may read (see `linked_exile_incarnation`), filtered to
+/// cards still in exile so stale entries (cards that later left exile)
+/// contribute nothing. `None` admits every entry (the source no longer exists).
+pub(crate) fn lki_snapshots_for_reader(
+    state: &GameState,
+    source_id: ObjectId,
+    reader: Option<u64>,
+) -> impl Iterator<Item = &LinkedExileSnapshot> {
+    state
+        .linked_exile_lki
+        .get(&source_id)
+        .into_iter()
+        .flatten()
+        .filter(move |lki| reader.is_none_or(|incarnation| lki.admits(incarnation)))
+        .flat_map(|lki| &lki.snapshot)
+        .filter(|snap| {
+            state
+                .objects
+                .get(&snap.exiled_id)
+                .is_some_and(|obj| obj.zone == Zone::Exile)
+        })
+}
+
+/// CR 607.2a + CR 113.7a: Whether `exiled_id` was exiled by the acting
+/// incarnation of `source_id` as a tracked exile: a live tracked link, or a
+/// card kept in that incarnation's linked-exile LKI because it acted after it
+/// was replaced. The same-resolution "exiled this way" readers ask this.
+pub(crate) fn tracked_exile_of_acting_incarnation(
+    state: &GameState,
+    source_id: ObjectId,
+    exiled_id: ObjectId,
+) -> bool {
+    let reader = linked_exile_incarnation(state, source_id);
+    live_links_for_source(state, source_id)
+        .any(|link| link.exiled_id == exiled_id && link.kind == ExileLinkKind::TrackedBySource)
+        || lki_snapshots_for_reader(state, source_id, reader)
+            .any(|snap| snap.exiled_id == exiled_id)
+}
+
+/// CR 607.2a: `exiled_id` as an entry of a "cards exiled with" pile, or `None`
+/// when it is not in exile.
+pub(crate) fn exiled_card_snapshot(
+    state: &GameState,
+    exiled_id: ObjectId,
+) -> Option<LinkedExileSnapshot> {
+    state
+        .objects
+        .get(&exiled_id)
+        .filter(|obj| obj.zone == Zone::Exile)
+        .map(|obj| LinkedExileSnapshot {
+            exiled_id,
+            owner: obj.owner,
+            // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a
+            // split card records its combined mana value.
+            mana_value: obj.effective_mana_value(),
+        })
 }
 
 /// CR 406.3 + CR 613.1b: a source-controller look link latches its source's new
@@ -265,14 +324,89 @@ pub(crate) fn reset_look_latches(state: &mut GameState, pile: &[ObjectId]) {
 /// A newly recorded link is also mirrored to every command-zone emblem the
 /// source created that consumes its exiles, when the exile was made by the
 /// ability set that emblem is paired with (CR 607.1d, `mirror_link_to_linked_emblems`).
+/// The exile is made by the incarnation `linked_exile_incarnation` names
+/// (see [`push_with_kind_as`]).
 pub(crate) fn push_with_kind(
     state: &mut GameState,
     exiled_id: ObjectId,
     source_id: ObjectId,
     kind: ExileLinkKind,
 ) {
-    if record_link(state, exiled_id, source_id, kind) {
+    let creator = linked_exile_incarnation(state, source_id);
+    push_with_kind_as(state, exiled_id, source_id, creator, kind);
+}
+
+/// CR 400.7 + CR 607.2a + CR 113.7a: Link a card exiled by `creator`, an
+/// incarnation of `source_id`. A tracked exile made by an incarnation that is
+/// no longer the live object is that incarnation's: it is kept in the
+/// linked-exile LKI and never becomes a link of the object that replaced it.
+pub(crate) fn push_with_kind_as(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    creator: Option<u64>,
+    kind: ExileLinkKind,
+) {
+    let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
+    let departed_creator = creator.filter(|creator| live != Some(*creator));
+    let recorded = match (&kind, departed_creator) {
+        (ExileLinkKind::TrackedBySource, Some(creator)) => {
+            record_departed_linked_exile(state, exiled_id, source_id, creator)
+        }
+        // The live object's own tracked exile, or a kind that is never
+        // diverted: a look link carries its creator (`push_look_link`); a
+        // craft material is linked at cost time; cipher, haunt and paradigm
+        // links are keyed to the object they belong to; and the "until" kinds
+        // track a return (CR 610.3).
+        (ExileLinkKind::TrackedBySource, None)
+        | (
+            ExileLinkKind::HideawayLookable { .. }
+            | ExileLinkKind::UntilSourceLeaves { .. }
+            | ExileLinkKind::UntilOpponentBecomesMonarch { .. }
+            | ExileLinkKind::ParadigmSource { .. }
+            | ExileLinkKind::Cipher
+            | ExileLinkKind::Haunt
+            | ExileLinkKind::CraftMaterial,
+            _,
+        ) => record_link(state, exiled_id, source_id, kind),
+    };
+    if recorded {
         mirror_link_to_linked_emblems(state, exiled_id, source_id);
+    }
+}
+
+/// CR 607.2a + CR 113.7a + CR 400.7: Keep a card the departed incarnation
+/// `creator` of `source_id` exiled in that incarnation's linked-exile LKI, once
+/// per card. The entry is the departure entry that admits `creator`, or a new
+/// entry admitting only `creator`: an ability of the same departed object
+/// stamped with another incarnation does not read it. Returns `true` when the
+/// card was newly recorded. CR 400.7: the live object did not exile it, so it
+/// gets no link and no per-turn ledger entry.
+fn record_departed_linked_exile(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    creator: u64,
+) -> bool {
+    // The exile was replaced: nothing was exiled with any incarnation.
+    let Some(snapshot) = exiled_card_snapshot(state, exiled_id) else {
+        return false;
+    };
+    let entries = state.linked_exile_lki.entry(source_id).or_default();
+    match entries.iter_mut().find(|lki| lki.admits(creator)) {
+        Some(lki) if lki.snapshot.iter().any(|snap| snap.exiled_id == exiled_id) => false,
+        Some(lki) => {
+            lki.snapshot.push(snapshot);
+            true
+        }
+        None => {
+            entries.push(LinkedExileLki {
+                departed: creator,
+                successor: creator,
+                snapshot: vec![snapshot],
+            });
+            true
+        }
     }
 }
 
@@ -630,12 +764,13 @@ fn contains_linked_exile_consumer_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::zones::create_object;
     use crate::types::ability::CharacteristicSetRef;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, Effect, ManaProduction, PlayerFilter,
         QuantityExpr, QuantityRef, TargetFilter,
     };
-    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::CastFrequency;
     use crate::types::zones::{EtbTapState, Zone};
@@ -2011,5 +2146,170 @@ mod tests {
         );
         state.resolving_stack_entry = None;
         assert_eq!(resolving_exile_supplier(&state, source), None);
+    }
+
+    // ── CR 113.7a write attribution ─────────────────────────────────────
+
+    /// A source on the battlefield as incarnation 6 while an activated ability
+    /// it put on the stack as incarnation 4 resolves.
+    fn departed_creator_fixture() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().incarnation = 6;
+        resolving_as(&mut state, source, ResolvingKind::Activated, |_| {});
+        (state, source)
+    }
+
+    /// The resolving ability of `source` acts as `incarnation`.
+    fn stamp_resolving(state: &mut GameState, source: ObjectId, incarnation: u64) {
+        resolving_as(state, source, ResolvingKind::Activated, |ability| {
+            ability.source_incarnation = Some(incarnation);
+        });
+    }
+
+    fn snapshot_of(state: &GameState, card: ObjectId) -> LinkedExileSnapshot {
+        exiled_card_snapshot(state, card).expect("the card is in exile")
+    }
+
+    /// CR 400.7 + CR 113.7a + CR 607.2a: a tracked exile made by an ability of
+    /// a departed incarnation is kept in that incarnation's linked-exile LKI,
+    /// once per card, with no live link and no per-turn ledger entry. Made by
+    /// the live object, it is an ordinary link.
+    #[test]
+    fn tracked_exile_by_a_departed_incarnation_is_kept_in_its_lki() {
+        // Stamped 4, live 6, pushed twice: one creator entry holding the card once.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            !has_link(&state, card, source),
+            "no link to the live object"
+        );
+        assert!(
+            !state
+                .cards_exiled_with_source_this_turn
+                .contains_key(&source),
+            "the live object did not exile it this turn"
+        );
+        assert_eq!(
+            state.linked_exile_lki[&source],
+            vec![LinkedExileLki {
+                departed: 4,
+                successor: 4,
+                snapshot: vec![snapshot_of(&state, card)],
+            }],
+            "one entry admitting only the creator, holding the card once"
+        );
+
+        // A departure entry that admits the creator receives the card.
+        let (mut state, source) = departed_creator_fixture();
+        let earlier = exile_card(&mut state);
+        let departure = LinkedExileLki {
+            departed: 4,
+            successor: 5,
+            snapshot: vec![snapshot_of(&state, earlier)],
+        };
+        state
+            .linked_exile_lki
+            .insert(source, vec![departure.clone()]);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert_eq!(
+            state.linked_exile_lki[&source],
+            vec![LinkedExileLki {
+                snapshot: vec![snapshot_of(&state, earlier), snapshot_of(&state, card)],
+                ..departure
+            }]
+        );
+
+        // Stamped 6 (the live object): an ordinary link, the LKI untouched.
+        let (mut state, source) = departed_creator_fixture();
+        stamp_resolving(&mut state, source, 6);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            has_link(&state, card, source),
+            "the live object's own exile"
+        );
+        assert_eq!(
+            state.cards_exiled_with_source_this_turn.get(&source),
+            Some(&vec![card])
+        );
+        assert!(!state.linked_exile_lki.contains_key(&source));
+
+        // Stamped 4, but the exile was replaced: nothing is recorded.
+        let (mut state, source) = departed_creator_fixture();
+        let card = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Redirected Card".to_string(),
+            Zone::Graveyard,
+        );
+        push_tracked_by_source(&mut state, card, source);
+        assert!(!has_link(&state, card, source));
+        assert!(!state.linked_exile_lki.contains_key(&source));
+    }
+
+    /// CR 607.2a + CR 113.7a: the membership view answers for the acting
+    /// incarnation: its own LKI pile while its ability resolves, the live
+    /// links for the live object, and never another incarnation's pile.
+    #[test]
+    fn tracked_exile_membership_answers_for_the_acting_incarnation() {
+        let (mut state, source) = departed_creator_fixture();
+        let live_card = exile_card(&mut state);
+        let creator_card = exile_card(&mut state);
+        let older_card = exile_card(&mut state);
+        state.exile_links.push(ExileLink {
+            exiled_id: live_card,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        state.linked_exile_lki.insert(
+            source,
+            vec![
+                LinkedExileLki {
+                    departed: 4,
+                    successor: 4,
+                    snapshot: vec![snapshot_of(&state, creator_card)],
+                },
+                LinkedExileLki {
+                    departed: 2,
+                    successor: 3,
+                    snapshot: vec![snapshot_of(&state, older_card)],
+                },
+            ],
+        );
+        let member =
+            |state: &GameState, card| tracked_exile_of_acting_incarnation(state, source, card);
+
+        // The ability stamped 4 is resolving.
+        assert!(member(&state, creator_card), "its own pile");
+        assert!(
+            member(&state, live_card),
+            "the live half is not gated by reader"
+        );
+        assert!(!member(&state, older_card), "another incarnation's pile");
+
+        stamp_resolving(&mut state, source, 2);
+        assert!(
+            member(&state, older_card),
+            "that pile, read by its own incarnation"
+        );
+
+        // No ability of the source is resolving: the live object reads.
+        state.resolving_stack_entry = None;
+        assert!(member(&state, live_card), "the live object's link");
+        assert!(
+            !member(&state, creator_card),
+            "a departed incarnation's pile"
+        );
     }
 }

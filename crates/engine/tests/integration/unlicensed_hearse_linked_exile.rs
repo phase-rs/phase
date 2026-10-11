@@ -19,6 +19,7 @@
 
 use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
@@ -43,9 +44,8 @@ struct HearseBoard {
 }
 
 /// Hearse, a blank land, a 2/2 pilot, two cards in the opponent's graveyard
-/// and a zero-cost Ghostly Flicker in hand. Hearse's `{T}` has already exiled
-/// both graveyard cards.
-fn hearse_with_two_exiled() -> HearseBoard {
+/// and a zero-cost Ghostly Flicker in hand.
+fn hearse_board() -> HearseBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let hearse = scenario
@@ -60,26 +60,33 @@ fn hearse_with_two_exiled() -> HearseBoard {
         .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
         .with_mana_cost(ManaCost::zero())
         .id();
-    let mut runner = scenario.build();
-    runner
-        .activate(hearse, 0)
-        .target_objects(&[first, second])
-        .resolve();
-    for card in [first, second] {
-        assert_eq!(
-            runner.state().objects[&card].zone,
-            Zone::Exile,
-            "Hearse's ability exiled the graveyard card"
-        );
-    }
     HearseBoard {
-        runner,
+        runner: scenario.build(),
         hearse,
         land,
         pilot,
         flicker,
         graveyard_cards: [first, second],
     }
+}
+
+/// [`hearse_board`] with Hearse's `{T}` having already exiled both graveyard
+/// cards.
+fn hearse_with_two_exiled() -> HearseBoard {
+    let mut board = hearse_board();
+    board
+        .runner
+        .activate(board.hearse, 0)
+        .target_objects(&board.graveyard_cards)
+        .resolve();
+    for card in board.graveyard_cards {
+        assert_eq!(
+            board.runner.state().objects[&card].zone,
+            Zone::Exile,
+            "Hearse's ability exiled the graveyard card"
+        );
+    }
+    board
 }
 
 fn linked(state: &engine::types::game_state::GameState, hearse: ObjectId) -> Vec<ObjectId> {
@@ -168,4 +175,65 @@ fn crewed_hearse_counts_the_cards_exiled_with_it() {
     assert_eq!(obj.zone, Zone::Battlefield);
     assert!(obj.card_types.core_types.contains(&CoreType::Creature));
     assert_eq!((obj.power, obj.toughness), (Some(2), Some(2)));
+}
+
+/// CR 113.7a + CR 607.2a + CR 400.7: Hearse's `{T}` ability resolves after
+/// Ghostly Flicker returned Hearse. The ability exiles the cards for the Hearse
+/// that activated it, so the returned Hearse, a new object, has no cards
+/// exiled with it. (CR 208.3: uncrewed, it has no power or toughness to read.)
+#[test]
+fn hearse_ability_resolving_after_a_blink_links_nothing_to_the_new_hearse() {
+    let HearseBoard {
+        mut runner,
+        hearse,
+        land,
+        flicker,
+        graveyard_cards,
+        ..
+    } = hearse_board();
+    let incarnation_before = runner.state().objects[&hearse].incarnation;
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: hearse,
+            ability_index: 0,
+        })
+        .expect("activate Hearse's {T} ability");
+    for card in graveyard_cards {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(card)),
+            })
+            .expect("target a graveyard card");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Hearse's ability waits on the stack"
+    );
+
+    runner
+        .cast(flicker)
+        .target_objects(&[hearse, land])
+        .resolve();
+
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "Hearse's ability resolved");
+    assert_eq!(state.objects[&hearse].zone, Zone::Battlefield);
+    assert_ne!(
+        state.objects[&hearse].incarnation, incarnation_before,
+        "Hearse came back as a new object before its ability resolved"
+    );
+    for card in graveyard_cards {
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Exile,
+            "the ability still exiled its target"
+        );
+    }
+    assert!(
+        linked(state, hearse).is_empty(),
+        "the departed Hearse exiled these cards, not the returned one; linked = {:?}",
+        linked(state, hearse)
+    );
 }

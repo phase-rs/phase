@@ -370,15 +370,7 @@ pub fn linked_exile_cards_for_source(
     let live: Vec<LinkedExileSnapshot> =
         crate::game::exile_links::live_links_for_source(state, source_id)
             .filter_map(|link| {
-                state.objects.get(&link.exiled_id).and_then(|obj| {
-                    (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
-                        exiled_id: link.exiled_id,
-                        owner: obj.owner,
-                        // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
-                        // a split card records its combined mana value.
-                        mana_value: obj.effective_mana_value(),
-                    })
-                })
+                crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id)
             })
             .collect();
     if !live.is_empty() {
@@ -386,23 +378,11 @@ pub fn linked_exile_cards_for_source(
     }
 
     // CR 607.2a + CR 607.2b + CR 113.7a: The live links are gone (the source left
-    // the battlefield, e.g. sacrificed as its own ability's cost). Fall back to the
-    // linked-exile LKI, but only to the piles of the incarnation this read is made
-    // for (CR 400.7), filtered to cards STILL in exile.
+    // the battlefield, e.g. sacrificed as its own ability's cost, or an ability
+    // of a departed incarnation exiled them). Fall back to the linked-exile LKI,
+    // but only to the piles of the incarnation this read is made for (CR 400.7).
     let reader = crate::game::exile_links::linked_exile_incarnation(state, source_id);
-    state
-        .linked_exile_lki
-        .get(&source_id)
-        .into_iter()
-        .flatten()
-        .filter(|lki| reader.is_none_or(|incarnation| lki.admits(incarnation)))
-        .flat_map(|lki| &lki.snapshot)
-        .filter(|snap| {
-            state
-                .objects
-                .get(&snap.exiled_id)
-                .is_some_and(|obj| obj.zone == Zone::Exile)
-        })
+    crate::game::exile_links::lki_snapshots_for_reader(state, source_id, reader)
         .cloned()
         .collect()
 }

@@ -8,11 +8,12 @@
 //! only `CastingPermission::ExileWithAltCost` and missed the `PlayFromExile`
 //! authority needed for face-down exile actions.
 
+use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::CastingPermission;
+use engine::types::ability::{CastingPermission, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ExileLinkKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -444,5 +445,112 @@ fn mosswort_bridge_hideaway_with_power_lt_10_offers_nothing() {
             .iter()
             .all(|p| !matches!(p, CastingPermission::PlayFromExile { .. })),
         "power<10 must not grant PlayFromExile to the hidden spell"
+    );
+}
+
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, \
+     then return those cards to the battlefield under your control.";
+
+/// CR 702.75a + CR 113.7a + CR 607.2a + CR 400.7: Bridge is played and its
+/// hideaway trigger waits; Ghostly Flicker returns Bridge, whose new hideaway
+/// trigger resolves first and exiles N. The old trigger then exiles O for the
+/// Bridge that left. The returned Bridge's "the exiled card" is N alone.
+#[test]
+fn old_hideaway_trigger_after_a_blink_does_not_feed_the_new_bridge() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mosswort = scenario.add_real_card(P0, "Mosswort Bridge", Zone::Hand, db);
+    let land = scenario.add_land_from_oracle(P0, "Blank Land", "").id();
+    for name in [
+        "Forest", "Island", "Mountain", "Plains", "Swamp", "Wastes", "Forest", "Island",
+    ] {
+        scenario.add_real_card(P0, name, Zone::Library, db);
+    }
+    scenario.add_real_card(P1, "Island", Zone::Library, db);
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let mosswort_card_id = runner.state().objects[&mosswort].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: mosswort,
+            card_id: mosswort_card_id,
+        })
+        .expect("play Mosswort Bridge");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the hideaway trigger waits on the stack"
+    );
+    let incarnation_played = runner.state().objects[&mosswort].incarnation;
+
+    let flicker_card_id = runner.state().objects[&flicker].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: flicker,
+            card_id: flicker_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Ghostly Flicker");
+    for target in [mosswort, land] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("target Bridge and the land");
+    }
+
+    // Each hideaway pick takes the first card it is offered: the re-entry
+    // trigger resolves first (N), the old trigger second (O).
+    let mut picks = Vec::new();
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DigChoice { cards, .. } => {
+                picks.push(cards[0]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    })
+                    .expect("hide the first offered card");
+            }
+            other => panic!("unexpected waiting state while resolving the blink: {other:?}"),
+        }
+    }
+
+    let state = runner.state();
+    assert_eq!(picks.len(), 2, "both hideaway triggers resolved");
+    for pick in &picks {
+        assert_eq!(
+            state.objects[pick].zone,
+            Zone::Exile,
+            "each pick was hidden"
+        );
+    }
+    assert_eq!(
+        state.objects[&mosswort].incarnation,
+        incarnation_played + 2,
+        "Bridge left and returned as a new object"
+    );
+    let linked: Vec<ObjectId> = linked_exile_cards_for_source(state, mosswort)
+        .iter()
+        .map(|snapshot| snapshot.exiled_id)
+        .collect();
+    assert_eq!(
+        linked,
+        vec![picks[0]],
+        "only the returned Bridge's own hideaway card is exiled with it"
     );
 }
