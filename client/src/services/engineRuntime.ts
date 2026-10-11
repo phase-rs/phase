@@ -325,6 +325,16 @@ export async function companionCandidates(request: unknown): Promise<string[]> {
 }
 
 /**
+ * CR 702.139a: Query the engine whether a card has the Companion keyword ability.
+ * The engine is the single authority on whether a card is a Companion.
+ */
+export async function isCardCompanion(cardName: string): Promise<boolean> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return Boolean(engine.isCardCompanion(cardName));
+}
+
+/**
  * Engine-owned deck-construction unions, re-exported so deck-builder callers
  * keep a single import site. `DeckCopyLimit` is a card's / format's copy
  * ceiling (CR 100.2a / CR 903.5b) and `SideboardPolicy` a format's sideboard

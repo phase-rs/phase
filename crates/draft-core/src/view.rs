@@ -3011,6 +3011,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )

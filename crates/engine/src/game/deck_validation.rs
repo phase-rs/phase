@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
 use crate::game::ante::face_uses_ante;
-use crate::game::companion::{companion_starting_deck, is_eligible_companion};
+use crate::game::companion::{companion_starting_deck, is_eligible_companion_with_min_deck_size};
 use crate::game::deck_loading::{deserialize_draft_set_codes, DeckEntry};
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
@@ -123,41 +123,67 @@ pub fn signature_spell_selection_policy(
     SignatureSpellSelectionPolicy::Required { candidates }
 }
 
-/// Returns eligible Commander-family companion cards that can be moved from
-/// the main deck into the dedicated companion slot. Candidate evaluation uses
-/// the same typed predicate as pregame reveal validation.
+/// Returns eligible companion cards that can be used with the deck under the
+/// selected format. Candidate evaluation uses the same typed predicate as
+/// pregame reveal validation and respects format minimum deck sizes.
 pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityRequest) -> Vec<String> {
-    // `SelectedFormat::rules()` returns `Err` for `Tag(Custom(_))` (a bare
-    // GameFormat cannot resolve it — see types::format). `selected_format`
-    // arrives from an untrusted request (this function is exposed directly
-    // via engine-wasm's `companion_candidates_js`), so it can only ever be a
-    // `Tag` (see the Wire-Inertness Invariant on `SelectedFormat`) — but no
-    // companion-candidate resolution exists for Custom formats yet anyway,
-    // so treating an `Err`/absent format the same as any other non-commander
-    // format (empty result) is the honest answer.
-    let uses_commander = request
+    let format_rules = request
         .selected_format
         .as_ref()
-        .and_then(|selected| selected.rules().ok())
+        .and_then(|selected| selected.rules().ok());
+    let uses_commander = format_rules
+        .as_ref()
         .is_some_and(|rules| rules.uses_commander);
-    if !uses_commander {
+    let is_limited =
+        request.selected_format.as_ref().map(SelectedFormat::tag) == Some(GameFormat::Limited);
+
+    if !uses_commander && !is_limited {
         return Vec::new();
     }
 
-    request
-        .main_deck
-        .iter()
-        .enumerate()
-        .filter_map(|(index, name)| {
-            let face = db.get_face_by_name(name)?;
-            let mut remaining_main = request.main_deck.clone();
-            remaining_main.remove(index);
+    let min_deck_size = format_rules
+        .as_ref()
+        .map(|rules| rules.deck_size.min_cards())
+        .unwrap_or(if is_limited { 40 } else { 60 });
+
+    let mut candidate_names = BTreeSet::new();
+    candidate_names.extend(request.main_deck.iter().cloned());
+    candidate_names.extend(request.sideboard.iter().cloned());
+    candidate_names.extend(request.companion.iter().cloned());
+
+    candidate_names
+        .into_iter()
+        .filter_map(|name| {
+            let face = db.get_face_by_name(&name)?;
+            let is_companion = face
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Companion(_)));
+            if !is_companion {
+                return None;
+            }
+            let is_already_registered = request.companion.iter().any(|c| c == &name);
+            let starting_main = if is_already_registered {
+                request.main_deck.clone()
+            } else if let Some(idx) = request.main_deck.iter().position(|n| n == &name) {
+                let mut rem = request.main_deck.clone();
+                rem.remove(idx);
+                rem
+            } else {
+                request.main_deck.clone()
+            };
             let companion = DeckEntry::from_resolved_face(db, face, 1);
-            let main = deck_entries_for_names(db, &remaining_main);
+            let main = deck_entries_for_names(db, &starting_main);
             let commanders = deck_entries_for_names(db, &request.commander);
             let starting = companion_starting_deck(&main, &commanders, uses_commander);
-            is_eligible_companion(&companion, &starting, &commanders, uses_commander)
-                .then(|| face.name.clone())
+            is_eligible_companion_with_min_deck_size(
+                &companion,
+                &starting,
+                &commanders,
+                uses_commander,
+                min_deck_size as usize,
+            )
+            .then(|| face.name.clone())
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -777,10 +803,31 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
 /// Every name in a Limited deck must resolve before game admission.
 /// A draft session applies its configured minimum at submission; this
 /// generic gate has no session provenance from which to recover that minimum.
-fn evaluate_limited(unknown_cards: &BTreeSet<String>) -> CompatibilityCheck {
+fn evaluate_limited(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+) -> CompatibilityCheck {
     let mut reasons = Vec::new();
     if !unknown_cards.is_empty() {
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+    if request.companion.len() > 1 {
+        reasons.push(format!(
+            "Limited decks may register at most one companion (found {})",
+            request.companion.len()
+        ));
+    } else if let Some(companion_name) = request.companion.first() {
+        if let Some(face) = db.get_face_by_name(companion_name) {
+            let companion = DeckEntry::from_resolved_face(db, face, 1);
+            let main = deck_entries_for_names(db, &request.main_deck);
+            let starting = companion_starting_deck(&main, &[], false);
+            if !is_eligible_companion_with_min_deck_size(&companion, &starting, &[], false, 40) {
+                reasons.push(format!(
+                    "{companion_name}: not a legal companion for this starting deck"
+                ));
+            }
+        }
     }
     CompatibilityCheck {
         compatible: reasons.is_empty(),
@@ -1420,8 +1467,15 @@ fn validate_commander_companion(
     // `Resolved` custom config for which the bare method would return `Err`
     // (see `SelectedFormat`) — the stored field is always available.
     let uses_commander = format_rules.uses_commander;
+    let min_deck_size = format_rules.deck_size.min_cards();
     let starting = companion_starting_deck(&main, &commanders, uses_commander);
-    if !is_eligible_companion(&companion, &starting, &commanders, uses_commander) {
+    if !is_eligible_companion_with_min_deck_size(
+        &companion,
+        &starting,
+        &commanders,
+        uses_commander,
+        min_deck_size as usize,
+    ) {
         reasons.push(format!(
             "{companion_name}: not a legal companion for this starting deck"
         ));
@@ -2603,7 +2657,7 @@ fn evaluate_selected_format_summary(
     };
     let uses_commander = format_rules.uses_commander;
 
-    if !uses_commander && !request.companion.is_empty() {
+    if !uses_commander && format != GameFormat::Limited && !request.companion.is_empty() {
         return (
             Some(false),
             vec![format!(
@@ -2693,7 +2747,7 @@ fn evaluate_selected_format_summary(
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => QuickCheckResult::compatible(),
         GameFormat::Limited => {
             let unknown_cards = collect_unknown_cards(db, request);
-            let check = evaluate_limited(&unknown_cards);
+            let check = evaluate_limited(db, request, &unknown_cards);
             QuickCheckResult {
                 reason: check.reasons.into_iter().next(),
                 unknown_cards,
@@ -3050,7 +3104,7 @@ fn evaluate_selected_format(
     };
     let uses_commander = format_rules.uses_commander;
 
-    if !uses_commander && !request.companion.is_empty() {
+    if !uses_commander && format != GameFormat::Limited && !request.companion.is_empty() {
         return (
             Some(false),
             vec![format!(
@@ -3221,7 +3275,7 @@ fn evaluate_selected_format(
         }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
         GameFormat::Limited => {
-            let check = evaluate_limited(unknown_cards);
+            let check = evaluate_limited(db, request, unknown_cards);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }
@@ -5942,6 +5996,67 @@ mod tests {
             .selected_format_reasons
             .iter()
             .any(|reason| reason.contains("Commander Banned (banned)")));
+    }
+
+    #[test]
+    fn companion_candidates_preserves_main_deck_for_already_registered_companion() {
+        let mut db_json: Value = serde_json::from_str(&test_db_json()).unwrap();
+        db_json["lurrus"] = serde_json::json!({
+            "name": "Lurrus",
+            "mana_cost": { "type": "Cost", "shards": [], "generic": 3 },
+            "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [
+                { "Companion": { "type": "MaxPermanentManaValue", "data": 2 } }
+            ],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null,
+            "legalities": { "standard": "legal", "commander": "legal" }
+        });
+        let db = CardDatabase::from_json_str(&db_json.to_string()).unwrap();
+
+        // When Lurrus is registered as companion AND a second Lurrus copy is in the main deck,
+        // the starting main deck contains a permanent with MV 3 (violating Lurrus's requirement).
+        // The candidate check must NOT remove the main-deck copy when Lurrus is already in request.companion.
+        let mut main = expand("Plains", 39);
+        main.push("Lurrus".to_string());
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: vec!["Lurrus".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Limited)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let candidates = companion_candidates(&db, &request);
+        assert!(
+            !candidates.contains(&"Lurrus".to_string()),
+            "Lurrus must not be eligible when a second Lurrus copy remains in the starting main deck"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("not a legal companion for this starting deck")));
     }
 
     #[test]

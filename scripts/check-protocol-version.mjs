@@ -227,7 +227,7 @@ const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 56
 // would pair successfully and silently drop every frame of the new shape. The
 // leg below closes that: the source constant, the test's `toBe(...)` and the
 // test's TITLE now all move with this expectation or the gate reds.
-const EXPECTED_DRAFT_PROTOCOL_VERSION = 30;
+const EXPECTED_DRAFT_PROTOCOL_VERSION = 31;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);

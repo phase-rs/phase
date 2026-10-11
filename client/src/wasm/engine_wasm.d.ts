@@ -428,6 +428,12 @@ export function isCardCommanderEligibleForFormat(name: string, format: any): boo
 export function is_card_commander_eligible(name: string): boolean;
 
 /**
+ * CR 702.139a: Whether the named card has the Companion keyword ability.
+ * Returns false if the card database isn't loaded or the card isn't found.
+ */
+export function isCardCompanion(name: string): boolean;
+
+/**
  * Read the multiplayer enforcement flag. Exposed primarily for tests and
  * adapters that need to defend their own paths (e.g., skip history pushes).
  */

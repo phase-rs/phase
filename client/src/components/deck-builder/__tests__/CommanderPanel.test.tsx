@@ -155,4 +155,69 @@ describe("CommanderPanel", () => {
     );
     expect(screen.getByText("99/100 cards")).toHaveClass("text-yellow-400");
   });
+
+  it("does not render companion section when no companion exists in pool or selected", () => {
+    render(
+      <CommanderPanel
+        commanders={[]}
+        deck={[{ name: "Filler Card", count: 60 }]}
+        deckComposition="commanders-outside"
+        cardDataCache={new Map()}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        isCommanderEligible={() => false}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        companionCandidates={[]}
+      />,
+    );
+    expect(screen.queryByText(/companion/i)).not.toBeInTheDocument();
+  });
+
+  it("renders companion slot and candidates when companionCandidates is provided", () => {
+    const onSetCompanion = vi.fn();
+    render(
+      <CommanderPanel
+        commanders={[]}
+        deck={[{ name: "Lurrus of the Dream-Den", count: 1 }]}
+        deckComposition="commanders-outside"
+        cardDataCache={new Map()}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        isCommanderEligible={() => false}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        companionCandidates={["Lurrus of the Dream-Den"]}
+        onSetCompanion={onSetCompanion}
+      />,
+    );
+    expect(screen.getByText("Companion")).toBeInTheDocument();
+    const candidateBtn = screen.getByRole("button", { name: "Lurrus of the Dream-Den" });
+    expect(candidateBtn).toBeInTheDocument();
+    fireEvent.click(candidateBtn);
+    expect(onSetCompanion).toHaveBeenCalledWith("Lurrus of the Dream-Den");
+  });
+
+  it("renders selected companion with remove button and handles removal", () => {
+    const onRemoveCompanion = vi.fn();
+    render(
+      <CommanderPanel
+        commanders={[]}
+        deck={[{ name: "Lurrus of the Dream-Den", count: 1 }]}
+        deckComposition="commanders-outside"
+        cardDataCache={new Map()}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        isCommanderEligible={() => false}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        companion="Lurrus of the Dream-Den"
+        companionCandidates={["Lurrus of the Dream-Den"]}
+        onRemoveCompanion={onRemoveCompanion}
+      />,
+    );
+    expect(screen.getByText("Companion")).toBeInTheDocument();
+    expect(screen.getByText("Lurrus of the Dream-Den")).toBeInTheDocument();
+    const removeBtn = screen.getByRole("button", { name: "Remove companion" });
+    fireEvent.click(removeBtn);
+    expect(onRemoveCompanion).toHaveBeenCalled();
+  });
 });
+

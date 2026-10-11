@@ -1514,6 +1514,10 @@ pub enum DraftAction {
         /// [`MAX_COMMANDER_DESIGNATIONS`](crate::types::MAX_COMMANDER_DESIGNATIONS).
         #[serde(default)]
         commanders: Vec<String>,
+        /// CR 702.139a: the optional companion card name designated outside the
+        /// main deck from the player's pool.
+        #[serde(default)]
+        companion: Option<String>,
     },
     /// Generate the next round's pairings. Carries no round: the reducer is the
     /// single authority for which round that is (`DraftSession::next_pairing_round`).
@@ -1760,6 +1764,9 @@ pub struct DraftDeckSubmission {
     /// `validate_limited_deck`.
     #[serde(default)]
     pub commanders: Vec<String>,
+    /// CR 702.139a: the optional companion designation.
+    #[serde(default)]
+    pub companion: Option<String>,
 }
 
 /// Win/loss record for a player in the draft event.

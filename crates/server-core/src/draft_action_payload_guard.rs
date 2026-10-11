@@ -70,6 +70,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         DraftAction::SubmitDeck {
             main_deck,
             commanders,
+            companion,
             ..
         } => {
             validate_deck_list("SubmitDeck.main_deck", main_deck, MAX_MAIN_DECK_ENTRIES)?;
@@ -88,6 +89,9 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
                 commanders,
                 MAX_COMMANDER_DESIGNATIONS,
             )?;
+            if let Some(c) = companion {
+                validate_token("SubmitDeck.companion", c, MAX_TOKEN_LEN)?;
+            }
         }
         DraftAction::ReportMatchResult { match_id, .. } => {
             validate_token("ReportMatchResult.match_id", match_id, MAX_TOKEN_LEN)?;
@@ -273,6 +277,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES + 1],
             commanders: Vec::new(),
+            companion: None,
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("main_deck"));
@@ -284,6 +289,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest\nIsland".to_string()],
             commanders: Vec::new(),
+            companion: None,
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("control characters"));
@@ -308,6 +314,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string()],
             commanders: vec!["Forest".to_string(); MAX_COMMANDER_DESIGNATIONS + 1],
+            companion: None,
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(
@@ -325,8 +332,21 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string()],
             commanders: vec!["Forest".to_string(); MAX_COMMANDER_DESIGNATIONS],
+            companion: Some("Yorion, Sky Nomad".to_string()),
         };
         assert!(guard_draft_action_payload(&action).is_ok());
+    }
+
+    #[test]
+    fn submit_deck_rejects_invalid_companion_name() {
+        let action = DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec!["Forest".to_string()],
+            commanders: Vec::new(),
+            companion: Some("Yorion\nSky Nomad".to_string()),
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("SubmitDeck.companion"));
     }
 
     #[test]
