@@ -43,18 +43,44 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
 /// The public paid-cast prompt and permission remain intact; only the cleanup
 /// capability used to validate it is removed.  Both viewer filtering and the
 /// direct client serializer use this one typed boundary.
+///
+/// Objects and departed stack spells are written only where the redaction
+/// changes them, so a state with nothing to redact shares both maps with
+/// `state`.
 pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameState {
     let mut projected = state.clone();
     redact_paid_cast_cleanup_authority(&mut projected.waiting_for);
-    let object_ids: Vec<_> = projected.objects.keys().copied().collect();
-    for object_id in object_ids {
+    let object_redactions: Vec<_> = state
+        .objects
+        .iter()
+        .filter_map(|(object_id, object)| {
+            redacted_casting_permissions(object).map(|permissions| (*object_id, permissions))
+        })
+        .collect();
+    for (object_id, permissions) in object_redactions {
         if let Some(object) = projected.objects.get_mut(&object_id) {
-            redact_casting_permission_cleanup_authority(object);
+            object.casting_permissions = permissions;
         }
     }
-    for (_, incarnations) in projected.departed_stack_spells.iter_mut() {
-        for (_, departed) in incarnations.iter_mut() {
-            redact_casting_permission_cleanup_authority(&mut departed.object);
+    let departed_redactions: Vec<_> = state
+        .departed_stack_spells
+        .iter()
+        .flat_map(|(object_id, incarnations)| {
+            incarnations
+                .iter()
+                .filter_map(move |(incarnation, departed)| {
+                    redacted_casting_permissions(&departed.object)
+                        .map(|permissions| (*object_id, *incarnation, permissions))
+                })
+        })
+        .collect();
+    for (object_id, incarnation, permissions) in departed_redactions {
+        if let Some(departed) = projected
+            .departed_stack_spells
+            .get_mut(&object_id)
+            .and_then(|incarnations| incarnations.get_mut(&incarnation))
+        {
+            departed.object.casting_permissions = permissions;
         }
     }
     projected
@@ -235,8 +261,10 @@ fn redact_resolution_cleanup_authority(cleanup: &mut crate::types::ability::Reso
     cleanup.delayed_trigger_receipts.clear();
 }
 
-fn redact_casting_permission_cleanup_authority(object: &mut crate::game::game_object::GameObject) {
-    for permission in &mut object.casting_permissions {
+fn redact_casting_permission_cleanup_authority(
+    permissions: &mut [crate::types::ability::CastingPermission],
+) {
+    for permission in permissions {
         match permission {
             crate::types::ability::CastingPermission::AdventureCreature
             | crate::types::ability::CastingPermission::PlayFromExile { .. }
@@ -255,6 +283,16 @@ fn redact_casting_permission_cleanup_authority(object: &mut crate::game::game_ob
             }
         }
     }
+}
+
+/// `object`'s casting permissions with their cleanup authority redacted, or
+/// `None` when the redaction leaves them unchanged.
+fn redacted_casting_permissions(
+    object: &crate::game::game_object::GameObject,
+) -> Option<Vec<crate::types::ability::CastingPermission>> {
+    let mut permissions = object.casting_permissions.clone();
+    redact_casting_permission_cleanup_authority(&mut permissions);
+    (permissions != object.casting_permissions).then_some(permissions)
 }
 
 pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: ObjectId) -> bool {
@@ -10992,5 +11030,271 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn exile_with_alt_cost_permission(
+        source: ObjectId,
+        owner: PlayerId,
+        offer_id: Option<crate::types::identifiers::ResolutionCastOfferId>,
+        receipts: Vec<crate::types::ability::ResolutionCastDelayedTriggerReceipt>,
+    ) -> crate::types::ability::CastingPermission {
+        use crate::types::ability::{
+            CastingPermission, ExileGrantCostProvenance, ResolutionCastCleanup,
+            ResolutionCastFacePolicy, ResolutionCastSuccessAction, ResolutionMvRejectAction,
+        };
+
+        CastingPermission::ExileWithAltCost {
+            cost: ManaCost::SelfManaCost,
+            cost_provenance: ExileGrantCostProvenance::NormalCost,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(owner),
+            resolution_cleanup: Some(ResolutionCastCleanup {
+                source_id: source,
+                offer_id,
+                face_policy: ResolutionCastFacePolicy::new(TargetFilter::Any, source, owner, None),
+                exiled_misses: Vec::new(),
+                reject_action: ResolutionMvRejectAction::RemainExiled,
+                success_action: ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: receipts,
+            }),
+            duration: None,
+            source_id: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+            cast_cost_modifier: None,
+        }
+    }
+
+    fn departed_record(
+        object: crate::game::game_object::GameObject,
+    ) -> crate::types::game_state::DepartedStackSpell {
+        use crate::types::game_state::{DepartedStackSpell, StackEntry, StackEntryKind};
+
+        let id = object.id;
+        let controller = object.controller;
+        DepartedStackSpell {
+            entry: StackEntry {
+                id,
+                source_id: id,
+                controller,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: id,
+                    ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, controller)),
+                },
+            },
+            object: Box::new(object),
+        }
+    }
+
+    /// The construction this projection replaced: every entry taken mutably.
+    fn every_entry_redaction(state: &GameState) -> GameState {
+        let mut projected = state.clone();
+        redact_paid_cast_cleanup_authority(&mut projected.waiting_for);
+        let object_ids: Vec<_> = projected.objects.keys().copied().collect();
+        for object_id in object_ids {
+            if let Some(object) = projected.objects.get_mut(&object_id) {
+                redact_casting_permission_cleanup_authority(&mut object.casting_permissions);
+            }
+        }
+        for (_, incarnations) in projected.departed_stack_spells.iter_mut() {
+            for (_, departed) in incarnations.iter_mut() {
+                redact_casting_permission_cleanup_authority(
+                    &mut departed.object.casting_permissions,
+                );
+            }
+        }
+        projected
+    }
+
+    fn dina_fixture() -> GameState {
+        use std::io::Read;
+
+        let gz = include_bytes!("../../tests/fixtures/dina_conqueror_4p.json.gz");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(&gz[..])
+            .read_to_string(&mut json)
+            .expect("fixture .json.gz must inflate to UTF-8 JSON");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        serde_json::from_value::<crate::types::game_state::PersistedGameState>(
+            envelope["gameState"].clone(),
+        )
+        .expect("gameState deserializes through the production decoder")
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
+    }
+
+    fn sole_cleanup(
+        permissions: &[crate::types::ability::CastingPermission],
+    ) -> &crate::types::ability::ResolutionCastCleanup {
+        match permissions {
+            [crate::types::ability::CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(cleanup),
+                ..
+            }] => cleanup,
+            other => panic!("expected one ExileWithAltCost permission with a cleanup: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paid_cast_cleanup_projection_shares_maps_with_nothing_to_redact() {
+        use crate::types::ability::CastingPermission;
+
+        let owner = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_001),
+            owner,
+            "Cleanup source".into(),
+            Zone::Battlefield,
+        );
+        let redacted = create_object(
+            &mut state,
+            CardId(9_002),
+            owner,
+            "Already redacted".into(),
+            Zone::Exile,
+        );
+        let adventurer = create_object(
+            &mut state,
+            CardId(9_003),
+            owner,
+            "Adventurer".into(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&redacted)
+            .unwrap()
+            .casting_permissions = vec![exile_with_alt_cost_permission(
+            source,
+            owner,
+            None,
+            Vec::new(),
+        )];
+        state
+            .objects
+            .get_mut(&adventurer)
+            .unwrap()
+            .casting_permissions = vec![CastingPermission::AdventureCreature];
+        let departed = departed_record(state.objects[&redacted].clone());
+        state
+            .departed_stack_spells
+            .entry(ObjectId(9_999))
+            .or_default()
+            .insert(0, departed);
+
+        assert!(matches!(
+            state.objects[&redacted].casting_permissions.as_slice(),
+            [CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(_),
+                ..
+            }]
+        ));
+        assert!(!state.objects[&adventurer].casting_permissions.is_empty());
+        assert!(!state.departed_stack_spells.is_empty());
+
+        let projected = project_paid_cast_cleanup_authority(&state);
+
+        assert!(
+            projected.objects.ptr_eq(&state.objects),
+            "a state with nothing to redact must share its object map with the projection"
+        );
+        assert!(
+            projected
+                .departed_stack_spells
+                .ptr_eq(&state.departed_stack_spells),
+            "a state with nothing to redact must share its departed spells with the projection"
+        );
+    }
+
+    #[test]
+    fn paid_cast_cleanup_projection_equals_every_entry_redaction() {
+        use crate::types::ability::{CastingPermission, ResolutionCastDelayedTriggerReceipt};
+        use crate::types::identifiers::{
+            DelayedTriggerInstanceId, DelayedTriggerToken, ResolutionCastOfferId,
+        };
+
+        let mut state = dina_fixture();
+        let mut ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+        ids.sort();
+        let (dirty, adventurer, source) = (ids[0], ids[1], ids[2]);
+        let owner = state.objects[&dirty].owner;
+        let offer_id = ResolutionCastOfferId(73);
+        let receipt = ResolutionCastDelayedTriggerReceipt {
+            offer_id,
+            token: DelayedTriggerToken(37),
+            instance: DelayedTriggerInstanceId(41),
+            source_id: source,
+        };
+        state.objects.get_mut(&dirty).unwrap().casting_permissions =
+            vec![exile_with_alt_cost_permission(
+                source,
+                owner,
+                Some(offer_id),
+                vec![receipt],
+            )];
+        state
+            .objects
+            .get_mut(&adventurer)
+            .unwrap()
+            .casting_permissions = vec![CastingPermission::AdventureCreature];
+        let departed_id = ObjectId(ids.last().unwrap().0 + 1);
+        let departed = departed_record(state.objects[&dirty].clone());
+        state
+            .departed_stack_spells
+            .entry(departed_id)
+            .or_default()
+            .insert(0, departed);
+
+        let before = serde_json::to_value(&state).unwrap();
+        let reference = every_entry_redaction(&state);
+        let projected = project_paid_cast_cleanup_authority(&state);
+
+        assert!(
+            serde_json::to_value(&projected).unwrap() == serde_json::to_value(&reference).unwrap(),
+            "the projection must equal the every-entry redaction"
+        );
+
+        let authoritative_object = sole_cleanup(&state.objects[&dirty].casting_permissions);
+        let authoritative_departed = sole_cleanup(
+            &state.departed_stack_spells[&departed_id][&0]
+                .object
+                .casting_permissions,
+        );
+        for cleanup in [authoritative_object, authoritative_departed] {
+            assert!(cleanup.offer_id.is_some() && !cleanup.delayed_trigger_receipts.is_empty());
+        }
+        let projected_object = sole_cleanup(&projected.objects[&dirty].casting_permissions);
+        let projected_departed = sole_cleanup(
+            &projected.departed_stack_spells[&departed_id][&0]
+                .object
+                .casting_permissions,
+        );
+        for cleanup in [projected_object, projected_departed] {
+            assert!(cleanup.offer_id.is_none() && cleanup.delayed_trigger_receipts.is_empty());
+        }
+        assert!(
+            serde_json::to_value(&state).unwrap() == before,
+            "projecting must not alter the authoritative state"
+        );
+
+        assert!(
+            !std::ptr::eq(&state.objects[&dirty], &projected.objects[&dirty]),
+            "a redacted object must be written, not shared"
+        );
+        let shared = ids
+            .iter()
+            .filter(|id| **id != dirty)
+            .filter(|id| std::ptr::eq(&state.objects[*id], &projected.objects[*id]))
+            .count();
+        assert!(
+            shared > 0,
+            "redacting one object must not copy every other object"
+        );
     }
 }

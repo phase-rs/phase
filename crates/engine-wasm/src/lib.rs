@@ -2638,7 +2638,7 @@ mod viewer_priority_tests {
             viewer_transition_snapshot(&state, &opponent_filtered, opponent, &events);
         assert_eq!(opponent_snapshot.events, Vec::<GameEvent>::new());
         assert_eq!(
-            opponent_snapshot.snapshot.state.state.objects[&card].name,
+            opponent_snapshot.snapshot.state.state().objects[&card].name,
             "Hidden Card"
         );
 
@@ -2646,7 +2646,7 @@ mod viewer_priority_tests {
         let owner_snapshot = viewer_transition_snapshot(&state, &owner_filtered, owner, &events);
         assert_eq!(owner_snapshot.events, events);
         assert_eq!(
-            owner_snapshot.snapshot.state.state.objects[&card].name,
+            owner_snapshot.snapshot.state.state().objects[&card].name,
             "Hidden Exile"
         );
 

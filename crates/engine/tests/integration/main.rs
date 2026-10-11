@@ -166,6 +166,7 @@ mod chosen_target_groups_phase2;
 mod claim_jumper_repeat;
 mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
+mod client_wire_viewer_projection;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod cobra_king_guarded_reflexive_modal;
