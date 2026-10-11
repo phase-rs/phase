@@ -419,6 +419,7 @@ mod fireball_x_cost_surcharge_timing;
 mod first_family_union_color_count;
 mod fixed_damage_amount_thresholds;
 mod fixture_deck_size_conformance;
+mod flamerush_rider_tapped_attacking_copy;
 mod flamewar_mtmte_export;
 mod flare_of_faith_parent_target;
 mod flashback_nonmana_payability;

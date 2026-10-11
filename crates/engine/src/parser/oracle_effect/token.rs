@@ -46,7 +46,8 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if let Ok((_, (tapped, enters_attacking, mut count))) = parse_copy_token_entry_modifiers(&lower)
+    if let Ok((_, (mut tapped, mut enters_attacking, mut count))) =
+        parse_copy_token_entry_modifiers(&lower)
     {
         let tp = TextPair::new(&text, &lower);
         let after_copy_tp = tp
@@ -76,7 +77,7 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         let (target_text, extra_keywords, additional_modifications) =
             split_token_except_clause(target_text, ctx);
         let target_lower = target_text.trim().to_lowercase();
-        let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
+        let (mut target, target_remainder) = if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
             parse_target_with_ctx(target_text, ctx)
@@ -87,6 +88,27 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
                     typed.properties.push(FilterProp::Another);
                 }
             }
+        }
+        // CR 508.4: A creature put onto the battlefield attacking is attacking
+        // without having attacked. Some copy effects state this entry condition
+        // after the copy target (for example, Flamerush Rider's "...attacking
+        // creature and that's tapped and attacking"). Parse only the target
+        // parser's unconsumed remainder so the target's Attacking restriction
+        // never sets the token's entry flags.
+        let variable_x_count = matches!(
+            &count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name }
+            } if name == "X"
+        );
+        if let Some((suffix_tapped, suffix_enters_attacking)) =
+            parse_copy_token_trailing_entry_modifiers(
+                &target_remainder.to_lowercase(),
+                variable_x_count,
+            )
+        {
+            tapped |= suffix_tapped;
+            enters_attacking |= suffix_enters_attacking;
         }
         // CR 303.4 + CR 702.103: Inside an Aura/bestow card, a `"that creature"`
         // anaphor in the copy-token clause is the antecedent of the attachment
@@ -207,6 +229,56 @@ pub(super) fn parse_copy_token_entry_modifiers(
             count.unwrap_or(QuantityExpr::Fixed { value: 1 }),
         ),
     ))
+}
+
+/// Parse an optional entry-state suffix after the copied-object target, such
+/// as `and that's tapped and attacking`. The caller supplies only the
+/// unconsumed target remainder, keeping target restrictions separate from
+/// token-entry instructions.
+fn parse_copy_token_trailing_entry_modifiers(
+    remainder: &str,
+    variable_x_count: bool,
+) -> Option<(bool, bool)> {
+    fn parse_suffix(input: &str, variable_x_count: bool) -> OracleResult<'_, (bool, bool)> {
+        let (rest, _) = tag("and ").parse(input)?;
+        let (rest, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(rest)?;
+        let (rest, flags) = alt((
+            // The longer alternative must precede `tapped` so it is not
+            // consumed as a tapped-only suffix.
+            value((true, true), tag(" tapped and attacking")),
+            value((true, false), tag(" tapped")),
+            value((false, true), tag(" attacking")),
+        ))
+        .parse(rest)?;
+        let rest = if variable_x_count {
+            // CR 107.3c: A following where-X clause defines the token count.
+            // Accept it only for an X count and only when its quantity parses;
+            // arbitrary text after the entry modifier is not an entry clause.
+            opt(preceded(
+                tag(", where x is "),
+                verify(
+                    nom::combinator::rest::<_, OracleError<'_>>,
+                    |expression: &str| {
+                        super::parse_where_x_quantity_expression(expression).is_some()
+                            || crate::parser::oracle_quantity::parse_cda_quantity(expression)
+                                .is_some()
+                    },
+                ),
+            ))
+            .parse(rest)?
+            .0
+        } else {
+            rest
+        };
+        let (rest, _) = opt(alt((tag("."), tag(",")))).parse(rest)?;
+        let (rest, _) = nom::character::complete::multispace0.parse(rest)?;
+        let (rest, _) = eof.parse(rest)?;
+        Ok((rest, flags))
+    }
+    parse_suffix(remainder.trim_start(), variable_x_count)
+        .ok()
+        .map(|(_, flags)| flags)
 }
 
 fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
@@ -2285,6 +2357,182 @@ mod tests {
     }
 
     #[test]
+    fn flamerush_rider_copy_target_and_post_target_entry_clause_parse() {
+        // Flamerush Rider: the attacking property on the copied target is a
+        // target restriction; the later "and that's tapped and attacking"
+        // independently controls how the token enters.
+        let target_text = "target attacking creature and that's tapped and attacking.";
+        let (target, remainder) = parse_target(target_text);
+        let TargetFilter::Typed(typed_target) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed_target
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert_eq!(remainder, " and that's tapped and attacking.");
+
+        let oracle = "Create a token that's a copy of another target attacking creature and that's tapped and attacking.";
+        let effect = try_parse_token(&oracle.to_lowercase(), oracle, &mut ParseContext::default())
+            .expect("Flamerush Rider copy clause must parse");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        let TargetFilter::Typed(typed_target) = target else {
+            panic!("expected typed copy target, got {target:?}");
+        };
+        assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed_target
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Another));
+        assert!(tapped, "trailing tapped clause must set tapped=true");
+        assert!(
+            enters_attacking,
+            "trailing attacking clause must set enters_attacking=true"
+        );
+
+        let restricted_target = "Create a token that's a copy of target attacking creature.";
+        let effect = try_parse_token(
+            &restricted_target.to_lowercase(),
+            restricted_target,
+            &mut ParseContext::default(),
+        )
+        .expect("copy of an attacking target must parse");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(ref typed)
+                if typed.properties.contains(&FilterProp::Attacking { defender: None })
+        ));
+        assert!(
+            !tapped,
+            "target's Attacking restriction must not tap the token"
+        );
+        assert!(
+            !enters_attacking,
+            "target's Attacking restriction must not make the token enter attacking"
+        );
+
+        // Exercise the full printed Oracle through trigger parsing too. The
+        // delayed end-of-combat exile must remain linked after the target
+        // suffix is consumed.
+        let full_oracle = "Whenever this creature attacks, create a token that's a copy of another target attacking creature and that's tapped and attacking. Exile the token at end of combat.\nDash {2}{R}{R} (You may cast this spell for its dash cost. If you do, it gains haste, and it's returned from the battlefield to its owner's hand at the beginning of the next end step.)";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            full_oracle,
+            "Flamerush Rider",
+            &["Dash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Warrior".to_string()],
+        );
+        let attack_trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::Attacks)
+            .expect("full Flamerush Rider Oracle must parse its attack trigger");
+        let execute = attack_trigger
+            .execute
+            .as_deref()
+            .expect("Flamerush Rider attack trigger execute");
+        let Effect::CopyTokenOf {
+            target: TargetFilter::Typed(target),
+            tapped,
+            enters_attacking,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected full attack trigger to start with CopyTokenOf, got {execute:?}");
+        };
+        assert!(target.type_filters.contains(&TypeFilter::Creature));
+        assert!(target
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(target.properties.contains(&FilterProp::Another));
+        assert!(*tapped && *enters_attacking);
+
+        fn find_delayed_exile(
+            definition: &crate::types::ability::AbilityDefinition,
+        ) -> Option<&crate::types::ability::AbilityDefinition> {
+            if matches!(
+                definition.effect.as_ref(),
+                Effect::CreateDelayedTrigger {
+                    condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+                        phase: crate::types::phase::Phase::EndCombat,
+                    },
+                    effect,
+                    ..
+                } if matches!(
+                    effect.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        target: TargetFilter::LastCreated,
+                        ..
+                    }
+                )
+            ) {
+                return Some(definition);
+            }
+            definition
+                .sub_ability
+                .as_deref()
+                .and_then(find_delayed_exile)
+                .or_else(|| {
+                    definition
+                        .else_ability
+                        .as_deref()
+                        .and_then(find_delayed_exile)
+                })
+        }
+        assert!(
+            find_delayed_exile(execute).is_some(),
+            "the full attack trigger must retain its end-of-combat exile of the created token"
+        );
+    }
+
+    #[test]
+    fn copy_token_entry_suffix_and_leading_forms_remain_composable() {
+        for (suffix, expected) in [
+            (" and that's tapped and attacking.", (true, true)),
+            (" and that is tapped.", (true, false)),
+            (" and thats attacking,", (false, true)),
+        ] {
+            assert_eq!(
+                parse_copy_token_trailing_entry_modifiers(suffix, false),
+                Some(expected),
+                "copy-token trailing entry suffix: {suffix:?}"
+            );
+        }
+        assert_eq!(
+            parse_copy_token_trailing_entry_modifiers(
+                " and that are tapped and attacking, with flying.",
+                true,
+            ),
+            None,
+            "an unrelated trailing clause must not be accepted as an entry modifier"
+        );
+
+        let (_, (tapped, enters_attacking, _)) = parse_copy_token_entry_modifiers(
+            "create a tapped and attacking token that's a copy of target creature",
+        )
+        .expect("existing leading copy-token form must stay supported");
+        assert!(tapped && enters_attacking);
+    }
+
+    #[test]
     fn copy_x_tokens_binds_where_clause() {
         // CR 107.3: X bound to a trailing "where X is <quantity>" clause.
         let txt = "Create X tokens that are copies of target creature you control, where X is the number of Clues you control.";
@@ -2308,6 +2556,37 @@ mod tests {
                 .contains(&TypeFilter::Subtype("Clue".to_string())),
             "X must count controlled Clues, got {:?}",
             tf.type_filters
+        );
+    }
+
+    #[test]
+    fn nacatl_war_pride_copy_tokens_bind_count_and_entry_state() {
+        // Nacatl War-Pride's printed token sentence combines a copied-source
+        // anaphor, a trailing entry-state clause, and a where-X count binding.
+        let oracle = "create X tokens that are copies of it and that are tapped and attacking, where X is the number of creatures defending player controls.";
+        let effect = try_parse_token(&oracle.to_lowercase(), oracle, &mut ParseContext::default())
+            .expect("Nacatl War-Pride token sentence must parse");
+        let Effect::CopyTokenOf {
+            count,
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(tapped && enters_attacking);
+        assert!(
+            matches!(
+                &count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+                } if filter.controller == Some(ControllerRef::DefendingPlayer)
+                    && filter.type_filters.contains(&TypeFilter::Creature)
+            ),
+            "where-X must count creatures defending player controls, got {count:?}"
         );
     }
 
