@@ -132,6 +132,11 @@ fn is_combat_full(entered: &[Phase]) -> bool {
 fn moraug_postcombat_landfall_untaps_attackers_for_a_full_added_combat() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // CR 704.5a: with Moraug's +1/+0-per-attack bonus the two combats deal
+    // 10 then 12 damage, which would kill a 20-life defender before the End
+    // phase and end the game mid-fixture. Headroom keeps the usability
+    // assertions (not life totals) under test.
+    scenario.with_life(P1, 40);
     let moraug = scenario
         .add_creature_from_oracle(P0, "Moraug, Fury of Akoum", 6, 6, MORAUG)
         .id();
