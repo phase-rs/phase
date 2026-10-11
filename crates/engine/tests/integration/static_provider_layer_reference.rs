@@ -1609,7 +1609,7 @@ fn late_carrier_receives_ordinary_granted_static_through_static_orderer() {
         StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![ContinuousModification::AddSubtype {
-                subtype: "Gold".to_string(),
+                subtype: "Elf".to_string(),
             }]),
     );
     assert!(runner.state().objects[&host_a].timestamp < runner.state().objects[&writer].timestamp);
@@ -1622,7 +1622,7 @@ fn late_carrier_receives_ordinary_granted_static_through_static_orderer() {
         .card_types
         .subtypes
         .iter()
-        .any(|subtype| subtype == "Gold"));
+        .any(|subtype| subtype == "Elf"));
     // CR 613.8a + CR 611.3a: the later Flying grant puts R into A's affected set
     // in layer 6, so A's granted Vigilance applies from that live set. B's grant
     // never covers R, so its own late child must not apply through A's set.
