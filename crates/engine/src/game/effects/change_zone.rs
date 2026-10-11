@@ -626,10 +626,11 @@ fn capture_devour_snapshot_before_single_entry(
 }
 
 /// Move target objects between zones.
-/// CR 610.3 + CR 610.3b: True when the "until" event bounding THIS node's own
-/// zone change (`ResolvedAbility::bounded_zone_change_event`) already occurred —
-/// latched on this node after the ability triggered, or emitted earlier in this
-/// same resolution. The initial one-shot move then does not happen. Shared by
+/// CR 610.3 + CR 610.3a + CR 610.3b: True when the "until" event bounding THIS
+/// node's own zone change (`ResolvedAbility::bounded_zone_change_event`) already
+/// occurred — latched on this node after the ability was put onto the stack
+/// (activated) or triggered (triggered), or emitted earlier in this same
+/// resolution. The initial one-shot move then does not happen. Shared by
 /// the single-object and mass resolvers so each bounded node refuses on its own
 /// latch.
 pub(crate) fn until_event_already_occurred(
@@ -738,9 +739,9 @@ pub fn resolve(
             .map(|cause| EffectResolutionResult { cause, count })
     };
 
-    // CR 610.3b: If the specified event occurred after this triggered ability
-    // triggered but before its initial one-shot zone change, the object does
-    // not move.
+    // CR 610.3a / CR 610.3b: If the specified event occurred after this ability
+    // was put onto the stack (activated) or triggered (triggered) but before its
+    // initial one-shot zone change, the object does not move.
     if until_event_already_occurred(state, ability, events) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
@@ -1944,8 +1945,8 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 610.3b: an "until" event that already occurred before this mass
-    // move's initial zone change means nothing moves and no return link is
+    // CR 610.3a / CR 610.3b: an "until" event that already occurred before this
+    // mass move's initial zone change means nothing moves and no return link is
     // installed. That refusal is non-performance for this node's own "if you
     // do" rider (CR 118.12); `resolve_ability_chain` derives it from this same
     // predicate over the call's own event window, so no resolution-wide flag

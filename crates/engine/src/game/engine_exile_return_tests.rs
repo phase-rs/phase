@@ -1820,6 +1820,7 @@ mod latch_window {
 
     const BANISHER_PRIEST: &str = "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.";
     const PALACE_JAILER: &str = "When this creature enters, you become the monarch.\nWhen this creature enters, exile target creature an opponent controls until an opponent becomes the monarch.";
+    const ANGEL_OF_CONDEMNATION: &str = "Flying, vigilance\n{2}{W}, {T}: Exile another target creature. Return that card to the battlefield under its owner's control at the beginning of the next end step.\n{2}{W}, {T}, Exert this creature: Exile another target creature until this creature leaves the battlefield. (An exerted creature won't untap during your next untap step.)";
 
     const STACK_ENTRY_ID: ObjectId = ObjectId(9_100_001);
 
@@ -1829,8 +1830,9 @@ mod latch_window {
         ability: ResolvedAbility,
     }
 
-    /// Builds `name` from its verbatim Oracle text and resolves the trigger
-    /// whose exile is bounded by `duration`, targeting an opponent's creature.
+    /// Builds `name` from its verbatim Oracle text and resolves the triggered
+    /// or activated ability whose exile is bounded by `duration`, targeting an
+    /// opponent's creature.
     fn fixture(name: &str, oracle: &str, duration: Duration) -> Fixture {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -1840,12 +1842,14 @@ mod latch_window {
             .id();
         let target = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
         let state = scenario.build().state().clone();
-        let execute = state.objects[&source]
+        let source_object = &state.objects[&source];
+        let execute = source_object
             .trigger_definitions
             .iter_all()
             .filter_map(|trigger| trigger.definition.execute.as_deref())
+            .chain(source_object.abilities.iter())
             .find(|execute| execute.duration.as_ref() == Some(&duration))
-            .expect("the bounded exile trigger must parse")
+            .expect("the bounded exile ability must parse")
             .clone();
         let mut ability = build_resolved_from_def(&execute, source, P0);
         ability.targets = vec![TargetRef::Object(target)];
@@ -1876,6 +1880,14 @@ mod latch_window {
             "Palace Jailer",
             PALACE_JAILER,
             Duration::UntilOpponentBecomesMonarch,
+        )
+    }
+
+    fn angel_of_condemnation() -> Fixture {
+        fixture(
+            "Angel of Condemnation",
+            ANGEL_OF_CONDEMNATION,
+            Duration::UntilHostLeavesPlay,
         )
     }
 
@@ -1931,6 +1943,18 @@ mod latch_window {
                 subject_match_count: None,
                 die_result: None,
                 provenance: None,
+            },
+        }
+    }
+
+    fn activated_entry(fixture: &Fixture, id: ObjectId) -> StackEntry {
+        StackEntry {
+            id,
+            source_id: fixture.source,
+            controller: P0,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: fixture.source,
+                ability: Box::new(fixture.ability.clone()),
             },
         }
     }
@@ -2041,6 +2065,66 @@ mod latch_window {
                 .duration_events
                 .clone(),
         }
+    }
+
+    /// Holders an activated ability can occupy: deferred and ordered holders
+    /// carry only pending triggers.
+    const ACTIVATED_HOLDERS: [Holder; 2] = [Holder::Stack, Holder::Resolving];
+
+    /// Places the fixture's ability in `holder` as an activated ability, runs
+    /// the pass over `events`, and returns what the holder latched.
+    fn activated_latches_after_pass(
+        fixture: &Fixture,
+        holder: Holder,
+        mut events: Vec<GameEvent>,
+    ) -> Vec<DurationEvent> {
+        let mut state = fixture.state.clone();
+        let entry = activated_entry(fixture, STACK_ENTRY_ID);
+        match holder {
+            Holder::Stack => state.stack.push_back(entry),
+            Holder::Resolving => state.resolving_stack_entry = Some(entry),
+            Holder::Deferred | Holder::Ordered => {
+                unreachable!("{holder:?} holds pending triggers, never an activated ability")
+            }
+        }
+        check_exile_returns(&mut state, &mut events);
+        let held = match holder {
+            Holder::Stack => state.stack.front(),
+            Holder::Resolving => state.resolving_stack_entry.as_ref(),
+            Holder::Deferred | Holder::Ordered => None,
+        };
+        node_latches(held.and_then(StackEntry::ability).expect("activated entry"))
+    }
+
+    /// CR 610.3a + CR 602.2a: an activated ability is on the stack before its
+    /// costs are paid and has no trigger event, so its source leaving at any
+    /// point of the pass is after it was put onto the stack, whether it waits
+    /// on the stack or is resolving.
+    #[test]
+    fn source_leaving_while_an_activated_ability_is_held_latches() {
+        let angel = angel_of_condemnation();
+        let latches_when = |leaving: ObjectId| {
+            ACTIVATED_HOLDERS.map(|holder| {
+                activated_latches_after_pass(
+                    &angel,
+                    holder,
+                    vec![source_leaves_battlefield_event(leaving)],
+                )
+            })
+        };
+        assert_eq!(
+            latches_when(angel.source),
+            [
+                vec![DurationEvent::SourceLeftBattlefield],
+                vec![DurationEvent::SourceLeftBattlefield],
+            ],
+            "{ACTIVATED_HOLDERS:?}: [L]"
+        );
+        assert_eq!(
+            latches_when(ObjectId(777_777)),
+            [Vec::<DurationEvent>::new(), Vec::new()],
+            "{ACTIVATED_HOLDERS:?}: another object leaves"
+        );
     }
 
     /// CR 610.3b: the source left the battlefield after the ability triggered,

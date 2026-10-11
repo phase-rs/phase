@@ -18711,7 +18711,7 @@ pub(crate) fn duration_event_matches(
     }
 }
 
-/// The CR 610.3 "until" events a held triggered ability can latch.
+/// The CR 610.3 "until" events a held activated or triggered ability can latch.
 const LATCHABLE_DURATION_EVENTS: [DurationEvent; 2] = [
     DurationEvent::SourceLeftBattlefield,
     DurationEvent::OpponentBecameMonarch,
@@ -18721,8 +18721,8 @@ const LATCHABLE_DURATION_EVENTS: [DurationEvent; 2] = [
 /// held triggered ability triggered, in event order. The holder's
 /// `trigger_event` is located once: when it is in `events`, only later events
 /// count; when it is absent (it occurred in an earlier action) or the holder
-/// has none, every event counts. A holder whose ability bounds no zone change
-/// is never searched.
+/// has none (CR 610.3a: an activated ability), every event counts. A holder
+/// whose ability bounds no zone change is never searched.
 fn duration_events_after_trigger(
     state: &GameState,
     events: &[GameEvent],
@@ -18767,9 +18767,10 @@ fn duration_events_after_trigger(
         .collect()
 }
 
-/// CR 610.3 + CR 610.3b: latch specified "until" events onto held triggered
-/// abilities, then return linked exiled cards whose duration ended. Each
-/// duration-bearing holder's trigger event is located once per pass.
+/// CR 610.3 + CR 610.3a + CR 610.3b: latch specified "until" events onto held
+/// activated and triggered abilities, then return linked exiled cards whose
+/// duration ended. Each duration-bearing holder's trigger event is located
+/// once per pass.
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
     let holders: &GameState = state;
@@ -18779,12 +18780,20 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         .stack
         .iter()
         .filter_map(|entry| match &entry.kind {
+            // CR 610.3b: measured from when the ability triggered.
             StackEntryKind::TriggeredAbility {
                 ability,
                 trigger_event,
                 ..
-            } => Some((entry, ability, trigger_event)),
-            _ => None,
+            } => Some((entry, ability, trigger_event.as_ref())),
+            // CR 610.3a + CR 602.2a: an activated ability is on the stack before its
+            // costs are paid, so every event in this pass follows it.
+            StackEntryKind::ActivatedAbility { ability, .. } => Some((entry, ability, None)),
+            // No supported spell has a ChangeZone node with a latchable duration
+            // (measured); a keyword action and a combat-damage step hold no ability.
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         })
         .flat_map(|(entry, ability, trigger_event)| {
             duration_events_after_trigger(
@@ -18793,20 +18802,26 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
                 ability,
                 entry.source_id,
                 entry.controller,
-                trigger_event.as_ref(),
+                trigger_event,
             )
             .into_iter()
             .map(move |duration_event| (entry.id, duration_event))
         })
         .collect();
 
-    // CR 610.3b: a resolving entry's trigger event is never in this pass's
-    // buffer (it triggered in an earlier priority pass), so the resolving holder
-    // scans the whole buffer, as its resolver does (`until_event_already_occurred`).
+    // CR 610.3a / CR 610.3b: a resolving entry's trigger event is never in this
+    // pass's buffer (it triggered in an earlier priority pass), and an activated
+    // entry has none, so the resolving holder scans the whole buffer, as its
+    // resolver does (`until_event_already_occurred`).
     let resolving_latches: Vec<DurationEvent> = holders
         .resolving_stack_entry
         .as_ref()
-        .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { .. } | StackEntryKind::ActivatedAbility { .. }
+            )
+        })
         .and_then(|entry| {
             entry.ability().map(|ability| {
                 duration_events_after_trigger(

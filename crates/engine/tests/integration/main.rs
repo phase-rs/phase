@@ -1499,6 +1499,7 @@ mod unravel_counter_mana_value;
 mod unresolved_look_result;
 mod unstoppable_slasher_half_life;
 mod until_next_step_deadline_durations;
+mod until_source_leaves_cr610_3a;
 mod until_source_leaves_cr610_3b;
 mod urborg_scavengers_source_exiled_keyword_grant;
 mod ureni_attack_trigger;
