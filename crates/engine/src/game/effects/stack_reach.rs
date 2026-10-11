@@ -514,7 +514,10 @@ fn instruction_writes(
         // CR 701.25a: surveil moves cards from its player's library to their
         // graveyard, where no replacement effect may apply to that move.
         Effect::Surveil { target, .. } => {
-            let player = super::resolve_player_for_context_ref(board, ability, target);
+            // CR 608.2b: a declared player whose target was illegal is not affected.
+            let Some(player) = super::resolve_player_for_context_ref(board, ability, target) else {
+                return Some(Written::default());
+            };
             let moves: Vec<ProposedEvent> = board
                 .players
                 .iter()
@@ -967,12 +970,16 @@ fn node_acted_on(
                 )))
                 .collect()
         }
-        Effect::LoseLife { target, .. } => vec![TargetRef::Player(
-            super::life::resolve_life_loss_target(state, bound, target.as_ref()),
-        )],
-        Effect::Mill { target, .. } => vec![TargetRef::Player(
-            super::resolve_player_for_context_ref(state, bound, target),
-        )],
+        Effect::LoseLife { target, .. } => {
+            super::life::resolve_life_loss_target(state, bound, target.as_ref())
+                .into_iter()
+                .map(TargetRef::Player)
+                .collect()
+        }
+        Effect::Mill { target, .. } => super::resolve_player_for_context_ref(state, bound, target)
+            .into_iter()
+            .map(TargetRef::Player)
+            .collect(),
         // These resolvers bind inline rather than through a function shared
         // here: a node that declared targets is answered with them, and one
         // that would inherit its parent's is answered with nothing.

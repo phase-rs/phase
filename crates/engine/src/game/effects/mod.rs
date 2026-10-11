@@ -4304,7 +4304,13 @@ pub(crate) fn apply_parent_chain_context(
     // and a child that was never handed off this way (e.g. a freshly-built
     // ability in a test) simply keeps the default `None` regardless of stray
     // global state.
-    if let Some(reason) = state.last_parent_target_missing_reason.take() {
+    let handed = state.last_parent_target_missing_reason.take();
+    // CR 608.2c + CR 609.3: a referent never produced is absent for every dependent anaphor,
+    // so the verdict travels down target-less hops as the targets do.
+    let passed_down = parent
+        .parent_target_missing_reason
+        .filter(|_| child.targets.is_empty());
+    if let Some(reason) = handed.or(passed_down) {
         child.parent_target_missing_reason = Some(reason);
     }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
@@ -4394,6 +4400,7 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && sub.illegal_local_target_slots.is_empty()
+        && sub.declares_chosen_group.is_none()
         && sub.reads_chosen_group.is_none()
         && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
@@ -5213,7 +5220,8 @@ fn instruction_outlives_declined_gate(
         activation_record: _,
     } = node;
     let unbound = condition.is_none()
-        && declares_chosen_group.is_none()
+        && declares_chosen_group
+            .is_none_or(crate::types::ability::ChosenGroupId::is_declared_player)
         && reads_chosen_group.is_none()
         && declares_return_result.is_none()
         && reads_return_result.is_none()
@@ -5863,6 +5871,7 @@ fn referent_exists_without_gated_action(
                         ControllerRef::ScopedPlayer
                         | ControllerRef::TargetPlayer
                         | ControllerRef::TargetOpponent
+                        | ControllerRef::DeclaredPlayer { .. }
                         | ControllerRef::ParentTargetController
                         | ControllerRef::EventTargetController
                         | ControllerRef::ParentTargetOwner
@@ -5879,6 +5888,10 @@ fn referent_exists_without_gated_action(
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { index: _ } => {
             parent_target_is_declared
         }
+        // CR 601.2c + CR 602.2b + CR 603.3d: a declared player is announced as the
+        // spell or ability is put on the stack, whether or not the gated action happens;
+        // `SpecificPlayer` is that announcement captured when a delayed payload was installed.
+        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. } => true,
         TargetFilter::Not { filter } => {
             referent_exists_without_gated_action(filter, parent_target_is_declared)
         }
@@ -5893,7 +5906,6 @@ fn referent_exists_without_gated_action(
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
@@ -10211,6 +10223,14 @@ pub(crate) fn publish_fresh_tracked_set(
     set_id
 }
 
+/// CR 608.2c: A look/reveal instruction replaces the chain's result with its own,
+/// including an empty one, so a later `ParentTarget`/`LastRevealed` reader never
+/// sees an earlier producer's cards.
+pub(crate) fn publish_reveal_result(state: &mut GameState, ids: Vec<ObjectId>) {
+    publish_fresh_tracked_set(state, ids.clone());
+    state.last_revealed_ids = ids;
+}
+
 /// CR 608.2c + CR 608.2d: An immutable capability for one reciprocal producer
 /// → consumer transition preserves the ordered instruction and the player who
 /// must announce the later resolution-time choice.
@@ -11486,7 +11506,8 @@ pub(crate) enum OptionalFeasibility {
 /// would re-base every metered row's pinned spend and make neither number readable.
 pub(crate) struct UpfrontOptionalGate {
     /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
-    pub prompt_player: PlayerId,
+    /// `None`: the instruction is addressed to no one, so it is declined unprompted.
+    pub prompt_player: Option<PlayerId>,
     /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
     /// on it. That is not the same as "no preference stored": it is "no key exists".
     pub key: Option<MayTriggerAutoChoiceKey>,
@@ -11558,8 +11579,9 @@ pub(crate) fn upfront_optional_gate(
         key: ability
             .may_trigger_origin
             .clone()
-            .map(|origin| MayTriggerAutoChoiceKey {
-                player: prompt_player,
+            .zip(prompt_player)
+            .map(|(origin, player)| MayTriggerAutoChoiceKey {
+                player,
                 source_id: ability.source_id,
                 origin,
             }),
@@ -11589,8 +11611,8 @@ pub(crate) fn stored_may_answer(
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
 /// mandatory iterations), each payment is offered SEPARATELY and the reflexive
-/// triggers exactly once for one-or-more payments, sized by the payment count
-/// (CR 700.2d). Such an ability is driven by `drive_repeated_optional_payment`
+/// triggers exactly once for one-or-more payments, sized by the payment count.
+/// Such an ability is driven by `drive_repeated_optional_payment`
 /// instead of the up-front optional gate + `repeated_full_chain` loop. Mirrors
 /// `has_kind_driven_repeat` / `has_member_driven_repeat`.
 ///
@@ -11647,7 +11669,7 @@ fn drive_repeated_optional_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
 ) -> Result<(), EffectError> {
-    // CR 700.2d: the "up to N" payment budget.
+    // CR 603.12a: the "up to N" payment budget.
     let n = match &ability.repeat_for {
         Some(QuantityExpr::Fixed { value }) => (*value).max(0),
         _ => 0,
@@ -11685,6 +11707,10 @@ fn drive_sequential_repeated_optional_payment(
     // depth==0 prelude and must not re-gate each individual {1} payment.
     payment_unit.condition = None;
 
+    // CR 608.2b: no one to ask means no payment opportunity, so K stays 0.
+    if !offer_repeated_payment(state, &payment_unit) {
+        return Ok(());
+    }
     state.push_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
         pending: Some(Box::new(PendingRepeatedOptionalPayment {
             payment_unit: Box::new(payment_unit),
@@ -11693,15 +11719,25 @@ fn drive_sequential_repeated_optional_payment(
         })),
         optional_cost_payments_this_resolution: 0,
     });
+    Ok(())
+}
+
+/// CR 608.2d: each "you may pay" offer goes to the player the optional
+/// instruction names (`optional_prompt_player`), not always the caster. False
+/// when no one is asked.
+fn offer_repeated_payment(state: &mut GameState, payment_unit: &ResolvedAbility) -> bool {
+    let Some(player) = optional_prompt_player(state, payment_unit) else {
+        return false;
+    };
     state.waiting_for = WaitingFor::OptionalEffectChoice {
-        player: ability.controller,
+        player,
         decision_subject_id: None,
-        source_id: ability.source_id,
-        description: ability.description.clone(),
+        source_id: payment_unit.source_id,
+        description: payment_unit.description.clone(),
         may_trigger_key: None,
         same_card_may_trigger_choice_available: false,
     };
-    Ok(())
+    true
 }
 
 /// CR 603.12a + CR 608.2c: Resume a repeated-optional-payment process for one
@@ -11757,11 +11793,7 @@ pub(super) fn resolve_repeated_optional_payment_choice(
             // not satisfy the "if you do" rider, so the sequence ends here and
             // the reflexive resolves once with the payments already made (it is
             // not offered another payment opportunity).
-            if remaining > 0 {
-                // CR 700.2d: offer the next "up to N" payment.
-                let player = payment_unit.controller;
-                let source_id = payment_unit.source_id;
-                let description = payment_unit.description.clone();
+            if remaining > 0 && offer_repeated_payment(state, &payment_unit) {
                 state
                     .replace_active_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
                         pending: Some(Box::new(PendingRepeatedOptionalPayment {
@@ -11772,14 +11804,6 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                         optional_cost_payments_this_resolution,
                     })
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-                state.waiting_for = WaitingFor::OptionalEffectChoice {
-                    player,
-                    decision_subject_id: None,
-                    source_id,
-                    description,
-                    may_trigger_key: None,
-                    same_card_may_trigger_choice_available: false,
-                };
                 return Ok(());
             }
         }
@@ -12084,7 +12108,29 @@ pub(crate) fn controller_for_relative_filter(
 ///    `post_replacement_event_source` (PostReplacementSourceController).
 /// 4. Fall back to `ability.controller` (preserves prior semantics for context
 ///    refs whose state slots are empty in the current resolution window).
+///
+/// CR 608.2b: `None` for a [`TargetFilter::DeclaredPlayer`] whose target was
+/// illegal (or never announced), and for a filter that declares its own slot on
+/// a resolving carrier while no player was announced into it; the effect then
+/// affects no one. Every other filter resolves to some player.
 pub(crate) fn resolve_player_for_context_ref(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<PlayerId> {
+    match target_filter {
+        TargetFilter::DeclaredPlayer { group } => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+        }
+        TargetFilter::SpecificPlayer { .. } => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        }
+        _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
+        _ => Some(resolve_context_player(state, ability, target_filter)),
+    }
+}
+
+fn resolve_context_player(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -12246,12 +12292,21 @@ pub(crate) fn resolve_player_for_context_ref(
 /// acting subject (the target permanent's controller). This mirrors the
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
-pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+/// `None`: addressed to an illegal, unannounced or departed declared player (CR 608.2b), so no one is
+/// asked and the optional resolves as declined.
+pub(crate) fn optional_prompt_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
     if let Effect::PayCost { payer, .. } = &ability.effect {
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         {
-            return player;
+            return Some(player);
+        }
+        // CR 608.2b: a payer that is an illegal or unannounced declared player is asked no one.
+        if payer.names_one_player() {
+            return None;
         }
     }
     // CR 608.2d: a parser-stamped subject such as "they may" names the player
@@ -12261,7 +12316,12 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, optional_player)
         {
-            return player;
+            return Some(player);
+        }
+        // CR 608.2b: an instruction addressed to an illegal or unannounced declared
+        // player is offered to no one.
+        if optional_player.names_one_player() {
+            return None;
         }
     }
     if let Effect::Sacrifice { target, .. } = &ability.effect {
@@ -12271,7 +12331,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
                 ability,
                 &TargetFilter::ParentTargetController,
             ) {
-                return player;
+                return Some(player);
             }
         }
     }
@@ -12287,7 +12347,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
                 ability,
                 &TargetFilter::ParentTargetController,
             ) {
-                return player;
+                return Some(player);
             }
         }
     }
@@ -12302,7 +12362,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             TargetRef::Player(player) => Some(*player),
             TargetRef::Object(_) => None,
         }) {
-            return player;
+            return Some(player);
         }
     }
 
@@ -12325,7 +12385,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             ability,
             &TargetFilter::ParentTargetController,
         ) {
-            return player;
+            return Some(player);
         }
     }
 
@@ -12335,7 +12395,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
     if let Some(scoped) = ability.scoped_player {
         if let Effect::ChangeZone { target, .. } = &ability.effect {
             if filter_uses_relative_controller_scoped(target) {
-                return scoped;
+                return Some(scoped);
             }
         }
         if ability
@@ -12343,11 +12403,11 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             .target_filter()
             .is_some_and(filter_uses_relative_controller_scoped)
         {
-            return scoped;
+            return Some(scoped);
         }
     }
 
-    ability.controller
+    Some(ability.controller)
 }
 
 fn ability_with_event_context_targets(
@@ -16303,6 +16363,18 @@ fn resolve_chain_body(
             prompt_player,
             key: may_trigger_key,
         } = gate;
+        // CR 608.2b: an instruction addressed to no one is not performed, which is
+        // how a declined "may" resolves.
+        let Some(prompt_player) = prompt_player else {
+            resolve_optional_effect_decision(
+                state,
+                ability.clone(),
+                AutoMayChoice::Decline,
+                events,
+                depth + 1,
+            )?;
+            return Ok(());
+        };
         // The executable half of the `optional_for` coupling note above: this branch is
         // reachable only because the CR 101.4 fan-out already returned, so the authority's
         // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
@@ -19376,9 +19448,24 @@ fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool 
     }
 }
 
+/// CR 608.2b: whether `filter` is the effect's own declared player slot and no
+/// player was announced into it on a resolving carrier (zero targets chosen is
+/// a legal state, CR 115.6). The effect then affects no one.
+pub(crate) fn declared_player_slot_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    crate::game::targeting::resolves_on_stack(state, ability)
+        && !filter.is_context_ref()
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect) == Some(filter)
+        && crate::game::ability_utils::primary_announced_player(&ability.targets, ability).is_none()
+}
+
 /// CR 608.2b + CR 608.2c: an empty child with local initial-legality removal
 /// evidence inherits nothing. Other children retain players and objects unless
-/// the child owns an independent object slot. Returned as the parent's
+/// the child owns an independent object slot; a node that declares its own player slot
+/// (`declares_chosen_group`) inherits no player. Returned as the parent's
 /// OCCURRENCES — the source projection a child inherits, each occurrence
 /// with its own pin.
 pub(super) fn inherited_parent_occurrences(
@@ -19396,7 +19483,7 @@ pub(super) fn inherited_parent_occurrences(
         .target_occurrences()
         .into_iter()
         .filter(|(target_ref, _)| match target_ref {
-            TargetRef::Player(_) => true,
+            TargetRef::Player(_) => sub.declares_chosen_group.is_none(),
             TargetRef::Object(_) => !has_independent_target_slot,
         })
         .collect()
@@ -20838,8 +20925,13 @@ fn resolve_unless_payer(
         // (Tergrid's Lantern and the broader "target player unless they X"
         // punisher class). Delegates to `resolve_effect_player_ref`'s
         // `TargetFilter::Player` arm which scans `ability.targets` for the
-        // first `TargetRef::Player`.
-        TargetFilter::Player => {
+        // first `TargetRef::Player`. CR 608.2c: a later "that player" payer
+        // (`DeclaredPlayer`) takes that resolver's own arm, which reads the
+        // declared player and honors CR 608.2b. `SpecificPlayer` is the same
+        // payer bound at delayed-trigger install (CR 603.7a).
+        TargetFilter::Player
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         // CR 508.5 + CR 118.12a: "[Effect] unless defending player [pays cost]"
@@ -21827,6 +21919,12 @@ mod tests {
             serde_json::from_str(r#"{"type":"Typed","type_filters":["Creature"],"controller":"Opponent","properties":[]}"#).unwrap(),
             TargetFilter::ParentTarget,
             TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId(
+                    crate::types::ability::ChosenGroupId::DECLARED_PLAYER_BASE,
+                ),
+            },
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
         ] {
             assert!(referent_exists_without_gated_action(&accepted, true), "{accepted:?}");
         }
@@ -26993,7 +27091,7 @@ mod tests {
 
         assert_eq!(
             resolve_player_for_context_ref(&state, &ability, &TargetFilter::ParentTargetController,),
-            PlayerId(1),
+            Some(PlayerId(1)),
         );
     }
 
@@ -32169,6 +32267,19 @@ mod tests {
     /// from an earlier resolution cannot receive the new grant.
     #[test]
     fn copy_token_chain_no_created_tokens_clears_stale_last_created_before_followup() {
+        // The second owner is an unannounced declared player (CR 608.2b): it takes the
+        // owner-unresolved exit rather than the no-source one.
+        for owner in [
+            TargetFilter::Controller,
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            },
+        ] {
+            copy_token_chain_clears_stale_last_created(owner);
+        }
+    }
+
+    fn copy_token_chain_clears_stale_last_created(owner: TargetFilter) {
         let mut state = GameState::new_two_player(42);
         let stale = create_object(
             &mut state,
@@ -32195,7 +32306,7 @@ mod tests {
         let copy = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Typed(TypedFilter::creature()),
-                owner: TargetFilter::Controller,
+                owner,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,

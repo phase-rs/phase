@@ -42,7 +42,10 @@ pub fn resolve_lose(
         // prior bespoke helper: it handles Controller, SelfRef-equivalent,
         // TriggeringPlayer (via event-context lookup), and the
         // `TargetFilter::Player` case by reading `ability.targets`.
-        Some(filter) => vec![resolve_player_for_context_ref(state, ability, filter)],
+        // CR 608.2b: a declared player whose target was illegal is not affected.
+        Some(filter) => resolve_player_for_context_ref(state, ability, filter)
+            .into_iter()
+            .collect(),
         None if ability.targets.is_empty() => {
             // No directed subject and no targets: controller loses
             // (e.g., "you lose the game").
@@ -116,9 +119,11 @@ pub fn resolve_win(
     // TriggeringPlayer, and `TargetFilter::Player` (consulting
     // `ability.targets`) in one call; absence of a filter falls back to the
     // controller (standard "you win the game" reading).
-    let winner = match target_filter {
+    let Some(winner) = (match target_filter {
         Some(filter) => resolve_player_for_context_ref(state, ability, filter),
-        None => ability.controller,
+        None => Some(ability.controller),
+    }) else {
+        return Ok(());
     };
 
     // CR 104.2b: CantWinTheGame blocks effect-based wins. If the winner is

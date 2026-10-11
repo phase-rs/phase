@@ -119,7 +119,9 @@ fn count_scoped_ability(
         let from_context = super::resolve_player_for_context_ref(state, ability, filter);
         let mut scoped = ability.clone();
         scoped.project_target_occurrences(&retain_only_player_at(ability, None));
-        scoped.push_target(TargetRef::Player(from_context));
+        if let Some(player) = from_context {
+            scoped.push_target(TargetRef::Player(player));
+        }
         return scoped;
     }
     // Case 3, else case 4.
@@ -153,9 +155,7 @@ fn mana_effect_recipient(
     // ParentTargetController, chosen player) resolve via the context, not
     // `ability.targets`.
     if filter.is_context_ref() {
-        return Some(super::resolve_player_for_context_ref(
-            state, ability, filter,
-        ));
+        return super::resolve_player_for_context_ref(state, ability, filter);
     }
     // CR 115.1 + CR 106.4: "target player adds …" (Jetfire, Ingenious
     // Scientist) — the targeted player was chosen at announcement and lives in

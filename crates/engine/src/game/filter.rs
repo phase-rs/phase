@@ -13,11 +13,11 @@ use crate::game::quantity::{
 };
 use crate::game::targeting::{DeclaredSlotBinding, SlotReferent};
 use crate::types::ability::{
-    AttachmentReferent, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
-    ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope, FilterProp,
-    Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    AbilityCondition, AttachmentReferent, AttackerBlockStatus, CardTypeSetSource,
+    CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject,
+    ControllerRef, CountScope, FilterProp, Parity, ParitySource, PlayerFilter, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -199,6 +199,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -480,6 +481,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -868,6 +870,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -1842,6 +1845,7 @@ pub(crate) fn controller_ref_player(
         ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
             target_player_from_ability_or_root(state, ability)
         }
+        ControllerRef::DeclaredPlayer { group } => declared_player(state, ability, *group),
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
         // CR 120.1 + CR 109.4 + CR 608.2c: resolved through the `TargetFilter`
         // twin so the two spellings of the damage-recipient's controller can
@@ -1878,6 +1882,17 @@ pub(crate) fn controller_ref_player(
         // resolving ability (Gideon Jura's "+2").
         ControllerRef::SpecificPlayer { id } => Some(*id),
     }
+}
+
+/// CR 608.2c + CR 608.2b: the player announced by the clause tagged `group`, as instructions
+/// see it; `None` when that target is illegal or gone, or no ability is resolving. Mass filters
+/// ("each creature they control") inherit this gate.
+fn declared_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
+    crate::game::targeting::resolve_live_declared_player(state, ability?, group)
 }
 
 /// CR 608.2c: resolve the first declared player target without letting a
@@ -1999,6 +2014,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -2261,6 +2277,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -2728,6 +2745,390 @@ pub(crate) fn bind_declaring_owner_authority(
     complete
 }
 
+/// Rewrites declared-player references to the concrete player a resolver names. The one
+/// traversal of the reference sites, shared by detection and binding.
+struct DeclaredGroupBinder<'a> {
+    resolve: std::cell::RefCell<
+        &'a mut dyn FnMut(crate::types::ability::ChosenGroupId) -> Option<PlayerId>,
+    >,
+}
+
+impl DeclaredGroupBinder<'_> {
+    fn controller(&self, controller: &mut ControllerRef) {
+        if let ControllerRef::DeclaredPlayer { group } = *controller {
+            if let Some(id) = (self.resolve.borrow_mut())(group) {
+                *controller = ControllerRef::SpecificPlayer { id };
+            }
+        }
+    }
+
+    fn node(&self, node: &mut TargetFilter) {
+        match node {
+            TargetFilter::DeclaredPlayer { group } => {
+                if let Some(id) = (self.resolve.borrow_mut())(*group) {
+                    *node = TargetFilter::SpecificPlayer { id };
+                }
+            }
+            TargetFilter::Typed(typed) => {
+                if let Some(controller) = typed.controller.as_mut() {
+                    self.controller(controller);
+                }
+            }
+            // `stack_entry_controller_matches` carries no ability context, so a declared group
+            // there fails closed and stays untouched.
+            TargetFilter::StackAbility { .. } => {}
+            // The remaining variants carry no `ControllerRef`.
+            _ => {}
+        }
+    }
+
+    fn prop(&self, prop: &mut FilterProp) {
+        if let Some(controller) = declared_group_controller(prop) {
+            self.controller(controller);
+        }
+    }
+}
+
+/// The controller scope of `prop` when its reader resolves a declared group. Exhaustive, so a
+/// new `ControllerRef`-bearing property must be classified here.
+fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef> {
+    match prop {
+        FilterProp::Owned { controller }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { player: controller },
+        }
+        | FilterProp::MostPrevalentCreatureTypeIn {
+            scope: controller, ..
+        } => Some(controller),
+        FilterProp::HasAttachment { controller, .. }
+        | FilterProp::HasAnyAttachmentOf { controller, .. }
+        | FilterProp::NameMatchesAnyPermanent { controller }
+        | FilterProp::Attacking {
+            defender: controller,
+        }
+        | FilterProp::AttackedThisTurn {
+            defender: controller,
+        } => controller.as_mut(),
+        // The reader matches only `You` / `Opponent`, so a declared group never resolves.
+        FilterProp::ProtectorMatches { .. }
+        // Properties without a `ControllerRef`.
+        | FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source
+                | AttachmentReferent::Recipient
+                | AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::AnyOf { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::PrepareSpell
+        | FilterProp::Other { .. } => None,
+    }
+}
+
+type DeclaredGroupResolver<'r> =
+    &'r mut dyn FnMut(crate::types::ability::ChosenGroupId) -> Option<PlayerId>;
+
+/// Runs `walk` over a clone and commits it only when the bounded population walk completed.
+fn rebind_declared_groups_with<T: Clone>(
+    value: &mut T,
+    resolve: DeclaredGroupResolver<'_>,
+    walk: impl FnOnce(&mut T, &DeclaredGroupBinder<'_>, &mut bool),
+) -> bool {
+    let binder = DeclaredGroupBinder {
+        resolve: std::cell::RefCell::new(resolve),
+    };
+    let mut rewritten = value.clone();
+    let mut complete = true;
+    walk(&mut rewritten, &binder, &mut complete);
+    if complete {
+        *value = rewritten;
+    }
+    complete
+}
+
+/// CR 608.2c + CR 115.1a: rewrite every declared-player reference in `filter` whose group
+/// `resolve` names to the concrete player. A group `resolve` declines is left untouched.
+/// `resolve` is called once per reference, so a recording closure doubles as the detector.
+/// Returns `false` (input unchanged) when a bounded population walk was incomplete.
+pub(crate) fn rebind_declared_groups(
+    filter: &mut TargetFilter,
+    resolve: DeclaredGroupResolver<'_>,
+) -> bool {
+    rebind_declared_groups_with(filter, resolve, |filter, binder, complete| {
+        rewrite_filter_props(
+            filter,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over the filters inside a quantity expression.
+pub(crate) fn rebind_declared_groups_in_quantity(
+    expr: &mut QuantityExpr,
+    resolve: DeclaredGroupResolver<'_>,
+) -> bool {
+    rebind_declared_groups_with(expr, resolve, |expr, binder, complete| {
+        rewrite_quantity_expr_filter_props(
+            expr,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over the filters inside a player filter.
+pub(crate) fn rebind_declared_groups_in_player_filter(
+    filter: &mut PlayerFilter,
+    resolve: DeclaredGroupResolver<'_>,
+) -> bool {
+    rebind_declared_groups_with(filter, resolve, |filter, binder, complete| {
+        rewrite_player_filter_props(
+            filter,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over a bare controller scope.
+pub(crate) fn rebind_declared_groups_in_controller(
+    controller: &mut ControllerRef,
+    resolve: DeclaredGroupResolver<'_>,
+) {
+    DeclaredGroupBinder {
+        resolve: std::cell::RefCell::new(resolve),
+    }
+    .controller(controller);
+}
+
+/// [`rebind_declared_groups`] over a bare filter property.
+fn rebind_declared_groups_in_prop(
+    prop: &mut FilterProp,
+    resolve: DeclaredGroupResolver<'_>,
+) -> bool {
+    rebind_declared_groups_with(prop, resolve, |prop, binder, complete| {
+        rewrite_filter_prop(
+            prop,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over every filter, quantity, player scope and controller scope an
+/// ability condition names. Exhaustive, so a new condition must classify its player references.
+pub(crate) fn rebind_declared_groups_in_condition(
+    condition: &mut AbilityCondition,
+    resolve: DeclaredGroupResolver<'_>,
+) {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            rebind_declared_groups_in_quantity(lhs, resolve);
+            rebind_declared_groups_in_quantity(rhs, resolve);
+        }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+            rebind_declared_groups_in_quantity(rhs, resolve);
+        }
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            rebind_declared_groups_in_player_filter(filter, resolve);
+        }
+        AbilityCondition::WasStartingPlayer { controller } => {
+            rebind_declared_groups_in_controller(controller, resolve);
+        }
+        AbilityCondition::ObjectsShareQuality {
+            subject, reference, ..
+        } => {
+            rebind_declared_groups(subject, resolve);
+            rebind_declared_groups(reference, resolve);
+        }
+        AbilityCondition::RevealedHasCardType {
+            additional_filter,
+            subtype_filter,
+            ..
+        } => {
+            if let Some(prop) = additional_filter {
+                rebind_declared_groups_in_prop(prop, resolve);
+            }
+            if let Some(filter) = subtype_filter {
+                rebind_declared_groups(filter, resolve);
+            }
+        }
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+        | AbilityCondition::DiscardedCardMatchesFilter { filter }
+        | AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+        | AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | AbilityCondition::ControllerControlsMatching { filter }
+        | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+        | AbilityCondition::ZoneChangedThisWay { filter, .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            rebind_declared_groups(filter, resolve);
+        }
+        AbilityCondition::ConditionInstead { inner: condition }
+        | AbilityCondition::Not { condition } => {
+            rebind_declared_groups_in_condition(condition, resolve)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                rebind_declared_groups_in_condition(condition, resolve);
+            }
+        }
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. } => {}
+    }
+}
+
+/// The distinct declared-player groups `filter` names, in first-seen order.
+pub(crate) fn declared_groups(filter: &TargetFilter) -> Vec<crate::types::ability::ChosenGroupId> {
+    let mut groups = Vec::new();
+    rebind_declared_groups(&mut filter.clone(), &mut |group| {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+        None
+    });
+    groups
+}
+
+/// [`rebind_declared_groups`] against an explicit group→player table.
+pub(crate) fn bind_declared_groups(
+    filter: &mut TargetFilter,
+    players: &[(crate::types::ability::ChosenGroupId, PlayerId)],
+) -> bool {
+    rebind_declared_groups(filter, &mut |group| {
+        players
+            .iter()
+            .find_map(|(g, player)| (*g == group).then_some(*player))
+    })
+}
+
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
 fn rewrite_filter_props(
@@ -2791,6 +3192,7 @@ fn rewrite_filter_props(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -3542,6 +3944,9 @@ fn stack_entry_controller_matches(
         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
             target_player_from_ability_or_root(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
+        }
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            declared_player(state, ctx.ability, *group).is_some_and(|pid| pid == entry_controller)
         }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, ctx.ability)
@@ -4907,6 +5312,14 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    // CR 608.2c + CR 608.2b: "that player controls" after a declared
+                    // player; no one when that target is illegal.
+                    ControllerRef::DeclaredPlayer { group } => {
+                        match declared_player(state, ability, *group) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
                     ControllerRef::ParentTargetController => {
                         let target_player = parent_target_controller_player(state, ability);
                         match target_player {
@@ -5431,6 +5844,7 @@ fn filter_inner_for_object(
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's
         // damage source) — resolved via `resolve_target_filter`, not by scanning
@@ -5693,7 +6107,25 @@ fn zone_change_filter_inner(
                             _ => return false,
                         }
                     }
-                    _ => {}
+                    // CR 608.2c + CR 608.2b: the announced player, or no one once gone.
+                    ControllerRef::DeclaredPlayer { group } => {
+                        match declared_player(state, ability, *group) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 109.4 + CR 611.2: a resolution-time snapshot — compare directly.
+                    ControllerRef::SpecificPlayer { id } if *id != obj_ctrl => {
+                        return false;
+                    }
+                    ControllerRef::You
+                    | ControllerRef::Opponent
+                    | ControllerRef::SpecificPlayer { .. }
+                    | ControllerRef::ParentTargetOwner
+                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::SourceChosenPlayer
+                    | ControllerRef::TriggeringPlayer
+                    | ControllerRef::ActivePlayer => {}
                 }
                     true
                 };
@@ -5826,6 +6258,7 @@ fn zone_change_filter_inner(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
@@ -6056,7 +6489,7 @@ pub fn spell_record_matches_filter(
                     // a spell-history record (no ability context to resolve the
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
-                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
+                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent | ControllerRef::DeclaredPlayer { .. } => return false,
                     ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
                     // CR 120.1 + CR 109.4: the damage recipient's controller.
@@ -6162,6 +6595,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -6485,6 +6919,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -7571,6 +8006,9 @@ fn owned_axis_admits(
             target_player_from_ability_or_root(state, source.ability)
                 .is_some_and(|pid| pid == owner)
         }
+        ControllerRef::DeclaredPlayer { group } => {
+            declared_player(state, source.ability, *group).is_some_and(|pid| pid == owner)
+        }
         ControllerRef::ParentTargetController => {
             parent_target_controller_player(state, source.ability).is_some_and(|pid| pid == owner)
         }
@@ -7893,6 +8331,9 @@ fn matches_filter_prop(
                         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent),
                         Some(pid),
                     ) => perm.controller == pid,
+                    (Some(ControllerRef::DeclaredPlayer { .. }), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
@@ -9125,6 +9566,10 @@ fn attachment_controller_matches(
             target_player_from_ability_or_root(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
         }
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            declared_player(state, source.ability, *group)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -10008,7 +10453,11 @@ fn player_matches_target_filter_with(
             // CR 109.4: TargetPlayer / TargetOpponent have no meaning when matching a
             // player against a filter without ability context. Fail closed (mirrors the
             // pattern established at filter.rs:526–569 for spell-record filters).
-            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+            Some(
+                ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. },
+            ) => false,
             Some(ControllerRef::ParentTargetController) => false,
             // CR 120.1 + CR 109.4: the damage recipient's controller.
             Some(ControllerRef::EventTargetController) => false,
@@ -19929,12 +20378,16 @@ mod characteristic_read_classification_tests {
     /// (declaration moved or reformatted), not an indirect carrier. Reaching
     /// through a nested type needs a real type walk, which is not available
     /// without a reflection dependency; classify such a variant by hand.
-    fn declared_controller_ref_carriers() -> Vec<String> {
+    pub(super) fn declared_controller_ref_carriers() -> Vec<String> {
+        controller_ref_carriers_of("pub enum FilterProp {")
+    }
+
+    /// [`declared_controller_ref_carriers`] over any enum declaration in `ability.rs`.
+    pub(super) fn controller_ref_carriers_of(decl: &str) -> Vec<String> {
         let src = include_str!("../types/ability.rs");
-        let decl = "pub enum FilterProp {";
-        let start = src.find(decl).expect("FilterProp declaration");
+        let start = src.find(decl).expect("enum declaration");
         let body = &src[start + decl.len()..];
-        let body = &body[..body.find("\n}").expect("end of FilterProp")];
+        let body = &body[..body.find("\n}").expect("end of enum")];
 
         let mut carriers = Vec::new();
         let mut current: Option<&str> = None;
@@ -19968,7 +20421,7 @@ mod characteristic_read_classification_tests {
 
     /// The variant name of a `FilterProp` sample, which is what `Debug` prints
     /// first and is the only handle a value gives onto its own variant.
-    fn variant_name(prop: &FilterProp) -> String {
+    pub(super) fn variant_name(prop: &FilterProp) -> String {
         let debug = format!("{prop:?}");
         debug
             .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -20112,6 +20565,208 @@ mod characteristic_read_classification_tests {
         assert!(
             enlist.contains(CharacteristicKinds::CARD_TYPES),
             "CR 302.6: the creature-typeline guard is a layer-4 read"
+        );
+    }
+}
+
+/// CR 608.2c + CR 115.1a: `bind_declared_groups` names a declared group's player in every
+/// scope a reader resolves, binds only the groups it is given, and leaves the rest.
+#[cfg(test)]
+mod declared_group_binder_tests {
+    use super::characteristic_read_classification_tests::{
+        controller_ref_carriers_of, declared_controller_ref_carriers, variant_name,
+    };
+    use super::*;
+    use crate::types::ability::{
+        AttachmentKind, ChosenGroupId, QuantityRef, SourceExclusion, TypeFilter,
+    };
+    use crate::types::zones::Zone;
+
+    const G: ChosenGroupId = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+    const G2: ChosenGroupId = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE + 1);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+
+    fn declared(group: ChosenGroupId) -> ControllerRef {
+        ControllerRef::DeclaredPlayer { group }
+    }
+
+    fn specific(id: PlayerId) -> ControllerRef {
+        ControllerRef::SpecificPlayer { id }
+    }
+
+    fn only(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![prop],
+            ..TypedFilter::default()
+        })
+    }
+
+    /// One sample of every `ControllerRef`-carrying property, each carrying `with`.
+    fn carriers(with: ControllerRef) -> Vec<FilterProp> {
+        vec![
+            FilterProp::Attacking {
+                defender: Some(with.clone()),
+            },
+            FilterProp::ProtectorMatches {
+                controller: with.clone(),
+            },
+            FilterProp::Owned {
+                controller: with.clone(),
+            },
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: Some(with.clone()),
+                exclude_source: SourceExclusion::Include,
+            },
+            FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura],
+                controller: Some(with.clone()),
+            },
+            FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: with.clone(),
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(with.clone()),
+            },
+            FilterProp::NameMatchesAnyPermanent {
+                controller: Some(with),
+            },
+        ]
+    }
+
+    /// Properties whose `ControllerRef` sits in a nested type, past the textual roster scan.
+    fn indirect_carriers(with: ControllerRef) -> Vec<FilterProp> {
+        vec![FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { player: with },
+        }]
+    }
+
+    fn bind(filter: &TargetFilter) -> TargetFilter {
+        let mut bound = filter.clone();
+        assert!(bind_declared_groups(&mut bound, &[(G, P1)]));
+        bound
+    }
+
+    #[test]
+    fn every_controller_ref_carrier_binds_except_the_one_reader_that_cannot_resolve_a_group() {
+        let mut roster: Vec<String> = carriers(declared(G)).iter().map(variant_name).collect();
+        roster.sort_unstable();
+        assert_eq!(
+            roster,
+            declared_controller_ref_carriers(),
+            "a new `ControllerRef`-carrying property needs a sample and a binder decision"
+        );
+        for (declared_prop, bound_prop) in carriers(declared(G))
+            .into_iter()
+            .chain(indirect_carriers(declared(G)))
+            .zip(
+                carriers(specific(P1))
+                    .into_iter()
+                    .chain(indirect_carriers(specific(P1))),
+            )
+        {
+            let name = variant_name(&declared_prop);
+            let expected = if name == "ProtectorMatches" {
+                declared_prop.clone()
+            } else {
+                bound_prop
+            };
+            assert_eq!(bind(&only(declared_prop)), only(expected), "{name}");
+        }
+    }
+
+    #[test]
+    fn no_target_filter_variant_but_stack_ability_names_a_controller_ref() {
+        assert_eq!(
+            controller_ref_carriers_of("pub enum TargetFilter {"),
+            vec!["StackAbility".to_string()],
+            "`DeclaredGroupBinder::node` binds `Typed.controller` and leaves `StackAbility`; a new \
+             `ControllerRef`-carrying variant needs an explicit arm there"
+        );
+    }
+
+    #[test]
+    fn bare_leaf_typed_controller_and_wrappers_bind_and_stack_ability_does_not() {
+        let leaf = TargetFilter::DeclaredPlayer { group: G };
+        assert_eq!(bind(&leaf), TargetFilter::SpecificPlayer { id: P1 });
+        let typed =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).controller(declared(G)));
+        let bound_typed =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).controller(specific(P1)));
+        assert_eq!(bind(&typed), bound_typed);
+        let wrapped = TargetFilter::And {
+            filters: vec![
+                typed.clone(),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Or {
+                        filters: vec![typed.clone()],
+                    }),
+                },
+            ],
+        };
+        assert_eq!(
+            bind(&wrapped),
+            TargetFilter::And {
+                filters: vec![
+                    bound_typed.clone(),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Or {
+                            filters: vec![bound_typed]
+                        })
+                    }
+                ]
+            }
+        );
+        let stack = TargetFilter::StackAbility {
+            controller: Some(declared(G)),
+            tag: None,
+            kind: None,
+        };
+        assert_eq!(bind(&stack), stack, "that reader has no ability context");
+    }
+
+    #[test]
+    fn only_the_given_groups_bind_and_detection_lists_each_group_once_in_order() {
+        let two = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().controller(declared(G2))),
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned {
+                    controller: declared(G),
+                }])),
+                TargetFilter::Typed(TypedFilter::creature().controller(declared(G2))),
+            ],
+        };
+        assert_eq!(declared_groups(&two), vec![G2, G]);
+        let mut bound = two.clone();
+        assert!(bind_declared_groups(&mut bound, &[(G, P1)]));
+        assert_eq!(
+            declared_groups(&bound),
+            vec![G2],
+            "G2 was not given a player"
+        );
+        assert!(bind_declared_groups(&mut bound, &[(G2, P2)]));
+        assert!(declared_groups(&bound).is_empty());
+    }
+
+    #[test]
+    fn quantity_filters_bind() {
+        let creatures = TargetFilter::Typed(TypedFilter::creature().controller(declared(G)));
+        let mut expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter: creatures },
+        };
+        assert!(rebind_declared_groups_in_quantity(
+            &mut expr,
+            &mut |_| Some(P1)
+        ));
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter::creature().controller(specific(P1)))
+                }
+            }
         );
     }
 }

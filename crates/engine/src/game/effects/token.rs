@@ -535,7 +535,10 @@ pub fn resolve(
             None,
         ),
     };
-    let token_owner = resolve_token_owner(state, ability, owner_filter);
+    // CR 608.2b: a declared player whose target was illegal creates no token.
+    let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
+        return no_token(state, ability, events);
+    };
 
     // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
     // time. ParentTarget reads the first Object target (the for-each loop's
@@ -613,7 +616,8 @@ pub fn resolve(
             }
         }
         ReplacementResult::Prevented => {
-            // Token creation was prevented entirely
+            // CR 609.3: nothing was created, so the previous result must not read as this one's.
+            state.last_created_token_ids = Vec::new();
         }
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
@@ -647,6 +651,24 @@ pub fn resolve(
         subject: None,
     });
 
+    Ok(())
+}
+
+/// CR 609.3 "do as much as possible": resolve without creating a token.
+///
+/// Shared by every branch that finds nothing to copy so they emit an identical
+/// `EffectResolved` and clear `last_created_token_ids` the same way.
+pub(crate) fn no_token(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    state.last_created_token_ids = Vec::new();
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
     Ok(())
 }
 
@@ -2886,7 +2908,9 @@ fn try_resolve_copy_batch(
     // (CR 707.2) or another permanent does, is collected by member 1's
     // checkpoint or by the executor's per-member collection, which ends the
     // run at that member.
-    let owner = resolve_token_owner(state, ability, &TargetFilter::Controller);
+    let Some(owner) = resolve_token_owner(state, ability, &TargetFilter::Controller) else {
+        return false;
+    };
     if token_creation_needs_choice(
         state,
         &probe_spec,
@@ -3016,7 +3040,7 @@ pub(crate) fn resolve_token_spec(
     };
 
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
-    let token_owner = resolve_token_owner(state, ability, owner);
+    let token_owner = resolve_token_owner(state, ability, owner)?;
     let host_request = TokenHostRequest::from_binding(
         attach_to.is_some(),
         attach_to
@@ -3164,6 +3188,12 @@ fn resolve_attach_host(
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
                 .map(target_ref_to_attach_target)
         }
+        // CR 608.2b + CR 608.2c: the declared player of the chain; an illegal or
+        // unannounced one names no host.
+        AttachHostAuthority::DeclaredPlayer(group) => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, group)
+                .map(AttachTarget::Player)
+        }
         AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),
         AttachHostAuthority::SpecificObject(id) => Some(AttachTarget::Object(id)),
         AttachHostAuthority::NoHost => None,
@@ -3195,6 +3225,9 @@ enum AttachHostAuthority {
     Pronoun,
     /// One numbered slot of the resolving chain's accumulated targets.
     ParentSlot(usize),
+    /// CR 608.2c: the player an earlier clause declared, read through the declared-group
+    /// authority.
+    DeclaredPlayer(crate::types::ability::ChosenGroupId),
     /// The ability's own source object.
     Source,
     /// An object the ability definition names outright.
@@ -3269,16 +3302,13 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
 
         TargetFilter::ParentTarget => AttachHostAuthority::Pronoun,
         TargetFilter::ParentTargetSlot { index } => AttachHostAuthority::ParentSlot(*index),
+        TargetFilter::DeclaredPlayer { group } => AttachHostAuthority::DeclaredPlayer(*group),
         TargetFilter::SelfRef => AttachHostAuthority::Source,
         TargetFilter::SpecificObject { id } => AttachHostAuthority::SpecificObject(*id),
 
-        // CR 115.1a: the remaining player-valued TARGET SLOTS, which
-        // `denotes_player_target` also claims. Kept as their own arm rather than
-        // folded into a guard so the variant list stays readable, and asserted
-        // to agree with that authority in `attach_host_authority_tests`.
-        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => {
-            AttachHostAuthority::SelectedPlayerTarget
-        }
+        // CR 115.1a: the remaining player-valued TARGET SLOT, which
+        // `denotes_player_target` also claims.
+        TargetFilter::Player => AttachHostAuthority::SelectedPlayerTarget,
 
         // Player-valued filters that are NOT target slots. CR 303.4 permits a
         // player host, but each of these names its player through a context
@@ -3306,6 +3336,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::Owner
+        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AllPlayers => AttachHostAuthority::NoHost,
 
         // Object references this path does not resolve. Each names its object
@@ -3388,7 +3419,7 @@ pub(crate) fn resolve_token_owner(
     state: &GameState,
     ability: &ResolvedAbility,
     owner_filter: &TargetFilter,
-) -> PlayerId {
+) -> Option<PlayerId> {
     // CR 115.1: Context-ref filters route through the central helper so chain
     // target propagation cannot leak the parent's Player target into a sub
     // CreateToken whose `owner: Controller`. The helper handles
@@ -3404,15 +3435,17 @@ pub(crate) fn resolve_token_owner(
     // *source* alongside the player `owner` slot, and resolving the source
     // object's controller as the token owner would be wrong. When no player
     // slot exists, the controller creates the token.
-    ability
-        .targets
-        .iter()
-        .rev()
-        .find_map(|target| match target {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .unwrap_or(ability.controller)
+    Some(
+        ability
+            .targets
+            .iter()
+            .rev()
+            .find_map(|target| match target {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .unwrap_or(ability.controller),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9883,6 +9916,7 @@ mod attach_host_authority_tests {
             TargetFilter::Neighbor {
                 direction: SeatDirection::Left,
             },
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
         ] {
             assert!(
                 filter.is_context_ref(),
@@ -9891,7 +9925,7 @@ mod attach_host_authority_tests {
             assert!(
                 !matches!(
                     classify_attach_host_authority(&filter),
-                    AttachHostAuthority::SelectedTarget
+                    AttachHostAuthority::SelectedTarget | AttachHostAuthority::SelectedPlayerTarget
                 ),
                 "{filter:?} is a context reference and must not inherit the ability's \
                  chosen targets as its attachment host"

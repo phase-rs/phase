@@ -5,8 +5,8 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
+    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -606,6 +606,32 @@ pub(crate) struct ParseContext {
     /// lowered through them). `None` on the first chunk of every chain and on
     /// every standalone parse. Never serialized.
     pub chain_declared_object_target: Option<TargetFilter>,
+    /// CR 608.2c: the reference to the player slot an ENCLOSING effect chain
+    /// already declared, for a nested `parse_effect_chain_ir` whose own builder
+    /// starts empty (a conditional body re-parsed as its own chain: "If you do,
+    /// that player discards that card, then draws a card"). Set by the caller
+    /// immediately before that one call; the callee `take`s it on entry, so it is
+    /// `None` everywhere else. Never serialized.
+    pub enclosing_declared_player: Option<TargetFilter>,
+    /// Ordinal of the next player-declaring clause's `ChosenGroupId`
+    /// (`ChosenGroupId::declared_player`). `parse_effect_chain_ir_body` owns the
+    /// running count in a chain-level local and hands it across a nested chain
+    /// and each per-chunk context, so ids stay unique across one ability.
+    pub next_declared_player_group: u32,
+    /// CR 608.2c: the chain's nearest earlier clause announced exactly one player, so
+    /// a bare "they" subject names that player (`ParentTargetController`, the
+    /// spelling "that player" takes) instead of an earlier object. Seeded per chunk
+    /// from the chain; `false` on every standalone parse.
+    pub prior_player_declaration: bool,
+    /// CR 608.2c + CR 115.1a: the controller scope "that player controls" and "they
+    /// control" take after a player the chain already declared. Seeded per chunk from
+    /// the chain; `None` on every standalone parse, which keeps `relative_player_scope`
+    /// (then `You`) as the reading.
+    pub declared_player_scope: Option<ControllerRef>,
+    /// The group a damage clause minted for the player it announces itself, so its own
+    /// continuations ("... and 1 damage to each creature that player controls") can name it.
+    /// The chunk loop takes it onto the clause.
+    pub clause_declared_group: Option<ChosenGroupId>,
     /// CR 601.2c + CR 608.2c: every target slot announced by the EARLIER clauses
     /// of this effect chain, in declared order, with its declared-slot index
     /// where that index is exactly computable (see [`DeclaredSlotRegistry`]).

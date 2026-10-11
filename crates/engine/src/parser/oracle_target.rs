@@ -6145,18 +6145,21 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         // companion `TargetFilter::Player` slot via `effect_references_target_player`
         // (game/ability_utils.rs). Without a scope, fall back to the legacy
         // `ControllerRef::You` behaviour relied on by per-player iteration
-        // contexts (`resolve_quantity_scoped`).
+        // contexts (`resolve_quantity_scoped`). A player the chain itself declared is the
+        // nearer antecedent (CR 608.2c + CR 115.1a).
         let ctrl = ctx
-            .relative_player_scope
+            .declared_player_scope
             .clone()
+            .or_else(|| ctx.relative_player_scope.clone())
             .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("controlled by that player").parse(trimmed)
     {
         let ctrl = ctx
-            .relative_player_scope
+            .declared_player_scope
             .clone()
+            .or_else(|| ctx.relative_player_scope.clone())
             .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
@@ -6164,10 +6167,13 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         // "They control" is an anaphoric player reference when the surrounding
         // parser supplies a relative player scope; otherwise keep the legacy
         // ControllerRef::You fallback used by "any opponent may" accepting-
-        // player resolution.
+        // player resolution. "They" names a chain-declared player only when the chain
+        // declared exactly one (CR 608.2c).
         let ctrl = ctx
-            .relative_player_scope
+            .declared_player_scope
             .clone()
+            .filter(|_| ctx.prior_player_declaration)
+            .or_else(|| ctx.relative_player_scope.clone())
             .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
@@ -9757,6 +9763,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer

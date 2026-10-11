@@ -1,6 +1,4 @@
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -33,16 +31,9 @@ pub fn resolve(
     // CR 109.5 / CR 113.6: "you" in an effect text resolves to the ability's
     // controller. Cards with `target: Controller` (the printed default) read
     // their grantee directly off `ability.controller`; targeted variants
-    // resolve from the first player target.
-    let player = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => {
-            if let Some(TargetRef::Player(pid)) = ability.targets.first() {
-                *pid
-            } else {
-                ability.controller
-            }
-        }
+    // resolve through the one player-reference authority.
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, target) else {
+        return Ok(());
     };
 
     let amount = crate::game::quantity::resolve_quantity(
@@ -74,7 +65,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, QuantityExpr, SiblingCondition, SpellContext, SubAbilityLink,
+        AbilityKind, QuantityExpr, SiblingCondition, SpellContext, SubAbilityLink, TargetFilter,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;

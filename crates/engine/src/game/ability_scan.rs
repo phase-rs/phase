@@ -3406,7 +3406,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: false,
             projected: false,
         },
-        TargetFilter::ParentTargetSlot { .. } => Axes {
+        TargetFilter::ParentTargetSlot { .. } | TargetFilter::DeclaredPlayer { .. } => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -4991,6 +4991,11 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         // legality; it is runtime-read-identical to TargetPlayer (the scope
         // restriction is enforced at target selection, not a walker axis).
         ControllerRef::TargetOpponent => Axes::NONE,
+        ControllerRef::DeclaredPlayer { .. } => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         ControllerRef::ParentTargetController => Axes {
             event: true,
             sibling: false,

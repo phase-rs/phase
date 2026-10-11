@@ -1419,6 +1419,7 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
+    let rederived: Option<Option<TriggerCondition>>;
     let triggered = match &entry.kind {
         StackEntryKind::TriggeredAbility {
             condition,
@@ -1426,19 +1427,28 @@ pub(crate) fn bind_resolution_scope(
             subject_match_count,
             die_result,
             ..
-        } => Some(TriggeredResolutionScope {
-            condition: condition.as_ref(),
-            controller: entry.controller,
-            trigger_source: entry
-                .ability()
-                .and_then(|ability| ability.trigger_source.as_ref()),
-            trigger_definition: entry
-                .ability()
-                .and_then(|ability| ability.trigger_definition_ref.as_ref()),
-            trigger_event: trigger_event.as_ref(),
-            subject_match_count: *subject_match_count,
-            die_result: *die_result,
-        }),
+        } => {
+            // CR 603.4 + CR 608.2b: a stored recheck of a payload carrying declared players is
+            // derived again now, so a carried player who has since left names no one.
+            rederived = condition
+                .as_ref()
+                .and(entry.ability())
+                .filter(|ability| !ability.context.outer_declared_players.is_empty())
+                .map(|ability| super::triggers::delayed_intervening_if(state, ability));
+            Some(TriggeredResolutionScope {
+                condition: rederived.as_ref().unwrap_or(condition).as_ref(),
+                controller: entry.controller,
+                trigger_source: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_source.as_ref()),
+                trigger_definition: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_definition_ref.as_ref()),
+                trigger_event: trigger_event.as_ref(),
+                subject_match_count: *subject_match_count,
+                die_result: *die_result,
+            })
+        }
         _ => None,
     };
     bind_triggered_resolution_scope(state, triggered, trigger_event_batch)

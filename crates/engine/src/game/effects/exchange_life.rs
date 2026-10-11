@@ -2,7 +2,7 @@ use crate::game::effects::life::{apply_life_gain, apply_life_loss};
 use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_lose_life};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, PtStat, ResolvedAbility,
-    TargetFilter, TargetRef,
+    TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -26,8 +26,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let stat = match &ability.effect {
-        Effect::ExchangeLifeWithStat { stat, .. } => *stat,
+    let (stat, player_filter) = match &ability.effect {
+        Effect::ExchangeLifeWithStat { stat, player } => (*stat, player),
         // Dispatcher in effects/mod.rs only routes ExchangeLifeWithStat here.
         _ => return Ok(()),
     };
@@ -36,14 +36,10 @@ pub fn resolve(
 
     // "your life total" forms declare no player target and fall back to the
     // ability's controller; "target opponent's life total" supplies a player.
-    let player_id = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .unwrap_or(ability.controller);
+    let Some(player_id) = super::resolve_player_for_context_ref(state, ability, player_filter)
+    else {
+        return Ok(());
+    };
 
     // CR 701.12a: capture both previous values before any mutation.
     let Some(source) = state.objects.get(&ability.source_id) else {
@@ -149,7 +145,7 @@ mod tests {
     use super::*;
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ContinuousModification, ControllerRef, TypedFilter};
+    use crate::types::ability::{ContinuousModification, ControllerRef, TargetRef, TypedFilter};
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;

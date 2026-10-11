@@ -692,7 +692,11 @@ fn static_affects_player(
             // against a player. Fail closed.
             Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetOpponent fails closed identically to TargetPlayer here.
-            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+            Some(
+                ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. },
+            ) => false,
             Some(ControllerRef::ParentTargetController) => false,
             // Engine constraint: this reference resolves only inside a trigger
             // event window, which a state-based-action check does not have.

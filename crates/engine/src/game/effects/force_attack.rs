@@ -1,5 +1,8 @@
 use super::resolve_player_for_context_ref;
-use crate::game::targeting::{resolve_live_parent_slot_from_root, resolved_object_ids_for_filter};
+use crate::game::targeting::{
+    resolve_live_declared_player, resolve_live_parent_slot_from_root,
+    resolved_object_ids_for_filter,
+};
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, EffectScope,
     PlayerScope, ResolvedAbility, TargetFilter, TargetRef,
@@ -48,11 +51,8 @@ fn defender_referent(
             .next()
             .map(DefenderReferent::Object)
     };
-    let player_referent = || {
-        Some(DefenderReferent::Player(resolve_player_for_context_ref(
-            state, ability, filter,
-        )))
-    };
+    let player_referent =
+        || resolve_player_for_context_ref(state, ability, filter).map(DefenderReferent::Player);
     match filter {
         TargetFilter::SelfRef | TargetFilter::SpecificObject { .. } => object_referent(),
         // CR 608.2c: the parent's chosen target. A player-valued parent target,
@@ -141,11 +141,11 @@ enum SubjectLowering {
 /// turn must attack Gideon Jura if able. This includes creatures that come under
 /// that player's control after the ability has resolved."
 ///
-/// Only `ControllerRef::TargetPlayer` / `TargetOpponent` need lowering:
+/// Only `ControllerRef::TargetPlayer` / `TargetOpponent` / `DeclaredPlayer` need lowering:
 /// `ControllerRef::You` / `Opponent` are resolved by `layers.rs` against the
-/// continuous effect's own snapshotted `controller` (the Kardur path), and no
-/// other controller ref reaches a broadcast force-attack subject today.
+/// continuous effect's own snapshotted `controller` (the Kardur path).
 fn lower_dynamic_affected(
+    state: &GameState,
     ability: &ResolvedAbility,
     target: &TargetFilter,
     scope: EffectScope,
@@ -173,6 +173,12 @@ fn lower_dynamic_affected(
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(_) => None,
         }) else {
+            return SubjectLowering::Unlowerable;
+        };
+        typed.controller = Some(ControllerRef::SpecificPlayer { id });
+    } else if let Some(ControllerRef::DeclaredPlayer { group }) = typed.controller {
+        // CR 608.2c + CR 608.2b: the announced player, or no one once gone.
+        let Some(id) = resolve_live_declared_player(state, ability, group) else {
             return SubjectLowering::Unlowerable;
         };
         typed.controller = Some(ControllerRef::SpecificPlayer { id });
@@ -249,7 +255,7 @@ pub fn resolve(
         // `MustAttackAwayFromSource` grants down the same path for the same
         // reason (Kardur, Maximum Carnage); this resolver installs directly, so
         // it makes the same call here.
-        match lower_dynamic_affected(ability, target, *scope) {
+        match lower_dynamic_affected(state, ability, target, *scope) {
             SubjectLowering::Population(affected) => state.add_transient_continuous_effect(
                 ability.source_id,
                 ability.controller,

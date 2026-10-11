@@ -597,6 +597,10 @@ pub fn resolve(
         rebind_last_created_to_parent_target(&mut delayed_ability.effect);
     }
 
+    // CR 603.7a + CR 608.2c: the payload fires as its own root, where the creating chain's
+    // declared players no longer exist; carry them while that chain does.
+    delayed_ability.context.outer_declared_players =
+        crate::game::targeting::live_declared_players(state, ability);
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
     // CR 608.2k: Give each clause that names an event-subject anaphor its own

@@ -99,9 +99,15 @@ pub fn resolve(
         ),
     };
 
-    let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
+    let Some(library_owner) =
+        super::resolve_player_for_context_ref(state, ability, library_owner_filter)
+    else {
+        super::publish_reveal_result(state, Vec::new());
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        return Ok(());
+    };
 
-    // CR 401.5 + CR 608.2c: This Dig's own outcome — not a stale value from an
+    // CR 608.2c: This Dig's own outcome — not a stale value from an
     // earlier link in the same chain — is what `apply_parent_chain_context`
     // relays to this Dig's immediate sub_ability. Reset here; the two "found
     // nothing" returns below (and in `resolve_from_prior_look`) set it back
@@ -137,13 +143,14 @@ pub fn resolve(
         .find(|p| p.id == library_owner)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // CR 401.5: If a library has fewer cards than required, use as many as available.
+    // CR 609.3: If a library has fewer cards than required, use as many as available.
     let count = dig_num.min(state.library_of(player.id).len());
     if count == 0 {
         // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
         // ("put up to one of them on top … the rest on the bottom") has no
         // cards to act on and must not fall back to acting on this ability's
         // own source (issue #1365).
+        super::publish_reveal_result(state, Vec::new());
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
@@ -167,8 +174,7 @@ pub fn resolve(
     // Calamity). Set last_revealed_ids (and emit CardsRevealed for public
     // reveals) then return without creating a DigChoice interaction.
     if raw_keep_count == 0 {
-        super::publish_fresh_tracked_set(state, cards.clone());
-        state.last_revealed_ids = cards.clone();
+        super::publish_reveal_result(state, cards.clone());
         if is_reveal {
             // CR 701.20a: public reveal — show to all players.
             for &card_id in &cards {
@@ -336,6 +342,7 @@ fn resolve_from_prior_look(
         // CR 608.2c: mirrors the empty-library branch in `resolve` (issue
         // #1365) — no cards were looked at, so a chained `ParentTarget`
         // consumer must not self-fallback.
+        super::publish_reveal_result(state, Vec::new());
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,

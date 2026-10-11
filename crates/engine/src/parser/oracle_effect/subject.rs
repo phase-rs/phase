@@ -4205,6 +4205,9 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
             .chain_prior_mass_population
             .clone()
             .unwrap_or(TargetFilter::TriggeringSource),
+        // CR 608.2c: the nearest earlier clause announced a player; "they" is that
+        // player, spelled as "that player" is.
+        _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }
@@ -6683,6 +6686,7 @@ fn build_restriction_clause(
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::SourceChosenPlayer
@@ -8289,6 +8293,43 @@ mod tests {
             resolve_they_pronoun(&mut with_opponent),
             TargetFilter::ParentTargetSlot { index: 1 },
             "the sole genuine player slot must remain unambiguous"
+        );
+    }
+
+    /// CR 608.2c: "they" after a declared player is that player, but every scope and
+    /// trigger reading of "they" keeps its own value.
+    #[test]
+    fn they_after_a_declared_player_yields_to_scope_and_trigger_readings() {
+        let they = |scope: Option<ControllerRef>, subject: Option<TargetFilter>, declared| {
+            resolve_they_pronoun(&mut ParseContext {
+                prior_player_declaration: declared,
+                relative_player_scope: scope,
+                subject,
+                ..Default::default()
+            })
+        };
+        assert_eq!(they(None, None, true), TargetFilter::ParentTargetController);
+        assert_eq!(they(None, None, false), TargetFilter::ParentTarget);
+        for (scope, expected) in [
+            (ControllerRef::ScopedPlayer, TargetFilter::ScopedPlayer),
+            (
+                ControllerRef::ParentTargetOwner,
+                TargetFilter::ParentTargetOwner,
+            ),
+            (
+                ControllerRef::DefendingPlayer,
+                TargetFilter::DefendingPlayer,
+            ),
+            (
+                ControllerRef::TriggeringPlayer,
+                TargetFilter::TriggeringPlayer,
+            ),
+        ] {
+            assert_eq!(they(Some(scope), None, true), expected);
+        }
+        assert_eq!(
+            they(None, Some(TargetFilter::Player), true),
+            TargetFilter::TriggeringPlayer
         );
     }
 
@@ -11921,8 +11962,8 @@ mod tests {
     /// CR 608.2c: a non-targeted MASS player subject ("each opponent") stated
     /// once at the head of a same-sentence verb list must govern every
     /// subjectless conjugated continuation after it, exactly like the
-    /// targeted (`CarriedPlayerSubject::Targeted`) and phase-scoped
-    /// (`::Scoped`) cases already covered by
+    /// declared (`CarriedPlayerSubject::Declared`) and phase-scoped
+    /// (`Reference { filter: ScopedPlayer, .. }`) cases already covered by
     /// `targeted_player_subject_carries_to_conjugated_predicates` above. This
     /// carry does NOT run through `CarriedPlayerSubject` — "each opponent " is
     /// peeled off the chunk's leading text before subject-application parsing

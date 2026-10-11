@@ -82,8 +82,11 @@ pub fn resolve(
     // loops, through the same single-authority helper `Effect::Token` uses so
     // "target opponent creates a token that's a copy of it" places the copy
     // under the chosen opponent's control rather than the trigger controller's.
-    let token_owner =
-        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter);
+    let Some(token_owner) =
+        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter)
+    else {
+        return crate::game::effects::token::no_token(state, ability, events);
+    };
 
     // Step 1: Resolve the copy source list.
     // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant

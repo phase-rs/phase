@@ -61,7 +61,10 @@ pub fn resolve(
     // (The Infamous Cruelclaw, issue #2881) and would exile from the wrong library.
     // Per-iteration "their library" uses `TargetFilter::ScopedPlayer` or a typed
     // `ControllerRef::ScopedPlayer` filter instead.
-    let acting_player = super::resolve_player_for_context_ref(state, ability, player_filter);
+    let Some(acting_player) = super::resolve_player_for_context_ref(state, ability, player_filter)
+    else {
+        return Ok(());
+    };
     let resume = state.pending_exile_from_top_until.take();
     let player = state
         .players

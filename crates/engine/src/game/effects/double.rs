@@ -1,6 +1,6 @@
 use crate::game::mana_sources::mana_color_to_type;
 use crate::types::ability::{
-    DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -156,7 +156,9 @@ fn resolve_double_life(
     events: &mut Vec<GameEvent>,
     target: &TargetFilter,
 ) -> Result<(), EffectError> {
-    let player_id = resolve_player_target(ability, target);
+    let Some(player_id) = resolve_player_target(state, ability, target) else {
+        return Ok(());
+    };
 
     let current_life = state
         .players
@@ -209,7 +211,9 @@ fn resolve_double_mana(
     target: &TargetFilter,
     color: Option<&ManaColor>,
 ) -> Result<(), EffectError> {
-    let player_id = resolve_player_target(ability, target);
+    let Some(player_id) = resolve_player_target(state, ability, target) else {
+        return Ok(());
+    };
 
     // Collect the mana types and counts to add
     let mana_to_add: Vec<(ManaType, usize)> = {
@@ -281,21 +285,12 @@ fn resolve_double_mana(
 }
 
 /// Resolve a player target from the ability.
-fn resolve_player_target(ability: &ResolvedAbility, target: &TargetFilter) -> PlayerId {
-    match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Player(pid) = t {
-                    Some(*pid)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(ability.controller),
-    }
+fn resolve_player_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<PlayerId> {
+    super::resolve_player_for_context_ref(state, ability, target)
 }
 
 #[cfg(test)]
@@ -323,7 +318,8 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        AbilityKind, QuantityModification, ReplacementDefinition, SpellContext, TypedFilter,
+        AbilityKind, QuantityModification, ReplacementDefinition, SpellContext, TargetRef,
+        TypedFilter,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};

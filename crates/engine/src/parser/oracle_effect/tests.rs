@@ -16344,8 +16344,8 @@ fn winds_of_abandon_iterated_subject_search_chain() {
 /// may search …, then shuffle") is a CASTER-subject switch (CR 109.5: "you"
 /// is the activator), so its `SearchLibrary`/`Shuffle` must route to the
 /// activator — NOT inherit the prior clause's `ParentTargetController` anchor.
-/// Pre-fix, `anchor_subject` was set once by clause (1) and never reset, so
-/// clause (2)'s caster-default search wrongly inherited the opponent.
+/// The carried non-caster player must not survive into clause (2), or its
+/// caster-default search would inherit the opponent.
 #[test]
 fn demolition_field_you_clause_routes_search_to_activator_not_opponent() {
     use crate::types::ability::AbilityKind;
@@ -64681,7 +64681,7 @@ fn is_unimplemented_def(def: &AbilityDefinition) -> bool {
 /// `V-PAIR`'s whole subject. So the compile-error net is total over the variant
 /// dimension of all three enums and over their filter-field dimension; it is
 /// NOT total over that quantity-field dimension, which is written down here
-/// rather than claimed away. The 49 leaf variants in this function's final arm
+/// rather than claimed away. The leaf variants in this function's final arm
 /// carry no nested filter at all, so `false` is their answer, not a default.
 fn filter_has_chosen_color(f: &TargetFilter) -> bool {
     match f {
@@ -64733,6 +64733,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -77720,7 +77721,7 @@ fn revealed_this_way_arm_ignores_mass_and_from_it_forms() {
     );
     assert_json_eq(
         &fall.abilities[0],
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
         "Fall",
     );
 
@@ -77757,7 +77758,7 @@ fn kitesail_freebooter_unscoped_from_it_choice_is_unchanged() {
     assert!(non_controller_gaps(execute).is_empty());
     assert_json_eq(
         execute,
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
         "Kitesail Freebooter's ETB",
     );
 }
@@ -81256,6 +81257,427 @@ fn self_cost_modification_after_closed_quote_is_its_own_chunk() {
 
     let anaphoric = chunk_texts(&format!("{grant} The token is goaded."));
     assert_eq!(anaphoric.len(), 1, "{anaphoric:?}");
+}
+
+mod carried_player_reference_tests {
+    use super::*;
+    use crate::types::ability::TypedFilter;
+    use crate::types::zones::Zone;
+
+    fn declared() -> TargetFilter {
+        TargetFilter::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        }
+    }
+
+    fn opponent_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        })
+    }
+
+    fn search(target_player: TargetFilter) -> Effect {
+        Effect::SearchLibrary {
+            source_zones: vec![Zone::Library],
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: false,
+            target_player: Some(target_player),
+            selection_constraint: Default::default(),
+            split: None,
+        }
+    }
+
+    fn application(affected: TargetFilter, target: Option<TargetFilter>) -> SubjectApplication {
+        SubjectApplication {
+            affected,
+            target,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        }
+    }
+
+    fn gain_life_controller() -> Effect {
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }
+    }
+
+    /// CR 115.1: only a declaring search names the declared player (consulting the builder
+    /// once); a Shuffle or ChangeZoneAll player filter is not a declaration, is returned
+    /// unchanged, and never consults it.
+    #[test]
+    fn extract_player_anchor_converts_only_a_declaring_search() {
+        let mut consulted = 0;
+        let mut declare = || {
+            consulted += 1;
+            declared()
+        };
+        for filter in [TargetFilter::Player, opponent_filter()] {
+            assert_eq!(
+                extract_player_anchor(&search(filter), &mut declare),
+                Some(declared())
+            );
+        }
+        assert_eq!(
+            extract_player_anchor(&search(TargetFilter::ParentTargetController), &mut declare),
+            Some(TargetFilter::ParentTargetController)
+        );
+        assert_eq!(
+            extract_player_anchor(
+                &Effect::Shuffle {
+                    target: TargetFilter::Player
+                },
+                &mut declare
+            ),
+            Some(TargetFilter::Player)
+        );
+        let mut sweep: Effect = serde_json::from_value(serde_json::json!({
+            "type": "ChangeZoneAll",
+            "destination": "Exile"
+        }))
+        .unwrap();
+        if let Effect::ChangeZoneAll { target, .. } = &mut sweep {
+            *target = opponent_filter();
+        }
+        assert_eq!(
+            extract_player_anchor(&sweep, &mut declare),
+            Some(opponent_filter())
+        );
+        assert_eq!(
+            consulted, 2,
+            "one consultation per declaring search, none otherwise"
+        );
+    }
+
+    /// One row per carry form: the reference, the phrase it re-supplies, its lifetime.
+    #[test]
+    fn carry_forms_supply_their_reference_and_lifetime() {
+        let carried = CarriedPlayerSubject::Declared;
+        assert_eq!(carried.reference(), &TargetFilter::ParentTarget);
+        let phrase = carried.subject_phrase(None);
+        assert_eq!(phrase.affected, Some(TargetFilter::ParentTarget));
+        assert_eq!(phrase.target, Some(TargetFilter::ParentTarget));
+        assert!(phrase.inherits_parent);
+        assert!(!carried.persists_across_sentences());
+        assert_eq!(carried.chain_reference(), None);
+
+        let scoped = CarriedPlayerSubject::from_leading_subject(&application(
+            TargetFilter::ScopedPlayer,
+            None,
+        ))
+        .expect("a scoped player subject carries");
+        let phrase = scoped.subject_phrase(None);
+        assert_eq!(phrase.affected, Some(TargetFilter::ScopedPlayer));
+        assert_eq!(phrase.target, None);
+        assert!(!phrase.inherits_parent);
+        assert!(!scoped.persists_across_sentences());
+
+        for antecedent in [declared(), TargetFilter::ParentTarget] {
+            let carry = CarriedPlayerSubject::antecedent(antecedent.clone());
+            let phrase = carry.subject_phrase(None);
+            assert_eq!(phrase.affected, Some(antecedent.clone()));
+            assert_eq!(phrase.target, None);
+            assert!(!phrase.inherits_parent);
+            assert!(carry.persists_across_sentences());
+            assert_eq!(carry.chain_reference(), Some(&antecedent));
+        }
+    }
+
+    #[test]
+    fn anaphoric_subject_carry_prefers_the_declared_slot() {
+        let event_player = application(TargetFilter::TriggeringPlayer, None);
+        assert_eq!(
+            CarriedPlayerSubject::from_anaphoric_subject(&event_player, Some(declared())),
+            Some(CarriedPlayerSubject::Reference {
+                filter: declared(),
+                lifetime: CarryLifetime::Sentence,
+            })
+        );
+        assert_eq!(
+            CarriedPlayerSubject::from_anaphoric_subject(&event_player, None),
+            Some(CarriedPlayerSubject::Reference {
+                filter: TargetFilter::TriggeringPlayer,
+                lifetime: CarryLifetime::Sentence,
+            })
+        );
+        let targeted = application(TargetFilter::ParentTarget, Some(TargetFilter::ParentTarget));
+        for refused in [
+            targeted,
+            application(TargetFilter::Controller, None),
+            application(TargetFilter::ScopedPlayer, None),
+        ] {
+            assert_eq!(
+                CarriedPlayerSubject::from_anaphoric_subject(&refused, Some(declared())),
+                None
+            );
+        }
+    }
+
+    /// CR 608.2c: the carried player is a player by construction, so a `Declared` or slot
+    /// phrase reaches the player-typed arms; a printed non-carry `ParentTarget` does not.
+    #[test]
+    fn carried_phrase_rewrites_player_arms_a_printed_object_reference_does_not() {
+        let carries = [
+            CarriedPlayerSubject::Declared,
+            CarriedPlayerSubject::antecedent(declared()),
+        ];
+        for carry in &carries {
+            let phrase = carry.subject_phrase(None);
+            let mut gain = gain_life_controller();
+            inject_subject_target(&mut gain, &phrase, "that player gains 1 life");
+            assert_eq!(
+                gain,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: phrase.target.clone().or(phrase.affected.clone()).unwrap(),
+                }
+            );
+            let mut lib = search(TargetFilter::Player);
+            if let Effect::SearchLibrary { target_player, .. } = &mut lib {
+                *target_player = None;
+            }
+            inject_subject_target(&mut lib, &phrase, "that player searches their library");
+            let expected = match carry {
+                CarriedPlayerSubject::Declared => TargetFilter::ParentTargetController,
+                CarriedPlayerSubject::Reference { filter, .. } => filter.clone(),
+            };
+            assert!(matches!(
+                lib,
+                Effect::SearchLibrary { target_player: Some(ref searched), .. } if *searched == expected
+            ));
+        }
+        let printed_object = SubjectPhraseAst {
+            affected: Some(TargetFilter::ParentTarget),
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        };
+        let mut gain = gain_life_controller();
+        inject_subject_target(
+            &mut gain,
+            &printed_object,
+            "that creature's controller gains 1 life",
+        );
+        assert_eq!(gain, gain_life_controller());
+    }
+}
+
+mod bare_player_pronoun_declaration_tests {
+    use super::bare_pronoun_after_object_creation_tests::effect_nodes;
+    use super::*;
+
+    /// The parsed chain plus its `Draw` nodes.
+    fn draws_of(text: &str) -> (serde_json::Value, Vec<serde_json::Value>) {
+        let json = serde_json::to_value(parse_effect_chain(text, AbilityKind::Spell)).unwrap();
+        let mut nodes = Vec::new();
+        effect_nodes(&json, "Draw", &mut nodes);
+        let draws = nodes.into_iter().cloned().collect::<Vec<_>>();
+        (json, draws)
+    }
+
+    /// CR 115.1a + CR 608.2c: a bare "they"/"that player" after a clause that declares an object
+    /// (a type-less filter carrying a property, e.g. a token) has no declared player to refer to.
+    #[test]
+    fn a_property_carrying_object_clause_declares_no_player() {
+        for object_clause in ["Exile target token you control.", "Exile target token."] {
+            for (follow, reference) in [
+                ("They draw a card.", "ParentTarget"),
+                ("That player draws a card.", "ParentTargetController"),
+            ] {
+                let text = format!("{object_clause} {follow}");
+                let (json, draws) = draws_of(&text);
+                assert_eq!(draws.len(), 1, "reach guard: the Draw node: {text}: {json}");
+                assert_eq!(
+                    draws[0]["target"],
+                    serde_json::json!({ "type": reference }),
+                    "{text}: {json}"
+                );
+                assert!(
+                    json.get("declares_chosen_group").is_none(),
+                    "{text}: {json}"
+                );
+            }
+        }
+        for follow in ["They draw a card.", "That player draws a card."] {
+            let text = format!("Target player gains 2 life. {follow}");
+            let (json, draws) = draws_of(&text);
+            assert_eq!(draws.len(), 1, "reach guard: the Draw node: {text}: {json}");
+            let group = &json["declares_chosen_group"];
+            assert!(
+                group.is_number(),
+                "reach: the declaring node: {text}: {json}"
+            );
+            assert_eq!(
+                draws[0]["target"],
+                serde_json::json!({ "type": "DeclaredPlayer", "group": group }),
+                "{text}: {json}"
+            );
+        }
+    }
+}
+
+mod bare_pronoun_after_object_creation_tests {
+    use super::*;
+
+    pub(super) fn effect_nodes<'a>(
+        value: &'a serde_json::Value,
+        ty: &str,
+        out: &mut Vec<&'a serde_json::Value>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(|t| t.as_str()) == Some(ty) {
+                    out.push(value);
+                }
+                map.values().for_each(|v| effect_nodes(v, ty, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| effect_nodes(v, ty, out)),
+            _ => {}
+        }
+    }
+
+    /// CR 608.2c: a bare "They" binds to the nearest clause that produces a referent; a token-creating
+    /// clause is one, a player-only "you gain" clause is not (Essence Feed).
+    #[test]
+    fn they_after_a_token_clause_reads_the_created_tokens_not_the_declared_player() {
+        let parsed = parse_oracle_text(
+            "Target player loses 3 life. You gain 3 life and create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\"",
+            "Essence Feed",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let json = serde_json::to_value(&parsed.abilities).unwrap();
+        let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"]["type"], "LastCreated",
+            "{}",
+            grants[0]
+        );
+        assert!(
+            !grants[0].to_string().contains("DeclaredPlayer"),
+            "{}",
+            grants[0]
+        );
+    }
+
+    fn chain_json(text: &str) -> serde_json::Value {
+        let parsed = parse_oracle_text(text, "Row", &[], &["Sorcery".to_string()], &[]);
+        serde_json::to_value(&parsed.abilities).unwrap()
+    }
+
+    /// CR 608.2c: "that player" and "<object> that player controls" take players only, so an
+    /// object-creating clause between the declaration and the reader does not stop them.
+    #[test]
+    fn player_only_readers_cross_a_token_clause_to_the_declared_player() {
+        for (text, reader, controller_scoped) in [
+            (
+                "Target opponent loses 2 life. Create a Treasure token. Destroy target creature that player controls.",
+                "Destroy",
+                true,
+            ),
+            (
+                "Target opponent loses 2 life. Create a Treasure token. That player discards a card.",
+                "Discard",
+                false,
+            ),
+        ] {
+            let json = chain_json(text);
+            let mut tokens = Vec::new();
+            effect_nodes(&json, "Token", &mut tokens);
+            assert_eq!(tokens.len(), 1, "reach guard: the Token node: {text}: {json}");
+            let mut readers = Vec::new();
+            effect_nodes(&json, reader, &mut readers);
+            assert_eq!(readers.len(), 1, "reach guard: the {reader} node: {text}: {json}");
+            let group = &json[0]["declares_chosen_group"];
+            assert!(group.is_number(), "reach: the declaring node: {text}: {json}");
+            let reference = if controller_scoped {
+                &readers[0]["target"]["controller"]
+            } else {
+                &readers[0]["target"]
+            };
+            let expected = if controller_scoped {
+                serde_json::json!({ "DeclaredPlayer": { "group": group } })
+            } else {
+                serde_json::json!({ "type": "DeclaredPlayer", "group": group })
+            };
+            assert_eq!(*reference, expected, "{text}: {json}");
+        }
+    }
+
+    /// With no declaration, the same token clause leaves nothing for "that player" to bind.
+    #[test]
+    fn player_only_readers_bind_no_player_across_a_token_clause_without_a_declaration() {
+        for (text, reader, expected) in [
+            (
+                "Destroy target creature. Create a Treasure token. That player discards a card.",
+                "Discard",
+                serde_json::json!({ "type": "ParentTargetController" }),
+            ),
+            (
+                "Create a Treasure token. Destroy target creature that player controls.",
+                "Destroy",
+                serde_json::json!("You"),
+            ),
+        ] {
+            let json = chain_json(text);
+            let mut tokens = Vec::new();
+            effect_nodes(&json, "Token", &mut tokens);
+            assert_eq!(
+                tokens.len(),
+                1,
+                "reach guard: the Token node: {text}: {json}"
+            );
+            let mut readers = Vec::new();
+            effect_nodes(&json, reader, &mut readers);
+            assert_eq!(
+                readers.len(),
+                1,
+                "reach guard: the {reader} node: {text}: {json}"
+            );
+            let target = &readers[0]["target"];
+            let reference = if reader == "Destroy" {
+                &target["controller"]
+            } else {
+                target
+            };
+            assert_eq!(*reference, expected, "{text}: {json}");
+            assert!(
+                !json.to_string().contains("declares_chosen_group"),
+                "{text}: {json}"
+            );
+        }
+    }
+
+    /// CR 608.2c: a bare "they" takes the tokens just created, however the declaration reached it.
+    #[test]
+    fn bare_they_after_a_token_clause_reads_the_tokens_with_a_non_caster_clause_between() {
+        let json = chain_json(
+            "Target player loses 3 life. Create two 1/1 white Spirit creature tokens. They have flying.",
+        );
+        let mut grants = Vec::new();
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"]["type"], "LastCreated",
+            "{}",
+            grants[0]
+        );
+        assert!(
+            !grants[0].to_string().contains("DeclaredPlayer"),
+            "{}",
+            grants[0]
+        );
+    }
 }
 
 const FINALE_OF_PROMISE: &str = "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.";

@@ -911,6 +911,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSourceController
         | TargetFilter::ParentTargetController
+        | TargetFilter::DeclaredPlayer { .. }
         // CR 120.1 + CR 109.4: the damage recipient's CONTROLLER is a player,
         // unlike `EventTarget` (the recipient object itself) below.
         | TargetFilter::EventTargetController

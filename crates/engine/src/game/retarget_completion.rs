@@ -109,9 +109,11 @@ pub(crate) fn retarget_dependencies(filter: &TargetFilter) -> RetargetDeps {
             .map_or(RetargetDeps::Independent, retarget_dependencies),
         // Untraversed payload: fail closed.
         TargetFilter::PlayerMatching { .. } => RetargetDeps::AllPositions,
-        // CR 608.2c: these read the resolving ability's own targets.
+        // CR 608.2c: these read the resolving ability's own targets; a declared player
+        // names the player an earlier clause announced.
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner => RetargetDeps::AllPositions,
         // Read the source, the event, a resolution-time binding or nothing:
@@ -205,6 +207,7 @@ fn controller_deps(controller: &ControllerRef) -> RetargetDeps {
     match controller {
         ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::ParentTargetController
         | ControllerRef::ParentTargetOwner => RetargetDeps::AllPositions,
         ControllerRef::You

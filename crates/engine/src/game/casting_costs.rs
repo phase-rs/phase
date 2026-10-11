@@ -12194,17 +12194,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
         ability.effect,
         crate::types::ability::Effect::Unimplemented { .. }
     ) && ability.targets.is_empty();
-    let stack_ability = if !is_placeholder {
-        Some(ability)
-    } else {
-        // CR 603.4: For permanent spells with no spell ability, store cast_from_zone
-        // directly on the object since there's no ability context to carry it.
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            obj.cast_from_zone = Some(source_zone);
-            obj.cast_controller = Some(player);
-        }
-        None
-    };
+    // CR 601.2a + CR 601.2i: every cast spell carries its cast provenance on
+    // the object itself, not only on its ability context. The engine-synthesized
+    // `WasCast` guard on the spell's own cast triggers (Cascade, CR 702.85a) is
+    // rechecked when the trigger resolves, while the spell is still on the
+    // stack and before `stack.rs` copies the context onto the resolving spell.
+    // Copies never reach here (CR 707.10: a copy of a spell isn't cast).
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_from_zone = Some(source_zone);
+        obj.cast_controller = Some(player);
+    }
+    let stack_ability = (!is_placeholder).then_some(ability);
 
     // CR 107.3m: Apply the paid-X snapshot to the object (after the placeholder
     // branch has already taken a mutable borrow). Done unconditionally so that

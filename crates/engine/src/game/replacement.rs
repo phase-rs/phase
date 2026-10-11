@@ -6558,7 +6558,11 @@ fn replacement_active_player_matches(
         Some(ControllerRef::You) => state.active_player == controller,
         Some(ControllerRef::Opponent) => state.active_player != controller,
         Some(ControllerRef::ScopedPlayer) => false,
-        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+        Some(
+            ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::DeclaredPlayer { .. },
+        ) => false,
         Some(ControllerRef::ParentTargetController) => false,
         // CR 120.1 + CR 109.4: the damage recipient's controller.
         Some(ControllerRef::EventTargetController) => false,
@@ -6696,7 +6700,11 @@ fn evaluate_replacement_condition(
                 // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
                 // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                Some(
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. },
+                ) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
@@ -6752,7 +6760,11 @@ fn evaluate_replacement_condition(
                 // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
                 // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                Some(
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. },
+                ) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
@@ -6947,6 +6959,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
                 | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. }
                 | ControllerRef::ParentTargetController
                 | ControllerRef::EventTargetController
                 | ControllerRef::ParentTargetOwner
@@ -7190,6 +7203,7 @@ fn apply_state_level_gates(
                 crate::types::ability::ControllerRef::ScopedPlayer
                 | crate::types::ability::ControllerRef::TargetPlayer
                 | crate::types::ability::ControllerRef::TargetOpponent
+                | crate::types::ability::ControllerRef::DeclaredPlayer { .. }
                 | crate::types::ability::ControllerRef::ParentTargetController
                 // Engine constraint: resolving the damage recipient's
                 // controller needs a trigger event window, which a replacement
@@ -7683,6 +7697,7 @@ fn object_replacement_candidate_applies(
                 // CR 109.4: TargetOpponent has no active-ability context at
                 // replacement-check time — fails closed identically to TargetPlayer.
                 | crate::types::ability::ControllerRef::TargetOpponent
+                | crate::types::ability::ControllerRef::DeclaredPlayer { .. }
                 | crate::types::ability::ControllerRef::ParentTargetController
                 // Engine constraint: no trigger event window at
                 // replacement-check time; fails closed like the parent-target

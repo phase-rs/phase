@@ -3075,13 +3075,19 @@ pub(super) fn handle_resolution_choice(
             GameAction::RippleChoice { choice },
         ) => {
             if matches!(choice, crate::types::actions::CastChoice::Cast) {
-                effects::ripple::perform_reveal_and_offer(state, source_id, count, events);
+                effects::ripple::perform_reveal_and_offer(state, source_id, player, count, events);
             } else {
                 // CR 702.60a: declined. An empty terminal batch still fires
                 // `RippleTerminalComplete`, which un-pauses the resolving Ripple
                 // trigger (nothing was revealed, so there is nothing to bottom).
-                effects::ripple::place_on_library_bottom(state, source_id, &[], None, events);
-                let _ = player;
+                effects::ripple::place_on_library_bottom(
+                    state,
+                    source_id,
+                    player,
+                    &[],
+                    None,
+                    events,
+                );
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -3097,7 +3103,6 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: order },
         ) => {
-            let _ = player;
             if order.len() != cards.len()
                 || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
                 || !order.iter().all(|id| cards.contains(id))
@@ -3106,7 +3111,9 @@ pub(super) fn handle_resolution_choice(
                     "Ripple bottom order must be a permutation of the revealed cards".to_string(),
                 ));
             }
-            effects::ripple::place_on_library_bottom(state, source_id, &order, final_cast, events);
+            effects::ripple::place_on_library_bottom(
+                state, source_id, player, &order, final_cast, events,
+            );
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 701.20a + CR 608.2d: the controller announces the bottom-placement

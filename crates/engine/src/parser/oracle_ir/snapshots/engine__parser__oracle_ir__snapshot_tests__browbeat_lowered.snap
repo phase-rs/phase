@@ -16,6 +16,7 @@ expression: "&lowered"
           "type": "Player"
         }
       },
+      "declares_chosen_group": 2147483649,
       "cost": null,
       "sub_ability": {
         "kind": "Spell",
@@ -29,6 +30,7 @@ expression: "&lowered"
             "type": "Player"
           }
         },
+        "declares_chosen_group": 2147483648,
         "cost": null,
         "sub_ability": null,
         "duration": null,

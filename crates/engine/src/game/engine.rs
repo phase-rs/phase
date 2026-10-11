@@ -3919,11 +3919,12 @@ fn entry_announces(
     // reads `waiting_for`, nor `pending_trigger_entry`, which is set exactly while a prompt
     // is up). NOT a claim of purity over a three-field surface: the CR 603.5 recipient
     // conjunct below resolves a player through `optional_prompt_player` →
-    // `resolve_effect_player_ref`, which reaches ELEVEN distinct `GameState` fields —
+    // `resolve_effect_player_ref`, which reaches these distinct `GameState` fields —
     // `state.players`, `state.seat_order`, `state.format_config`, `state.objects`,
     // `state.lki_cache`, `state.stack`, `state.current_trigger_event`,
     // `state.last_created_token_ids`, `state.last_revealed_ids`,
-    // `state.last_zone_changed_ids` and `state.resolution_stack`. The contract is narrower
+    // `state.last_zone_changed_ids`, `state.resolution_stack` and
+    // `state.resolving_stack_entry`. The contract is narrower
     // and exact — the mint is a function of the BOARD, never of the PROMPT — and it is what
     // keeps the mint's verdict stable across a prompted and an unprompted beat.
     // It is set exactly
@@ -4032,7 +4033,7 @@ fn entry_announces(
         ability,
         crate::game::effects::OptionalFeasibility::Probe,
     )
-    .filter(|gate| gate.prompt_player == proposer)
+    .filter(|gate| gate.prompt_player == Some(proposer))
     .filter(|gate| {
         gate.key
             .as_ref()
@@ -4124,7 +4125,7 @@ fn entry_announces(
     //   `collect_target_slots`' own `player != ability.controller` filter: it keys on the seat
     //   the CONSUMER reads, which is `entry.controller`, and those two coincide in production
     //   but are separate fields. Same shape as the sibling `may` mint's
-    //   `.filter(|gate| gate.prompt_player == proposer)` — direction: strictly FEWER offers.
+    //   `.filter(|gate| gate.prompt_player == Some(proposer))` — direction: strictly FEWER offers.
     // * `TargetSelectionMode` other than `Chosen` — CR 115.1's "require their controller to
     //   choose" is overridden and the GAME selects. `triggers::prepare_trigger_targets` sends
     //   this to `random_select_targets_for_ability` and then to `AutoAssigned`, so no prompt
@@ -4183,8 +4184,8 @@ fn entry_announces(
 /// A function of the BOARD, never of the PROMPT. NOT a purity claim over a three-field
 /// `(state.stack, state.objects, proposer)` surface — that would be false: the CR 603.5
 /// recipient conjunct in the body resolves a player through `optional_prompt_player` →
-/// `resolve_effect_player_ref`, which reaches ELEVEN distinct `GameState` fields (enumerated
-/// at that conjunct). What actually holds, and what the callers rely on, is the narrower
+/// `resolve_effect_player_ref`, which reaches the distinct `GameState` fields enumerated
+/// at that conjunct. What actually holds, and what the callers rely on, is the narrower
 /// PROMPT-independence: it deliberately does **not**
 /// read `state.waiting_for`, and it cannot: both production call sites run at
 /// `WaitingFor::Priority` (`interactive_loop_bridge`'s destructure, and the drive's
@@ -22616,7 +22617,7 @@ mod stage2_injector_tests {
         scoped.scoped_player = Some(P1);
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &scoped),
-            P1,
+            Some(P1),
             "reach-guard: the recipient authority must really route this entry to the OTHER \
              seat, or the negative below is about nothing"
         );
@@ -22630,7 +22631,7 @@ mod stage2_injector_tests {
         let unscoped = shape_b(src, scoped_put_counter());
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &unscoped),
-            P0,
+            Some(P0),
             "reach-guard: with no scoped player the gate asks the controller = proposer"
         );
         let positive = shape_b_entry(941, src, unscoped);
@@ -22665,6 +22666,39 @@ mod stage2_injector_tests {
             points[0].slot.index, 1,
             "index 1 is the may slot in BOTH shapes"
         );
+    }
+
+    /// CR 608.2b: an optional addressed to a declared player nobody was announced as is asked
+    /// of no one, so its `may` gate carries no recipient and the entry publishes no slot.
+    #[test]
+    fn a_may_slot_is_not_minted_for_an_unannounced_declared_player() {
+        use crate::types::ability::{ChosenGroupId, TargetFilter};
+        let (state, src) = u2_board();
+
+        let mut unannounced = shape_b(src, scoped_put_counter());
+        unannounced.optional_player = Some(TargetFilter::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        });
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &unannounced),
+            None,
+            "reach-guard: no declared player resolves, so the gate has no recipient"
+        );
+        assert!(
+            entry_publishes_pin_slots(&state, &shape_b_entry(942, src, unannounced), P0).is_none(),
+            "a gate with no recipient mints no `may` slot for any proposer"
+        );
+
+        let addressed_to_nobody = shape_b(src, scoped_put_counter());
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &addressed_to_nobody),
+            Some(P0),
+            "reach-guard: the same entry with no `optional_player` asks the controller"
+        );
+        let published =
+            entry_publishes_pin_slots(&state, &shape_b_entry(943, src, addressed_to_nobody), P0)
+                .expect("the matched positive must reach the mint and publish");
+        assert!(published.may.is_some(), "the matched positive mints `may`");
     }
 
     /// The CR 603.5 prompt sites in ONE source text: `(producers, readers, in_test)`.
@@ -22798,9 +22832,10 @@ mod stage2_injector_tests {
     /// **The PRODUCER census, so a new producer is a COUNTED event.** What bounds the mint
     /// conjunct's reach is how many things PRODUCE `WaitingFor::OptionalEffectChoice`: the
     /// conjunct is a fail-closed pre-filter on ONE of them, and soundness over the others is
-    /// discharged at the consumption point. Exactly one of the five sits inside the CR 603.5 gate
-    /// that consults the recipient authority, so if a sixth appears this row fails and whoever
-    /// added it must decide where its recipient is bound.
+    /// discharged at the consumption point. Exactly one of the four sits inside the CR 603.5 gate
+    /// that consults the recipient authority (the repeated-payment offer consults it too, but
+    /// mints no may-trigger key), so if a fifth appears this row fails and whoever added it must
+    /// decide where its recipient is bound.
     ///
     /// A producer is identified by its ENCLOSING FUNCTION and the CONSTRUCTION it mints
     /// (`file::fn {fields}`, whitespace stripped), and the qualifying
@@ -22850,7 +22885,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            53,
+            52,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -22858,8 +22893,8 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 11, 37),
-            "the partition, not just the total: five PRODUCTION producers, eleven PRODUCTION \
+            (4, 11, 37),
+            "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
              readers (including the two new optional-subject projection reads), and 37 \
              `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
@@ -22867,15 +22902,14 @@ mod stage2_injector_tests {
         assert_eq!(
             producers,
             vec![
-                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,decision_subject_id:None,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/mod.rs::offer_repeated_payment {player,decision_subject_id:None,source_id:payment_unit.source_id,description:payment_unit.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
                 "game/effects/mod.rs::resolve_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
-                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
                 "game/effects/scoped_library_search.rs::advance_acceptance {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
                 "game/engine.rs::begin_pending_trigger_target_selection {player,decision_subject_id:None,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
             ],
-            "the five production producers, each keyed by its ENCLOSING FUNCTION and the \
-             CONSTRUCTION it mints, compared as a sorted MULTISET, so a sixth mint inside one \
-             of these functions still fails here. Four of the five choose `player` WITHOUT \
+            "the four production producers, each keyed by its ENCLOSING FUNCTION and the \
+             CONSTRUCTION it mints, compared as a sorted MULTISET, so a fifth mint inside one \
+             of these functions still fails here. Two of the four choose `player` WITHOUT \
              consulting the recipient authority, which is exactly why the mint conjunct is a \
              fail-closed pre-filter and not a soundness proof. A CR 603.5 producer's \
              construction changed — if that was intended, update this literal; if it was not, \
@@ -22895,10 +22929,11 @@ mod stage2_injector_tests {
             .filter(|l| l.contains(&authority))
             .count();
         assert_eq!(
-            authority_code_hits, 2,
-            "one definition + exactly one call — the CR 603.5 gate's `let prompt_player = ..`. \
-             A second call inside `effects/mod.rs` means a second producer started consulting \
-             the authority and this row's partition needs re-deriving"
+            authority_code_hits, 3,
+            "one definition + two calls — the CR 603.5 gate's `let prompt_player = ..` and the \
+             repeated-payment offer, which asks the named player per iteration. A third call \
+             inside `effects/mod.rs` means another producer started consulting the authority \
+             and this row's partition needs re-deriving"
         );
     }
 
@@ -23379,10 +23414,11 @@ mod stage2_injector_tests {
     /// R23, conjunct 4 — **CR 603.5 + CR 732.2a: a `may` pin answers only the seat the PROMPT
     /// names.**
     ///
-    /// The mint's recipient conjunct (U2) is a PREDICTION over one of five
-    /// `WaitingFor::OptionalEffectChoice` producers — only one of them consults
-    /// `optional_prompt_player` — so it is partial by construction. This guard reads the
-    /// recipient OFF THE PROMPT, which is total over all five and over any sixth.
+    /// The mint's recipient conjunct (U2) is a PREDICTION over one of four
+    /// `WaitingFor::OptionalEffectChoice` producers — only the CR 603.5 gate and the
+    /// repeated-payment offer consult `optional_prompt_player` — so it is partial by
+    /// construction. This guard reads the recipient OFF THE PROMPT, which is total over all
+    /// four and over any fifth.
     ///
     /// MATCHED POSITIVE, same instrument, same template, differing in exactly one fixture
     /// parameter (the seat the prompt names — and, coherently, the controller of the suspended
@@ -25347,10 +25383,10 @@ mod bounded_offer_conjunct_tests {
     /// | `has_kind_driven_repeat` | 2 | `upfront_optional_gate` + `repeat_for_outermost_with_scope_or_unless` |
     /// | `has_member_driven_repeat_after_hydration` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver guard |
     /// | `is_repeated_optional_payment` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver dispatch |
-    /// | `optional_prompt_player` | 1 | `upfront_optional_gate` only |
+    /// | `optional_prompt_player` | 2 | `upfront_optional_gate` + `offer_repeated_payment` (names who is asked each CR 603.12a payment offer; opens no up-front window) |
     /// | `optional_effect_is_infeasible` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s `CastFromZone` decline |
     ///
-    /// **THE THREE NON-AUTHORITY SITES ARE NOT COPIES, AND FOLDING THEM IN WOULD BE WRONG.**
+    /// **THE NON-AUTHORITY SITES ARE NOT COPIES, AND FOLDING THEM IN WOULD BE WRONG.**
     /// They consume these predicates to decide WHICH DRIVER RUNS — whether a counted repeat
     /// has to wrap scoped/unless-pay instructions (CR 608.2c), which repeat driver takes the
     /// ability, and the CR 603.12a repeated-payment dispatch that fires *because* the up-front
@@ -25422,7 +25458,7 @@ mod bounded_offer_conjunct_tests {
                 3,
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
-            (format!("optional_prompt{}player(", '_'), 1),
+            (format!("optional_prompt{}player(", '_'), 2),
             (format!("optional_effect_is{}infeasible(", '_'), 2),
         ];
 
@@ -25498,8 +25534,9 @@ mod bounded_offer_conjunct_tests {
              repeat-driver guard, its per-member unless-payment gate, and its CR 603.12a \
              driver dispatch, and \
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
-             DRIVER rather than opening an up-front window, so a NEW site is a decision to \
-             adjudicate here and not a number to move.\nsites={sites:#?}"
+             DRIVER rather than opening an up-front window — plus `offer_repeated_payment`, \
+             which only names who is asked a driver's per-iteration offer, so a NEW site is a \
+             decision to adjudicate here and not a number to move.\nsites={sites:#?}"
         );
 
         let outside: Vec<&String> = sites

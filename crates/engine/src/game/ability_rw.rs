@@ -1427,7 +1427,9 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
             WriteScope::SelfSource
         }
         TargetFilter::TriggeringSource => WriteScope::EventObject,
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. } => {
             chain_root.unwrap_or(WriteScope::EventObject)
         }
         TargetFilter::LastCreated => WriteScope::Created,
@@ -2365,6 +2367,7 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         // CR 109.4 + CR 102.2/102.3: runtime-read-identical to `TargetPlayer` (first
         // `TargetRef::Player`); not a frozen event-context tag.
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
@@ -2414,6 +2417,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
                 || tf.properties.iter().any(legacy_filter_prop)
         }
         TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -2662,6 +2666,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::StackAbility { .. }
         // CR 201.5: an unstamped `GrantingObject` resolves to each member's own
         // source, so it is per-member-divergent (TrackedSet/ExiledBySource shape).
@@ -2748,6 +2753,7 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         // no-ordering-input target gate (the target player is a declared target,
         // member-invariant under uniformity, not per-source storage).
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         // CR 102.1: the active player is a game-defined role read live from
         // `state.active_player`, not per-source member-bound storage.
         | ControllerRef::ActivePlayer
@@ -7203,6 +7209,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         // the write path `target_is_legacy_ref` excludes it too), so it must NOT
         // set `legacy_batch_prompt`; it is a live event read like the others here.
         TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -7421,6 +7428,7 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         // CR 109.4: runtime-read-identical to `TargetPlayer` (declared-target read,
         // no sibling-mutable state).
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::DefendingPlayer
         // CR 102.1: a live read of `state.active_player` — no sibling-mutable
         // state, empty RW profile (mirrors `DefendingPlayer`).

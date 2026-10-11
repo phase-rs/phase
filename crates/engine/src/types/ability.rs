@@ -6406,6 +6406,16 @@ pub enum ControllerRef {
     ChosenPlayer {
         index: u8,
     },
+    /// CR 608.2c + CR 115.1a: Filter controller is the player announced as the target of the
+    /// chain clause tagged `declares_chosen_group == Some(group)` ("Choose target opponent.
+    /// Destroy target land that player controls."). Names that clause's player without
+    /// announcing a second one, and names no one to instructions once that target is illegal
+    /// (CR 608.2b); an object target's own legality criterion still reads the announced player.
+    /// The `ControllerRef` twin of [`TargetFilter::DeclaredPlayer`], read through the same
+    /// `targeting::resolve_live_declared_player`.
+    DeclaredPlayer {
+        group: ChosenGroupId,
+    },
     /// CR 613.1 + CR 109.4: Filter controller is the player PERSISTED on the
     /// source via `ChosenAttribute::Player` — the player chosen by an
     /// "as ~ enters the battlefield, choose a player" replacement. Read at
@@ -8043,6 +8053,16 @@ pub enum TargetFilter {
     /// would be ambiguous after earlier instructions mutate zones.
     ParentTargetSlot {
         index: usize,
+    },
+    /// CR 608.2c + CR 115.1a: the player announced as the target of the chain
+    /// clause tagged `declares_chosen_group == Some(group)` ("Target player
+    /// draws a card. That player discards a card."). A later clause names that
+    /// player without declaring a second target, so it surfaces no target slot.
+    /// Resolved live from the resolving chain (`targeting::resolve_live_declared_player`),
+    /// never by position; names no player when that target was illegal
+    /// (CR 608.2b), so the clause affects no one.
+    DeclaredPlayer {
+        group: ChosenGroupId,
     },
     /// CR 608.2c: Resolves to the controller of the parent ability's target object.
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
@@ -21444,6 +21464,15 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// Either variant names exactly one player, so one that does not resolve names no one
+    /// instead of falling back to another player (CR 608.2b).
+    pub(crate) fn names_one_player(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+        )
+    }
+
     /// CR 608.2c + CR 701.24c: True only for the mixed-zone owner population
     /// used by compound all-player shuffles. One operand is the iterated
     /// player's hand; the other is every permanent that player owns. Ordinary
@@ -21906,6 +21935,8 @@ impl TargetFilter {
                 | TargetFilter::AmassedArmy
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::DeclaredPlayer { .. }
+                | TargetFilter::SpecificPlayer { .. }
                 | TargetFilter::ParentTargetController
                 // CR 115.1: only something identified by the word "target" is a
                 // target, so this reference — read from the triggering event at
@@ -22009,8 +22040,9 @@ impl TargetFilter {
     }
 
     /// CR 115.1a + CR 109.5: Returns true when this filter's TARGET SLOT holds a
-    /// player rather than an object — "target player", "target opponent", a
-    /// snapshotted specific player.
+    /// player rather than an object — "target player", "target opponent".
+    /// `SpecificPlayer` is a bound player id, a context reference that is
+    /// affected rather than targeted (CR 115.10a), so it is not a slot.
     ///
     /// This is the same rule `game::targeting::legal_targets` enumerates
     /// players-only with, kept here as the single authority so any consumer that
@@ -22031,13 +22063,11 @@ impl TargetFilter {
     /// is NOT a player target, so [`Self::chosen_player_index`] must be consulted
     /// first by callers that handle both.
     pub fn denotes_player_target(&self) -> bool {
-        matches!(
-            self,
-            TargetFilter::Player | TargetFilter::SpecificPlayer { .. }
-        ) || matches!(
-            self,
-            TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty()
-        )
+        matches!(self, TargetFilter::Player)
+            || matches!(
+                self,
+                TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty()
+            )
     }
 
     /// CR 115.10a + CR 608.2d: True when this filter denotes a
@@ -26375,6 +26405,22 @@ impl TargetChoiceTiming {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChosenGroupId(pub u32);
 
+impl ChosenGroupId {
+    /// Ids the parser mints for a player-declaring clause start here, disjoint
+    /// from the `ClauseId`-derived ids of `TargetOnly` producers.
+    pub const DECLARED_PLAYER_BASE: u32 = 1 << 31;
+
+    /// The id of the `ordinal`-th player-declaring clause of one ability.
+    pub fn declared_player(ordinal: u32) -> Self {
+        Self(Self::DECLARED_PLAYER_BASE + ordinal)
+    }
+
+    /// Whether the parser minted this id for a player-declaring clause.
+    pub fn is_declared_player(self) -> bool {
+        self.0 >= Self::DECLARED_PLAYER_BASE
+    }
+}
+
 /// Identity of one return instruction in a parsed ability chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultId(pub u32);
@@ -28676,6 +28722,11 @@ pub struct SpellContext {
     /// event-delayed trigger, which reads the event that fires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
+    /// CR 603.7a + CR 608.2c: the player each declared group of the creating chain named, still
+    /// legal at creation, read through `targeting::carried_declared_player`; stamped only by
+    /// `delayed_trigger::resolve`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outer_declared_players: Vec<(ChosenGroupId, PlayerId)>,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks
@@ -33293,7 +33344,7 @@ impl CopyCountStatus {
     }
 }
 
-/// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
+/// CR 608.2c: Distinguishes WHY a chained `ParentTarget` child
 /// ability was handed off with nothing to act on. The sources are mutually
 /// exclusive per hand-off (only one effect can be the immediate parent of a
 /// given child). Downstream consumers inspect the typed reason only when their
@@ -33303,7 +33354,7 @@ impl CopyCountStatus {
 /// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
-    /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
+    /// CR 401.5 (issue #1365): A `Dig` (or `RevealTop`) looked at an empty library. Consulted
     /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
     /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
     /// cast/play operations avoid offering a nonexistent card regardless of
@@ -36241,6 +36292,21 @@ mod tests {
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn names_one_player_is_the_declared_and_bound_player_only() {
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        assert!(TargetFilter::DeclaredPlayer { group }.names_one_player());
+        assert!(TargetFilter::SpecificPlayer { id: PlayerId(1) }.names_one_player());
+        for other in [
+            TargetFilter::Player,
+            TargetFilter::Controller,
+            TargetFilter::ParentTargetController,
+            TargetFilter::Typed(TypedFilter::default()),
+        ] {
+            assert!(!other.names_one_player(), "{other:?}");
+        }
+    }
 
     /// CR 123.6e: unique vowels are the *different* vowels among A, E, I, O,
     /// U and Y, case-insensitively, over every text read. Each value exposes
@@ -42001,7 +42067,6 @@ mod player_target_slot_tests {
 
         for filter in [
             TargetFilter::Player,
-            TargetFilter::SpecificPlayer { id: PlayerId(1) },
             empty_typed(Some(ControllerRef::Opponent)),
             empty_typed(Some(ControllerRef::You)),
             // A resolution-chosen player is a player slot by shape; callers that
@@ -42021,6 +42086,8 @@ mod player_target_slot_tests {
             TargetFilter::Opponent,
             TargetFilter::Controller,
             TargetFilter::SelfRef,
+            // CR 115.10a: a bound player id is affected, never a declared target.
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
             // "target token you control" — a characteristic no player has.
             TargetFilter::Typed(TypedFilter {
                 type_filters: Vec::new(),

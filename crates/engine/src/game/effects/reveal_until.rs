@@ -117,7 +117,10 @@ fn resolve_reveal(
     // → controller of the parent ability's targeted object (Polymorph, Proteus Staff,
     // Transmogrify); other player-resolving filters → player extracted from
     // `ability.targets` (e.g., Telemin Performance "target opponent reveals...").
-    let revealing_player = resolve_revealing_player(state, ability, player_filter);
+    let Some(revealing_player) = resolve_revealing_player(state, ability, player_filter) else {
+        super::publish_reveal_result(state, Vec::new());
+        return Ok(());
+    };
 
     let player = state
         .players
@@ -231,7 +234,11 @@ fn resolve_reveal(
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    super::publish_tracked_set(state, all_revealed.clone());
+    if all_revealed.is_empty() {
+        super::publish_fresh_tracked_set(state, Vec::new());
+    } else {
+        super::publish_tracked_set(state, all_revealed.clone());
+    }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
@@ -635,6 +642,7 @@ fn resolve_choose_any_number(
     // CR 608.2c: nothing was revealed (count 0 or an empty library) — the
     // disposition has no cards to act on; resolve cleanly with no interaction.
     if revealed.is_empty() {
+        super::publish_fresh_tracked_set(state, Vec::new());
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
@@ -685,21 +693,27 @@ fn resolve_revealing_player(
     state: &GameState,
     ability: &ResolvedAbility,
     player_filter: &TargetFilter,
-) -> PlayerId {
+) -> Option<PlayerId> {
     match player_filter {
-        TargetFilter::Controller => ability.controller,
-        TargetFilter::ParentTargetController => {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::ParentTargetController => Some(
             crate::game::ability_utils::parent_target_controller(ability, state)
-                .unwrap_or(ability.controller)
+                .unwrap_or(ability.controller),
+        ),
+        filter if filter.names_one_player() => {
+            super::resolve_player_for_context_ref(state, ability, player_filter)
         }
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-            })
-            .unwrap_or(ability.controller),
+        _ if super::declared_player_slot_is_empty(state, ability, player_filter) => None,
+        _ => Some(
+            ability
+                .targets
+                .iter()
+                .find_map(|target| match target {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                })
+                .unwrap_or(ability.controller),
+        ),
     }
 }
 

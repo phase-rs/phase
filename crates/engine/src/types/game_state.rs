@@ -22516,23 +22516,23 @@ declare_game_state! {
     pub last_revealed_ids: Vec<ObjectId>,
 
     /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
-    /// recently resolved `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice/
+    /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
     /// since issue #8798; a `RevealUntil` that revealed no matching card) — distinct from "none of those has run
     /// in this chain link," which is `None`. This is a brief, transient
     /// relay: `effects::apply_parent_chain_context` reads and immediately
     /// clears it at the very next parent->child hand-off (whatever that
-    /// child turns out to be), copying it onto that ONE child's typed
+    /// child turns out to be), copying it onto that child's (and, while still target-less, its descendants') typed
     /// `ResolvedAbility::parent_target_missing_reason` field. The only other
     /// reader is the same hop's inline `WhenYouDo` creation gate
     /// (`effects::reflexive_occurrence_voided_by_parent`), which peeks without
     /// clearing immediately before that hand-off — in
     /// particular, the shared
     /// `resolved_targets` chokepoint does not, so an empty Dig/ChooseFromZone/
-    /// RevealHand can never affect any `ParentTarget` consumer beyond its own
-    /// immediate sub_ability (e.g. Avenging Angel's unrelated LTB self-return
-    /// stays unaffected). See [`crate::types::ability::ParentTargetMissingReason`]
+    /// RevealHand reaches a later `ParentTarget` consumer only through the typed
+    /// field, down the chain its producer heads (e.g. Avenging Angel's
+    /// unrelated LTB self-return stays unaffected). See [`crate::types::ability::ParentTargetMissingReason`]
     /// for what each reason gates and who consults it. Transient resolution
     /// bookkeeping — not serialized. (Consolidated from three parallel
     /// booleans — `last_dig_found_nothing`, `last_choose_from_zone_found_nothing`,

@@ -32,7 +32,9 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("ExileFaceDownPile".to_string())),
     };
 
-    let player = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, &player_filter) else {
+        return Ok(());
+    };
     let source_object = resolve_pile_object(state, ability, &object);
     let seat = state
         .players

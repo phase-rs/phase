@@ -347,7 +347,11 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::ScopedPlayer) => false,
                     // CR 109.4: TargetOpponent, like TargetPlayer, is what's being
                     // chosen here — fail closed as a candidate-enumeration scope.
-                    Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                    Some(
+                        ControllerRef::TargetPlayer
+                        | ControllerRef::TargetOpponent
+                        | ControllerRef::DeclaredPlayer { .. },
+                    ) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     // Engine constraint: resolving this reference needs a trigger event
                     // window, which target-candidate matching does not have.
@@ -1480,6 +1484,71 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     })
 }
 
+/// CR 608.2c + CR 608.2b: the instruction-time read of the player announced by the clause
+/// tagged `declares_chosen_group == Some(group)`, else the player the creating chain carried
+/// (`carried_declared_player`). `None` when no player was announced,
+/// when that target was illegal as the chain began to resolve (`illegal_target_slots`), or when
+/// the player has left the game (CR 800.4a): an illegal target is not affected and "any part of
+/// the effect that requires that information won't happen". An independently announced object
+/// ("target land that player controls") is checked before the stamp exists (CR 608.2 runs
+/// 608.2a/b first) and so still reads the announced player.
+pub(crate) fn resolve_live_declared_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
+    let root = resolving_root_ability(state, ability);
+    // A group the root declares is local even when it announced no player.
+    let Some(local) = super::ability_utils::declared_group_player_slot(root, group) else {
+        return carried_declared_player(state, root, group);
+    };
+    let (slot, player) = local?;
+    let illegal = resolution_carrier_entry(state, ability)
+        .and_then(StackEntry::ability)
+        .is_some_and(|root| root.illegal_target_slots.contains(&slot));
+    (!illegal && super::players::is_alive(state, player)).then_some(player)
+}
+
+/// CR 603.7a + CR 800.4: the player the creating chain announced for `group`, carried on the
+/// delayed payload `root`, while that player is in the game. Takes the root itself because a
+/// payload that is not yet on the stack has no stack root to find by source.
+pub(crate) fn carried_declared_player(
+    state: &GameState,
+    root: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
+    root.context
+        .outer_declared_players
+        .iter()
+        .find_map(|&(carried, player)| (carried == group).then_some(player))
+        .filter(|&player| super::players::is_alive(state, player))
+}
+
+/// CR 603.7a + CR 608.2c: every declared group the creating `ability` can name, with its player
+/// as `resolve_live_declared_player` reads it now: the groups its root declares and the groups
+/// it carries from an earlier delayed creation. A group that names no one is omitted.
+pub(crate) fn live_declared_players(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<(crate::types::ability::ChosenGroupId, PlayerId)> {
+    let root = resolving_root_ability(state, ability);
+    let mut groups = super::ability_utils::declared_groups_in_chain(root);
+    for &(group, _) in &root.context.outer_declared_players {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    groups
+        .into_iter()
+        .filter_map(|group| Some((group, resolve_live_declared_player(state, ability, group)?)))
+        .collect()
+}
+
+/// CR 608.2b: whether `ability` is the resolving stack entry or a node of it.
+pub(crate) fn resolves_on_stack(state: &GameState, ability: &ResolvedAbility) -> bool {
+    resolution_carrier_entry(state, ability).is_some()
+}
+
 /// CR 601.2c + CR 608.2b: one position of a declared-target view supplied to a
 /// legality evaluation (target announcement, CR 608.2b validation, CR 115.7 /
 /// CR 707.10c retargeting). The two shapes keep an elected choice distinct from
@@ -2383,6 +2452,10 @@ pub fn resolve_effect_player_ref(
             Some(ability.original_controller.unwrap_or(ability.controller))
         }
         TargetFilter::ScopedPlayer => ability.scoped_player,
+        TargetFilter::DeclaredPlayer { group } => {
+            resolve_live_declared_player(state, ability, *group)
+        }
+        TargetFilter::SpecificPlayer { id } => super::players::is_alive(state, *id).then_some(*id),
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,
@@ -3089,6 +3162,7 @@ fn stack_entry_controller_matches(
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
@@ -6395,7 +6469,7 @@ mod tests {
             resolve_player_for_context_ref(&state, &ability, &TargetFilter::TriggeringPlayer);
         assert_eq!(
             resolved,
-            PlayerId(1),
+            Some(PlayerId(1)),
             "TriggeringPlayer on a ZoneChanged event must resolve to the entering \
              creature's controller (P1), not the Suture Priest controller (P0)",
         );
@@ -8448,5 +8522,36 @@ mod tests {
             "a legacy record cannot prove which incarnation it bound, so it must \
              not act on the object now at that id; got {result:?}"
         );
+    }
+
+    /// CR 800.4a + CR 608.2b: a `SpecificPlayer` that a delayed install bound in place of a
+    /// declared group names that player while they are in the game and no one afterwards, at
+    /// every authority that reads a declared group.
+    #[test]
+    fn a_bound_specific_player_names_no_one_once_eliminated() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let ability = ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        let bound = TargetFilter::SpecificPlayer { id: PlayerId(1) };
+        let read = |state: &GameState| {
+            (
+                resolve_effect_player_ref(state, &ability, &bound),
+                crate::game::ability_utils::collect_player_targets(state, &ability, &bound),
+                crate::game::effects::resolve_player_for_context_ref(state, &ability, &bound),
+            )
+        };
+        assert_eq!(
+            read(&state),
+            (Some(PlayerId(1)), vec![PlayerId(1)], Some(PlayerId(1)))
+        );
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        assert_eq!(read(&state), (None, vec![], None));
     }
 }

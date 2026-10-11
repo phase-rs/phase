@@ -110,9 +110,10 @@ use engine::types::ability::{
 };
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use engine::types::GameAction;
@@ -361,12 +362,14 @@ fn the_ancient_one_mills_equal_to_discarded_card_mana_value() {
     let opp_lib_before = runner.state().players[P1.0 as usize].library.len();
 
     let def = parse_effect_chain(ANCIENT_BODY, AbilityKind::Spell);
-    // The reflexive sub targets "target player"; supply the opponent up front.
-    let ability = build_resolved_from_def(&def, source, P0);
-    let ability = ResolvedAbility {
-        targets: vec![TargetRef::Player(P1)],
-        ..ability
-    };
+    let mut ability = build_resolved_from_def(&def, source, P0);
+    // The declaring sub announces its own player slot.
+    let declaring = ability
+        .sub_ability
+        .as_mut()
+        .and_then(|discard| discard.sub_ability.as_mut())
+        .expect("draw, discard, then the declaring mill");
+    declaring.targets = vec![TargetRef::Player(P1)];
 
     let mut events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
@@ -382,6 +385,66 @@ fn the_ancient_one_mills_equal_to_discarded_card_mana_value() {
         graveyard_len(&runner, P0),
         1,
         "the controller discarded exactly one card this way"
+    );
+}
+
+/// CR 601.2c + CR 603.12: through the real cast and target-announcement pipeline the mill's player
+/// is announced on the mill node itself, where the hand-built tests above place it.
+#[test]
+fn the_ancient_one_cast_announces_the_mill_player_on_its_own_node() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ancient Body", false, ANCIENT_BODY)
+        .id();
+    let drawn = scenario.add_card_to_library_top(P0, "MV5 Card");
+    let opp_lib: Vec<&str> = vec!["O0", "O1", "O2", "O3", "O4", "O5", "O6", "O7"];
+    scenario.with_library_top(P1, &opp_lib);
+    let mut runner = scenario.build();
+    set_mv(&mut runner, drawn, 5);
+    let before = runner.state().players[P1.0 as usize].library.len();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("target");
+            }
+            WaitingFor::DiscardChoice { cards, count, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: cards.into_iter().take(count).collect(),
+                    })
+                    .expect("discard");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    let after = runner.state().players[P1.0 as usize].library.len();
+    assert_eq!(
+        before - after,
+        5,
+        "the chosen player milled the discarded card's mana value"
+    );
+    assert_eq!(
+        graveyard_len(&runner, P0),
+        2,
+        "the cast spell and the discarded card"
     );
 }
 
@@ -504,11 +567,14 @@ fn the_ancient_one_interactive_discard_mills_discarded_card_mana_value() {
     let opp_lib_before = runner.state().players[P1.0 as usize].library.len();
 
     let def = parse_effect_chain(ANCIENT_BODY, AbilityKind::Spell);
-    let ability = build_resolved_from_def(&def, source, P0);
-    let ability = ResolvedAbility {
-        targets: vec![TargetRef::Player(P1)],
-        ..ability
-    };
+    let mut ability = build_resolved_from_def(&def, source, P0);
+    // The declaring sub announces its own player slot.
+    let declaring = ability
+        .sub_ability
+        .as_mut()
+        .and_then(|discard| discard.sub_ability.as_mut())
+        .expect("draw, discard, then the declaring mill");
+    declaring.targets = vec![TargetRef::Player(P1)];
 
     let mut events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)

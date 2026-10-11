@@ -88,6 +88,8 @@ fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
         // target_player: Some(Opponent) which falls through to the else branch.
         TargetFilter::Player
             | TargetFilter::ParentTargetController
+            // "That player searches their library", not "search that player's library".
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
@@ -405,6 +407,16 @@ struct SearchDisposition {
 }
 
 fn known_search_library_owner(ability: &ResolvedAbility) -> Option<PlayerId> {
+    // The first announced player need not be the declared one, and naming it needs state.
+    if matches!(
+        &ability.effect,
+        Effect::SearchLibrary {
+            target_player: Some(filter),
+            ..
+        } if filter.names_one_player()
+    ) {
+        return None;
+    }
     if let Some(player) = ability.targets.iter().find_map(|target| match target {
         TargetRef::Player(player) => Some(*player),
         TargetRef::Object(_) => None,
@@ -627,6 +639,16 @@ pub(crate) fn prepare_effective_search(
     }
     let searched_library = effective_zones.contains(&Zone::Library);
     let searched_zone_owner = match target_player.as_ref() {
+        // CR 608.2b: a declared player with no legal referent has no library to search.
+        Some(filter) if filter.names_one_player() => {
+            let Some(player) = super::resolve_player_for_context_ref(state, ability, filter) else {
+                return Ok(None);
+            };
+            player
+        }
+        Some(filter) if super::declared_player_slot_is_empty(state, ability, filter) => {
+            return Ok(None);
+        }
         Some(filter) => resolve_library_owner(state, ability, filter),
         None => ability.controller,
     };
@@ -4047,5 +4069,34 @@ mod tests {
             }
             other => panic!("expected SearchChoice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn known_search_library_owner_fails_closed_for_a_declared_player() {
+        let searching = |target_player: TargetFilter| {
+            let mut ability = make_search_ability(TargetFilter::Any, 1);
+            if let Effect::SearchLibrary {
+                target_player: slot,
+                ..
+            } = &mut ability.effect
+            {
+                *slot = Some(target_player);
+            }
+            ability.targets = vec![TargetRef::Player(PlayerId(1))];
+            ability
+        };
+        assert_eq!(
+            known_search_library_owner(&searching(TargetFilter::Player)),
+            Some(PlayerId(1)),
+            "reach guard: the first announced player is the owner for a plain player target"
+        );
+        assert_eq!(
+            known_search_library_owner(&searching(TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId(
+                    crate::types::ability::ChosenGroupId::DECLARED_PLAYER_BASE
+                ),
+            })),
+            None
+        );
     }
 }

@@ -5874,9 +5874,7 @@ fn resolve_ref(
                 // of the two shapes it takes at quantity-resolution time:
                 //   - a resolving instant/sorcery is still on the Stack (its
                 //     effect, e.g. Thunder Salvo, runs before the spell leaves —
-                //     CR 608.2n) and carries NO `cast_from_zone` (that provenance
-                //     is stamped only onto placeholder permanent-spell objects at
-                //     cast and permanents at resolution);
+                //     CR 608.2n) and carries its cast `cast_from_zone`;
                 //   - an ETB replacement evaluates against the placeholder
                 //     permanent-spell object, which DOES carry `cast_from_zone`.
                 // A reanimated / put-onto-battlefield permanent is neither on the
@@ -6497,6 +6495,13 @@ fn resolve_ref(
                                 })
                                 .is_some_and(|pid| pid == snap.controller)
                         }
+                        Some(ControllerRef::DeclaredPlayer { group }) => ability
+                            .and_then(|a| {
+                                crate::game::targeting::resolve_live_declared_player(
+                                    state, a, *group,
+                                )
+                            })
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::ParentTargetController) => ability
                             .and_then(|a| {
                                 crate::game::ability_utils::parent_target_controller(a, state)
@@ -6585,6 +6590,11 @@ fn damage_source_controller_matches(
                     TargetRef::Player(player) => Some(*player),
                     TargetRef::Object(_) => None,
                 })
+            })
+            .is_some_and(|player| actual == player),
+        ControllerRef::DeclaredPlayer { group } => ability
+            .and_then(|ability| {
+                crate::game::targeting::resolve_live_declared_player(state, ability, *group)
             })
             .is_some_and(|player| actual == player),
         ControllerRef::ParentTargetController => ability

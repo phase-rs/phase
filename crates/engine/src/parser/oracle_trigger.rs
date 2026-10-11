@@ -17390,6 +17390,7 @@ fn subject_attack_scope(subject_scope: Option<&ControllerRef>) -> Option<Subject
             ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
             | ControllerRef::TargetOpponent
+            | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner

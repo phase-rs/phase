@@ -1200,7 +1200,8 @@ struct FiringConditions<'a> {
     /// (`stack_condition_for_trigger`).
     head: Option<&'a TriggerCondition>,
     /// A delayed body's hoisted intervening-if (`delayed_intervening_if`). Its
-    /// resolution recheck is carried on the pending trigger separately.
+    /// resolution recheck is carried on the pending trigger; `stack::bind_resolution_scope`
+    /// derives it again for a payload carrying declared players.
     body_if: Option<&'a TriggerCondition>,
     /// CR 603.4 + CR 607.1c: the `trigger_definition_ref` the gated ability's
     /// builder installs, so a self-linked leaf ("if you haven't added mana with
@@ -12517,6 +12518,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // — the population-level counterpart of `ObjectScope::Target`.
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::ScopedPlayer
@@ -12653,6 +12655,7 @@ fn controller_ref_binding_diverges(controller: &ControllerRef) -> bool {
         // answers `None`. Declining covers both.
         ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         // CR 109.4 + CR 108.3: the parent target's controller / owner, read off
         // the same empty `ability.targets`.
         | ControllerRef::ParentTargetController
@@ -13201,16 +13204,38 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 /// (the controller-scoped `QuantityCheck` populations pinned by
 /// `non_battlefield_presence_gate_declines_the_fire_time_hoist` and its
 /// siblings) — buying nothing and costing CR 603.4's fire-time half.
-fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition> {
+pub(crate) fn delayed_intervening_if(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<TriggerCondition> {
     if delayed_body_outlives_a_false_gate(ability) {
         return None;
     }
-    let condition = ability.condition.as_ref()?;
-    if gate_binding_diverges_at_fire_time(condition) {
+    // CR 603.7a + CR 608.2c: the fire-time leg evaluates the condition with no ability, so a live
+    // carried declared player is bound into it first. A group the payload declares itself declines
+    // the hoist; any other group is left unbound.
+    let declared_locally =
+        |group| super::ability_utils::declared_group_player_slot(ability, group).is_some();
+    let mut condition = ability.condition.clone()?;
+    crate::game::filter::rebind_declared_groups_in_condition(&mut condition, &mut |group| {
+        if declared_locally(group) {
+            return None;
+        }
+        super::targeting::carried_declared_player(state, ability, group)
+    });
+    // CR 603.4 + CR 608.2b: an unbound non-local group names no one on both legs, so a literal
+    // stands in for it in the divergence test alone.
+    let mut classified = condition.clone();
+    crate::game::filter::rebind_declared_groups_in_condition(&mut classified, &mut |group| {
+        (!declared_locally(group)).then_some(ability.controller)
+    });
+    if gate_binding_diverges_at_fire_time(&classified) {
         return None;
     }
     let static_condition =
-        crate::parser::oracle_effect::conditions::ability_condition_to_static_condition(condition)?;
+        crate::parser::oracle_effect::conditions::ability_condition_to_static_condition(
+            &condition,
+        )?;
     if static_gate_bridge_loses_zone(&static_condition) {
         return None;
     }
@@ -13311,8 +13336,9 @@ fn delayed_trigger_to_context(
     // entry so `stack.rs`'s resolution recheck applies to a delayed triggered
     // ability exactly as it does to a printed one. `delayed_intervening_if` is
     // the SAME authority the collection gate below used, so the two halves of
-    // the CR 603.4 pair cannot read different predicates.
-    let condition = delayed_intervening_if(&trigger.ability);
+    // the CR 603.4 pair cannot read different predicates; `stack.rs` re-derives it
+    // for a payload carrying declared players, so a departed player binds no one.
+    let condition = delayed_intervening_if(state, &trigger.ability);
     // CR 603.2c: a batched ("one or more") delayed trigger reads "that many" as
     // the number of matching subjects in its whole firing group, through the
     // same counting authority printed batched triggers use.
@@ -13396,7 +13422,7 @@ fn delayed_whenever_event_firings(
     // CR 603.4: the definition's own condition (a head qualifier such as
     // "attacks alone") and the body's hoisted intervening-if are separate
     // inputs; only the body-if is rechecked on resolution.
-    let body_if = delayed_intervening_if(&delayed.ability);
+    let body_if = delayed_intervening_if(state, &delayed.ability);
     let conditions = FiringConditions {
         head: trigger.condition.as_ref(),
         body_if: body_if.as_ref(),
@@ -13536,7 +13562,7 @@ fn collect_matching_delayed_triggers(
             // `check_trigger_condition_with_source` is the same fire-time
             // evaluator printed triggers use, given the delayed ability's own
             // CR 400.7 source context and the matched event.
-            if let Some(condition) = delayed_intervening_if(&delayed.ability) {
+            if let Some(condition) = delayed_intervening_if(state, &delayed.ability) {
                 if !check_trigger_condition_with_source(
                     state,
                     &condition,
@@ -24715,7 +24741,7 @@ pub mod tests {
         ability.condition = Some(AbilityCondition::ControlsCommander {
             ownership: CommanderOwnership::Own,
         });
-        let expected_gate = delayed_intervening_if(&ability);
+        let expected_gate = delayed_intervening_if(&state, &ability);
         state.delayed_triggers.push(DelayedTrigger {
             condition: DelayedTriggerCondition::WhenDies {
                 filter: TargetFilter::Any,
@@ -26819,6 +26845,109 @@ pub mod tests {
             1,
             "reachability proof: with no commander the negated gate is TRUE and the same \
              fixture reaches the stack"
+        );
+    }
+
+    /// CR 603.7a + CR 603.4: the hoisted gate binds the group the payload CARRIES, not whatever
+    /// a same-source entry on the stack declares under the same id; a group the payload declares
+    /// itself declines the hoist, and a group with no live carried player stays unbound and is
+    /// hoisted as it is, which both legs read as no one.
+    #[test]
+    fn delayed_intervening_if_binds_the_carried_group() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let gate = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        };
+        let payload = |carried: Option<PlayerId>, declares_locally: bool| {
+            let mut ability = ResolvedAbility::new(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: None,
+                },
+                vec![],
+                ObjectId(9),
+                PlayerId(0),
+            );
+            ability.condition = Some(gate.clone());
+            ability.declares_chosen_group = declares_locally.then_some(group);
+            ability.context.outer_declared_players =
+                carried.map(|p| (group, p)).into_iter().collect();
+            ability
+        };
+        let mut state = setup();
+        let mut resident = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        resident.declares_chosen_group = Some(group);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(50),
+            source_id: ObjectId(9),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(9),
+                ability: Box::new(resident),
+            },
+        });
+
+        let bound = |player: PlayerId| {
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::SpecificPlayer { id: player }),
+                        ),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            })
+        };
+        assert_eq!(
+            delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
+            bound(PlayerId(1)),
+            "the carried player, although a same-source stack entry declares the id as P0"
+        );
+        let unbound = Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        });
+        assert_eq!(
+            delayed_intervening_if(&state, &payload(None, false)),
+            unbound,
+            "a group the payload does not carry is hoisted unbound"
+        );
+        assert_eq!(
+            delayed_intervening_if(&state, &payload(Some(PlayerId(1)), true)),
+            None,
+            "a group the payload declares itself is not the carried player"
+        );
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        assert_eq!(
+            delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
+            unbound,
+            "a carried player who left is hoisted unbound, never by identity"
         );
     }
 

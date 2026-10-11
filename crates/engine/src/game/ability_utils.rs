@@ -479,6 +479,12 @@ struct SlotAccumulator {
     /// recursed, read by `target_effect_detail`. Scoped exactly like
     /// `current_effect_kind`.
     current_effect_detail: TargetEffectDetail,
+    /// CR 608.2c + CR 115.1a: declared-player group of the link currently being
+    /// recursed, scoped exactly like `current_effect_kind`.
+    current_group: Option<crate::types::ability::ChosenGroupId>,
+    /// `groups[i]` is the group `slots[i]` was announced under; index-parallel with
+    /// `slots` by construction (`push` is the only writer).
+    groups: Vec<Option<crate::types::ability::ChosenGroupId>>,
 }
 
 impl Default for SlotAccumulator {
@@ -496,6 +502,8 @@ impl Default for SlotAccumulator {
             current_chooser: None,
             current_effect_kind: EffectKind::NoOp,
             current_effect_detail: TargetEffectDetail::None,
+            current_group: None,
+            groups: Vec::new(),
         }
     }
 }
@@ -511,7 +519,29 @@ impl SlotAccumulator {
         }
         self.slots.push(slot);
         self.labels.push(self.current_label.clone());
+        self.groups.push(self.current_group);
     }
+
+    fn built(&self) -> BuiltSlots<'_> {
+        BuiltSlots {
+            slots: &self.slots,
+            groups: &self.groups,
+        }
+    }
+}
+
+/// The slots built so far, with the declared-player group each was announced under.
+#[derive(Clone, Copy)]
+struct BuiltSlots<'a> {
+    slots: &'a [TargetSelectionSlot],
+    groups: &'a [Option<crate::types::ability::ChosenGroupId>],
+}
+
+impl BuiltSlots<'static> {
+    const NONE: Self = Self {
+        slots: &[],
+        groups: &[],
+    };
 }
 
 /// Result of target construction while an ability is being announced.
@@ -1283,6 +1313,8 @@ struct TargetSlotSpec {
     filter: TargetFilter,
     optional: bool,
     instance: TargetInstanceId,
+    /// The declared-player group the clause announcing this slot is tagged with.
+    group: Option<crate::types::ability::ChosenGroupId>,
 }
 
 struct AbilityTargetingView<'a> {
@@ -1564,6 +1596,7 @@ pub fn simple_legal_target_assignment_exists_for_ability(
     }
     if target_filter_contains_chosen_x_ref(&spec.filter)
         || relative_controller_kind(&spec.filter).is_some()
+        || caster_scoped_selection(&spec.filter)
         || target_filter_has_another_target_marker(&spec.filter)
         || is_per_opponent_target_fanout(ability)
         || matches!(ability.effect, Effect::PairWith { .. })
@@ -2103,6 +2136,96 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     targets
 }
 
+/// CR 608.2c + CR 115.1a: the first player target the chain node tagged
+/// `declares_chosen_group == Some(group)` announced, with its slot number as
+/// [`declared_targets_in_chain`] numbers it (the numbering
+/// `ResolvedAbility::illegal_target_slots` uses). The outer `None` means no node
+/// carries `group`; the inner `None` means that node announced no player or
+/// declares no slots of its own (an inheriting rider's snapshot, a paid
+/// "instead" delegator's mirror).
+pub(crate) fn declared_group_player_slot(
+    root: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<Option<(usize, PlayerId)>> {
+    let mut found = None;
+    walk_declared_slots(root, &mut |node, _, first_slot| {
+        if found.is_none() && node.declares_chosen_group == Some(group) {
+            found = Some(first_slot.and_then(|first| {
+                chain_node_targets(node)
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, target)| match target {
+                        TargetRef::Player(player) => Some((first + i, *player)),
+                        TargetRef::Object(_) => None,
+                    })
+            }));
+        }
+    });
+    found
+}
+
+/// The groups declared by the nodes of `root`'s chain, first-seen order, distinct.
+pub(crate) fn declared_groups_in_chain(
+    root: &ResolvedAbility,
+) -> Vec<crate::types::ability::ChosenGroupId> {
+    let mut groups = Vec::new();
+    walk_declared_slots(root, &mut |node, _, _| {
+        if let Some(group) = node.declares_chosen_group {
+            if !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+    });
+    groups
+}
+
+type DeclaredSlotVisit<'a> = dyn FnMut(&'a ResolvedAbility, &[ChainStep], Option<usize>) + 'a;
+
+/// CR 601.2c + CR 115.10a: the single walk that numbers a chain's declared target slots — every
+/// declared-slot numbering (`declared_target_entries_in_chain`, `illegal_declared_target_slots`,
+/// `declared_slots_ahead_of`, `declared_position_addresses`, `declared_group_player_slot`) reads it.
+/// Calls `visit(node, path, first_slot)` for each node reached from `root` in numbering order
+/// (the node, its `sub_ability` line, then its `else_ability`), where `path` is the steps from
+/// `root` to `node` and `first_slot` is `Some(n)` when the node's own entries
+/// are declarations numbered from `n`, `None` when they are not (a paid
+/// "instead" delegator's mirror, an inheriting rider's snapshot — see
+/// [`declared_targets_in_chain`]). A delegator continues into its delegate only.
+fn walk_declared_slots<'a>(root: &'a ResolvedAbility, visit: &mut DeclaredSlotVisit<'a>) {
+    fn go<'a>(
+        node: &'a ResolvedAbility,
+        targets_are_inherited: bool,
+        next_slot: &mut usize,
+        path: &mut Vec<ChainStep>,
+        visit: &mut DeclaredSlotVisit<'a>,
+    ) {
+        let delegate = paid_instead_delegate(node);
+        if delegate.is_some() || targets_are_inherited {
+            visit(node, path, None);
+        } else {
+            visit(node, path, Some(*next_slot));
+            *next_slot += chain_node_positions(node).len();
+        }
+        if let Some(delegate) = delegate {
+            path.push(ChainStep::SubAbility);
+            go(delegate, targets_are_inherited, next_slot, path, visit);
+            path.pop();
+            return;
+        }
+        if let Some(sub_ability) = node.sub_ability.as_deref() {
+            path.push(ChainStep::SubAbility);
+            let inherited = rider_entries_are_inherited(node, sub_ability);
+            go(sub_ability, inherited, next_slot, path, visit);
+            path.pop();
+        }
+        if let Some(else_ability) = node.else_ability.as_deref() {
+            path.push(ChainStep::ElseAbility);
+            go(else_ability, false, next_slot, path, visit);
+            path.pop();
+        }
+    }
+    go(root, false, &mut 0, &mut Vec::new(), visit);
+}
+
 /// CR 601.2c: The targets a chain declares, as [`flatten_targets_in_chain`]
 /// lists them except that a node delegating to a paid "instead" sub contributes
 /// only that sub's targets. When the additional cost was paid, the sub's targets
@@ -2139,42 +2262,22 @@ pub(crate) struct DeclaredTargetEntry {
     pub(crate) pin: Option<ObjectIncarnationRef>,
 }
 
-/// CR 601.2c: [`declared_targets_in_chain`] with each slot's pin. The single
-/// walker both share, so slot numbering is identical by construction.
+/// CR 601.2c: [`declared_targets_in_chain`] with each slot's pin. Numbered by
+/// [`walk_declared_slots`], the walk every declared-slot numbering shares.
 pub(crate) fn declared_target_entries_in_chain(
     ability: &ResolvedAbility,
 ) -> Vec<DeclaredTargetEntry> {
-    fn visit(
-        ability: &ResolvedAbility,
-        targets_are_inherited: bool,
-        out: &mut Vec<DeclaredTargetEntry>,
-    ) {
-        if let Some(sub_ability) = paid_instead_delegate(ability) {
-            visit(sub_ability, targets_are_inherited, out);
-            return;
-        }
-        if !targets_are_inherited {
-            out.extend(chain_node_positions(ability).into_iter().map(|position| {
+    let mut entries = Vec::new();
+    walk_declared_slots(ability, &mut |node, _, first_slot| {
+        if first_slot.is_some() {
+            entries.extend(chain_node_positions(node).into_iter().map(|position| {
                 DeclaredTargetEntry {
-                    target: ability.targets[position].clone(),
-                    pin: ability.target_pin_at(position),
+                    target: node.targets[position].clone(),
+                    pin: node.target_pin_at(position),
                 }
             }));
         }
-        if let Some(sub_ability) = ability.sub_ability.as_deref() {
-            visit(
-                sub_ability,
-                rider_entries_are_inherited(ability, sub_ability),
-                out,
-            );
-        }
-        if let Some(else_ability) = ability.else_ability.as_deref() {
-            visit(else_ability, false, out);
-        }
-    }
-
-    let mut entries = Vec::new();
-    visit(ability, false, &mut entries);
+    });
     entries
 }
 
@@ -2201,23 +2304,13 @@ fn rider_entries_are_inherited(parent: &ResolvedAbility, sub: &ResolvedAbility) 
 /// never precede `base`. `base` must lie on `root`'s `sub_ability` line.
 pub(crate) fn declared_slots_ahead_of(root: &ResolvedAbility, base: &ResolvedAbility) -> usize {
     let mut ahead = 0;
-    let mut node = Some(root);
-    let mut inherited = false;
-    while let Some(current) = node {
-        if std::ptr::eq(current, base) {
-            break;
+    let mut reached = false;
+    walk_declared_slots(root, &mut |node, _, first_slot| {
+        reached |= std::ptr::eq(node, base);
+        if !reached && first_slot.is_some() {
+            ahead += chain_node_positions(node).len();
         }
-        if let Some(delegate) = paid_instead_delegate(current) {
-            node = Some(delegate);
-            continue;
-        }
-        if !inherited {
-            ahead += chain_node_targets(current).len();
-        }
-        let next = current.sub_ability.as_deref();
-        inherited = next.is_some_and(|sub| rider_entries_are_inherited(current, sub));
-        node = next;
-    }
+    });
     ahead
 }
 
@@ -2274,14 +2367,25 @@ pub(crate) fn illegal_declared_target_slots(
     validated: &ResolvedAbility,
 ) -> Vec<usize> {
     let mut illegal = Vec::new();
-    visit_illegal_declared_target_slots(
-        declared,
-        Some(judged),
-        Some(validated),
-        false,
-        &mut 0,
-        &mut illegal,
-    );
+    walk_declared_slots(declared, &mut |node, path, first_slot| {
+        let Some(first_slot) = first_slot else {
+            return;
+        };
+        let judged_node = node_at(judged, path);
+        let validated_node = node_at(validated, path);
+        for (position, slot) in chain_node_positions(node).into_iter().zip(first_slot..) {
+            // CR 608.2b: validation stamped each publishing node with the
+            // declared-domain positions whose own occurrence verdict was illegal;
+            // a missing validated node marks every position.
+            let judged_here = judged_node
+                .is_some_and(|twin| twin.targets.get(position) == node.targets.get(position));
+            let stamped_illegal = validated_node
+                .is_none_or(|twin| twin.illegal_local_target_slots.contains(&position));
+            if stamped_illegal || !judged_here {
+                illegal.push(slot);
+            }
+        }
+    });
     illegal
 }
 
@@ -2294,63 +2398,6 @@ pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         clear_illegal_local_target_slots(else_ability);
-    }
-}
-
-fn visit_illegal_declared_target_slots(
-    declared: &ResolvedAbility,
-    judged: Option<&ResolvedAbility>,
-    validated: Option<&ResolvedAbility>,
-    targets_are_inherited: bool,
-    next_slot: &mut usize,
-    illegal: &mut Vec<usize>,
-) {
-    if let Some(delegate) = paid_instead_delegate(declared) {
-        visit_illegal_declared_target_slots(
-            delegate,
-            judged.and_then(|node| node.sub_ability.as_deref()),
-            validated.and_then(|node| node.sub_ability.as_deref()),
-            targets_are_inherited,
-            next_slot,
-            illegal,
-        );
-        return;
-    }
-    if !targets_are_inherited {
-        // CR 608.2b: validation stamped each publishing node with the
-        // declared-domain positions whose own occurrence verdict was illegal;
-        // a missing validated node marks every position.
-        for position in chain_node_positions(declared) {
-            let judged_here = judged
-                .is_some_and(|node| node.targets.get(position) == declared.targets.get(position));
-            let stamped_illegal =
-                validated.is_none_or(|node| node.illegal_local_target_slots.contains(&position));
-            if stamped_illegal || !judged_here {
-                illegal.push(*next_slot);
-            }
-            *next_slot += 1;
-        }
-    }
-    if let Some(sub_ability) = declared.sub_ability.as_deref() {
-        let inherited = rider_entries_are_inherited(declared, sub_ability);
-        visit_illegal_declared_target_slots(
-            sub_ability,
-            judged.and_then(|node| node.sub_ability.as_deref()),
-            validated.and_then(|node| node.sub_ability.as_deref()),
-            inherited,
-            next_slot,
-            illegal,
-        );
-    }
-    if let Some(else_ability) = declared.else_ability.as_deref() {
-        visit_illegal_declared_target_slots(
-            else_ability,
-            judged.and_then(|node| node.else_ability.as_deref()),
-            validated.and_then(|node| node.else_ability.as_deref()),
-            false,
-            next_slot,
-            illegal,
-        );
     }
 }
 
@@ -4086,7 +4133,9 @@ fn collect_target_slots(
         &mut acc.current_effect_detail,
         target_effect_detail(&ability.effect),
     );
+    let previous_group = std::mem::replace(&mut acc.current_group, ability.declares_chosen_group);
     let result = collect_target_slots_inner(state, ability, acc);
+    acc.current_group = previous_group;
     acc.current_chooser = previous_chooser;
     acc.current_effect_kind = previous_effect_kind;
     acc.current_effect_detail = previous_effect_detail;
@@ -4187,7 +4236,7 @@ fn collect_target_slots_inner(
                         index,
                         filter: role.filter(),
                     },
-                    &acc.slots,
+                    acc.built(),
                 );
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
@@ -4202,7 +4251,7 @@ fn collect_target_slots_inner(
             }
         } else if let Some(src_leaf) = damage_replacement_source_slot_filter(&ability.effect) {
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, src_leaf, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, src_leaf, acc.built());
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -4268,7 +4317,7 @@ fn collect_target_slots_inner(
     if paired_subject_filters(&ability.effect).is_some() {
         for filter in paired_subject_slot_filters(&ability.effect) {
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, filter, acc.built());
             // CR 115.6 + CR 601.2c: zero-target authority is targeting_is_optional() —
             // ability-wide optional_targeting and a min-0 multi_target ("up to one
             // target", Gilded Drake) encode the same fact.
@@ -4301,7 +4350,7 @@ fn collect_target_slots_inner(
             // slot for it produced a spurious all-players slot that panicked the
             // cast (Malamet Battle Glyph).
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, filter, acc.built());
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -4328,7 +4377,7 @@ fn collect_target_slots_inner(
                 continue;
             }
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, filter, acc.built());
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -4354,7 +4403,7 @@ fn collect_target_slots_inner(
         // fails silently as misaligned TargetInstanceIds at runtime.
         for (_slot, filter) in role.surfaced_filters() {
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, filter, acc.built());
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -4379,7 +4428,7 @@ fn collect_target_slots_inner(
             collect_attach_attachment_target_slots(state, ability, attachment, selection, acc)?;
             if attach_host_filter_needs_target_slot(target) {
                 let legal_targets =
-                    legal_targets_for_ability_filter(state, ability, target, &acc.slots);
+                    legal_targets_for_ability_filter(state, ability, target, acc.built());
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
                 }
@@ -4414,7 +4463,7 @@ fn collect_target_slots_inner(
             // CR 601.2c + CR 115.1d: the source count ("up to two" → 0..=2, or
             // "two" → exactly 2) lives in the ability's `multi_target` spec.
             let source_legal =
-                legal_targets_for_ability_filter(state, ability, sources, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, sources, acc.built());
             if let Some(spec) = ability.multi_target.as_ref() {
                 let bounds = resolve_multi_target_bounds(state, ability, spec, source_legal.len())?;
                 for slot_index in 0..bounds.max {
@@ -4449,7 +4498,7 @@ fn collect_target_slots_inner(
             // chosen group-B creature as a source, not the recipient.
             if let Some(extra) = extra_source {
                 let extra_legal =
-                    legal_targets_for_ability_filter(state, ability, extra, &acc.slots);
+                    legal_targets_for_ability_filter(state, ability, extra, acc.built());
                 acc.push(TargetSelectionSlot {
                     legal_targets: extra_legal,
                     optional: true,
@@ -4461,7 +4510,7 @@ fn collect_target_slots_inner(
 
             // CR 115.1: the recipient is exactly one mandatory target.
             let recipient_legal =
-                legal_targets_for_ability_filter(state, ability, recipient, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, recipient, acc.built());
             if recipient_legal.is_empty() {
                 return Err(no_legal_target_slots());
             }
@@ -4535,7 +4584,7 @@ fn collect_target_slots_inner(
                 .expect("slot filter present when gate true")
                 .filter;
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, &filter, acc.built());
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -4552,7 +4601,7 @@ fn collect_target_slots_inner(
         {
             let filter = parent_target_combat_relation_slot_filter();
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, &filter, acc.built());
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -4576,7 +4625,7 @@ fn collect_target_slots_inner(
         if ability.target_choice_timing == TargetChoiceTiming::Stack {
             if let Some(filter) = become_copy_recipient_slot_filter(&ability.effect) {
                 let legal_targets =
-                    legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                    legal_targets_for_ability_filter(state, ability, filter, acc.built());
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
                 }
@@ -4594,7 +4643,7 @@ fn collect_target_slots_inner(
         {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
                 let legal_targets =
-                    legal_choices_for_ability_filter(state, ability, filter, &acc.slots);
+                    legal_choices_for_ability_filter(state, ability, filter, acc.built());
                 // CR 601.2c: An "up to N" ability (`multi_target.min == 0`) — or an
                 // ability-wide "up to one" (`optional_targeting`) — may legally
                 // choose zero targets, so an empty legal-target set is acceptable.
@@ -4689,7 +4738,7 @@ fn legal_choices_for_ability_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
-    existing_slots: &[TargetSelectionSlot],
+    existing_slots: BuiltSlots<'_>,
 ) -> Vec<TargetRef> {
     if matches!(ability.effect, Effect::PairWith { .. }) {
         return pair_with_legal_choices(state, ability, filter);
@@ -5991,7 +6040,7 @@ fn collect_attach_attachment_target_slots(
     if !attach_attachment_claims_announcement_slot(attachment, selection) {
         return Ok(());
     }
-    let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &acc.slots);
+    let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, acc.built());
     if legal_targets.is_empty() && !ability.targeting_is_optional() {
         return Err(EngineError::ActionNotAllowed(
             "No legal targets available".to_string(),
@@ -6032,7 +6081,8 @@ fn collect_attach_attachment_target_slot_specs(
         return;
     }
     if let Some(spec) = ability.multi_target.as_ref() {
-        let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &[]);
+        let legal_targets =
+            legal_targets_for_ability_filter(state, ability, attachment, BuiltSlots::NONE);
         if let Ok(bounds) = resolve_multi_target_bounds(state, ability, spec, legal_targets.len()) {
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
@@ -6041,6 +6091,7 @@ fn collect_attach_attachment_target_slot_specs(
                     filter: attachment.clone(),
                     optional: slot_index >= bounds.min,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
         }
@@ -6051,6 +6102,7 @@ fn collect_attach_attachment_target_slot_specs(
             filter: attachment.clone(),
             optional: ability.targeting_is_optional(),
             instance: id,
+            group: ability.declares_chosen_group,
         });
     }
 }
@@ -6068,7 +6120,8 @@ fn attach_attachment_slot_bounds(
         return Ok(None);
     }
     if let Some(spec) = &ability.multi_target {
-        let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &[]);
+        let legal_targets =
+            legal_targets_for_ability_filter(state, ability, attachment, BuiltSlots::NONE);
         let bounds = resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
         Ok(Some(bounds))
     } else {
@@ -6159,7 +6212,7 @@ fn attach_declared_host_slot_reserve(
     if targets.len() <= next_target {
         return 0;
     }
-    let legal_hosts = legal_targets_for_ability_filter(state, ability, host, &[]);
+    let legal_hosts = legal_targets_for_ability_filter(state, ability, host, BuiltSlots::NONE);
     usize::from(legal_hosts.contains(last))
 }
 
@@ -6330,6 +6383,17 @@ pub(crate) fn collect_player_targets(
             .into_iter()
             .collect();
     }
+    // CR 608.2b + CR 608.2c: "that player" is the declared player, no one when illegal.
+    if let TargetFilter::DeclaredPlayer { group } = target {
+        return crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+            .into_iter()
+            .collect();
+    }
+    if let TargetFilter::SpecificPlayer { .. } = target {
+        return targeting::resolve_effect_player_ref(state, ability, target)
+            .into_iter()
+            .collect();
+    }
     let from_targets: Vec<PlayerId> = ability
         .targets
         .iter()
@@ -6360,7 +6424,11 @@ pub(crate) fn collect_player_targets(
                 }
                 // CR 109.4: TargetPlayer / TargetOpponent are ambiguous here (player
                 // targets are resolved from ability.targets directly); fail closed.
-                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                Some(
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. },
+                ) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 // CR 120.1 + CR 109.4 + CR 603.2: unlike the parent-target refs
                 // (which need a target slot this population expansion has no
@@ -7128,6 +7196,7 @@ fn collect_target_slot_specs(
                     filter: role.filter().clone(),
                     optional: ability.optional_targeting,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
         } else if let Some(src_leaf) = damage_replacement_source_slot_filter(&ability.effect) {
@@ -7137,6 +7206,7 @@ fn collect_target_slot_specs(
                 filter: src_leaf.clone(),
                 optional: ability.optional_targeting,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
     }
@@ -7156,6 +7226,7 @@ fn collect_target_slot_specs(
                 // CR 115.6: same authority as collect_target_slots_inner's paired arm.
                 optional: ability.targeting_is_optional(),
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
         collect_sub_chain_slot_specs(state, ability, specs, next_instance);
@@ -7173,6 +7244,7 @@ fn collect_target_slot_specs(
                 filter: filter.clone(),
                 optional: ability.optional_targeting,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
         return;
@@ -7193,6 +7265,7 @@ fn collect_target_slot_specs(
                     filter: filter.clone(),
                     optional: ability.optional_targeting,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
         }
@@ -7210,6 +7283,7 @@ fn collect_target_slot_specs(
                 filter: filter.clone(),
                 optional: ability.optional_targeting,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
     } else if let Effect::Attach {
@@ -7234,6 +7308,7 @@ fn collect_target_slot_specs(
                     filter: target.clone(),
                     optional: ability.optional_targeting,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
         }
@@ -7250,7 +7325,8 @@ fn collect_target_slot_specs(
         // instance per CR 115.3 so the same creature can't fill two source
         // slots), then the single mandatory RECIPIENT slot (its own instance).
         if each_power_damage_recipient_slot_filter(ability).is_some() {
-            let source_legal = legal_targets_for_ability_filter(state, ability, sources, &[]);
+            let source_legal =
+                legal_targets_for_ability_filter(state, ability, sources, BuiltSlots::NONE);
             if let Some(spec) = ability.multi_target.as_ref() {
                 if let Ok(bounds) =
                     resolve_multi_target_bounds(state, ability, spec, source_legal.len())
@@ -7262,6 +7338,7 @@ fn collect_target_slot_specs(
                             filter: sources.clone(),
                             optional: slot_index >= bounds.min,
                             instance: id,
+                            group: ability.declares_chosen_group,
                         });
                     }
                 }
@@ -7272,6 +7349,7 @@ fn collect_target_slot_specs(
                     filter: sources.clone(),
                     optional: false,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
             // CR 115.4 + CR 601.2c: group-B spec — its OWN instance, between the
@@ -7285,6 +7363,7 @@ fn collect_target_slot_specs(
                     filter: extra.clone(),
                     optional: true,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
             let id = TargetInstanceId(*next_instance);
@@ -7293,6 +7372,7 @@ fn collect_target_slot_specs(
                 filter: recipient.clone(),
                 optional: false,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
     } else {
@@ -7317,6 +7397,7 @@ fn collect_target_slot_specs(
                 filter: TargetFilter::Player,
                 optional: ability.optional_targeting,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7331,6 +7412,7 @@ fn collect_target_slot_specs(
                     .filter,
                 optional: ability.optional_targeting,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7342,6 +7424,7 @@ fn collect_target_slot_specs(
                 filter: parent_target_combat_relation_slot_filter(),
                 optional: ability.optional_targeting,
                 instance: id,
+                group: ability.declares_chosen_group,
             });
         }
         // CR 115.1 + CR 601.2c: EXACT MIRROR of the `BecomeCopy` recipient slot
@@ -7366,6 +7449,7 @@ fn collect_target_slot_specs(
                     filter: filter.clone(),
                     optional: ability.optional_targeting,
                     instance: id,
+                    group: ability.declares_chosen_group,
                 });
             }
         }
@@ -7373,7 +7457,7 @@ fn collect_target_slot_specs(
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
                 if let Some(spec) = ability.multi_target.as_ref() {
                     let legal_targets =
-                        legal_targets_for_ability_filter(state, ability, filter, &[]);
+                        legal_targets_for_ability_filter(state, ability, filter, BuiltSlots::NONE);
                     if let Ok(bounds) =
                         resolve_multi_target_bounds(state, ability, spec, legal_targets.len())
                     {
@@ -7389,6 +7473,7 @@ fn collect_target_slot_specs(
                                 filter: filter.clone(),
                                 optional: slot_index >= bounds.min,
                                 instance: id,
+                                group: ability.declares_chosen_group,
                             });
                         }
                     }
@@ -7399,6 +7484,7 @@ fn collect_target_slot_specs(
                         filter: filter.clone(),
                         optional: ability.optional_targeting,
                         instance: id,
+                        group: ability.declares_chosen_group,
                     });
                 }
             }
@@ -7509,7 +7595,7 @@ fn legal_targets_for_ability_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
-    existing_slots: &[TargetSelectionSlot],
+    existing_slots: BuiltSlots<'_>,
 ) -> Vec<TargetRef> {
     legal_targets_for_ability_slot(
         state,
@@ -7523,7 +7609,7 @@ fn legal_targets_for_ability_slot(
     state: &GameState,
     ability: &ResolvedAbility,
     slot: AbilityTargetSlot<'_>,
-    existing_slots: &[TargetSelectionSlot],
+    existing_slots: BuiltSlots<'_>,
 ) -> Vec<TargetRef> {
     exclude_cost_paid_object_that_left_battlefield(
         state,
@@ -7536,7 +7622,7 @@ fn legal_targets_for_ability_filter_uncapped(
     state: &GameState,
     ability: &ResolvedAbility,
     slot: AbilityTargetSlot<'_>,
-    existing_slots: &[TargetSelectionSlot],
+    existing_slots: BuiltSlots<'_>,
 ) -> Vec<TargetRef> {
     if let Some(targets) = damage_any_target_legal_targets(state, ability, slot) {
         return targets;
@@ -7549,23 +7635,115 @@ fn legal_targets_for_ability_filter_uncapped(
     if !super::filter::bind_declaring_owner_authority(&mut bound_filter, ability.controller) {
         return Vec::new();
     }
-    let filter = &bound_filter;
     // CR 601.2c + CR 701.3a: a declared-slot attachment referent is unioned
     // over every candidate of the slot it names (no selection exists yet);
     // the interactive walk narrows it to the object actually chosen. CR 109.5:
     // only a bindable shape is enumerated, under the declaring controller.
-    if crate::game::filter::filter_reads_declared_slot(filter) {
-        if !declared_slot_filter_is_bindable(filter) {
+    if crate::game::filter::filter_reads_declared_slot(&bound_filter) {
+        if !declared_slot_filter_is_bindable(&bound_filter) {
             return Vec::new();
         }
         return union_over_declared_slot_candidates(
             state,
             ability,
-            filter,
-            existing_slots,
+            &bound_filter,
+            existing_slots.slots,
             &[ability.controller],
         );
     }
+    // CR 608.2c + CR 115.1a: each declared group the filter names ranges over the
+    // players ITS clause may announce; the slot's legal set is the union over every
+    // combination. Selection narrows it to the announced players.
+    let groups = super::filter::declared_groups(&bound_filter);
+    if groups.is_empty() {
+        return legal_targets_for_relative_filter(
+            state,
+            ability,
+            &bound_filter,
+            needs_ability_context,
+            existing_slots,
+        );
+    }
+    let mut assignments: Vec<Vec<(crate::types::ability::ChosenGroupId, PlayerId)>> =
+        vec![Vec::new()];
+    for group in groups {
+        let candidates = declared_group_candidates(state, existing_slots, group);
+        assignments = assignments
+            .into_iter()
+            .flat_map(|assignment| {
+                candidates.iter().map(move |player| {
+                    let mut extended = assignment.clone();
+                    extended.push((group, *player));
+                    extended
+                })
+            })
+            .collect();
+    }
+    let mut legal_targets = Vec::new();
+    for assignment in assignments {
+        let mut group_bound = bound_filter.clone();
+        if !super::filter::bind_declared_groups(&mut group_bound, &assignment) {
+            return Vec::new();
+        }
+        let needs_context = slot_needs_ability_context(&group_bound, ability);
+        for target in legal_targets_for_relative_filter(
+            state,
+            ability,
+            &group_bound,
+            needs_context,
+            existing_slots,
+        ) {
+            if !legal_targets.contains(&target) {
+                legal_targets.push(target);
+            }
+        }
+    }
+    legal_targets
+}
+
+/// The players a slot-build pass counts for `group`: the first player slot its clause
+/// announced, else (clause not yet built) every player.
+fn declared_group_candidates(
+    state: &GameState,
+    existing_slots: BuiltSlots<'_>,
+    group: crate::types::ability::ChosenGroupId,
+) -> Vec<PlayerId> {
+    existing_slots
+        .groups
+        .iter()
+        .zip(existing_slots.slots)
+        .filter(|(declared, _)| **declared == Some(group))
+        .find_map(|(_, slot)| player_targets_of(slot))
+        .unwrap_or_else(|| state.players.iter().map(|player| player.id).collect())
+}
+
+/// The players of a slot whose legal targets are all players.
+fn player_targets_of(slot: &TargetSelectionSlot) -> Option<Vec<PlayerId>> {
+    (!slot.legal_targets.is_empty()
+        && slot
+            .legal_targets
+            .iter()
+            .all(|target| matches!(target, TargetRef::Player(_))))
+    .then(|| {
+        slot.legal_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Player(player_id) => Some(*player_id),
+                TargetRef::Object(_) => None,
+            })
+            .collect()
+    })
+}
+
+/// Legal targets of `filter` after declaring ownership and declared groups are bound;
+/// any remaining player-relative scope is counted against the companion player slot.
+fn legal_targets_for_relative_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    needs_ability_context: bool,
+    existing_slots: BuiltSlots<'_>,
+) -> Vec<TargetRef> {
     let relative_kind = relative_controller_kind(filter);
     if relative_kind.is_none() {
         // CR 601.2c + CR 603.3d: at slot-build time no selection has been made
@@ -7574,7 +7752,7 @@ fn legal_targets_for_ability_filter_uncapped(
         // See `union_over_prior_object_candidates`'s doc for why a union (not
         // exact narrowing) is correct here.
         if target_filter_binds_prior_target(filter) {
-            if let Some(prior) = first_prior_object_slot(existing_slots) {
+            if let Some(prior) = first_prior_object_slot(existing_slots.slots) {
                 return union_over_prior_object_candidates(state, ability, filter, prior);
             }
         }
@@ -7584,18 +7762,33 @@ fn legal_targets_for_ability_filter_uncapped(
         return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
     }
 
-    let player_slot = existing_slots.iter().rev().find(|slot| {
+    let player_slot = existing_slots.slots.iter().rev().find(|slot| {
         !slot.legal_targets.is_empty()
             && slot
                 .legal_targets
                 .iter()
                 .all(|target| matches!(target, TargetRef::Player(_)))
     });
-    let Some(player_slot) = player_slot else {
-        if needs_ability_context {
-            return targeting::find_legal_targets_for_ability(state, filter, ability);
+    let candidates: Vec<PlayerId> = match player_slot {
+        Some(slot) => slot
+            .legal_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Player(player_id) => Some(*player_id),
+                TargetRef::Object(_) => None,
+            })
+            .collect(),
+        None => {
+            if needs_ability_context {
+                return targeting::find_legal_targets_for_ability(state, filter, ability);
+            }
+            return targeting::find_legal_targets(
+                state,
+                filter,
+                ability.controller,
+                ability.source_id,
+            );
         }
-        return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
     };
 
     // CR 601.2c: enumerate a declared target-player dependency against every
@@ -7610,14 +7803,7 @@ fn legal_targets_for_ability_filter_uncapped(
     };
 
     let mut legal_targets = Vec::new();
-    for player_id in player_slot
-        .legal_targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Player(player_id) => Some(*player_id),
-            TargetRef::Object(_) => None,
-        })
-    {
+    for player_id in candidates {
         let targets = if needs_ability_context {
             targeting::find_legal_targets_for_ability_with_controller(
                 state,
@@ -7636,6 +7822,17 @@ fn legal_targets_for_ability_filter_uncapped(
     }
 
     legal_targets
+}
+
+/// A selection scoped to the caster ("a token you control"): a spec the single-slot fast paths
+/// must not decide, since not every such spec is a targeted slot.
+fn caster_scoped_selection(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.controller == Some(ControllerRef::You)
+                && !super::filter::typed_filter_is_owner_scoped(filter)
+    )
 }
 
 /// CR 109.5 + CR 601.2c: the shapes a declared-slot attachment referent
@@ -7666,17 +7863,18 @@ fn declared_slot_filter_is_bindable(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Returns the relative `ControllerRef` (`You` or `TargetPlayer`) embedded in
-/// `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
+/// Returns the player-relative `ControllerRef` (`TargetPlayer` or `DeclaredPlayer`)
+/// embedded in `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
 /// build) and `legal_targets_for_selected_slot` (selection-time recompute) to
 /// detect filters that need per-player re-enumeration against the player chosen
-/// in a companion `TargetFilter::Player` slot.
+/// in a prior player slot. `You` is the caster and is never player-relative.
 fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::ability::ControllerRef> {
     use crate::types::ability::ControllerRef;
     match filter {
         TargetFilter::Typed(tf) => match tf.controller {
-            Some(ControllerRef::You) if !super::filter::typed_filter_is_owner_scoped(filter) => {
-                Some(ControllerRef::You)
+            // CR 608.2c + CR 115.1a: "that player controls" after a declared player.
+            Some(ControllerRef::DeclaredPlayer { group }) => {
+                Some(ControllerRef::DeclaredPlayer { group })
             }
             // CR 109.4 + CR 102.2 / CR 102.3: normalize the opponent-constrained scope
             // to TargetPlayer so the per-player re-enumeration guards / rewrite args
@@ -7689,6 +7887,9 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
                 FilterProp::Owned {
                     controller: ControllerRef::TargetPlayer | ControllerRef::TargetOpponent,
                 } => Some(ControllerRef::TargetPlayer),
+                FilterProp::Owned {
+                    controller: ControllerRef::DeclaredPlayer { group },
+                } => Some(ControllerRef::DeclaredPlayer { group: *group }),
                 _ => None,
             }),
         },
@@ -7897,11 +8098,13 @@ fn collect_per_opponent_target_fanout_specs(
             filter: TargetFilter::SpecificPlayer { id: opponent },
             optional: false,
             instance: player_id,
+            group: None,
         });
         specs.push(TargetSlotSpec {
             filter: object_filter.clone(),
             optional: ability.targeting_is_optional(),
             instance: object_id,
+            group: None,
         });
     }
 }
@@ -7941,23 +8144,23 @@ fn object_targets_only(targets: &[TargetRef]) -> Vec<TargetRef> {
         .collect()
 }
 
-/// Substitute every `from`-controller binding in `filter` with `to`. Used to
-/// rewrite `TargetPlayer` → `You` so per-player enumeration through
+/// Substitute every controller binding of `filter` that satisfies `from` with `to`. Used to
+/// rewrite a declared-player scope → `You` so per-player enumeration through
 /// `find_legal_targets`'s `source_controller` parameter works uniformly.
 fn rewrite_relative_controller(
     filter: &TargetFilter,
-    from: crate::types::ability::ControllerRef,
-    to: crate::types::ability::ControllerRef,
+    from: &impl Fn(&crate::types::ability::ControllerRef) -> bool,
+    to: &crate::types::ability::ControllerRef,
 ) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => {
             let mut new_tf = tf.clone();
-            if new_tf.controller == Some(from.clone()) {
+            if new_tf.controller.as_ref().is_some_and(from) {
                 new_tf.controller = Some(to.clone());
             }
             for prop in &mut new_tf.properties {
                 if let FilterProp::Owned { controller } = prop {
-                    if *controller == from {
+                    if from(controller) {
                         *controller = to.clone();
                     }
                 }
@@ -7967,13 +8170,13 @@ fn rewrite_relative_controller(
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .iter()
-                .map(|f| rewrite_relative_controller(f, from.clone(), to.clone()))
+                .map(|f| rewrite_relative_controller(f, from, to))
                 .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .iter()
-                .map(|f| rewrite_relative_controller(f, from.clone(), to.clone()))
+                .map(|f| rewrite_relative_controller(f, from, to))
                 .collect(),
         },
         TargetFilter::Not { filter: inner } => TargetFilter::Not {
@@ -7983,11 +8186,12 @@ fn rewrite_relative_controller(
     }
 }
 
-/// CR 109.4 + CR 102.2 / CR 102.3: rewrite BOTH declared-target-player scopes
-/// (`TargetPlayer` and `TargetOpponent`) to `to`. `relative_controller_kind`
-/// normalizes `TargetOpponent` → `TargetPlayer`, so a naive single-`TargetPlayer`
-/// rewrite would leave a `TargetOpponent` occurrence behind and the per-player
-/// enumeration would fail closed.
+/// CR 109.4 + CR 102.2 / CR 102.3: rewrite every selected-player scope
+/// (`TargetPlayer`, `TargetOpponent`) to `to`.
+/// `relative_controller_kind` normalizes them to one kind, so a rewrite of a single
+/// variant would leave another behind and the per-player enumeration would fail closed.
+/// A `DeclaredPlayer` is bound to its group's announced player beforehand or names no one
+/// (CR 608.2b), so it is never rewritten.
 // ponytail: covers the dependent-object-slot subclass ("destroy target creature
 // target opponent controls"); the mass class (Quick Draw / DamageAll) has
 // target_filter() == None and never reaches these rewrite sites.
@@ -7996,8 +8200,16 @@ fn rewrite_declared_target_player(
     to: crate::types::ability::ControllerRef,
 ) -> TargetFilter {
     use crate::types::ability::ControllerRef;
-    let rewritten = rewrite_relative_controller(filter, ControllerRef::TargetPlayer, to.clone());
-    rewrite_relative_controller(&rewritten, ControllerRef::TargetOpponent, to)
+    rewrite_relative_controller(
+        filter,
+        &|controller| {
+            matches!(
+                controller,
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
+            )
+        },
+        &to,
+    )
 }
 
 fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
@@ -8007,6 +8219,23 @@ fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<Target
     let mut next_instance = 0usize;
     collect_target_slot_specs(state, ability, &mut specs, &mut next_instance);
     specs
+}
+
+/// CR 608.2c + CR 115.1a: the first player announced for each declared group in the
+/// selected prefix. `prior_specs` lines up one-for-one with `selected_slots`.
+fn announced_group_players(
+    prior_specs: &[TargetSlotSpec],
+    selected_slots: &[Option<TargetRef>],
+) -> Vec<(crate::types::ability::ChosenGroupId, PlayerId)> {
+    let mut players: Vec<(crate::types::ability::ChosenGroupId, PlayerId)> = Vec::new();
+    for (spec, selected) in prior_specs.iter().zip(selected_slots) {
+        if let (Some(group), Some(TargetRef::Player(player))) = (spec.group, selected) {
+            if players.iter().all(|(g, _)| *g != group) {
+                players.push((group, *player));
+            }
+        }
+    }
+    players
 }
 
 fn relative_filter_controller(
@@ -8155,17 +8384,28 @@ fn legal_targets_for_selected_slot(
         if !super::filter::bind_declaring_owner_authority(&mut bound_filter, ability.controller) {
             return Vec::new();
         }
-        let relative_kind = relative_controller_kind(&bound_filter);
-        let controller = if relative_kind.is_some() {
+        // CR 608.2c + CR 115.1a: a reader of a declared group names the player THAT
+        // group's clause announced, not the latest player selected.
+        let mut players = announced_group_players(prior_specs, selected_slots);
+        // CR 603.7a: a group no node of this chain declares is the payload's carried player; a
+        // declaration that announced no player still shadows it.
+        for group in super::filter::declared_groups(&bound_filter) {
+            if declared_group_player_slot(ability, group).is_none() {
+                players.extend(
+                    targeting::carried_declared_player(state, ability, group)
+                        .map(|player| (group, player)),
+                );
+            }
+        }
+        if !super::filter::bind_declared_groups(&mut bound_filter, &players) {
+            return Vec::new();
+        }
+        // CR 109.4: only a selected-player scope moves the enumeration to the latest selected player.
+        let enumeration_filter = rewrite_declared_target_player(&bound_filter, ControllerRef::You);
+        let controller = if enumeration_filter != bound_filter {
             relative_filter_controller(ability, selected_slots)
         } else {
             ability.controller
-        };
-        let enumeration_filter = match relative_kind {
-            Some(ControllerRef::TargetPlayer) => {
-                rewrite_declared_target_player(&bound_filter, ControllerRef::You)
-            }
-            _ => bound_filter.clone(),
         };
 
         // CR 601.2c + CR 603.3d: a filter qualified relative to an object chosen
@@ -8833,6 +9073,7 @@ fn homogeneous_required_target_walk_spec<'a>(
                 || spec.filter != first.filter
                 || target_filter_has_another_target_marker(&spec.filter)
                 || relative_controller_kind(&spec.filter).is_some()
+                || caster_scoped_selection(&spec.filter)
                 || target_filter_needs_ability_context(&spec.filter)
                 // MG-C: the fast path below calls
                 // `legal_targets_for_selected_slot` with an EMPTY
@@ -11724,47 +11965,18 @@ pub(crate) fn changed_dependent_targets_are_legal(
 pub(crate) fn declared_position_addresses(
     ability: &ResolvedAbility,
 ) -> Vec<Option<RetargetSlotAddress>> {
-    fn visit(
-        ability: &ResolvedAbility,
-        path: &mut Vec<ChainStep>,
-        targets_are_inherited: bool,
-        out: &mut Vec<Option<RetargetSlotAddress>>,
-    ) {
-        if let Some(sub_ability) = paid_instead_delegate(ability) {
-            path.push(ChainStep::SubAbility);
-            visit(sub_ability, path, targets_are_inherited, out);
-            path.pop();
-            return;
-        }
-        if !targets_are_inherited {
-            let fanout = is_per_opponent_target_fanout(ability);
-            let count = chain_node_targets(ability).len();
-            out.extend((0..count).map(|slot| {
+    let mut out = Vec::new();
+    walk_declared_slots(ability, &mut |node, path, first_slot| {
+        if first_slot.is_some() {
+            let fanout = is_per_opponent_target_fanout(node);
+            out.extend((0..chain_node_positions(node).len()).map(|slot| {
                 (!fanout).then(|| RetargetSlotAddress {
-                    path: path.clone(),
+                    path: path.to_vec(),
                     slot,
                 })
             }));
         }
-        if let Some(sub_ability) = ability.sub_ability.as_deref() {
-            path.push(ChainStep::SubAbility);
-            visit(
-                sub_ability,
-                path,
-                rider_entries_are_inherited(ability, sub_ability),
-                out,
-            );
-            path.pop();
-        }
-        if let Some(else_ability) = ability.else_ability.as_deref() {
-            path.push(ChainStep::ElseAbility);
-            visit(else_ability, path, false, out);
-            path.pop();
-        }
-    }
-
-    let mut out = Vec::new();
-    visit(ability, &mut Vec::new(), false, &mut out);
+    });
     out
 }
 
@@ -19020,7 +19232,7 @@ mod tests {
                 .push(CoreType::Creature);
         }
 
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::TargetOnly {
                 target: TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
@@ -19034,7 +19246,11 @@ mod tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DeclaredPlayer {
+                        group: crate::types::ability::ChosenGroupId(7),
+                    },
+                )),
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
@@ -19050,6 +19266,7 @@ mod tests {
             ObjectId(900),
             PlayerId(0),
         ));
+        ability.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(7));
 
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
         assert_eq!(slots.len(), 2);
@@ -19191,7 +19408,7 @@ mod tests {
                 .push(CoreType::Creature);
         }
 
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::TargetOnly {
                 target: TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
@@ -19205,7 +19422,11 @@ mod tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DeclaredPlayer {
+                        group: crate::types::ability::ChosenGroupId(7),
+                    },
+                )),
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
@@ -19221,6 +19442,7 @@ mod tests {
             ObjectId(900),
             PlayerId(0),
         ));
+        ability.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(7));
 
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
         let progress =
@@ -19566,7 +19788,7 @@ mod tests {
             assert!(tf.properties.contains(&selected));
         }
         let legacy = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
-        assert_eq!(relative_controller_kind(&legacy), Some(ControllerRef::You));
+        assert_eq!(relative_controller_kind(&legacy), None);
     }
 
     // CR 109.5 + CR 108.3: declaring ownership and independent player authority remain distinct.
@@ -20450,47 +20672,6 @@ mod tests {
         assert!(progress
             .current_legal_targets
             .contains(&TargetRef::Object(second_creature)));
-    }
-
-    /// CR 115.10a is scoped to the per-opponent fanout BINDER, not to every
-    /// pinned-player slot. A mandatory `SpecificPlayer` slot on a NON-fanout
-    /// ability is a real announced target and still prompts — this is the row
-    /// that separates the adopted `is_per_opponent_target_fanout` gate from a
-    /// filter-shape-only predicate.
-    #[test]
-    fn mandatory_specific_player_slot_on_a_non_fanout_ability_still_prompts() {
-        let state = GameState::new(FormatConfig::standard(), 3, 42);
-        let pinned = PlayerId(1);
-        let ability = ResolvedAbility::new(
-            Effect::TargetOnly {
-                target: TargetFilter::SpecificPlayer { id: pinned },
-            },
-            vec![],
-            ObjectId(900),
-            PlayerId(0),
-        );
-        assert!(!ability.optional_targeting);
-        assert!(ability.multi_target.is_none());
-        assert!(!is_per_opponent_target_fanout(&ability));
-
-        // Reach guard: the fixture satisfies every conjunct of the auto-fill
-        // guard EXCEPT the fanout gate — mandatory, unchoosered, singleton.
-        let slots = build_target_slots(&state, &ability).expect("target slots should build");
-        assert_eq!(slots.len(), 1);
-        assert!(!slots[0].optional);
-        assert!(slots[0].chooser.is_none());
-        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(pinned)]);
-
-        let progress =
-            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
-        assert_eq!(
-            progress.current_slot, 0,
-            "a pinned-player slot outside the fanout class is still announced by the controller"
-        );
-        assert_eq!(
-            progress.current_legal_targets,
-            vec![TargetRef::Player(pinned)]
-        );
     }
 
     #[test]
@@ -25565,6 +25746,381 @@ mod tests {
         );
     }
 
+    /// CR 603.7a: a delayed payload's slot filter that reads a carried group offers the carried
+    /// player's objects, even when a same-source stack entry declares the same id as another
+    /// player.
+    #[test]
+    fn carried_group_slot_filter_offers_the_carried_players_objects() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(100);
+        let creature = |state: &mut GameState, card: u64, owner: PlayerId| {
+            let id = create_object(
+                state,
+                CardId(card),
+                owner,
+                format!("Creature {card}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let mine = creature(&mut state, 1, PlayerId(0));
+        let theirs = creature(&mut state, 2, PlayerId(1));
+        let mut resident = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        );
+        resident.declares_chosen_group = Some(group);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(50),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(resident),
+            },
+        });
+        let payload = |carried: Option<PlayerId>| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.context.outer_declared_players =
+                carried.map(|player| (group, player)).into_iter().collect();
+            ability
+        };
+        let offered = |state: &GameState, ability: &ResolvedAbility| {
+            let specs = target_slot_specs(state, ability);
+            assert_eq!(specs.len(), 1, "reach-guard: the payload has one slot");
+            legal_targets_for_selected_slot(state, ability, &specs[0], &[], &[])
+        };
+        assert_eq!(
+            offered(&state, &payload(Some(PlayerId(1)))),
+            vec![TargetRef::Object(theirs)]
+        );
+        assert_ne!(
+            theirs, mine,
+            "reach-guard: the two players' creatures differ"
+        );
+    }
+
+    /// CR 608.2c: a payload node that declares the group but announced no player shadows the
+    /// carried player, so a reader slot offers none of their objects.
+    #[test]
+    fn silent_local_declaration_shadows_the_carried_group_at_selection() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(100);
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&theirs)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let payload = |declares: bool| {
+            let mut root = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            root.declares_chosen_group = declares.then_some(group);
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )));
+            root.context.outer_declared_players = vec![(group, PlayerId(1))];
+            root
+        };
+        let offered = |ability: &ResolvedAbility| {
+            let specs = target_slot_specs(&state, ability);
+            assert_eq!(specs.len(), 1, "reach-guard: only the reader has a slot");
+            legal_targets_for_selected_slot(&state, ability, &specs[0], &[], &[])
+        };
+        assert_eq!(
+            offered(&payload(false)),
+            vec![TargetRef::Object(theirs)],
+            "reach-guard: without the local declaration the carried player's creature is offered"
+        );
+        assert_eq!(offered(&payload(true)), Vec::<TargetRef>::new());
+    }
+
+    /// Three seats, one creature each (`Creature {seat}`), and the object ids in seat order.
+    fn one_creature_per_seat() -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        let creatures: Vec<ObjectId> = (0..3u8)
+            .map(|seat| {
+                let id = create_object(
+                    &mut state,
+                    CardId(u64::from(seat) + 1),
+                    PlayerId(seat),
+                    format!("Creature {seat}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            })
+            .collect();
+        (state, creatures)
+    }
+
+    /// The legal targets of `payload`'s last slot after `picks` fill the slots before it.
+    fn offered_after_picks(
+        state: &GameState,
+        payload: &ResolvedAbility,
+        picks: &[PlayerId],
+    ) -> Vec<TargetRef> {
+        let specs = target_slot_specs(state, payload);
+        let reader_slot = specs.len() - 1;
+        assert_eq!(
+            picks.len(),
+            reader_slot,
+            "reach guard: one pick per earlier slot"
+        );
+        let selected: Vec<_> = picks.iter().map(|p| Some(TargetRef::Player(*p))).collect();
+        legal_targets_for_selected_slot(
+            state,
+            payload,
+            &specs[reader_slot],
+            &specs[..reader_slot],
+            &selected,
+        )
+    }
+
+    /// CR 608.2b + CR 601.2c: a selection-time reader of a group that names no one is offered
+    /// nothing, whoever controls creatures and whoever was selected last; the legacy
+    /// `TargetPlayer` reader still follows the latest selected player.
+    #[test]
+    fn slot_reading_a_group_that_names_no_one_offers_nothing() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let (state, creatures) = one_creature_per_seat();
+        let source = ObjectId(100);
+        let objects = |ids: &[usize]| -> Vec<TargetRef> {
+            ids.iter()
+                .map(|&i| TargetRef::Object(creatures[i]))
+                .collect()
+        };
+        let populations = [
+            TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+            ),
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { group },
+            }])),
+        ];
+        let reader = |filter: &TargetFilter| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: filter.clone(),
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let offered = offered_after_picks;
+        let with_pick = |tail: ResolvedAbility| {
+            let mut head = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Player,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            head.sub_ability = Some(Box::new(tail));
+            head
+        };
+        for filter in &populations {
+            let carried = |mut ability: ResolvedAbility| {
+                ability.context.outer_declared_players = vec![(group, PlayerId(1))];
+                ability
+            };
+            assert_eq!(
+                offered(&state, &carried(reader(filter)), &[]),
+                objects(&[1]),
+                "reach guard: the carried player's creature"
+            );
+            assert_eq!(
+                offered(&state, &carried(with_pick(reader(filter))), &[PlayerId(2)]),
+                objects(&[1]),
+                "reach guard: an earlier pick does not replace the carried player"
+            );
+            let mut silent = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            silent.declares_chosen_group = Some(group);
+            silent.sub_ability = Some(Box::new(reader(filter)));
+            let silent = carried(silent);
+            let mut gone = state.clone();
+            gone.players[1].is_eliminated = true;
+            for (case, state, payload, pick) in [
+                ("silent local declaration", &state, silent, &[][..]),
+                ("never carried", &state, reader(filter), &[][..]),
+                (
+                    "never carried, earlier pick",
+                    &state,
+                    with_pick(reader(filter)),
+                    &[PlayerId(2)][..],
+                ),
+                (
+                    "carried player left",
+                    &gone,
+                    carried(reader(filter)),
+                    &[][..],
+                ),
+                (
+                    "carried player left, earlier pick",
+                    &gone,
+                    carried(with_pick(reader(filter))),
+                    &[PlayerId(2)][..],
+                ),
+            ] {
+                assert_eq!(
+                    offered(state, &payload, pick),
+                    Vec::<TargetRef>::new(),
+                    "{case}"
+                );
+            }
+        }
+        // The legacy reader brings its own companion player slot.
+        let legacy = reader(&TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+        ));
+        assert_eq!(
+            offered(&state, &legacy, &[PlayerId(2)]),
+            objects(&[2]),
+            "legacy TargetPlayer follows the latest selected player"
+        );
+    }
+
+    /// CR 608.2b + CR 601.2c: beside a `TargetPlayer` reader, a group that names no one changes
+    /// nothing, whichever reader is written first.
+    #[test]
+    fn mixed_group_and_selected_player_readers_do_not_depend_on_their_order() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let (state, creatures) = one_creature_per_seat();
+        let reader = |filter: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: filter,
+                    cant_regenerate: false,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let group_reader = TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+        );
+        let player_reader =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+        let mut cases = Vec::new();
+        for (connective, expected) in [("or", vec![creatures[2]]), ("and", vec![])] {
+            for group_first in [true, false] {
+                let filters = if group_first {
+                    vec![group_reader.clone(), player_reader.clone()]
+                } else {
+                    vec![player_reader.clone(), group_reader.clone()]
+                };
+                let filter = if connective == "or" {
+                    TargetFilter::Or { filters }
+                } else {
+                    TargetFilter::And { filters }
+                };
+                let name = format!("{connective}, group first: {group_first}");
+                cases.push((name, reader(filter), expected.clone()));
+            }
+        }
+        // "You" is the caster, not the latest selected player, even beside a group naming no one.
+        let you_reader =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let mut after_pick = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        after_pick.sub_ability = Some(Box::new(reader(TargetFilter::Or {
+            filters: vec![group_reader, you_reader],
+        })));
+        cases.push((
+            "you beside a group".to_string(),
+            after_pick,
+            vec![creatures[0]],
+        ));
+        for (name, payload, expected) in cases {
+            let expected: Vec<TargetRef> = expected.into_iter().map(TargetRef::Object).collect();
+            assert_eq!(
+                offered_after_picks(&state, &payload, &[PlayerId(2)]),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
     /// T7: a single-slot ability already carrying `ObjectScope::Target` — with
     /// NO prior object slot anywhere in the same ability — must be
     /// undisturbed: the `bound.is_some()` gate must NOT fire, so the offered
@@ -25618,7 +26174,7 @@ mod tests {
             &state,
             &ability,
             AbilityTargetSlot::Unpositioned(&filter),
-            &[],
+            BuiltSlots::NONE,
         );
         assert_eq!(
             bare, via_ability,
@@ -25840,7 +26396,7 @@ mod tests {
             &state,
             &bare_ability,
             AbilityTargetSlot::Unpositioned(&filter),
-            &[],
+            BuiltSlots::NONE,
         );
         assert_eq!(
             crate::game::perf_counters::prior_target_binding_snapshot().static_union_enumerations,
@@ -26077,7 +26633,7 @@ mod tests {
 
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &delayed),
-            countered_controller,
+            Some(countered_controller),
             "CR 608.2d: the countered spell's controller announces the may and draws"
         );
 
@@ -26086,7 +26642,7 @@ mod tests {
         delayed.optional_player = None;
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &delayed),
-            caster,
+            Some(caster),
             "without the stamp the gate falls back to the ability's controller — the \
              wrong seat this change exists to correct"
         );
@@ -26827,6 +27383,132 @@ mod tests {
         }
         assert_eq!(exhausted, full_cost);
     }
+
+    /// CR 608.2c: a declared group names the slot `declared_targets_in_chain` numbers, and the
+    /// slot `illegal_declared_target_slots` marks when that player is pruned, after an
+    /// inheriting rider's snapshot or a paid "instead" delegator's mirror as well as in a
+    /// plain chain.
+    #[test]
+    fn declared_group_player_slot_follows_chain_numbering() {
+        use crate::types::ability::ChosenGroupId;
+        let base = ChosenGroupId::DECLARED_PLAYER_BASE;
+        let (g1, g2, g3, g4) = (
+            ChosenGroupId(base),
+            ChosenGroupId(base + 1),
+            ChosenGroupId(base + 2),
+            ChosenGroupId(base + 3),
+        );
+        let (p, o) = (
+            |n: u32| TargetRef::Player(PlayerId(n as u8)),
+            |n: u64| TargetRef::Object(ObjectId(n)),
+        );
+        let node = |group: Option<ChosenGroupId>, targets: Vec<TargetRef>| {
+            let mut n = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                targets,
+                ObjectId(1),
+                PlayerId(0),
+            );
+            n.declares_chosen_group = group;
+            n
+        };
+        // Numbering: root [o1], sub [p0, o2], sub.sub (g2) [p2], else (g1) [o3, p1],
+        // else.sub (g3) [o4].
+        let root = node(None, vec![o(1)])
+            .sub_ability(node(None, vec![p(0), o(2)]).sub_ability(node(Some(g2), vec![p(2)])))
+            .else_ability(node(Some(g1), vec![o(3), p(1)]).sub_ability(node(Some(g3), vec![o(4)])));
+        let numbered = declared_targets_in_chain(&root);
+        for (group, slot, player) in [(g2, 3, PlayerId(2)), (g1, 5, PlayerId(1))] {
+            assert_eq!(
+                declared_group_player_slot(&root, group),
+                Some(Some((slot, player)))
+            );
+            assert_eq!(numbered[slot], TargetRef::Player(player));
+        }
+        assert_eq!(
+            declared_group_player_slot(&root, g3),
+            Some(None),
+            "a tagged node that announced no player"
+        );
+        assert_eq!(declared_group_player_slot(&root, g4), None, "no such group");
+
+        // The tagged node's player P1 follows a head `A`; per shape the chain before it differs.
+        let a = ObjectId(77);
+        let head = || change_zone_head(Zone::Exile, vec![TargetRef::Object(a)]);
+        let check = |label: &str, build: &dyn Fn(ResolvedAbility) -> ResolvedAbility| {
+            let declared = build(node(Some(g1), vec![p(1)]));
+            let (slot, player) = declared_group_player_slot(&declared, g1)
+                .flatten()
+                .unwrap_or_else(|| panic!("{label}: tagged node found"));
+            assert_eq!(player, PlayerId(1), "{label}");
+            assert_eq!(
+                declared_targets_in_chain(&declared)[slot],
+                p(1),
+                "{label}: lookup slot is the engine's slot"
+            );
+            let mut pruned = node(Some(g1), vec![p(1)]);
+            pruned.illegal_local_target_slots = vec![0];
+            let validated = build(pruned);
+            assert_eq!(
+                illegal_declared_target_slots(&declared, &declared, &validated),
+                vec![slot],
+                "{label}: the stamp marks the lookup's slot when the player is pruned"
+            );
+            let tagged_node =
+                std::iter::successors(Some(&declared), |node| node.sub_ability.as_deref())
+                    .find(|node| node.declares_chosen_group == Some(g1))
+                    .expect("tagged node on the sub line");
+            assert_eq!(
+                declared_slots_ahead_of(&declared, tagged_node),
+                slot,
+                "{label}: the base offset counts the same slots"
+            );
+        };
+        check("plain", &|tagged| head().sub_ability(tagged));
+        check("rider", &|tagged| {
+            head().sub_ability(
+                gain_life_anaphor_rider(vec![TargetRef::Object(a)]).sub_ability(tagged),
+            )
+        });
+        check("delegator", &|tagged| {
+            let mut instead = head();
+            instead.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+            let mut delegator = head();
+            delegator.context.additional_cost_paid = true;
+            delegator.sub_ability(instead.sub_ability(tagged))
+        });
+    }
+
+    /// CR 601.2c: a branch under an inheriting rider declares its own slots, so the
+    /// walk numbers an `else_ability` whether or not its parent's entries are inherited.
+    #[test]
+    fn declared_slot_walk_numbers_the_else_branch_of_an_inheriting_rider() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let a = ObjectId(77);
+        let mut declaring = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        declaring.declares_chosen_group = Some(group);
+        let rider = gain_life_anaphor_rider(vec![TargetRef::Object(a)]).else_ability(declaring);
+        let root = change_zone_head(Zone::Exile, vec![TargetRef::Object(a)]).sub_ability(rider);
+        assert_eq!(
+            declared_targets_in_chain(&root),
+            vec![TargetRef::Object(a), TargetRef::Player(PlayerId(1))]
+        );
+        assert_eq!(
+            declared_group_player_slot(&root, group),
+            Some(Some((1, PlayerId(1))))
+        );
+    }
+
     #[test]
     fn immediate_pt_quantities_share_one_slot_and_skip_deferred_grants_shape() {
         let mut scenario = crate::game::scenario::GameScenario::new();

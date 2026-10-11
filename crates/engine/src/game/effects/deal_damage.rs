@@ -54,7 +54,35 @@ pub(crate) struct DamageContext {
     pub(crate) lifelink_bonus: u32,
 }
 
+/// A player-recipient filter's outcome; `NoReferent` must not fall through to the
+/// node's object targets.
+enum PlayerRecipient {
+    Bound(TargetRef),
+    NoReferent,
+}
+
+/// `None` means "not a player-recipient filter".
 fn player_context_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<PlayerRecipient> {
+    if matches!(
+        target_filter,
+        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+    ) {
+        // CR 608.2b: a declared player with no legal referent is dealt nothing.
+        return Some(
+            match super::resolve_player_for_context_ref(state, ability, target_filter) {
+                Some(player) => PlayerRecipient::Bound(TargetRef::Player(player)),
+                None => PlayerRecipient::NoReferent,
+            },
+        );
+    }
+    bound_player_context_target(state, ability, target_filter).map(PlayerRecipient::Bound)
+}
+
+fn bound_player_context_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -111,11 +139,7 @@ fn player_context_target(
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner
     ) {
-        Some(TargetRef::Player(super::resolve_player_for_context_ref(
-            state,
-            ability,
-            target_filter,
-        )))
+        super::resolve_player_for_context_ref(state, ability, target_filter).map(TargetRef::Player)
     } else {
         None
     }
@@ -161,8 +185,10 @@ fn resolve_effect_recipients(
             .map(|id| vec![TargetRef::Object(id)])
             .unwrap_or_default();
     }
-    if let Some(target) = player_context_target(state, ability, target_filter) {
-        return vec![target];
+    match player_context_target(state, ability, target_filter) {
+        Some(PlayerRecipient::Bound(target)) => return vec![target],
+        Some(PlayerRecipient::NoReferent) => return Vec::new(),
+        None => {}
     }
     // CR 608.2c: An inherited target-slot anaphor belongs to the flattened
     // resolving root, not this local damage node.  Resolve it before the local
@@ -1602,10 +1628,14 @@ fn each_target_damage_split(
         })
         .collect();
 
-    if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
+    match player_context_target(state, ability, target_filter) {
         // CR 120.3a: implicit/context player recipient (damage to a player
         // causes life loss) — every object target is a source.
-        return Some((player_recipient, object_targets));
+        Some(PlayerRecipient::Bound(player_recipient)) => {
+            return Some((player_recipient, object_targets));
+        }
+        Some(PlayerRecipient::NoReferent) => return None,
+        None => {}
     }
     let (last, sources) = object_targets.split_last()?;
     Some((TargetRef::Object(*last), sources.to_vec()))
@@ -7752,5 +7782,63 @@ mod tests {
         // Silence the unused CounterType import on builds where the matches! arm
         // already consumed it via the qualified path.
         let _ = CounterType::Plus1Plus1;
+    }
+
+    /// CR 608.2b: a declared player with no legal referent is dealt nothing, and the
+    /// chain's inherited targets do not stand in for it.
+    #[test]
+    fn damage_to_a_declared_player_reads_the_declared_referent() {
+        use crate::types::ability::ChosenGroupId;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let targets = vec![
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+        ];
+        let damage = |damage_source| {
+            let mut root = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::DeclaredPlayer { group },
+                    damage_source,
+                    excess: None,
+                },
+                targets.clone(),
+                ObjectId(99),
+                PlayerId(0),
+            );
+            root.declares_chosen_group = Some(group);
+            root
+        };
+        let carrier = |root: &ResolvedAbility| StackEntry {
+            id: ObjectId(500),
+            source_id: ObjectId(99),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(99),
+                ability: Box::new(root.clone()),
+            },
+        };
+        let player = vec![TargetRef::Player(PlayerId(1))];
+        for (damage_source, legal_sources, illegal_sources) in [
+            (None, vec![ObjectId(99)], vec![ObjectId(99)]),
+            (
+                Some(DamageSource::EachTarget),
+                vec![ObjectId(1), ObjectId(2)],
+                vec![],
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let mut root = damage(damage_source);
+            state.resolving_stack_entry = Some(carrier(&root));
+            assert_eq!(damage_recipients(&state, &root), player);
+            assert_eq!(damage_sources(&state, &root), legal_sources);
+
+            root.illegal_target_slots = vec![0];
+            state.resolving_stack_entry = Some(carrier(&root));
+            assert_eq!(damage_recipients(&state, &root), Vec::<TargetRef>::new());
+            assert_eq!(damage_sources(&state, &root), illegal_sources);
+        }
     }
 }

@@ -234,7 +234,9 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         // ability's targets, so on a card whose player target is unrelated to
         // the moved object (or absent entirely) every permanent would enter
         // under one arbitrary player's control.
-        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => None,
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. } => None,
         // CR 102.2 / CR 102.3: `Opponent` is a CLASS of players,
         // not a player. `controller_ref_player` yields `None` for it, which
         // surfaces at runtime as an `InvalidParam` rather than a controller.

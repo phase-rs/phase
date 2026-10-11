@@ -61,6 +61,11 @@ fn added_to_turn_in_progress(
             .current_trigger_event
             .as_ref()
             .and_then(|event| extract_player_from_event(event, state)),
+        // CR 608.2b + CR 608.2c: "that player" names the declared player, which
+        // gets nothing once it is illegal or was never announced.
+        ExtraPhaseRecipient::TargetedPlayer(filter) if filter.names_one_player() => {
+            super::resolve_player_for_context_ref(state, ability, filter)
+        }
         ExtraPhaseRecipient::TargetedPlayer(_) => {
             // CR 115.1 + CR 608.2b: the embedded recipient filter assigned
             // this instruction its own player slot at announcement and the

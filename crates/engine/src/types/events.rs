@@ -634,6 +634,7 @@ impl EventObjectSnapshot {
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::OriginalSource
             | TargetFilter::PostReplacementDamageTarget
             // CR 615.5 + CR 615: object/compound referents never reachable from

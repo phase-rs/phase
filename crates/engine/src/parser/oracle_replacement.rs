@@ -9541,7 +9541,7 @@ fn parse_draw_replacement(
             AsLongAsDrawGate::Parsed {
                 remainder,
                 condition,
-            } => (remainder, Some(condition)),
+            } => (remainder, Some(*condition)),
             AsLongAsDrawGate::Unparsed => return None,
         };
     let effect_text = extract_replacement_effect(effect_source);
@@ -10389,7 +10389,7 @@ enum AsLongAsDrawGate<'a> {
     /// original case, `condition` the lifted state restriction.
     Parsed {
         remainder: &'a str,
-        condition: ReplacementCondition,
+        condition: Box<ReplacementCondition>,
     },
     /// Gate present but its condition can't be carried — fail closed.
     Unparsed,
@@ -10431,7 +10431,7 @@ fn strip_as_long_as_draw_gate(normalized: &str) -> AsLongAsDrawGate<'_> {
     match static_gate_to_replacement_condition(static_cond) {
         Some(condition) => AsLongAsDrawGate::Parsed {
             remainder: remainder.trim_start(),
-            condition,
+            condition: Box::new(condition),
         },
         None => AsLongAsDrawGate::Unparsed,
     }

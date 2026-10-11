@@ -1654,7 +1654,13 @@ fn pay_ability_cost_inner(
                         }
                         // An activated ability's controller and original
                         // controller are both the activating player.
-                        PaymentScope::Activation { .. } => player,
+                        PaymentScope::Activation { .. } => Some(player),
+                    };
+                    // CR 608.2b + CR 608.2c: a drawer reference that names no player draws nothing, as in
+                    // `draw::resolve`. `Controller` and `OriginalController` are context refs that always name
+                    // one, so this only guards the resolver's general contract.
+                    let Some(drawer) = drawer else {
+                        return Ok(PaymentOutcome::Paid);
                     };
                     // CR 614.17b + CR 121.3 + CR 121.2b: a drawer who can't draw
                     // every card this cost includes can't choose to pay it.
@@ -2518,7 +2524,11 @@ fn draw_legs_are_drawable(
         else {
             continue;
         };
-        let drawer = super::effects::resolve_player_for_context_ref(state, ability, target);
+        // CR 608.2b + CR 608.2c: a drawer reference that names no player demands no draw.
+        let Some(drawer) = super::effects::resolve_player_for_context_ref(state, ability, target)
+        else {
+            continue;
+        };
         let cards = resolved_cost_count(resolve_quantity_with_targets(state, count, ability));
         match totals.iter_mut().find(|(player, _)| *player == drawer) {
             Some((_, total)) => *total = total.saturating_add(cards),

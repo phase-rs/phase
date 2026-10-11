@@ -1624,6 +1624,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController

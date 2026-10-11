@@ -210,14 +210,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 128 — Paused cost payments: the parked unless-cost resume
+ * 129 — Paused cost payments: the parked unless-cost resume
  *      (CounterAdditionUnlessPayment) gains unpaid_suffix, the unpaid legs and
  *      their payer, and PendingContinuation gains head_payment_origin, which
- *      marks a queued PayCost remainder as a payment already chosen. A v127 peer
+ *      marks a queued PayCost remainder as a payment already chosen. A v128 peer
  *      drops both silently. The pending cost-move resume also gains
  *      ReplacementMayCostInnerChoice, an accepted entry MayCost parked while its
- *      leg's own replacement choice is answered, which a v127 peer cannot decode.
- *      P2P moves in lockstep to wire 110.
+ *      leg's own replacement choice is answered, which a v128 peer cannot decode.
+ *      P2P moves in lockstep to wire 111.
  * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
  *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
  *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
@@ -234,6 +234,13 @@ export class NativeEngineVersionMismatchError extends Error {
  *      CopyRetarget.announcer_election carries a copy announcement's
  *      announcing-opponent election.
  *      (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
+ * 128 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v127 peer
+ *      cannot deserialize it; the exact-match handshake refuses the pairing.
+ *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
+ *      delayed ability's creating chain named by group, omitted when empty;
+ *      amended in place, not bumped. P2P moves in lockstep (wire 110); lobby
+ *      messages are unchanged.
  * 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the
  *      destination object holds) inside `GameState` and the resolved-rules
  *      journal's zone-change commands; a v125 peer rejects the journal when the
@@ -805,7 +812,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 128;
+export const PROTOCOL_VERSION = 129;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -78,13 +78,13 @@ pub fn resolve(
     // library-count reads for any trailing win condition.
     //
     // `ability.parent_target_missing_reason` is a typed, per-ability signal
-    // stamped ONLY by `effects::apply_parent_chain_context` at the exact
-    // moment THIS ability is handed off as a Dig's immediate sub_ability —
-    // never copied to grandchildren and never read from raw global state
-    // here. That means every OTHER `ParentTarget` consumer (Avenging Angel's
-    // LTB self-return, etc.) keeps its ordinary self-fallback regardless of
-    // an unrelated Dig anywhere else in the same resolution, including a
-    // second, later `PutAtLibraryPosition` call.
+    // stamped ONLY by `effects::apply_parent_chain_context`, when this ability
+    // is handed off as a Dig's immediate sub_ability or, still target-less,
+    // down the chain that Dig heads — never read from raw global state here.
+    // So every OTHER `ParentTarget` consumer (Avenging Angel's LTB
+    // self-return, etc.) keeps its ordinary self-fallback regardless of an
+    // unrelated Dig anywhere else in the same resolution, including a second,
+    // later `PutAtLibraryPosition` call.
     let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
         && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
