@@ -13035,11 +13035,11 @@ fn try_parse_typed_cards_in_hand_perpetual_gain_cost(tp: TextPair) -> Option<Eff
 /// To avoid silently dropping unmodeled riders (which the coverage tooling
 /// counts as swallowed clauses), the clause tail must be **fully consumed**:
 /// the bare draft goes to the hand; "and put it onto the battlefield[ tapped]"
-/// goes to the battlefield (honouring the tapped rider); "and exile it" goes to
-/// exile. Anything else — "and exile it face down", "twice, then …", or a
-/// trailing "then …" continuation not split off by the effect chain — returns
-/// `None` so the card falls through to `Unimplemented` rather than parsing to a
-/// subtly wrong effect.
+/// goes to the battlefield (honouring the tapped rider); "and exile it" / ",
+/// then exile it" goes to exile. Anything else — "and exile it face down",
+/// "twice, then …", or a trailing "then …" continuation not split off by the
+/// effect chain — returns `None` so the card falls through to `Unimplemented`
+/// rather than parsing to a subtly wrong effect.
 fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
     /// The clause tail is fully consumed when nothing (or just a sentence
     /// period) remains.
@@ -13082,9 +13082,23 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
         });
     }
 
-    // "… and exile it" — but not "and exile it face down" (face-down exile is
-    // not modeled yet), which leaves an unconsumed tail and is rejected.
-    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(" and exile it").parse(after_book) {
+    // Connector axis (` and` / `, then`) × destination-verb (` exile it`).
+    // Digital-only Alchemy draft (no CR entry: `spellbook` / `conjure` /
+    // `draft a card` do not occur in the Comprehensive Rules).
+    // CR 608.2c: later text may modify earlier text — apply the rules of English;
+    // ", then exile it" names the draft's destination, same as " and exile it",
+    // rather than a later independent exile of a hand card.
+    // CR 701.13a: to exile an object, move it to the exile zone (the created
+    // object is created there). `tail_done` still rejects " face down".
+    if let Ok((tail, _)) = preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>(" and"),
+            tag::<_, _, OracleError<'_>>(", then"),
+        )),
+        tag::<_, _, OracleError<'_>>(" exile it"),
+    )
+    .parse(after_book)
+    {
         return tail_done(tail).then_some(Effect::DraftFromSpellbook {
             destination: Zone::Exile,
             tapped: false,

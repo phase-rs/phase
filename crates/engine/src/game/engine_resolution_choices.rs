@@ -8017,6 +8017,21 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;
+            // CR 608.2c: later instructions of the same effect ("you may play that
+            // card") name the object this instruction created in exile. Interactive
+            // draft pauses before conjure, so the pause-time event harvest is empty;
+            // exile conjure emits ObjectConjured, not ZoneChanged. Publish the
+            // conjured ids from last_created_token_ids when the parked continuation
+            // consumes a tracked set (SearchChoice analog). Digital draft has no CR
+            // keyword-action number.
+            if state
+                .active_ability_continuation()
+                .is_some_and(|continuation| {
+                    effects::chain_references_tracked_set(&continuation.chain)
+                })
+            {
+                effects::publish_fresh_tracked_set(state, state.last_created_token_ids.clone());
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
