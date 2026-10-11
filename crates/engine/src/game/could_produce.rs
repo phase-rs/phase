@@ -58,6 +58,7 @@
 //! calls.
 
 use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 
@@ -806,6 +807,26 @@ fn performed_hand_off<'s>(
         };
     };
 
+    // Read at most once, and only by a decision that needs it: the scan of
+    // the continuous reveal statics is not free.
+    let public = LazyCell::new(|| {
+        let continuous = continuously_revealed_cards(frame.state);
+        published
+            .iter()
+            .all(|id| identity_is_public_now(frame.state, &continuous, *id))
+    });
+    // The two arms below need the parent's after-state, so decide first
+    // whether either can bind. A publication some seat may not see binds
+    // nothing through the look hand-off, and a parent holding no objects an
+    // earlier instruction established hands nothing on by inheritance (the
+    // precondition `inherited_targets` checks first).
+    let may_inherit = frame.bindings.targets
+        == HypotheticalTargets::EstablishedByEarlierInstruction
+        && !parent.targets.is_empty();
+    if !may_inherit && !*public {
+        return unbound();
+    }
+
     // The state the parent's handler leaves behind: the field the hand-off
     // predicates read.
     let mut scratch = frame.state.clone();
@@ -813,14 +834,10 @@ fn performed_hand_off<'s>(
 
     if receives_last_revealed(&scratch, parent, child) {
         let handed = inject_last_revealed_targets(&scratch, parent, child);
-        let continuous = continuously_revealed_cards(frame.state);
-        let public = published
-            .iter()
-            .all(|id| identity_is_public_now(frame.state, &continuous, *id));
         let gate_reads_handed = child.condition.as_ref().is_none_or(|condition| {
             gate_pre_read_targets(&scratch, parent, child, condition) == handed
         });
-        if handed.is_empty() || !public || !gate_reads_handed {
+        if handed.is_empty() || !*public || !gate_reads_handed {
             return unbound();
         }
         return (Cow::Owned(scratch), Some(handed));
@@ -3231,7 +3248,8 @@ mod tests {
     }
 
     /// U-b′ (CR 106.7): a filter the hypothetical node cannot decide keeps the
-    /// source-anchored enumeration.
+    /// source-anchored enumeration. The node is unbound, so both readings
+    /// coincide here; U-b″ is the row that discriminates the guard.
     #[test]
     fn colors_among_permanents_fall_back_for_an_undecidable_filter() {
         let shares_a_name_with_the_target =
@@ -3266,5 +3284,96 @@ mod tests {
             could_produce(&state, land),
             mana_options_from_production(&state, P0_ID, land, &production)
         );
+    }
+
+    /// U-b″, a typed-contract row (CR 106.7 + CR 608.2c): a filter that still
+    /// diverges on a BOUND node keeps the source-anchored enumeration.
+    ///
+    /// No printed card reaches this shape. Omnath's look and reveal hand the
+    /// public top card (Doomsday) to the mana node, which reads "colors among
+    /// creatures named like the parent target". Bound, that is the Red
+    /// creature named Doomsday; source-anchored, it is nothing. The classifier
+    /// keeps `SameNameAsParentTarget` diverging under every reader, so the
+    /// walker must answer with the enumeration, not the bound reading.
+    #[test]
+    fn colors_among_permanents_fall_back_for_a_filter_diverging_on_a_bound_node() {
+        let (mut runner, omnath, library) = public_library_board(vec![("Doomsday", doomsday())]);
+        let nodes = omnath_nodes(&runner, omnath);
+        let named_like_the_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            crate::types::ability::FilterProp::SameNameAsParentTarget,
+        ]));
+        let production = ManaProduction::DistinctColorsAmongPermanents {
+            filter: named_like_the_target.clone(),
+        };
+        let bound = HypotheticalBindings {
+            targets: HypotheticalTargets::EstablishedByEarlierInstruction,
+            ..HypotheticalBindings::NONE
+        };
+        assert!(
+            filter_binding_diverges(
+                &named_like_the_target,
+                BindingReader::HypotheticalResolution(bound)
+            ),
+            "reach-guard: the filter diverges even on a bound node"
+        );
+        let namesake = add_object(
+            runner.state_mut(),
+            P0_ID,
+            "Doomsday",
+            Zone::Battlefield,
+            CoreType::Creature,
+            vec![],
+        );
+        runner.state_mut().objects.get_mut(&namesake).unwrap().color = vec![ManaColor::Red];
+
+        // Control: the same chain shape binds its mana node to the top card.
+        let target_colors = chain(vec![
+            nodes.dig.clone(),
+            nodes.reveal.clone(),
+            target_colors_mana(),
+        ]);
+        let control_land = land_with_trigger(runner.state_mut(), target_colors);
+        assert_eq!(
+            could_produce(runner.state(), control_land),
+            vec![ManaType::Black],
+            "reach-guard: the mana node of this chain is bound to the top card"
+        );
+
+        let execute = chain(vec![
+            nodes.dig.clone(),
+            nodes.reveal.clone(),
+            AbilityDefinition::new(AbilityKind::Spell, mana(production.clone())),
+        ]);
+        let mut reveal = build_resolved_from_def(&execute, omnath, P0_ID)
+            .sub_ability
+            .map(|reveal| *reveal)
+            .unwrap();
+        reveal.set_unpinned_targets(vec![TargetRef::Object(library[0])]);
+        let mut bound_mana = reveal.sub_ability.as_deref().cloned().unwrap();
+        assert_eq!(
+            inherited_parent_occurrences(&reveal, &bound_mana),
+            vec![(TargetRef::Object(library[0]), None)],
+            "reach-guard: the mana node inherits the revealed top card"
+        );
+        bound_mana.set_unpinned_targets(vec![TargetRef::Object(library[0])]);
+
+        let land = land_with_trigger(runner.state_mut(), execute);
+        let state = runner.state();
+        let source_anchored = mana_options_from_production(state, P0_ID, land, &production);
+        assert_eq!(
+            distinct_colors_among_permanents(
+                state,
+                Some(&bound_mana),
+                land,
+                &named_like_the_target
+            ),
+            vec![ManaColor::Red],
+            "reach-guard: the bound reading names the Red namesake"
+        );
+        assert!(
+            source_anchored.is_empty(),
+            "reach-guard: the source-anchored reading names nothing"
+        );
+        assert_eq!(could_produce(state, land), source_anchored);
     }
 }
