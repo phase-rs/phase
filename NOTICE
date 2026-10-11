@@ -1,9 +1,39 @@
 phase.rs
 Copyright 2024-2026 phase.rs contributors
 
-This project uses card data from the following sources:
+This project uses card data and card images from the following sources:
 
 MTGJSON (https://mtgjson.com/)
 Licensed under the MIT License
 Card metadata including names, mana costs, types, oracle text, and other
 game-relevant fields is sourced from MTGJSON's open data sets.
+
+Scryfall (https://scryfall.com/)
+Card images and local-language printing data. Card images are not redistributed
+by this project; they are fetched from Scryfall's CDN by the user's browser at
+runtime. The per-locale card-art maps under client/public/ are derived from
+Scryfall's bulk data sets.
+
+magic-cards-zhs (https://github.com/HeliumOctahelide/magic-cards-zhs)
+Licensed under Creative Commons Attribution-ShareAlike 4.0 International
+(CC BY-SA 4.0) — https://creativecommons.org/licenses/by-sa/4.0/
+Simplified-Chinese card names, type lines, and rules text are sourced from this
+project's weekly data exports and compiled into the card-data.zh.json content
+sidecar. The translated text is a derivative work of that data set and is
+distributed under the same license. See THIRD-PARTY-CONTENT below.
+
+mtgch.com / 大学院废墟 (https://mtgch.com/)
+Simplified-Chinese card images. No license is published by this site; it states
+that its database and card images are open to all developers and that it
+operates under the Wizards of the Coast Fan Content Policy. Card images are not
+redistributed by this project; they are fetched from its CDN by the user's
+browser at runtime, and only when the user selects the Chinese card-art source.
+
+THIRD-PARTY-CONTENT
+Magic: The Gathering, including its card names, rules text, and card art, is
+copyright Wizards of the Coast LLC. The Chinese card text above is a
+translation of Wizards of the Coast card text, and none of the sources listed
+here make any claim resolving that underlying copyright. This project is a
+non-commercial fan project and does not bundle Wizards of the Coast card
+images, card art, mana symbol artwork, card-frame graphics, or the
+Comprehensive Rules document. See DMCA.md.

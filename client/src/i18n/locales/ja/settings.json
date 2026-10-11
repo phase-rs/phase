@@ -29,6 +29,19 @@
     },
     "title": "ゲームプレイ",
     "language": "言語",
+    "cardText": "カードテキスト",
+    "cardTextOptions": {
+      "follow": "言語に合わせる",
+      "english": "常に英語"
+    },
+    "cardArt": "カードアート",
+    "cardArtOptions": {
+      "mtgch": "中国語（mtgch.com）",
+      "scryfall": "英語（Scryfall）"
+    },
+    "sourceNote": "簡体字中国語のカード名、タイプ・ライン、ルール・テキストは{{project}}のデータエクスポートから取得しています。中国語のカード画像は{{site}}から取得しています。どちらも第三者によるデータソースで、カードの識別とルール処理は英語のままです。",
+    "sourceNoteMtgchLicense": "mtgch.comはライセンスを公開していません。そのデータベースとカード画像は、Wizards of the Coastのファン・コンテンツ・ポリシー（Fan Content Policy）に基づいて開発者に公開されていると表明されています。",
+    "sourceNoteZhsLicense": "magic-cards-zhsはCC BY-SA 4.0でライセンスされています。",
     "cardSize": "カードサイズ",
     "commandZone": "統率領域",
     "autoPass": "自動パス",

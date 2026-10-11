@@ -23,6 +23,10 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: () => null,
   useCardParseDetails: () => null,
   useCardRulings: () => [],
+  // Content-i18n name overlay. `null` = "no localized name", i.e. the English
+  // passthrough these tests exercise (they run in `en`). The localized path has
+  // its own suite: CardPreview.localizedCardName.test.tsx.
+  useLocalizedCardName: () => null,
 }));
 
 function battlefieldObject(overrides: Partial<GameObject> = {}): GameObject {

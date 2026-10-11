@@ -92,3 +92,66 @@ and uses its Japanese sibling when available, including face-specific image URLs
 Missing localized fields or printings fall back to English. Printed text can
 differ from current Oracle wording; rules and card identity remain English.
 Do not invent card translations in UI catalogs.
+
+## Simplified Chinese (`zh`)
+
+Use concise, natural mainland Simplified Chinese for frontend-authored text,
+with official Wizards 万智牌 terminology: cast = 施放, activate = 起动,
+resolve = 结算, priority = 优先权, battlefield = 战场, graveyard = 墓地,
+library = 牌库, hand = 手牌, commander = 指挥官 (the format is 指挥官),
+planeswalker = 鹏洛客, token = 衍生物. Keep countering a spell (反击) distinct
+from counters (指示物), controller (操控者) from owner (拥有者), and 牌库
+(library) from 套牌 (deck). Translate a complete sentence rather than joining
+English-order fragments. Preserve optional choices, quantities, costs, who may
+act, and every interpolation token, formatter, markup tag, and shortcut.
+
+Chinese resolves only the `other` CLDR plural category, so `_one` / `_few` /
+`_many` values are unreachable at runtime — they still must exist for key parity,
+but **the `_other` wording must read correctly at every count, including one**.
+This differs from Japanese only in emphasis, not in rule.
+
+### Chinese is the one locale whose card content comes from elsewhere
+
+Every other locale's card text is MTGJSON `foreignData`, emitted by
+`oracle-gen --sidecar-dir`. Chinese cannot be: **MTGJSON carries no Simplified
+Chinese for any set released after 2024-07-05 (`ACR`)** — Bloomburrow, Duskmourn,
+Foundations, Aetherdrift and every later set are 0% — so the MTGJSON pipeline
+would ship a catalog with no data for any current set.
+
+Instead, `scripts/gen-zhs-card-data.sh` compiles `card-data.zh.json` from the
+[magic-cards-zhs](https://github.com/HeliumOctahelide/magic-cards-zhs) weekly
+data export, and `scripts/lib/magic_cards_zhs.py` holds the ingest. Read that
+file's docstring before touching the pipeline: the upstream JSONL is **not
+strictly valid JSON** (escaped quotes are double-escaped, `\\"` for `\"`, which
+breaks ~13% of lines under a strict parser) and its newlines are double-escaped
+as well. Both are repaired at the byte level, and the docstring records the
+measured evidence for each.
+
+Its records are oracle-level and per-face, so unlike the MTGJSON path Chinese
+covers **multi-face cards** too. The sidecar is still keyed by lowercased English
+face name, matching `ensureCardLocale` and the engine's `face_index`; records
+whose English name contains `//` are skipped, because that key can never be a
+face name and splitting it would let a back face clobber the standalone card
+sharing its name.
+
+Chinese card ART comes from [mtgch.com](https://mtgch.com/) instead of the
+Scryfall locale maps. `services/cardArtSource.ts` derives the URL from the
+printing id the client already holds, so no sidecar map is needed — and Scryfall
+serves no Chinese printings under those ids, which is why
+`gen-scryfall-locale-images.sh` has no Chinese entry. Two consequences worth
+knowing: mtgch publishes **no `art_crop`** for Chinese (that endpoint 404s), so
+crop requests fall back to the English crop; and the host resolves to
+Chinese-network IPs that can refuse connections from elsewhere, which is why the
+art source is a user-facing setting and every failure degrades to English art.
+
+Both sources are opt-out-able in Settings → Gameplay (`Card Text`, `Card Art`)
+and neither is redistributed as art: images are fetched from the user's browser
+at runtime. Card text IS redistributed, in `card-data.zh.json` — a derivative
+work of a CC BY-SA 4.0 data set. See [NOTICE](../../../NOTICE) and
+[DMCA.md](../../../DMCA.md) before changing how it is shipped.
+
+Card identity, the engine's Oracle parse, and rules execution remain English in
+every locale. `chineseCardText` only gates Chinese; it must never become a
+general on/off switch for content i18n, because for every other locale the
+sidecar is the sole source of card text.
+

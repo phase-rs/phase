@@ -90,6 +90,19 @@ export type CommandZoneDisplay = "compact" | "inline" | "auto";
  *  {@link BattlefieldZoneOverflow}, mirroring the `commandZoneDisplay`
  *  tri-state "auto" precedent. Lands and support each carry their own value. */
 export type ZoneCollapseMode = "auto" | "on" | "off";
+/** Which service card art is loaded from.
+ *
+ *  `scryfall` is the original and only English source. `mtgch` is 大学院废墟
+ *  (mtgch.com / sbwsz.com), which mirrors the official Simplified-Chinese
+ *  printings of English Scryfall printings keyed by the SAME Scryfall printing
+ *  id — so the player's chosen printing and face carry over unchanged and no
+ *  extra lookup is needed.
+ *
+ *  Deliberately NOT a free choice of "Chinese art" vs "English art" at every
+ *  language: the two sources do not overlap. Scryfall serves no Chinese
+ *  printings under these ids and mtgch serves Chinese only, so the value is a
+ *  provider selection rather than an independent axis. */
+export type CardArtSource = "scryfall" | "mtgch";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "autoExceptSacrificialMana" | "manual";
 /** Which screen edge the resolving-stack panel docks to (and collapses toward).
@@ -304,6 +317,8 @@ function buildDefaultPreferences(): PreferencesState {
     commandZoneDisplay: "auto",
     collapseLands: "auto",
     collapseSupport: "auto",
+    chineseCardText: true,
+    chineseCardArt: true,
     tapRotation: "mtga",
     spellPaymentMode: "auto",
     handSort: "none",
@@ -391,6 +406,20 @@ interface PreferencesState {
   collapseLands: ZoneCollapseMode;
   /** Whether the support sub-row collapses into its summary tile (auto/on/off). */
   collapseSupport: ZoneCollapseMode;
+  /** Whether Chinese-locale card TEXT (name, type line, rules text) is overlaid
+   *  from the `card-data.zh.json` content sidecar. Only consulted when the UI
+   *  language is Chinese; other locales have their own sidecar or none. Exists
+   *  so a player who prefers the English wording — or who hits a translation
+   *  they distrust — can keep the Chinese UI without the Chinese card data.
+   *  Card IDENTITY stays English regardless: this is display data only. */
+  chineseCardText: boolean;
+  /** Whether Chinese-locale card ART is drawn from mtgch.com. Only consulted
+   *  when the UI language is Chinese. Off falls back to the Scryfall art the
+   *  player's printing already resolves to, so this is a pure provider switch
+   *  and never leaves a card imageless. Defaults on so a Chinese player gets
+   *  Chinese cards out of the box; the switch exists because the mtgch image
+   *  CDN is a third-party host that can be unreachable from some networks. */
+  chineseCardArt: boolean;
   tapRotation: TapRotation;
   spellPaymentMode: SpellPaymentMode;
   /** Persisted sort order for the player's own hand (display-only — never
@@ -498,6 +527,8 @@ interface PreferencesActions {
   setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
   setCollapseLands: (mode: ZoneCollapseMode) => void;
   setCollapseSupport: (mode: ZoneCollapseMode) => void;
+  setChineseCardText: (enabled: boolean) => void;
+  setChineseCardArt: (enabled: boolean) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
   setHandSort: (sort: SortKey) => void;
@@ -665,6 +696,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
       setCollapseLands: (mode) => set({ collapseLands: mode }),
       setCollapseSupport: (mode) => set({ collapseSupport: mode }),
+      setChineseCardText: (enabled) => set({ chineseCardText: enabled }),
+      setChineseCardArt: (enabled) => set({ chineseCardArt: enabled }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
       setHandSort: (sort) => set({ handSort: sort }),
@@ -831,7 +864,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 37,
+      version: 38,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -921,6 +954,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          card animations) through the shallow merge, the same as fresh
       //          stores, so no migrate block is needed.
       // v36 → v37: Consolidate battlefield art to one animated arena per color.
+      // v37 → v38: Add chineseCardText/chineseCardArt. Both are seeded `true`
+      //          via the shallow merge, matching the fresh-store default — they
+      //          are only ever consulted when the UI language is Chinese, so an
+      //          existing non-Chinese store sees no behavior change at all, and
+      //          a Chinese player gets Chinese card content without opting in.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

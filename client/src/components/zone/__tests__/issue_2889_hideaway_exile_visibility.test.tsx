@@ -22,6 +22,9 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: () => null,
   useCardParseDetails: () => null,
   useCardRulings: () => [],
+  // Content-i18n name overlay; identity here keeps these tests on the
+  // English passthrough they were written against.
+  useLocalizedCardName: (n: string | null) => n,
 }));
 
 // Issue #2889: a Hideaway permanent exiles a card face down (CR 702.75a). The

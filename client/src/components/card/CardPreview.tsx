@@ -15,7 +15,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import type { ImageRungs } from "../../services/visualPacks/types.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
-import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
+import { useEngineCardData, useCardParseDetails, useCardRulings, useLocalizedCardName, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { faceDownMarkerRef } from "./faceDownMarker.ts";
@@ -465,6 +465,30 @@ function CardPreviewInner({
   const activeImageSrc = activeArt.kind === "face" ? activeArt.src : null;
   const activeImageIsLoading = activeArt.kind === "face" && activeArt.isLoading;
   const displayName = showOtherFace ? backFaceName! : cardName;
+  // Content i18n: the preview's text path is its placeholder (with art present
+  // the name is part of the image), and that placeholder used to print the
+  // canonical English name in every language.
+  //
+  // The lookup key must be the FACE name, never `displayName`. A double-faced
+  // card reaches this component as "Delver of Secrets // Insectile Aberration",
+  // and no content sidecar keys on a combined name — every one of them is keyed
+  // per face, because that is what the engine's `face_index` carries. Passing
+  // `displayName` therefore compiles, runs, and silently never localizes a
+  // single DFC. `showOtherFace` picks WHICH face; the lookup needs that face's
+  // own name.
+  //
+  // Only the DISPLAY string is swapped. `cardName` stays the engine's canonical
+  // English identity for the WASM lookups, the rulings fetch and the image
+  // lookup. Hooks cannot run conditionally, so the call is hoisted above the
+  // branches that choose a face; the hook passes a null through unchanged.
+  //
+  // The FALLBACK must be the face name too, not `displayName`. For a DFC,
+  // `displayName` is the combined "Invasion of Alara // Awaken the Maelstrom"
+  // (that is what `cardName` holds until `showOtherFace` picks a side), so
+  // falling back to it would put the whole two-face string on screen — and into
+  // the accessible name — whenever the overlay has nothing for that face.
+  const faceName = showOtherFace ? backFaceName : frontFaceName;
+  const shownName = useLocalizedCardName(faceName) ?? faceName ?? cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const handPreview = handOrigin != null && !position && !dockSide;
   const infoPanelHeight = showCardPreviewFooter && showInfoPanel ? 120 : 0;
@@ -774,6 +798,7 @@ function CardPreviewInner({
     return (
       <MobilePreviewOverlay
         cardName={cardName}
+        displayName={shownName}
         art={activeArt}
         onDismiss={onDismiss ?? dismissPreview}
         layout={mobileLayout ?? "modal"}
@@ -849,6 +874,7 @@ function CardPreviewInner({
         ) : (
           <CardImagePreview
             cardName={displayName}
+            displayName={shownName}
             classLevel={classLevel}
             showInfoPanel={showInfoPanel}
             showFooter={showCardPreviewFooter}
@@ -875,12 +901,17 @@ function CardPreviewInner({
 /** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
 function MobilePreviewOverlay({
   cardName,
+  displayName,
   art,
   onDismiss,
   layout = "modal",
   report,
 }: {
   cardName: string;
+  /** The UI-language name the overlay PRINTS. `cardName` stays the canonical
+   *  English identity — it is the image `alt` and the art-lookup key, and a
+   *  localized value there would resolve no art at all. */
+  displayName: string;
   /** The parent's RESOLVED art state (marker / generic back / peek already
    *  applied). The overlay must never run its own lookup: a second
    *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
@@ -943,7 +974,7 @@ function MobilePreviewOverlay({
           <CardBackFallback className="pointer-events-auto max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl" />
         ) : showArtFallback ? (
           <CardArtFallback
-            name={cardName}
+            name={displayName}
             className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
           />
         ) : !src ? (
@@ -987,7 +1018,7 @@ function MobilePreviewOverlay({
           <CardBackFallback className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg" />
         ) : showArtFallback ? (
           <CardArtFallback
-            name={cardName}
+            name={displayName}
             className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg"
           />
         ) : !src ? (
@@ -1027,6 +1058,7 @@ function MobilePreviewOverlay({
 /** Shared card image preview used by both desktop and mobile modes */
 function CardImagePreview({
   cardName,
+  displayName,
   classLevel,
   showInfoPanel,
   showFooter,
@@ -1042,6 +1074,10 @@ function CardImagePreview({
   debugObjectId,
 }: {
   cardName: string;
+  /** The UI-language card name for the visible title and the loading/failure
+   *  placeholders. `cardName` remains the canonical English identity used for
+   *  alt text and every lookup. */
+  displayName: string;
   classLevel?: number | null;
   showInfoPanel?: boolean;
   showFooter?: boolean;
@@ -1150,7 +1186,7 @@ function CardImagePreview({
         ) : isLoading ? (
           <div
             className={`${frameClass} aspect-[488/680] animate-pulse rounded-[4%] bg-gray-700`}
-            aria-label={t("card.loading", { name: cardName })}
+            aria-label={t("card.loading", { name: displayName })}
           />
         ) : !src ? (
           <div
@@ -1161,9 +1197,9 @@ function CardImagePreview({
             // (`!src`), so it needs it too.
             className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
             role="img"
-            aria-label={cardName}
+            aria-label={displayName}
           >
-            <span className="text-sm font-medium text-gray-300">{cardName}</span>
+            <span className="text-sm font-medium text-gray-300">{displayName}</span>
           </div>
         ) : (
           <img

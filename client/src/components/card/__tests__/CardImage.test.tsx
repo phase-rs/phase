@@ -21,6 +21,9 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
 // explicitly via the prop when they want to exercise that branch.
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: mockUseEngineCardData,
+  // Content-i18n name overlay; identity here keeps these tests on the
+  // English passthrough they were written against.
+  useLocalizedCardName: (n: string | null) => n,
 }));
 
 const mockUseCardImage = vi.mocked(useCardImage);

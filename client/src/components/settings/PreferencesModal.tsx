@@ -36,6 +36,7 @@ import {
 } from "../../animation/types.ts";
 import type {
   ArtChainEntry,
+  CardArtSource,
   CardPreviewMode,
   CardSizePreference,
   CommandZoneDisplay,
@@ -44,6 +45,11 @@ import type {
   SpellPaymentMode,
   ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
+/** Card text source: `follow` = the UI language's content sidecar, `english` =
+ *  always the engine's English text. Defined here rather than in the store
+ *  because it exists only to give the `chineseCardText` boolean a two-sided
+ *  control; the store has no third state to represent. */
+type CardTextSource = "follow" | "english";
 import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
@@ -84,9 +90,19 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
   { value: "pt", label: "Português" },
   { value: "pl", label: "Polski" },
   { value: "ja", label: "日本語" },
+  { value: "zh", label: "简体中文" },
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
+/** Card TEXT source. `follow` is the default and means "use the UI language's
+ *  content sidecar"; `english` opts out, which today can only mean the Chinese
+ *  sidecar because no other locale offers a choice. Modeled as a two-value
+ *  control rather than a bare boolean so the label reads as a comparison
+ *  against the language picker above it, mirroring `CARD_ART_SOURCES`. */
+const CARD_TEXT_SOURCES: CardTextSource[] = ["follow", "english"];
+/** Card ART provider. Ordered Chinese-first: it is the non-default source, and
+ *  a user opening this control is usually looking for it. */
+const CARD_ART_SOURCES: CardArtSource[] = ["mtgch", "scryfall"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
 const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
@@ -183,6 +199,10 @@ export function PreferencesModal({
   const language = usePreferencesStore((s) => s.language);
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
+  const chineseCardText = usePreferencesStore((s) => s.chineseCardText);
+  const setChineseCardText = usePreferencesStore((s) => s.setChineseCardText);
+  const chineseCardArt = usePreferencesStore((s) => s.chineseCardArt);
+  const setChineseCardArt = usePreferencesStore((s) => s.setChineseCardArt);
   const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
   const collapseLands = usePreferencesStore((s) => s.collapseLands);
   const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
@@ -397,6 +417,44 @@ export function PreferencesModal({
                       })}
                     </div>
                   </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.cardText")}>
+                    <SegmentedControl
+                      options={CARD_TEXT_SOURCES}
+                      value={chineseCardText ? "follow" : "english"}
+                      onChange={(opt) => setChineseCardText(opt === "follow")}
+                      renderLabel={(opt) => t(`gameplay.cardTextOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.cardArt")}>
+                    <SegmentedControl
+                      options={CARD_ART_SOURCES}
+                      value={chineseCardArt ? "mtgch" : "scryfall"}
+                      onChange={(opt) => setChineseCardArt(opt === "mtgch")}
+                      renderLabel={(opt) => t(`gameplay.cardArtOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  {/* Attribution for the two third-party Chinese sources. The
+                      license identifiers and project names are NOT run through
+                      t() as separate keys: they are proper nouns and SPDX
+                      strings, and interpolating them keeps them byte-identical
+                      in every locale. magic-cards-zhs is CC BY-SA 4.0, which
+                      requires attribution, and mtgch.com has no license page at
+                      all — so stating what it does publish is the honest form. */}
+                  <p className="text-xs leading-relaxed text-slate-500">
+                    {t("gameplay.sourceNote", {
+                      project: "magic-cards-zhs",
+                      site: "mtgch.com",
+                    })}
+                  </p>
+                  <p className="text-xs leading-relaxed text-slate-500">
+                    {t("gameplay.sourceNoteMtgchLicense")}
+                  </p>
+                  <p className="text-xs leading-relaxed text-slate-500">
+                    {t("gameplay.sourceNoteZhsLicense")}
+                  </p>
 
                   <SettingGroup label={t("gameplay.cardSize")}>
                     <SegmentedControl

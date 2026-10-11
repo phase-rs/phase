@@ -17,6 +17,9 @@ vi.mock("../../../hooks/useCardHover.ts", () => ({
 }));
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useCardParseDetails: vi.fn(() => []),
+  // Content-i18n name overlay; identity here keeps these tests on the
+  // English passthrough they were written against.
+  useLocalizedCardName: (n: string | null) => n,
 }));
 vi.mock("../../../hooks/useCardReport.ts", () => ({
   useCardReport: vi.fn(() => ({ sent: false, report: vi.fn() })),

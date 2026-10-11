@@ -2,6 +2,7 @@ import { act } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { usePreferencesStore } from "../preferencesStore";
+import { SUPPORTED_LNGS } from "../../i18n/resources";
 
 describe("preferencesStore", () => {
   it.each([
@@ -383,14 +384,17 @@ describe("preferencesStore", () => {
   it("falls back from an unsupported current-version persisted locale", () => {
     localStorage.setItem(
       "phase-preferences",
-      JSON.stringify({ state: { language: "zh-Hans" }, version: 34 }),
+      // Traditional Chinese: no `zh-Hant` catalog ships and the Chinese card
+      // content is Simplified-only, so this must NOT resolve to `zh`.
+      JSON.stringify({ state: { language: "zh-Hant" }, version: 34 }),
     );
 
     act(() => usePreferencesStore.persist.rehydrate());
 
-    expect(["en", "es", "fr", "de", "it", "pt", "pl", "ja"]).toContain(
+    expect(SUPPORTED_LNGS as readonly string[]).toContain(
       usePreferencesStore.getState().language,
     );
+    expect(usePreferencesStore.getState().language).not.toBe("zh");
   });
 
   it("migrates pre-log-dock preferences to the prior right dock", () => {

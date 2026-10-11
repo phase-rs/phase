@@ -29,6 +29,19 @@
     },
     "title": "Rozgrywka",
     "language": "Język",
+    "cardText": "Tekst karty",
+    "cardTextOptions": {
+      "follow": "Zgodnie z językiem",
+      "english": "Zawsze po angielsku"
+    },
+    "cardArt": "Grafika kart",
+    "cardArtOptions": {
+      "mtgch": "Chiński (mtgch.com)",
+      "scryfall": "Angielski (Scryfall)"
+    },
+    "sourceNote": "Nazwy kart, linie typów i tekst zasad w języku chińskim uproszczonym pochodzą z eksportu danych {{project}}. Chińskie grafiki kart pochodzą z {{site}}. Oba są źródłami zewnętrznymi; identyfikacja kart i rozstrzyganie zasad pozostają po angielsku.",
+    "sourceNoteMtgchLicense": "mtgch.com nie publikuje żadnej licencji; jego baza danych i grafiki kart są według deklaracji otwarte dla deweloperów, zgodnie z polityką Wizards of the Coast dotyczącą treści fanowskich (Fan Content Policy).",
+    "sourceNoteZhsLicense": "magic-cards-zhs jest udostępniany na licencji CC BY-SA 4.0.",
     "cardSize": "Rozmiar kart",
     "commandZone": "Strefa dowodzenia",
     "autoPass": "Auto-Pass",

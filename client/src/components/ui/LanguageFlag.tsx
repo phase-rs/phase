@@ -111,6 +111,30 @@ function FlagJA({ className }: { className?: string }) {
   );
 }
 
+function FlagZH({ className }: { className?: string }) {
+  // Simplified: red field with the five-star canton. The four small stars are
+  // placed on an arc by hand (the real geometry is exacting and unreadable at
+  // chip size); the point-up large star is what makes the flag recognizable.
+  const smallStars = [
+    { cx: 22, cy: 6 },
+    { cx: 27, cy: 12 },
+    { cx: 27, cy: 20 },
+    { cx: 22, cy: 26 },
+  ];
+  return (
+    <svg viewBox={VIEW_BOX} className={className} aria-hidden="true">
+      <rect width="60" height="40" fill="#DE2910" />
+      <polygon
+        points="10,4 12.4,11 19,11 13.8,15.2 15.8,22 10,17.8 4.2,22 6.2,15.2 1,11 7.6,11"
+        fill="#FFDE00"
+      />
+      {smallStars.map((s) => (
+        <circle key={`${s.cx}-${s.cy}`} cx={s.cx} cy={s.cy} r="2" fill="#FFDE00" />
+      ))}
+    </svg>
+  );
+}
+
 export function LanguageFlag({ lng, className }: { lng: SupportedLng; className?: string }) {
   // Keep in sync with SupportedLng.
   switch (lng) {
@@ -130,5 +154,7 @@ export function LanguageFlag({ lng, className }: { lng: SupportedLng; className?
       return <FlagPL className={className} />;
     case "ja":
       return <FlagJA className={className} />;
+    case "zh":
+      return <FlagZH className={className} />;
   }
 }

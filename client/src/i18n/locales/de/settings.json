@@ -29,6 +29,19 @@
     },
     "title": "Spielablauf",
     "language": "Sprache",
+    "cardText": "Kartentext",
+    "cardTextOptions": {
+      "follow": "Der Sprache folgen",
+      "english": "Immer Englisch"
+    },
+    "cardArt": "Karten-Artwork",
+    "cardArtOptions": {
+      "mtgch": "Chinesisch (mtgch.com)",
+      "scryfall": "Englisch (Scryfall)"
+    },
+    "sourceNote": "Vereinfachte chinesische Kartennamen, Typenzeilen und Regeltexte stammen aus dem Datenexport von {{project}}. Chinesische Kartenbilder stammen von {{site}}. Beides sind Drittquellen; Kartenidentität und Regelausführung bleiben auf Englisch.",
+    "sourceNoteMtgchLicense": "mtgch.com veröffentlicht keine Lizenz; laut Angabe stehen seine Datenbank und seine Kartenbilder Entwicklern offen, im Rahmen der Fan-Content-Richtlinie („Fan Content Policy“) von Wizards of the Coast.",
+    "sourceNoteZhsLicense": "magic-cards-zhs steht unter der Lizenz CC BY-SA 4.0.",
     "cardSize": "Kartengröße",
     "commandZone": "Kommandozone",
     "autoPass": "Auto-Pass",

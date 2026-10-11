@@ -441,9 +441,16 @@ function loadLocaleArtInBackground(lang: string): void {
  * dispatches an invalidation, but the request key would be unchanged, so the
  * resolution effect would never re-run. Distinguishing pending from ready makes
  * the map's arrival a genuine key change.
+ *
+ * The art SOURCE participates for the same reason: flipping the mtgch provider
+ * re-resolves every URL on screen (`localFaceImageUrl` reads the preference at
+ * call time), so a key that ignored it would leave every mounted tile pinned to
+ * the art of the provider that happened to be active when it first resolved.
+ * Without a locale map installed for the active language, `localeArtCacheKey`
+ * alone is identical either side of the flip — hence the explicit suffix.
  */
-function localeArtCacheKey(lang: string): string {
-  return isLocaleArtReady(lang) ? lang : `${lang}:pending`;
+function localeArtCacheKey(lang: string, chineseArt: boolean): string {
+  return `${isLocaleArtReady(lang) ? lang : `${lang}:pending`}:${chineseArt ? "mtgch" : "scryfall"}`;
 }
 
 /**
@@ -462,6 +469,9 @@ function localeArtCacheKey(lang: string): string {
  */
 export function useLocaleArt(): string {
   const language = usePreferencesStore((s) => s.language);
+  // Subscribed, not read at call time, so flipping the provider re-renders the
+  // caller through the key change below.
+  const chineseArt = usePreferencesStore((s) => s.chineseCardArt);
   const [, setLocaleArtTick] = useState(0);
 
   useEffect(() => {
@@ -474,7 +484,7 @@ export function useLocaleArt(): string {
     loadLocaleArtInBackground(language);
   }, [language]);
 
-  return localeArtCacheKey(language);
+  return localeArtCacheKey(language, chineseArt);
 }
 
 function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
@@ -836,9 +846,11 @@ export function useCardImage(
   const effectiveOffline = useEffectiveOffline();
   // Card art follows the UI language: the printing the user chose is kept, and
   // only its image is swapped for the same printing in their language. Cards
-  // with no localized sibling keep their English art.
+  // with no localized sibling keep their English art. The separate Chinese-art
+  // toggle selects the mtgch provider for that same printing.
   const language = usePreferencesStore((s) => s.language);
-  const artLocaleKey = localeArtCacheKey(language);
+  const chineseArt = usePreferencesStore((s) => s.chineseCardArt);
+  const artLocaleKey = localeArtCacheKey(language, chineseArt);
 
   const [src, setSrc] = useState<string | null>(null);
   const [isRotated, setIsRotated] = useState(false);
@@ -1155,7 +1167,16 @@ export function useCardImage(
             allowRemote: true,
             remote: { src: imageAsset.src, rungs: imageAsset.rungs },
           });
-          const viable = result.sources.filter((source) =>
+          // The asset's own fallbacks (the English URL for a provider-rewritten
+          // one) slot in AFTER the repository's sources — so an installed visual
+          // pack still outranks them — but BEFORE the terminal no-art entry,
+          // which must stay last. Without them a provider-rewritten URL has no
+          // next rung at all and a single CDN failure reaches no-art while the
+          // English art for the same printing sits unused.
+          const viable = [
+            ...result.sources,
+            ...(imageAsset.fallbackSources ?? []),
+          ].filter((source) =>
             source.src === null || !failedSources.current.values.has(source.src));
           publish(viable.length > 0 ? viable : fallback, imageAsset);
         } catch {

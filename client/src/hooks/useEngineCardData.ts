@@ -5,6 +5,7 @@ import {
   ensureCardLocale,
 } from "../services/engineRuntime";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
+import type { SupportedLng } from "../i18n/resources";
 import { usePreferencesStore } from "../stores/preferencesStore";
 
 /**
@@ -51,6 +52,10 @@ export interface ParsedItem {
  */
 export function useEngineCardData(cardName: string | null): EngineCardFace | null {
   const language = usePreferencesStore((s) => s.language);
+  const chineseCardText = usePreferencesStore((s) => s.chineseCardText);
+  // The Chinese sidecar is a separate source with its own opt-out, so it is not
+  // simply "the zh locale": see `localeContentEnabled`.
+  const contentLocale = localeContentEnabled(language, chineseCardText);
   const [data, setData] = useState<EngineCardFace | null>(null);
 
   useEffect(() => {
@@ -64,14 +69,14 @@ export function useEngineCardData(cardName: string | null): EngineCardFace | nul
     void (async () => {
       const result = (await getSharedAdapter().getCardFaceData(cardName)) as EngineCardFace | null;
       if (cancelled) return;
-      if (!result || language === "en") {
+      if (!result || !contentLocale) {
         setData(result ?? null);
         return;
       }
       // Content i18n: overlay the engine's English name/oracle text with the
-      // selected locale's official MTGJSON text, per-field falling back to
-      // English. Identity (lookup key) stays English; only display strings change.
-      const localeMap = await ensureCardLocale(language);
+      // selected locale's official text, per-field falling back to English.
+      // Identity (lookup key) stays English; only display strings change.
+      const localeMap = await ensureCardLocale(contentLocale);
       if (cancelled) return;
       const localized = localeMap.get(result.name.toLowerCase());
       setData(
@@ -89,9 +94,27 @@ export function useEngineCardData(cardName: string | null): EngineCardFace | nul
     });
 
     return () => { cancelled = true; };
-  }, [cardName, language]);
+  }, [cardName, contentLocale]);
 
   return data;
+}
+
+/**
+ * The locale whose card-content sidecar should be overlaid, or `null` when the
+ * engine's English text should stand.
+ *
+ * Extracted so the two overlay hooks cannot disagree. `chineseCardText` gates
+ * only Chinese: every other locale's sidecar is the sole source for its text and
+ * has no opt-out, so this must not become a general on/off switch for content
+ * i18n. English never overlays — it IS the engine's text.
+ */
+function localeContentEnabled(
+  language: SupportedLng,
+  chineseCardText: boolean,
+): SupportedLng | null {
+  if (language === "en") return null;
+  if (language === "zh" && !chineseCardText) return null;
+  return language;
 }
 
 /**
@@ -102,14 +125,16 @@ export function useEngineCardData(cardName: string | null): EngineCardFace | nul
  */
 export function useLocalizedCardName(name: string | null): string | null {
   const language = usePreferencesStore((s) => s.language);
+  const chineseCardText = usePreferencesStore((s) => s.chineseCardText);
+  const contentLocale = localeContentEnabled(language, chineseCardText);
   const [localized, setLocalized] = useState<string | null>(name);
 
   useEffect(() => {
     setLocalized(name);
-    if (!name || language === "en") return;
+    if (!name || !contentLocale) return;
 
     let cancelled = false;
-    ensureCardLocale(language)
+    ensureCardLocale(contentLocale)
       .then((map) => {
         if (cancelled) return;
         const loc = map.get(name.toLowerCase());
@@ -120,7 +145,7 @@ export function useLocalizedCardName(name: string | null): string | null {
       });
 
     return () => { cancelled = true; };
-  }, [name, language]);
+  }, [name, contentLocale]);
 
   return localized;
 }

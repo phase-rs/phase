@@ -94,6 +94,9 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useCardParseDetails: () => null,
   useCardRulings: () => [],
   useEngineCardData: () => null,
+  // Content-i18n name overlay; identity here keeps these tests on the
+  // English passthrough they were written against.
+  useLocalizedCardName: (n: string | null) => n,
 }));
 
 function WarmNormalTile() {

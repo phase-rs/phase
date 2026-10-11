@@ -21,7 +21,7 @@
     "heading": "Quick Start"
   },
   "shell": {
-    "disclaimer": "phase.rs is a non-commercial fan project and is not affiliated with or endorsed by Wizards of the Coast. Magic: The Gathering is © Wizards of the Coast LLC. Card images are fetched from Scryfall at runtime; card data is sourced from MTGJSON. No copyrighted WotC assets are bundled with this project."
+    "disclaimer": "phase.rs is a non-commercial fan project and is not affiliated with or endorsed by Wizards of the Coast. Magic: The Gathering is © Wizards of the Coast LLC. Card images are fetched at runtime from Scryfall, and for Simplified-Chinese cards from mtgch.com. Card data is sourced from MTGJSON, and Simplified-Chinese card text from the magic-cards-zhs project. No copyrighted WotC assets are bundled with this project; see Settings for full source attribution."
   },
   "home": {
     "resume": {

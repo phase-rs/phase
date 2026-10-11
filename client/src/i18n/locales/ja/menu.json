@@ -21,7 +21,7 @@
     "heading": "クイックスタート"
   },
   "shell": {
-    "disclaimer": "phase.rsは非商用のファンプロジェクトであり、Wizards of the Coastとは提携・承認関係にありません。Magic: The GatheringはWizards of the Coast LLCの©著作物です。カード画像は実行時にScryfallから取得し、カードデータはMTGJSONを使用しています。WotCの著作権資産は本プロジェクトに同梱していません。"
+    "disclaimer": "phase.rsは非商用のファンプロジェクトであり、Wizards of the Coastとは提携・承認関係にありません。Magic: The GatheringはWizards of the Coast LLCの©著作物です。カード画像は実行時にScryfallから取得し、簡体字中国語のカード画像はmtgch.comから取得します。カードデータはMTGJSONから、簡体字中国語のカードテキストはmagic-cards-zhsプロジェクトから取得しています。本プロジェクトにはWotCの著作権資産は一切同梱していません。完全な出典情報は「設定」でご確認ください。"
   },
   "home": {
     "resume": {

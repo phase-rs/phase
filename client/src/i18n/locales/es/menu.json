@@ -21,7 +21,7 @@
     "heading": "Inicio rápido"
   },
   "shell": {
-    "disclaimer": "phase.rs es un proyecto de fans sin ánimo de lucro y no está afiliado ni respaldado por Wizards of the Coast. Magic: The Gathering es © Wizards of the Coast LLC. Las imágenes de las cartas se obtienen de Scryfall en tiempo de ejecución; los datos de las cartas provienen de MTGJSON. Este proyecto no incluye ningún recurso con derechos de autor de WotC."
+    "disclaimer": "phase.rs es un proyecto de fans sin ánimo de lucro y no está afiliado ni respaldado por Wizards of the Coast. Magic: The Gathering es © Wizards of the Coast LLC. Las imágenes de las cartas se obtienen en tiempo de ejecución de Scryfall y, para las cartas en chino simplificado, de mtgch.com. Los datos de las cartas provienen de MTGJSON, y el texto de las cartas en chino simplificado, del proyecto magic-cards-zhs. Este proyecto no incluye ningún recurso con derechos de autor de WotC; consulta Ajustes para ver la atribución completa de las fuentes."
   },
   "home": {
     "resume": {

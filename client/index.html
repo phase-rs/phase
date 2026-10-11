@@ -12,6 +12,14 @@
     <link rel="preconnect" href="https://api.scryfall.com" />
     <link rel="preconnect" href="https://cards.scryfall.io" crossorigin />
     <link rel="preconnect" href="https://backs.scryfall.io" crossorigin />
+    <!-- Simplified-Chinese card art (images.mtgch.com) deliberately gets NO
+         static preconnect here. This document is parsed before any preference
+         is readable, so the hint would open a TCP/TLS connection to a
+         third-party host for every visitor — including the majority who read
+         English and never select Chinese art. The art source is an opt-in
+         provider; discovering it at the moment an image is actually requested
+         costs one handshake on the first Chinese card and leaks nothing for
+         everyone else. -->
   </head>
   <body>
     <div id="root"></div>

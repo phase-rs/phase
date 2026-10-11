@@ -29,6 +29,19 @@
     },
     "title": "Gameplay",
     "language": "Language",
+    "cardText": "Card Text",
+    "cardTextOptions": {
+      "follow": "Follow language",
+      "english": "Always English"
+    },
+    "cardArt": "Card Art",
+    "cardArtOptions": {
+      "mtgch": "Chinese (mtgch.com)",
+      "scryfall": "English (Scryfall)"
+    },
+    "sourceNote": "Simplified-Chinese card names, type lines, and rules text come from the {{project}} data export. Chinese card images come from {{site}}. Both are third-party sources; card identity and rules execution stay English.",
+    "sourceNoteMtgchLicense": "mtgch.com publishes no license; its database and card images are stated to be open for developers, under Wizards of the Coast's Fan Content Policy.",
+    "sourceNoteZhsLicense": "magic-cards-zhs is licensed CC BY-SA 4.0.",
     "cardSize": "Card Size",
     "commandZone": "Command Zone",
     "autoPass": "Auto-Pass",

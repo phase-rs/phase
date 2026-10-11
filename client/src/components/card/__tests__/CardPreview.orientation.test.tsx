@@ -18,6 +18,9 @@ vi.mock("../../../services/visualPacks/repository.ts", () => ({
 }));
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: () => null, useCardParseDetails: () => null, useCardRulings: () => [],
+  // Content-i18n name overlay; identity here keeps these tests on the
+  // English passthrough they were written against.
+  useLocalizedCardName: (n: string | null) => n,
 }));
 
 const FRONT = "Invasion of Alara";
