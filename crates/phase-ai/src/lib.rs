@@ -6,7 +6,10 @@ pub mod card_hints;
 pub(crate) mod card_value;
 pub mod cast_facts;
 pub mod combat_ai;
+#[cfg(test)]
+mod combat_awareness_tests;
 mod combat_tax;
+pub(crate) mod combat_triggers;
 pub mod combo;
 pub mod config;
 pub mod context;
@@ -20,6 +23,7 @@ pub mod draft_eval;
 pub mod duel_suite;
 pub mod eval;
 pub mod features;
+pub(crate) mod life_resource;
 pub mod mana_colors;
 pub(crate) mod manland;
 pub mod plan;
