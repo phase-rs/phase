@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-10T00:00:00Z",
+  "updated": "2026-10-11T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -318,38 +318,34 @@
       "main": [
         {
           "count": 4,
-          "name": "Sunspine Lynx"
+          "name": "Boltwave"
         },
         {
           "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 1,
-          "name": "Rockface Village"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Rage"
+          "name": "Slickshot Show-Off"
         },
         {
           "count": 2,
-          "name": "Ramunap Ruins"
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 2,
+          "name": "Gandalf, Goblins' Bane"
         },
         {
           "count": 4,
+          "name": "Kumano Faces Kakkazan"
+        },
+        {
+          "count": 4,
+          "name": "Ramunap Ruins"
+        },
+        {
+          "count": 2,
           "name": "Mutavault"
         },
         {
-          "count": 14,
+          "count": 11,
           "name": "Mountain"
         },
         {
@@ -358,15 +354,11 @@
         },
         {
           "count": 4,
-          "name": "Kumano Faces Kakkazan"
+          "name": "Monastery Swiftspear"
         },
         {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 1,
-          "name": "Den of the Bugbear"
+          "count": 2,
+          "name": "Searing Blood"
         },
         {
           "count": 4,
@@ -374,37 +366,49 @@
         },
         {
           "count": 1,
-          "name": "The Legend of Roku"
+          "name": "Sokenzan, Crucible of Defiance"
         },
         {
           "count": 4,
-          "name": "Screaming Nemesis"
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 4,
+          "name": "Stingcaster Mage"
+        },
+        {
+          "count": 4,
+          "name": "Wizard's Lightning"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Weathered Runestone"
+          "name": "Tormod's Crypt"
         },
         {
           "count": 2,
-          "name": "Pyroclasm"
+          "name": "Reckless Rage"
         },
         {
           "count": 2,
-          "name": "Redcap Melee"
+          "name": "Roiling Vortex"
         },
         {
           "count": 4,
-          "name": "Magebane Lizard"
+          "name": "Screaming Nemesis"
         },
         {
           "count": 2,
-          "name": "Flowstone Infusion"
+          "name": "Scorching Shot"
         },
         {
-          "count": 3,
-          "name": "Scorching Shot"
+          "count": 2,
+          "name": "Searing Blood"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
         }
       ]
     },
@@ -412,8 +416,8 @@
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "U"
+        "U",
+        "W"
       ],
       "tags": [
         "metagame"
@@ -421,7 +425,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Hallowed Fountain"
+          "name": "Teferi, Hero of Dominaria"
         },
         {
           "count": 4,
@@ -429,7 +433,7 @@
         },
         {
           "count": 4,
-          "name": "Teferi, Hero of Dominaria"
+          "name": "Meticulous Archive"
         },
         {
           "count": 4,
@@ -441,23 +445,11 @@
         },
         {
           "count": 4,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
-          "name": "No More Lies"
-        },
-        {
-          "count": 4,
           "name": "March of Otherworldly Light"
         },
         {
           "count": 4,
-          "name": "Memory Deluge"
+          "name": "No More Lies"
         },
         {
           "count": 6,
@@ -465,7 +457,11 @@
         },
         {
           "count": 4,
-          "name": "Glacial Fortress"
+          "name": "Memory Deluge"
+        },
+        {
+          "count": 2,
+          "name": "Restless Anchorage"
         },
         {
           "count": 4,
@@ -489,7 +485,7 @@
         },
         {
           "count": 2,
-          "name": "Restless Anchorage"
+          "name": "Beza, the Bounding Spring"
         },
         {
           "count": 4,
@@ -505,11 +501,23 @@
         },
         {
           "count": 2,
-          "name": "Beza, the Bounding Spring"
+          "name": "Ultima"
         },
         {
-          "count": 2,
-          "name": "Ultima"
+          "count": 1,
+          "name": "Glacial Fortress"
+        },
+        {
+          "count": 3,
+          "name": "Glacial Fortress"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Plains"
         }
       ],
       "sideboard": [
@@ -523,10 +531,6 @@
         },
         {
           "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 2,
           "name": "Kutzil's Flanker"
         },
         {
@@ -536,6 +540,10 @@
         {
           "count": 4,
           "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
         }
       ]
     },
@@ -655,6 +663,141 @@
         {
           "count": 2,
           "name": "Brazen Borrower"
+        }
+      ]
+    },
+    {
+      "name": "Rakdos Sacrifice",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 2,
+          "name": "Blightstep Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Bloodtithe Harvester"
+        },
+        {
+          "count": 4,
+          "name": "Cauldron Familiar"
+        },
+        {
+          "count": 3,
+          "name": "Claim the Firstborn"
+        },
+        {
+          "count": 4,
+          "name": "Deadly Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Eyetwitch"
+        },
+        {
+          "count": 4,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Mayhem Devil"
+        },
+        {
+          "count": 1,
+          "name": "Scavenger's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 2,
+          "name": "The Sackville-Bagginses"
+        },
+        {
+          "count": 4,
+          "name": "Witch's Oven"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 1,
+          "name": "Decorum Dissertation"
+        },
+        {
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Ruinous Waterbending"
+        },
+        {
+          "count": 3,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 2,
+          "name": "Ghost Vacuum"
         }
       ]
     },
@@ -786,133 +929,6 @@
       ]
     },
     {
-      "name": "Rakdos Sacrifice",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Blazemire Verge"
-        },
-        {
-          "count": 3,
-          "name": "Blightstep Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Bloodtithe Harvester"
-        },
-        {
-          "count": 4,
-          "name": "Cauldron Familiar"
-        },
-        {
-          "count": 3,
-          "name": "Claim the Firstborn"
-        },
-        {
-          "count": 4,
-          "name": "Deadly Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Eyetwitch"
-        },
-        {
-          "count": 4,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 4,
-          "name": "Mayhem Devil"
-        },
-        {
-          "count": 1,
-          "name": "Scavenger's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 3,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 2,
-          "name": "The Sackville-Bagginses"
-        },
-        {
-          "count": 4,
-          "name": "Witch's Oven"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "Go Blank"
-        },
-        {
-          "count": 1,
-          "name": "Ozai's Cruelty"
-        },
-        {
-          "count": 1,
-          "name": "Ruinous Waterbending"
-        },
-        {
-          "count": 3,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Decorum Dissertation"
-        }
-      ]
-    },
-    {
       "name": "Abzan Greasefang",
       "author": "MTGGoldfish",
       "colors": [
@@ -989,7 +1005,7 @@
           "name": "Boseiju, Who Endures"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Thundering Broodwagon"
         },
         {
@@ -1019,6 +1035,10 @@
         {
           "count": 1,
           "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Witherbloom Command"
         }
       ],
       "sideboard": [
@@ -1059,12 +1079,16 @@
           "name": "Ruinous Waterbending"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Duress"
         },
         {
           "count": 1,
-          "name": "Ral Zarek, Guest Lecturer"
+          "name": "Yasharn, Implacable Earth"
+        },
+        {
+          "count": 1,
+          "name": "Witherbloom Command"
         }
       ]
     },
