@@ -571,6 +571,42 @@ describe("ModalPanelShell", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("keeps a portaled select's arrow navigation local and lets its scope own Escape", () => {
+    const onClose = vi.fn();
+    render(
+      shell({
+        onClose,
+        children: (
+          <MenuSelect
+            label="Board style"
+            items={[
+              { value: "classic", label: "Classic" },
+              { value: "modern", label: "Modern" },
+            ]}
+            onSelect={vi.fn()}
+          />
+        ),
+      }),
+    );
+
+    const trigger = screen.getByRole("button", { name: "Board style" });
+    fireEvent.click(trigger);
+    const [classic, modern] = screen.getAllByRole("option");
+    expect(classic).toHaveFocus();
+
+    fireEvent.keyDown(classic, { key: "ArrowDown" });
+    expect(modern).toHaveFocus();
+
+    fireEvent.keyDown(modern, { key: "ArrowUp" });
+    expect(classic).toHaveFocus();
+
+    fireEvent.keyDown(classic, { key: "Escape" });
+
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("recovers within an open portal branch when its focused option is removed", async () => {
     const modal = (items: Array<{ value: string; label: string }>) =>
       shell({
