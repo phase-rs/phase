@@ -31,7 +31,7 @@ use crate::types::game_state::{
     PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
     ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
-use crate::types::identifiers::{DiscardFrameId, ObjectId};
+use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
@@ -383,6 +383,136 @@ pub struct PendingCipherEncode {
     pub creatures: Vec<ObjectId>,
 }
 
+/// CR 608.2f + CR 101.4: a `player_scope` clause paused on a seat's choice owes
+/// ONE result. This parked frame owns the clause's detached tail and the events
+/// its own frames, and the prompts they raised, produced. It sits below every
+/// frame the clause raised, owns no prompt, and wakes only when those frames are
+/// gone; then the clause publishes once and the tail resolves (CR 608.2c).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeClause {
+    /// The ability whose clause this is; one owner per source at a time.
+    pub source_id: ObjectId,
+    /// The detached instructions that read the clause's result.
+    pub tail: Box<PendingContinuation>,
+    /// How the clause's result is published when it completes.
+    pub publication: ClausePublication,
+    /// Every event the clause's own frames produced, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<GameEvent>,
+    /// The prompt this clause's own work left standing. An answer site attributes
+    /// an answer to the clause only when it answers exactly this prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raised_prompt: Option<WaitingFor>,
+    /// Execution cursor; always `Closed` at an action boundary, so it is never
+    /// saved and a restored frame equals the live one.
+    #[serde(skip)]
+    pub(crate) attribution: ClauseAttribution,
+}
+
+/// How a completed clause publishes its result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ClausePublication {
+    /// Paused by this build: published through the player-scope clause authority.
+    Recorded {
+        outer: Box<ResolvedAbility>,
+        scoped_template: Box<ResolvedAbility>,
+        matching_players: Vec<PlayerId>,
+    },
+    /// Converted from a save written with the retired linked-exile sidecar: only
+    /// a linked-exile batch survives that form.
+    MigratedLinkedExile(MigratedLinkedExileSeed),
+}
+
+/// The retired sidecar's pre-save linked-exile batch. Only the legacy converter in
+/// this module writes one, so its field has no constructor outside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MigratedLinkedExileSeed {
+    batch: Vec<ObjectIncarnationRef>,
+}
+
+impl MigratedLinkedExileSeed {
+    pub(crate) fn into_batch(self) -> Vec<ObjectIncarnationRef> {
+        self.batch
+    }
+}
+
+/// Whether a paused clause's frame-of-origin bracket is open (decision 1: work
+/// counts for the clause by the frame that executed it).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum ClauseAttribution {
+    #[default]
+    Closed,
+    Open(OpenClauseBracket),
+    /// CR 704.3: the post-action pipeline is running inside this owner's
+    /// bracket. `standing` is the prompt the clause's own work left standing when
+    /// the pipeline began.
+    Suspended {
+        standing: Box<WaitingFor>,
+    },
+}
+
+/// An open bracket: the clause owns every event from `from` on.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OpenClauseBracket {
+    from: usize,
+    return_to: ReturnTo,
+    interposed: Option<InterposedPrompt>,
+}
+
+/// The state a closing bracket returns its owner to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReturnTo {
+    Closed,
+    /// Opened by a resumption site inside a suspended pipeline region.
+    Suspended,
+}
+
+/// A prompt the suspended pipeline left standing, and the clause's own prompt it
+/// displaced. A close never records `foreign` as clause-raised.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InterposedPrompt {
+    foreign: Box<WaitingFor>,
+    own: Box<WaitingFor>,
+}
+
+impl InterposedPrompt {
+    /// The displaced own prompt, when the region left a different one standing.
+    fn between(standing: &WaitingFor, current: &WaitingFor) -> Option<Self> {
+        (standing != current).then(|| Self {
+            foreign: Box::new(current.clone()),
+            own: Box::new(standing.clone()),
+        })
+    }
+}
+
+impl PendingPlayerScopeClause {
+    /// Absorbs the span of a bracket still open at completion, then closes it.
+    pub(crate) fn absorb_open_span(&mut self, events: &[GameEvent]) {
+        let ClauseAttribution::Open(bracket) = &self.attribution else {
+            debug_assert!(false, "a clause completes only inside a resumption bracket");
+            tracing::warn!(
+                source = ?self.source_id,
+                "player-scope clause completed outside an open attribution bracket"
+            );
+            return;
+        };
+        match events.get(bracket.from..) {
+            Some(span) => self.events.extend_from_slice(span),
+            None => {
+                debug_assert!(
+                    false,
+                    "completion on an event buffer shorter than its bracket"
+                );
+                tracing::warn!(
+                    source = ?self.source_id,
+                    "player-scope clause completed on a shrunk event buffer; absorbing nothing"
+                );
+            }
+        }
+        self.attribution = ClauseAttribution::Closed;
+    }
+}
+
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
 /// `PendingChangeZoneIteration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -450,6 +580,7 @@ pub enum ResolutionFrame {
     MutateMerge(PendingMutateMerge),
     CipherEncode(PendingCipherEncode),
     PostReplacement(PostReplacementDrainStack),
+    PlayerScopeClause(Box<PendingPlayerScopeClause>),
 }
 
 /// The discriminant of a [`ResolutionFrame`], used by checked stack
@@ -484,6 +615,7 @@ pub enum FrameKind {
     MutateMerge,
     CipherEncode,
     PostReplacement,
+    PlayerScopeClause,
 }
 
 impl ResolutionFrame {
@@ -517,6 +649,7 @@ impl ResolutionFrame {
             Self::MutateMerge(_) => FrameKind::MutateMerge,
             Self::CipherEncode(_) => FrameKind::CipherEncode,
             Self::PostReplacement(_) => FrameKind::PostReplacement,
+            Self::PlayerScopeClause(_) => FrameKind::PlayerScopeClause,
         }
     }
 
@@ -554,6 +687,7 @@ impl ResolutionFrame {
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
             | Self::CipherEncode(_)
+            | Self::PlayerScopeClause(_)
             | Self::PostReplacement(_) => true,
         }
     }
@@ -624,6 +758,7 @@ impl ResolutionFrame {
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
+            | Self::PlayerScopeClause(_)
             | Self::PostReplacement(_) => FrameGate::AfterChild,
         }
     }
@@ -3301,6 +3436,213 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 608.2f: parks a paused clause's owner below every frame the clause
+    /// raised (the child stack begun at `child_stack_start`), or on top when the
+    /// clause raised no frame.
+    pub(crate) fn park_player_scope_clause(
+        &mut self,
+        clause: PendingPlayerScopeClause,
+        child_stack_start: ChildStackDepth,
+    ) {
+        let frame = ResolutionFrame::PlayerScopeClause(Box::new(clause));
+        if self.capture_child_boundary() > child_stack_start {
+            self.insert_parent_at_child_boundary(frame, child_stack_start)
+                .expect("a clause owner sits at its own child boundary");
+        } else {
+            self.push_inner(frame);
+        }
+    }
+
+    /// The clause owner on top of the stack, consumed for completion.
+    pub(crate) fn take_active_player_scope_clause(&mut self) -> Option<PendingPlayerScopeClause> {
+        if !matches!(
+            self.frames.last(),
+            Some(ResolutionFrame::PlayerScopeClause(_))
+        ) {
+            return None;
+        }
+        match self.frames.pop() {
+            Some(ResolutionFrame::PlayerScopeClause(clause)) => Some(*clause),
+            _ => unreachable!("the checked top is a clause owner"),
+        }
+    }
+
+    /// Every parked clause owner, bottom to top.
+    pub(crate) fn player_scope_clauses(&self) -> impl Iterator<Item = &PendingPlayerScopeClause> {
+        self.frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::PlayerScopeClause(clause) => Some(&**clause),
+            _ => None,
+        })
+    }
+
+    /// The highest parked clause owner: the clause whose frames are innermost.
+    pub(crate) fn topmost_player_scope_clause(&self) -> Option<&PendingPlayerScopeClause> {
+        self.player_scope_clauses().last()
+    }
+
+    fn player_scope_clause_mut(
+        &mut self,
+        source_id: ObjectId,
+    ) -> Option<&mut PendingPlayerScopeClause> {
+        self.frames.iter_mut().rev().find_map(|frame| match frame {
+            ResolutionFrame::PlayerScopeClause(clause) if clause.source_id == source_id => {
+                Some(&mut **clause)
+            }
+            _ => None,
+        })
+    }
+
+    fn topmost_player_scope_clause_mut(&mut self) -> Option<&mut PendingPlayerScopeClause> {
+        self.frames.iter_mut().rev().find_map(|frame| match frame {
+            ResolutionFrame::PlayerScopeClause(clause) => Some(&mut **clause),
+            _ => None,
+        })
+    }
+
+    /// Opens the topmost owner's bracket at event index `from`, returning its
+    /// source. A `Suspended` owner opens to return to `Suspended`, remembering a
+    /// prompt the suspended region interposed; an already `Open` owner is not
+    /// reopened (its opener closes it).
+    pub(crate) fn open_clause_attribution(
+        &mut self,
+        from: usize,
+        current: &WaitingFor,
+    ) -> Option<ObjectId> {
+        let clause = self.topmost_player_scope_clause_mut()?;
+        let bracket = match &clause.attribution {
+            ClauseAttribution::Closed => OpenClauseBracket {
+                from,
+                return_to: ReturnTo::Closed,
+                interposed: None,
+            },
+            ClauseAttribution::Suspended { standing } => OpenClauseBracket {
+                from,
+                return_to: ReturnTo::Suspended,
+                interposed: InterposedPrompt::between(standing, current),
+            },
+            ClauseAttribution::Open(_) => return None,
+        };
+        clause.attribution = ClauseAttribution::Open(bracket);
+        Some(clause.source_id)
+    }
+
+    /// Closes the bracket of the owner keyed by `source_id`, if it is still open:
+    /// absorbs `events[from..]`, or `moved[from..]` when the site moved its whole
+    /// buffer into its output, and records the prompt the clause's work left
+    /// standing. A prompt a suspended region interposed is never recorded: the
+    /// close records the clause's own displaced prompt instead.
+    pub(crate) fn close_clause_attribution(
+        &mut self,
+        source_id: ObjectId,
+        events: &[GameEvent],
+        moved: Option<&[GameEvent]>,
+        standing: &WaitingFor,
+    ) {
+        let Some(clause) = self.player_scope_clause_mut(source_id) else {
+            // The bracketed work completed the owner itself.
+            return;
+        };
+        if !matches!(clause.attribution, ClauseAttribution::Open(_)) {
+            // A successor owner from the same source never had this bracket.
+            return;
+        }
+        let ClauseAttribution::Open(bracket) = std::mem::take(&mut clause.attribution) else {
+            unreachable!("the checked owner is open");
+        };
+        // An empty `events` tail is ambiguous when the site emptied its buffer into
+        // its output; the moved buffer then holds the span.
+        let buffer_was_moved = moved.is_some_and(|moved| moved.len() > bracket.from);
+        let span = match events.get(bracket.from..) {
+            Some(span) if !(span.is_empty() && buffer_was_moved) => Some(span),
+            _ => moved.and_then(|moved| moved.get(bracket.from..)),
+        };
+        match span {
+            Some(span) => clause.events.extend_from_slice(span),
+            None => {
+                debug_assert!(
+                    false,
+                    "clause bracket closed on a buffer shorter than its start"
+                );
+                tracing::warn!(
+                    source = ?source_id,
+                    "player-scope clause bracket closed on a shrunk event buffer; absorbing nothing"
+                );
+            }
+        }
+        let recorded = match bracket.interposed {
+            Some(InterposedPrompt { foreign, own }) if *foreign == *standing => *own,
+            _ => standing.clone(),
+        };
+        clause.raised_prompt =
+            (!matches!(recorded, WaitingFor::Priority { .. })).then(|| recorded.clone());
+        clause.attribution = match bracket.return_to {
+            ReturnTo::Closed => ClauseAttribution::Closed,
+            ReturnTo::Suspended => ClauseAttribution::Suspended {
+                standing: Box::new(recorded),
+            },
+        };
+    }
+
+    /// CR 704.3: the post-action pipeline begins inside an open bracket. Absorbs
+    /// the span so far and parks the owner as `Suspended`, remembering the prompt
+    /// the clause's own work left standing. Returns the suspended owner's source.
+    pub(crate) fn suspend_clause_attribution(
+        &mut self,
+        events: &[GameEvent],
+        current: &WaitingFor,
+    ) -> Option<ObjectId> {
+        let clause = self.frames.iter_mut().rev().find_map(|frame| match frame {
+            ResolutionFrame::PlayerScopeClause(clause)
+                if matches!(clause.attribution, ClauseAttribution::Open(_)) =>
+            {
+                Some(&mut **clause)
+            }
+            _ => None,
+        })?;
+        let ClauseAttribution::Open(bracket) = std::mem::take(&mut clause.attribution) else {
+            unreachable!("the found owner is open");
+        };
+        match events.get(bracket.from..) {
+            Some(span) => clause.events.extend_from_slice(span),
+            None => {
+                debug_assert!(false, "pipeline suspended a bracket on a shrunk buffer");
+                tracing::warn!(
+                    source = ?clause.source_id,
+                    "player-scope clause suspended on a shrunk event buffer; absorbing nothing"
+                );
+            }
+        }
+        clause.attribution = ClauseAttribution::Suspended {
+            standing: Box::new(current.clone()),
+        };
+        Some(clause.source_id)
+    }
+
+    /// The pipeline ends: reopens, at `from`, only the owner with `source_id` that
+    /// is still `Suspended`. A successor owner from the same source (the original
+    /// completed inside the region and its tail parked a new one) is `Closed` and
+    /// is never reopened here. Returns whether an owner reopened.
+    pub(crate) fn resume_clause_attribution(
+        &mut self,
+        source_id: ObjectId,
+        from: usize,
+        current: &WaitingFor,
+    ) -> bool {
+        let Some(clause) = self.player_scope_clause_mut(source_id) else {
+            return false;
+        };
+        let ClauseAttribution::Suspended { standing } = &clause.attribution else {
+            return false;
+        };
+        let interposed = InterposedPrompt::between(standing, current);
+        clause.attribution = ClauseAttribution::Open(OpenClauseBracket {
+            from,
+            return_to: ReturnTo::Closed,
+            interposed,
+        });
+        true
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &ResolutionFrame> {
         self.frames.iter()
     }
@@ -3338,6 +3680,7 @@ impl ResolutionStack {
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::PlayerScopeClause(_)
             | ResolutionFrame::PostReplacement(_) => false,
         })
     }
@@ -3362,6 +3705,14 @@ impl ResolutionStack {
                 ResolutionFrame::EachPlayerCopyChosen(pending) => {
                     if let Some(event) = pending.trigger_event.as_mut() {
                         f(event);
+                    }
+                }
+                ResolutionFrame::PlayerScopeClause(clause) => {
+                    for context in clause.tail.trigger_context.iter_mut() {
+                        if let Some(event) = context.event.as_mut() {
+                            f(event);
+                        }
+                        context.events.iter_mut().for_each(&mut *f);
                     }
                 }
                 ResolutionFrame::AbilityContinuation(frame) => {
@@ -3789,8 +4140,22 @@ impl ResolutionStack {
 /// Version 3 distinguishes the current exploited-trigger source/victim roles
 /// from the legacy actor fallback stored in `valid_card`. Version 4 requires
 /// every draw frame to carry its result owner explicitly, including `null`.
-/// Version 5 adds the simultaneous-draw dealer to the draw frame.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
+/// Version 5 adds the simultaneous-draw dealer to the draw frame. Version 6
+/// retires the player-scope linked-exile continuation sidecar in favour of the
+/// `PlayerScopeClause` owner frame; a version 2–5 save carrying the sidecar is
+/// converted (or refused) by `migrate_retired_player_scope_linked_exile`.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
+
+/// Last wire version that could carry the retired player-scope linked-exile
+/// sidecar (`PendingContinuation.player_scope_linked_exile` and its queue-end
+/// marker). Regenerate the range with: `for t in $(git tag --contains c9498de7b);
+/// do git show $t:crates/engine/src/types/resolution.rs | grep "pub const
+/// RESOLUTION_STATE_WIRE_VERSION"; done | sort | uniq -c`.
+const LEGACY_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
+
+/// First wire version that could carry the retired sidecar: the version at the
+/// commit that introduced it (c9498de7b). Same regeneration command as above.
+const FIRST_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4342,9 +4707,11 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 and 5 use the same frame
+    /// 2 and 3 share the typed-frame reader; versions 4, 5 and 6 use the same frame
     /// layout with an explicit draw-result-owner presence check, and a version-4
-    /// draw frame simply has no dealer.
+    /// draw frame simply has no dealer. Versions 2–5 may carry the retired
+    /// player-scope linked-exile sidecar, which is converted to the clause owner
+    /// frame here or refused; version 6 never carries it.
     fn from_value(mut value: Value) -> Result<Self, String> {
         let version = {
             let object = value
@@ -4367,12 +4734,12 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV4
-            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION
+            | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -4387,6 +4754,17 @@ impl ResolutionStateWire {
         // events are recognized there only to produce the same incompatibility
         // diagnostic; this adapter does not add support for that event codec.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
+        // Decision 7: a save written while the retired sidecar existed converts to
+        // the clause owner frame (or is refused, never silently resumed); any
+        // other version must not carry it at all.
+        if (FIRST_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION
+            ..=LEGACY_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION)
+            .contains(&version)
+        {
+            migrate_retired_player_scope_linked_exile(&mut value)?;
+        } else {
+            reject_retired_player_scope_linked_exile(&value)?;
+        }
         let additional_live_event_roots = match decode_mode {
             GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
             GameStateDecodeMode::ResolutionWireV2
@@ -4811,6 +5189,194 @@ impl<'de> Deserialize<'de> for ResolutionStateWire {
     {
         Self::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
+}
+
+/// The JSON-pointer roots whose frames can carry a parked continuation: the
+/// typed-frame wire and the runtime stack a bare `GameState` payload holds.
+const RETIRED_SIDECAR_FRAME_ROOTS: [&str; 2] =
+    ["/resolution_frames/frames", "/resolution_stack/frames"];
+
+/// The retired #8233 continuation sidecar's two keys.
+const RETIRED_SIDECAR_KEY: &str = "player_scope_linked_exile";
+const RETIRED_QUEUE_END_KEY: &str = "player_scope_queue_end";
+
+/// `(root, index)` of every frame whose `data.pending` carries the retired sidecar
+/// or its queue-end marker.
+fn retired_player_scope_sidecar_carriers(value: &Value) -> Vec<(&'static str, usize)> {
+    let mut carriers = Vec::new();
+    for root in RETIRED_SIDECAR_FRAME_ROOTS {
+        let Some(frames) = value.pointer(root).and_then(Value::as_array) else {
+            continue;
+        };
+        for (index, frame) in frames.iter().enumerate() {
+            let carries = frame.pointer("/data/pending").is_some_and(|pending| {
+                pending.get(RETIRED_SIDECAR_KEY).is_some()
+                    || pending.get(RETIRED_QUEUE_END_KEY).is_some()
+            });
+            if carries {
+                carriers.push((root, index));
+            }
+        }
+    }
+    carriers
+}
+
+/// Decision 7: a payload at a version that never carried the retired sidecar
+/// must not carry it. Its keys would otherwise be dropped silently by serde.
+pub(crate) fn reject_retired_player_scope_linked_exile(value: &Value) -> Result<(), String> {
+    let carriers = retired_player_scope_sidecar_carriers(value);
+    if carriers.is_empty() {
+        return Ok(());
+    }
+    let paths: Vec<String> = carriers
+        .iter()
+        .map(|(root, index)| format!("{root}/{index}"))
+        .collect();
+    Err(format!(
+        "malformed resolution state: the retired player-scope linked-exile sidecar is present at {paths:?}"
+    ))
+}
+
+/// The refusal a legacy clause this build cannot resume receives (decision 7).
+fn unresumable_player_scope_clause(name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!(
+            "This saved game is paused inside the player-scope clause of {name} in a form this \
+             version can no longer resume; restart the game from a current save."
+        ),
+        None => "This saved game is paused inside a player-scope clause in a form this version \
+                 can no longer resume; restart the game from a current save."
+            .to_string(),
+    }
+}
+
+/// CR 608.2f + CR 608.2c, decision 7: converts the one retired sidecar a version
+/// 2–5 save can carry into the `PlayerScopeClause` owner frame, or refuses the
+/// save with a diagnostic.
+///
+/// The retired form kept only a linked-exile batch, so a clause whose tail reads
+/// anything else the clause produced (its "this way" ledger, its tracked set or
+/// its amount) is refused (sub-shape (i)), as is a save holding more than one
+/// carrier (sub-shape (ii)). The migrated owner's completion marks span exiles the
+/// way the publication authority marks an exile-destination producer's, so the
+/// converter also requires producer evidence in the save that the clause exiles:
+/// the remaining legs' head effect, then the standing `EffectZoneChoice`
+/// destination. Without at least one piece, every piece exile-destination, the
+/// save is refused.
+fn migrate_retired_player_scope_linked_exile(value: &mut Value) -> Result<(), String> {
+    let carriers = retired_player_scope_sidecar_carriers(value);
+    let (root, index) = match carriers.as_slice() {
+        [] => return Ok(()),
+        [carrier] => *carrier,
+        _ => return Err(unresumable_player_scope_clause(None)),
+    };
+    let pending_pointer = format!("{root}/{index}/data/pending");
+    let pending = value
+        .pointer(&pending_pointer)
+        .cloned()
+        .ok_or_else(|| "a retired sidecar carrier has no pending continuation".to_string())?;
+    let sidecar = pending
+        .get(RETIRED_SIDECAR_KEY)
+        .cloned()
+        .unwrap_or(Value::Null);
+    let source_id = sidecar.get("source_id").cloned().unwrap_or(Value::Null);
+    let clause_name = source_id
+        .as_u64()
+        .and_then(|id| value.pointer(&format!("/objects/{id}/name")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let refuse = || unresumable_player_scope_clause(clause_name.as_deref());
+
+    // (i) The retired form recorded no ledger, tracked set or amount.
+    let after_scope: ResolvedAbility = sidecar
+        .get("after_scope")
+        .cloned()
+        .ok_or_else(&refuse)
+        .and_then(|tail| serde_json::from_value(tail).map_err(|_| refuse()))?;
+    if crate::game::effects::chain_reads_zone_change_ledger(&after_scope)
+        || crate::game::effects::ability_or_branch_references_tracked_set(&after_scope)
+        || crate::game::effects::chain_reads_clause_amount(&after_scope)
+    {
+        return Err(refuse());
+    }
+
+    // (i) Producer evidence: the legs' head, then the standing prompt.
+    let is_queue_end = pending
+        .get(RETIRED_QUEUE_END_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut producer_evidence = Vec::new();
+    if !is_queue_end {
+        if let Some(chain) = pending.get("chain") {
+            let leg: ResolvedAbility =
+                serde_json::from_value(chain.clone()).map_err(|_| refuse())?;
+            producer_evidence.push(
+                crate::game::effects::effect_destination_zone(&leg.effect)
+                    == Some(crate::types::zones::Zone::Exile),
+            );
+        }
+    }
+    let standing = value.get("waiting_for").cloned();
+    if let Some(WaitingFor::EffectZoneChoice { destination, .. }) = standing
+        .clone()
+        .and_then(|prompt| serde_json::from_value::<WaitingFor>(prompt).ok())
+    {
+        producer_evidence.push(destination == Some(crate::types::zones::Zone::Exile));
+    }
+    if producer_evidence.is_empty() || !producer_evidence.iter().all(|exiles| *exiles) {
+        return Err(refuse());
+    }
+
+    // Build the owner: the tail is the sidecar's detached instructions, carrying
+    // the parked continuation's resolution context.
+    let mut tail = Map::new();
+    tail.insert("chain".to_string(), sidecar["after_scope"].clone());
+    for key in [
+        "return_result_occurrence",
+        "trigger_context",
+        "trigger_firing",
+    ] {
+        if let Some(field) = pending.get(key) {
+            tail.insert(key.to_string(), field.clone());
+        }
+    }
+    let mut owner = Map::new();
+    owner.insert("source_id".to_string(), source_id);
+    owner.insert("tail".to_string(), Value::Object(tail));
+    owner.insert(
+        "publication".to_string(),
+        serde_json::json!({
+            "MigratedLinkedExile": {
+                "batch": sidecar.get("batch").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+            }
+        }),
+    );
+    // The standing prompt of a mid-clause save was raised by the clause's own legs.
+    if let Some(prompt) =
+        standing.filter(|prompt| prompt.get("type").and_then(Value::as_str) != Some("Priority"))
+    {
+        owner.insert("raised_prompt".to_string(), prompt);
+    }
+    let owner_frame = serde_json::json!({ "type": "PlayerScopeClause", "data": owner });
+
+    let frames = value
+        .pointer_mut(root)
+        .and_then(Value::as_array_mut)
+        .expect("the carrier's root was found above");
+    if is_queue_end {
+        // The placeholder only terminated the queue; the owner replaces it.
+        frames[index] = owner_frame;
+    } else {
+        // Decision 5: the remaining legs sit above the owner.
+        let pending = frames[index]
+            .pointer_mut("/data/pending")
+            .and_then(Value::as_object_mut)
+            .expect("the carrier's pending continuation was read above");
+        pending.remove(RETIRED_SIDECAR_KEY);
+        pending.remove(RETIRED_QUEUE_END_KEY);
+        frames.insert(index, owner_frame);
+    }
+    reject_retired_player_scope_linked_exile(value)
 }
 
 /// The one-dialog repeated-payment experiment serialized a `batched` marker
@@ -5551,6 +6117,9 @@ fn project_frames_into_legacy_state(
                     .resolution_stack
                     .push_post_replacement(drains.clone());
             }
+            ResolutionFrame::PlayerScopeClause(clause) => projected
+                .resolution_stack
+                .push_inner(ResolutionFrame::PlayerScopeClause(clause.clone())),
         }
     }
     Ok(projected)
@@ -7004,8 +7573,10 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
+    fn resolution_wire_contract_pins_v6_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 6);
+        assert_eq!(LEGACY_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION, 5);
+        assert_eq!(FIRST_PLAYER_SCOPE_SIDECAR_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -9038,6 +9609,179 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
+        assert!(error.contains("1, 2, 3, 4, 5, or 6"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod clause_attribution_tests {
+    use super::*;
+    use crate::game::effects::{
+        attribute_to_paused_clause, suspend_clause_attribution, ClauseSite,
+    };
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::ZoneChangeRecord;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    fn zone_changed(object_id: u64) -> GameEvent {
+        let object_id = ObjectId(object_id);
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Graveyard),
+            to: Zone::Exile,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                object_id,
+                Some(Zone::Graveyard),
+                Zone::Exile,
+            )),
+        }
+    }
+
+    fn pair_prompt(player: u8) -> WaitingFor {
+        WaitingFor::PairChoice {
+            player: PlayerId(player),
+            source_id: ObjectId(900 + u64::from(player)),
+            choices: Vec::new(),
+        }
+    }
+
+    fn park_owner(state: &mut GameState, source: ObjectId) {
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let owner = PendingPlayerScopeClause {
+            source_id: source,
+            tail: Box::new(PendingContinuation::new(Box::new(tail.clone()), state)),
+            publication: ClausePublication::Recorded {
+                outer: Box::new(tail.clone()),
+                scoped_template: Box::new(tail),
+                matching_players: vec![PlayerId(0)],
+            },
+            events: Vec::new(),
+            raised_prompt: None,
+            attribution: ClauseAttribution::Closed,
+        };
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::PlayerScopeClause(Box::new(owner)));
+    }
+
+    fn new_state() -> (GameState, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "clause source".into(),
+            Zone::Battlefield,
+        );
+        park_owner(&mut state, source);
+        (state, source)
+    }
+
+    fn owner(state: &GameState) -> &PendingPlayerScopeClause {
+        state
+            .resolution_stack
+            .topmost_player_scope_clause()
+            .expect("an owner is parked")
+    }
+
+    /// CR 704.3 + decision 1 (R1.31): the clause's own work raises `X`; the
+    /// post-action pipeline then interposes a foreign prompt `F`. The close
+    /// records `X`, never `F`. Paired positive: the same `F` set by the clause's
+    /// own (unsuspended) work is adopted. Reverting the interposed rule records
+    /// `F` in the suspended case.
+    #[test]
+    fn suspended_pipeline_prompt_is_never_recorded_as_clause_raised() {
+        let own = pair_prompt(1);
+        let foreign = pair_prompt(3);
+        for (suspended, recorded) in [(true, own.clone()), (false, foreign.clone())] {
+            let (mut state, _) = new_state();
+            let mut events = Vec::new();
+            let (own, foreign) = (own.clone(), foreign.clone());
+            attribute_to_paused_clause(
+                &mut state,
+                &mut events,
+                ClauseSite::Resumption,
+                |state, events| {
+                    state.waiting_for = own;
+                    if suspended {
+                        suspend_clause_attribution(state, events, |state, _| {
+                            state.waiting_for = foreign;
+                        });
+                    } else {
+                        state.waiting_for = foreign;
+                    }
+                },
+            );
+            assert_eq!(
+                owner(&state).raised_prompt,
+                Some(recorded),
+                "suspended: {suspended}"
+            );
+            assert_eq!(owner(&state).attribution, ClauseAttribution::Closed);
+        }
+    }
+
+    /// CR 704.3 + decision 1 (R1.32): the pipeline region completes the owner and
+    /// its tail parks a successor from the same source. Resume must not reopen
+    /// the successor: it stays `Closed` and absorbs nothing. Paired positive:
+    /// without the replacement, the suspended owner itself reopens and absorbs
+    /// exactly the post-resume event, never the suspended one. Reverting to an
+    /// unconditional reopen by source opens the successor and it absorbs.
+    #[test]
+    fn resume_reopens_only_the_suspended_owner_never_a_successor() {
+        for replace in [true, false] {
+            let (mut state, source) = new_state();
+            let mut events = Vec::new();
+            let mut inside = None;
+            attribute_to_paused_clause(
+                &mut state,
+                &mut events,
+                ClauseSite::Resumption,
+                |state, events| {
+                    suspend_clause_attribution(state, events, |state, events| {
+                        if replace {
+                            let _ = state.resolution_stack.take_active_player_scope_clause();
+                            park_owner(state, source);
+                        }
+                        events.push(zone_changed(77));
+                    });
+                    inside = Some(owner(state).attribution.clone());
+                    events.push(zone_changed(78));
+                },
+            );
+            let inside = inside.expect("the bracketed work ran");
+            if replace {
+                assert_eq!(
+                    inside,
+                    ClauseAttribution::Closed,
+                    "the successor stays closed"
+                );
+                assert!(
+                    owner(&state).events.is_empty(),
+                    "the successor absorbs nothing"
+                );
+            } else {
+                assert!(
+                    matches!(inside, ClauseAttribution::Open(_)),
+                    "the suspended owner reopens"
+                );
+                assert_eq!(
+                    owner(&state).events,
+                    vec![zone_changed(78)],
+                    "the owner absorbs the post-resume event, never the suspended one"
+                );
+            }
+        }
     }
 }

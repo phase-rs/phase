@@ -166,8 +166,18 @@ fn replay(
     let mut buffered_events = Vec::new();
     let mut buffered_log_entries: Vec<GameLogEntry> = Vec::new();
     let payment_root = payment_only_root(&transaction.root);
-    effects::resolve_ability_chain(&mut shadow, &payment_root, &mut buffered_events, 0)
-        .map_err(replay_error)?;
+    // CR 608.2c + decision 1: replaying the root is the paused clause's own
+    // frame resumed on the shadow; the transcript's answers attribute through
+    // their answer sites.
+    effects::attribute_to_paused_clause(
+        &mut shadow,
+        &mut buffered_events,
+        effects::ClauseSite::Resumption,
+        |shadow, buffered_events| {
+            effects::resolve_ability_chain(shadow, &payment_root, buffered_events, 0)
+        },
+    )
+    .map_err(replay_error)?;
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
     // Keep the replay guard live while transcript actions drain the suspended
     // continuation. A remaining Composite must use the ordinary sequential
@@ -235,7 +245,15 @@ fn resolve_root_continuation(
     let mut continuation = sub.clone();
     effects::apply_parent_chain_context(&mut continuation, &parent, None, state);
     restore_trigger_context(state, resolving_trigger_context);
-    effects::resolve_ability_chain(state, &continuation, events, 1).map_err(replay_error)
+    // CR 608.2c + decision 1: the rider is the paused instruction's own
+    // continuation on every path (committed, failed, abandoned by a departure).
+    effects::attribute_to_paused_clause(
+        state,
+        events,
+        effects::ClauseSite::Resumption,
+        |state, events| effects::resolve_ability_chain(state, &continuation, events, 1),
+    )
+    .map_err(replay_error)
 }
 
 /// Apply one player action against the live transaction's replayed shadow.
@@ -2038,6 +2056,289 @@ mod tests {
                 .count(),
             1,
             "the restored EventContextAmount drives the same life payment"
+        );
+    }
+
+    /// What the parked owner's completion reports, through its tail.
+    #[derive(Clone, Copy)]
+    enum Measure {
+        /// The life the clause's span records as lost (CR 119.3).
+        LifeLost,
+        /// The life the clause's span records as gained (CR 119.3).
+        LifeGained,
+    }
+
+    /// Parks a clause owner with its remaining legs above it (decision 5
+    /// placement). Its publication template is a life instruction, so on
+    /// completion the clause publishes, as `PreviousEffectAmount`, the life its
+    /// span recorded as lost (or gained); its tail then gives P1 exactly that
+    /// much life. P1's life is touched by nothing else, so its gain reads the
+    /// clause span: each attributed event counted once.
+    fn park_owner_below_legs(state: &mut GameState, root: &ResolvedAbility, measure: Measure) {
+        use crate::types::ability::{AggregateFunction, DamageChannel, QuantityRef};
+        use crate::types::resolution::{
+            ClauseAttribution, ClausePublication, PendingPlayerScopeClause, ResolutionFrame,
+        };
+        let fixed = QuantityExpr::Fixed { value: 1 };
+        let template_effect = match measure {
+            Measure::LifeLost => Effect::LoseLife {
+                amount: fixed.clone(),
+                target: None,
+            },
+            Measure::LifeGained => Effect::GainLife {
+                amount: fixed.clone(),
+                player: TargetFilter::Controller,
+            },
+        };
+        let template =
+            ResolvedAbility::new(template_effect, Vec::new(), root.source_id, PlayerId(0));
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            root.source_id,
+            PlayerId(1),
+        );
+        let owner = PendingPlayerScopeClause {
+            source_id: root.source_id,
+            tail: Box::new(crate::types::game_state::PendingContinuation::new(
+                Box::new(tail),
+                state,
+            )),
+            publication: ClausePublication::Recorded {
+                outer: Box::new(template.clone()),
+                scoped_template: Box::new(template),
+                matching_players: vec![PlayerId(0)],
+            },
+            events: Vec::new(),
+            raised_prompt: None,
+            attribution: ClauseAttribution::Closed,
+        };
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::PlayerScopeClause(Box::new(owner)));
+        let legs = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 100 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            root.source_id,
+            PlayerId(0),
+        );
+        state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
+            Box::new(legs),
+            state,
+        ));
+    }
+
+    /// Runs `root` as the clause's own leg (a resumption bracket), as the driver
+    /// does when it resumes the clause's frames.
+    fn resolve_as_clause_leg(state: &mut GameState, root: &ResolvedAbility) {
+        let mut events = Vec::new();
+        effects::attribute_to_paused_clause(
+            state,
+            &mut events,
+            effects::ClauseSite::Resumption,
+            |state, events| effects::resolve_ability_chain(state, root, events, 0),
+        )
+        .expect("the leg resolves");
+    }
+
+    /// The life the completed clause reported to P1, after the action settles.
+    fn reported_by_clause(mut state: GameState, action: GameAction) -> (i32, GameState) {
+        let before = state.players[1].life;
+        crate::game::engine::apply_as_current(&mut state, action)
+            .expect("the payment answer is accepted");
+        (state.players[1].life - before, state)
+    }
+
+    /// CR 608.2c + decision 1 (R1.12): a staged payment inside a clause leg
+    /// attributes each of its events to the clause exactly once — the replayed
+    /// root and the transcript's answer on the commit, and the rider on every
+    /// path. The owner reports the attributed life through its tail.
+    #[test]
+    fn staged_payment_in_a_clause_leg_attributes_each_event_once() {
+        // Committed: the Phyrexian shard is paid with 2 life, once.
+        let (mut state, root) = phyrexian_energy_case(1);
+        park_owner_below_legs(&mut state, &root, Measure::LifeLost);
+        resolve_as_clause_leg(&mut state, &root);
+        assert!(
+            state.payment_transaction.is_some(),
+            "reach guard: the payment is staged"
+        );
+        let (reported, state) = reported_by_clause(state, GameAction::ChooseBranch { index: 0 });
+        assert!(
+            state
+                .resolution_stack
+                .topmost_player_scope_clause()
+                .is_none(),
+            "reach guard: the clause completed"
+        );
+        assert_eq!(
+            reported, 2,
+            "the shard's 2 life is the clause's work, counted once"
+        );
+
+        // Failed: no energy, so the composite cannot complete. The payment's
+        // events never happened; the rider (7) runs and is the clause's work. The
+        // owner stays parked under its legs, so its span is read directly.
+        let (mut state, root) = phyrexian_energy_case(0);
+        park_owner_below_legs(&mut state, &root, Measure::LifeGained);
+        resolve_as_clause_leg(&mut state, &root);
+        assert!(
+            state.payment_transaction.is_some(),
+            "reach guard: the payment is staged"
+        );
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("the branch choice settles the failed payment");
+        assert!(
+            state.payment_transaction.is_none(),
+            "reach guard: the payment settled"
+        );
+        assert_eq!(owner_life_changes(&state), vec![7], "only the rider, once");
+
+        // Synchronous: both 6-life payments complete inside the leg; the legs and
+        // the owner then resume as the driver would.
+        let (mut state, root) = life_composite_case(13);
+        park_owner_below_legs(&mut state, &root, Measure::LifeLost);
+        let before = state.players[1].life;
+        resolve_as_clause_leg(&mut state, &root);
+        assert!(
+            state.payment_transaction.is_none(),
+            "reach guard: nothing was staged"
+        );
+        let mut events = Vec::new();
+        effects::drain_pending_continuation(&mut state, &mut events);
+        effects::resume_resolution_frames(&mut state, &mut events);
+        assert!(state
+            .resolution_stack
+            .topmost_player_scope_clause()
+            .is_none());
+        assert_eq!(
+            state.players[1].life - before,
+            12,
+            "both payments, once each"
+        );
+    }
+
+    /// The life changes in the parked owner's span, in order.
+    fn owner_life_changes(state: &GameState) -> Vec<i32> {
+        let owner = state
+            .resolution_stack
+            .topmost_player_scope_clause()
+            .expect("the owner is still parked");
+        owner
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 104.3a + CR 800.4a + decision 1 (R1.12): the payer leaves while the
+    /// payment is staged. The abandoned rider is still the clause's work; the
+    /// departure is not.
+    #[test]
+    fn staged_payment_payer_departure_keeps_only_the_rider() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.players[1].energy = 0;
+        let payer_card = create_object(
+            &mut state,
+            CardId(925),
+            PlayerId(1),
+            "payer card".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(926),
+            PlayerId(1),
+            "payer alternate".to_string(),
+            Zone::Hand,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(927),
+            PlayerId(0),
+            "source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                        },
+                        AbilityCost::PayEnergy {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                },
+                scale: None,
+                payer: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        root.sub_ability = Some(Box::new(rider));
+        park_owner_below_legs(&mut state, &root, Measure::LifeGained);
+        resolve_as_clause_leg(&mut state, &root);
+        assert!(
+            state.payment_transaction.is_some(),
+            "reach guard: the payment is staged"
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::Concede {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect("the payer concedes");
+        assert_eq!(
+            state.objects.get(&payer_card).map(|object| object.zone),
+            Some(Zone::Exile),
+            "reach guard: the payer's card left the game with them"
+        );
+        assert_eq!(
+            owner_life_changes(&state),
+            vec![3],
+            "only the abandoned rider is clause work"
+        );
+        let owner = state
+            .resolution_stack
+            .topmost_player_scope_clause()
+            .expect("the owner is still parked");
+        assert!(
+            !owner.events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == payer_card
+            )),
+            "the departure is not the clause's work"
         );
     }
 }

@@ -3377,6 +3377,10 @@ mod tests {
     /// (`RetargetSpell` `null` keeps, engine-derived copy-walk keep
     /// permissions), which a v126 peer cannot parse or render.
     /// (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
+    /// A paused player-scope clause is a `ResolutionFrame::PlayerScopeClause`
+    /// owner frame and the continuation's player-scope linked-exile sidecar is
+    /// retired; a v127 peer cannot parse the new frame tag, so it must be refused
+    /// before it receives v128 state.
     /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
     /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
     /// a v119 peer cannot decode v120 state, so it must be refused before state
@@ -3496,8 +3500,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_127_for_attached_to_referent() {
-        assert_eq!(PROTOCOL_VERSION, 127);
+    fn protocol_version_is_128_for_player_scope_clause_owner() {
+        assert_eq!(PROTOCOL_VERSION, 128);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3508,7 +3512,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_127_for_attached_to_referent` stays
+    /// `protocol_version_is_128_for_player_scope_clause_owner` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -118,6 +118,36 @@ fn run_post_action_pipeline_from_with_policy(
     drain_policy: DeferredTriggerDrainPolicy,
     carried_priority_recipient: Option<PlayerId>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 704.3 + CR 603.3 + decision 1: state-based actions and trigger
+    // placement are the pipeline's own work, never a paused player-scope
+    // clause's, even when this pass runs inside a clause's attribution bracket.
+    // Clause work the pass resumes reopens the clause through that work's own
+    // resumption site, and a prompt the pass leaves standing is never recorded
+    // as one the clause raised.
+    crate::game::effects::suspend_clause_attribution(state, events, |state, events| {
+        run_post_action_pipeline_core(
+            state,
+            events,
+            event_start,
+            default_wf,
+            skip_trigger_scan,
+            drain_policy,
+            carried_priority_recipient,
+        )
+    })
+}
+
+/// The body of [`run_post_action_pipeline_from_with_policy`], run with clause
+/// attribution suspended.
+fn run_post_action_pipeline_core(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+    drain_policy: DeferredTriggerDrainPolicy,
+    carried_priority_recipient: Option<PlayerId>,
+) -> Result<WaitingFor, EngineError> {
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_post_action_pipeline_pass();
     stage_pending_activation_trigger_events(state, events, event_start);

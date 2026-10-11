@@ -210,6 +210,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 128 — A paused player-scope clause is a PlayerScopeClause resolution frame
+ *      (its detached tail, its clause span and the prompt it raised), and the
+ *      continuation's player-scope linked-exile sidecar is retired — see
+ *      PROTOCOL_VERSION's own `/// 128` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v127 client would take the new
+ *      frame with no decode error; the exact-match version check at connect
+ *      refuses the pairing instead. Wire 110 moves with it.
  * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
  *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
  *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
@@ -797,7 +804,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 127;
+export const PROTOCOL_VERSION = 128;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

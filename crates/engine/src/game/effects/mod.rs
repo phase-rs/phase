@@ -32,10 +32,9 @@ use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
     ExileLinkKind, GameState, LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey,
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
-    PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    RepeatUntilStopWitness, ResolutionOptionalPaymentOption, ReturnResultOccurrenceId, WaitingFor,
-    ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
+    PendingPlayerScopeSacrificeFollowUp, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
+    ReturnResultOccurrenceId, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1184,7 +1183,109 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
     }
 }
 
+/// Which kind of site opens a paused clause's attribution bracket (decision 1:
+/// work counts for a clause by the frame that executed it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClauseSite {
+    /// Resumes the clause's own parked frames (`drain_pending_continuation`,
+    /// `resume_resolution_frames`, a staged payment's rider and replay root).
+    Resumption,
+    /// Answers a prompt; opens only when the clause raised that exact prompt.
+    Answer,
+}
+
+/// The output of bracketed work that may carry the site's whole event buffer:
+/// a handler that `mem::take`s its buffer into an `ActionResult` empties the
+/// buffer the bracket opened on, so the close reads the span from the output.
+pub(crate) trait MovedEvents {
+    fn moved_events(&self) -> Option<&[GameEvent]> {
+        None
+    }
+}
+
+impl MovedEvents for () {}
+impl MovedEvents for Result<(), EffectError> {}
+impl MovedEvents for Result<(), crate::game::engine::EngineError> {}
+impl MovedEvents for Result<WaitingFor, crate::game::engine::EngineError> {}
+impl MovedEvents
+    for Result<crate::types::game_state::ActionResult, crate::game::engine::EngineError>
+{
+    fn moved_events(&self) -> Option<&[GameEvent]> {
+        self.as_ref().ok().map(|result| result.events.as_slice())
+    }
+}
+
+/// CR 608.2c "this way": work run while a paused clause's own frames resume, or
+/// while the prompt that clause raised is answered, is that clause's work, so its
+/// events join the clause's span. A concession (CR 104.3a + CR 800.4a), a mana
+/// ability (CR 605.3b) or a foreign spell's prompt is never inside such a
+/// bracket: an `Answer` site opens only when the topmost owner recorded exactly
+/// the prompt standing now.
+pub(crate) fn attribute_to_paused_clause<Output: MovedEvents>(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    site: ClauseSite,
+    work: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> Output,
+) -> Output {
+    let opens = match site {
+        ClauseSite::Resumption => true,
+        ClauseSite::Answer => state
+            .resolution_stack
+            .topmost_player_scope_clause()
+            .is_some_and(|clause| clause.raised_prompt.as_ref() == Some(&state.waiting_for)),
+    };
+    let opened = if opens {
+        state
+            .resolution_stack
+            .open_clause_attribution(events.len(), &state.waiting_for)
+    } else {
+        None
+    };
+    let output = work(state, events);
+    if let Some(source_id) = opened {
+        state.resolution_stack.close_clause_attribution(
+            source_id,
+            events,
+            output.moved_events(),
+            &state.waiting_for,
+        );
+    }
+    output
+}
+
+/// CR 704.3 + CR 603.3: the post-action pipeline (state-based actions, trigger
+/// placement) is never a clause's work, and a prompt it leaves standing is never
+/// recorded as one the clause raised. Clause work it resumes reopens the owner
+/// through that work's own resumption site.
+pub(crate) fn suspend_clause_attribution<Output>(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    work: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> Output,
+) -> Output {
+    let suspended = state
+        .resolution_stack
+        .suspend_clause_attribution(events, &state.waiting_for);
+    let output = work(state, events);
+    if let Some(source_id) = suspended {
+        state.resolution_stack.resume_clause_attribution(
+            source_id,
+            events.len(),
+            &state.waiting_for,
+        );
+    }
+    output
+}
+
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    attribute_to_paused_clause(
+        state,
+        events,
+        ClauseSite::Resumption,
+        drain_pending_continuation_inner,
+    )
+}
+
+fn drain_pending_continuation_inner(state: &mut GameState, events: &mut Vec<GameEvent>) {
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
     counters::drain_pending_counter_additions(state, events);
@@ -1231,19 +1332,6 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
-        let scoped_source = state
-            .active_ability_continuation()
-            .and_then(|pending| pending.player_scope_linked_exile.as_ref())
-            .map(|scope| scope.source_id);
-        if let Some(source_id) = scoped_source {
-            let additions = linked_exile_batch_from_events(state, source_id, events);
-            if let Some(scope) = state
-                .active_ability_continuation_frame_mut()
-                .and_then(|frame| frame.pending.player_scope_linked_exile.as_mut())
-            {
-                extend_linked_exile_batch(&mut scope.batch, additions);
-            }
-        }
         let discard_frame = state
             .resolution_stack
             .active_ability_continuation_discard_parent_id();
@@ -1279,8 +1367,6 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             trigger_firing,
             attachment_choice,
             attachment_remainder: _,
-            player_scope_linked_exile,
-            player_scope_queue_end,
         } = cont;
         debug_assert!(
             pending_return_result_producer.is_none(),
@@ -1292,10 +1378,6 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
-        let previous_scope = std::mem::replace(
-            &mut state.resolving_player_scope_linked_exile,
-            player_scope_linked_exile,
-        );
         let source_id = chain.source_id;
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
@@ -1317,37 +1399,34 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 object_incarnations: Vec::new(),
             }));
         }
-        if !player_scope_queue_end {
-            if bound_result_is_empty(&chain)
-                && ability_chain_depends_on_missing_forward_result(&chain)
-            {
-                if let Some(mut remaining) = without_missing_forward_result_dependencies(&chain) {
-                    // CR 608.2c: Preserve the completed result when pruning resumes at an independent sibling.
-                    remaining.context.forwarded_result_context =
-                        chain.context.forwarded_result_context.clone();
-                    let _ = resolve_ability_chain(state, &remaining, events, 1);
-                }
-            } else {
-                let _ = resolve_ability_chain(state, &chain, events, 1);
+        if bound_result_is_empty(&chain) && ability_chain_depends_on_missing_forward_result(&chain)
+        {
+            if let Some(mut remaining) = without_missing_forward_result_dependencies(&chain) {
+                // CR 608.2c: Preserve the completed result when pruning resumes at an independent sibling.
+                remaining.context.forwarded_result_context =
+                    chain.context.forwarded_result_context.clone();
+                let _ = resolve_ability_chain(state, &remaining, events, 1);
             }
+        } else {
+            let _ = resolve_ability_chain(state, &chain, events, 1);
         }
-        if let Some(scope) = state.resolving_player_scope_linked_exile.as_ref() {
-            mark_exile_choice_tracks_by_source(state, scope.source_id);
+        // CR 608.2f + CR 607.2a: an exile choice a parked clause's legs just made
+        // is linked to that clause's source when its tail reads linked exiles.
+        let linked_clause_sources: Vec<ObjectId> = state
+            .resolution_stack
+            .player_scope_clauses()
+            .filter(|clause| {
+                crate::game::exile_links::ability_contains_linked_exile_consumer(&clause.tail.chain)
+            })
+            .map(|clause| clause.source_id)
+            .collect();
+        for source_id in linked_clause_sources {
+            mark_exile_choice_tracks_by_source(state, source_id);
         }
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
-        let completed_scope = std::mem::take(&mut state.resolving_player_scope_linked_exile);
-        state.resolving_player_scope_linked_exile = previous_scope;
         state.resolving_continuation_attach_host = None;
-        if !waits_for_resolution_choice(&state.waiting_for)
-            && state.active_ability_continuation().is_none()
-        {
-            if let Some(mut scope) = completed_scope {
-                bind_resolution_exile_batch_paths(&mut scope.after_scope, &scope.batch);
-                let _ = resolve_ability_chain(state, &scope.after_scope, events, 1);
-            }
-        }
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
                 kind,
@@ -1620,6 +1699,15 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
 /// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
 /// which retires only its exact completed child and paired paused parent.
 pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    attribute_to_paused_clause(
+        state,
+        events,
+        ClauseSite::Resumption,
+        resume_resolution_frames_inner,
+    )
+}
+
+fn resume_resolution_frames_inner(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
@@ -1633,6 +1721,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             drain_pending_continuation(state, events)
         }
         ResolutionFrame::Discard(_) => {}
+        ResolutionFrame::PlayerScopeClause(_) => complete_player_scope_clause(state, events),
         // CR 702.99a: a Cipher encode offer parked under the spell's own prompt
         // arms here — i.e. only once that prompt's owner is consumed, which is
         // what puts the encode after the spell's other effects (issue #7470).
@@ -2879,8 +2968,6 @@ fn prepend_to_pending_continuation_with_producer(
             trigger_firing,
             attachment_choice,
             attachment_remainder,
-            player_scope_linked_exile,
-            player_scope_queue_end,
         } = existing;
         assert!(
             pending_return_result_producer.is_none() || existing_return_result_producer.is_none(),
@@ -2902,8 +2989,6 @@ fn prepend_to_pending_continuation_with_producer(
                 trigger_firing,
                 attachment_choice,
                 attachment_remainder,
-                player_scope_linked_exile,
-                player_scope_queue_end,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -2911,17 +2996,6 @@ fn prepend_to_pending_continuation_with_producer(
     }
 
     state.park_ability_continuation(make_pending(state, Box::new(head)));
-}
-
-fn park_player_scope_queue_end(state: &mut GameState, placeholder: ResolvedAbility) {
-    let pending = PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
-    if active_frame_requires_ability_continuation_parent(state) {
-        state
-            .insert_ability_continuation_parent_of_active(pending)
-            .expect("player-scope queue end must remain outside its paused child");
-    } else {
-        state.park_ability_continuation(pending);
-    }
 }
 
 /// CR 118.12 + CR 608.2c: Complete the original rider of a paused
@@ -6098,6 +6172,74 @@ fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bo
     }
 }
 
+/// CR 608.2c: does this chain (or a branch of it) read the "this way" zone-change
+/// ledger a preceding instruction published: through a gate, a target filter or
+/// a quantity's population?
+pub(crate) fn chain_reads_zone_change_ledger(node: &ResolvedAbility) -> bool {
+    let mut reads = node
+        .condition
+        .as_ref()
+        .is_some_and(condition_depends_on_zone_change_this_way)
+        || node
+            .effect
+            .target_filter()
+            .is_some_and(filter_contains_last_zone_changed);
+    node.effect.for_each_quantity_expr(&mut |quantity| {
+        reads |=
+            quantity_expr_counts_population_matching(quantity, &filter_contains_last_zone_changed);
+    });
+    reads
+        || node
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_reads_zone_change_ledger)
+        || node
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_reads_zone_change_ledger)
+}
+
+/// CR 608.2c: does this chain (or a branch of it) read the amount a preceding
+/// instruction left behind (`PreviousEffectAmount` / `EventContextAmount`), in an
+/// effect quantity or a gate?
+pub(crate) fn chain_reads_clause_amount(node: &ResolvedAbility) -> bool {
+    fn reads_amount(quantity: &QuantityExpr) -> bool {
+        quantity_expr_any_ref(quantity, &mut |reference| {
+            matches!(
+                reference,
+                QuantityRef::PreviousEffectAmount { .. } | QuantityRef::EventContextAmount
+            )
+        })
+    }
+    fn condition_reads_amount(condition: &AbilityCondition) -> bool {
+        match condition {
+            AbilityCondition::PreviousEffectAmount { .. } => true,
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                reads_amount(lhs) || reads_amount(rhs)
+            }
+            AbilityCondition::ConditionInstead { inner } => condition_reads_amount(inner),
+            AbilityCondition::Not { condition } => condition_reads_amount(condition),
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions.iter().any(condition_reads_amount)
+            }
+            _ => false,
+        }
+    }
+    let mut reads = node.condition.as_ref().is_some_and(condition_reads_amount);
+    node.effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= reads_amount(quantity);
+    });
+    reads
+        || node
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_reads_clause_amount)
+        || node
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_reads_clause_amount)
+}
+
 /// Whether a condition reads a graveyard-card count. During an interactive
 /// discard, that count is not final until the player has selected and moved the
 /// card; see the resolution-choice deferral gate above.
@@ -7086,6 +7228,47 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
     )
 }
 
+/// CR 109.5 + CR 608.2c: does this chain node name the player a surrounding
+/// `player_scope` iteration is bound to? True when its condition tests the
+/// scoped player (`ScopedPlayerMatches` — "each opponent who …"), or when its
+/// effect's player/object filter references that player: the bare
+/// `ScopedPlayer` recipient ("loses 3 life", "draws a card") or a
+/// `ControllerRef::ScopedPlayer` controller/owner axis ("a creature they
+/// control", "their graveyard"). `OriginalController` ("you") is deliberately
+/// NOT a reference: it names the printed controller in every iteration.
+///
+/// Reads only this node; the filter traversal is `filter::filter_contains`, the
+/// single authority for "does this filter mention X anywhere".
+fn node_references_scoped_player(node: &ResolvedAbility) -> bool {
+    fn condition_tests_scoped_player(condition: &AbilityCondition) -> bool {
+        match condition {
+            AbilityCondition::ScopedPlayerMatches { .. } => true,
+            AbilityCondition::Not { condition } => condition_tests_scoped_player(condition),
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions.iter().any(condition_tests_scoped_player)
+            }
+            _ => false,
+        }
+    }
+    let names_scoped_player = |filter: &TargetFilter| {
+        crate::game::filter::filter_contains(filter, &|leaf| {
+            matches!(leaf, TargetFilter::ScopedPlayer)
+                || filter_uses_relative_controller_scoped(leaf)
+        })
+    };
+    // `Effect::target_filter()` surfaces every single-recipient axis (damage,
+    // life, draw, token owner, sacrifice, zone moves) but hides a mass effect's
+    // population ("destroy all creatures they control"); `mass_population_target`
+    // is the single authority for where every mass-population effect keeps it.
+    let effect_names_scoped_player = node.effect.target_filter().is_some_and(names_scoped_player)
+        || mass_population_target(&node.effect).is_some_and(names_scoped_player);
+    effect_names_scoped_player
+        || node
+            .condition
+            .as_ref()
+            .is_some_and(condition_tests_scoped_player)
+}
+
 /// CR 608.2c + CR 701.20b: An effect that introduces a single per-player object
 /// referent which a later anaphoric clause ("that card", "it", "its mana value")
 /// in the same iteration binds to. `RevealTop` is the canonical case: it reveals
@@ -7211,19 +7394,28 @@ fn detach_after_player_scope_local_chain(
         .condition
         .as_ref()
         .is_some_and(condition_depends_on_effect_performed);
-    // CR 608.2c + CR 109.5: a decline-branch sub-ability gated on
-    // `ZoneChangedThisWay` (Kroxa, Titan of Death's Hunger: "each opponent who
-    // didn't discard a nonland card this way") reads `last_zone_changed_ids`
-    // stamped by THIS iteration's own scoped zone change — it is per-opponent
-    // by construction exactly like the performed-gate class above, just keyed
-    // on WHAT moved rather than WHETHER the parent action happened. Detaching
-    // it as the unscoped tail would evaluate it once, after every opponent's
-    // discard has already overwritten the ledger, against the wrong (or a
-    // stale aggregate) zone-change set.
-    let next_is_zone_change_this_way_gated = next
+    // CR 608.2c + CR 608.2f: a "this way" zone-change gate is per-iteration
+    // only when the gated clause names the iterated player
+    // (`node_references_scoped_player`). Kroxa, Titan of Death's Hunger's "each
+    // opponent who didn't discard a nonland card this way loses 3 life" lowers
+    // to `LoseLife { ScopedPlayer }` gated on `ScopedPlayerMatches`: each
+    // opponent's own discard gates their own life loss, so the sub reads the
+    // ledger stamped by THIS iteration's zone change and stays in the scoped
+    // template — the zone-keyed twin of the performed-gate class above.
+    //
+    // A gated clause that never names the iterated player is instead ONE
+    // look-back over the whole multi-player action. Locke, Treasure Hunter's
+    // "each player mills a card. If a land card was milled this way, create a
+    // Treasure token" creates exactly one Treasure as long as any land was
+    // milled (ruling 2025-06-06). Kept in scope it would be re-evaluated, and
+    // its implicit controller rebound, once per player. Detached, it resolves
+    // once, after `publish_player_scope_clause_results` has published every
+    // player's zone changes as the clause's aggregate ledger.
+    let next_is_scoped_player_zone_change_gated = next
         .condition
         .as_ref()
-        .is_some_and(condition_depends_on_zone_change_this_way);
+        .is_some_and(condition_depends_on_zone_change_this_way)
+        && node_references_scoped_player(&next);
     // CR 608.2c: When the parser distributes "each player reveals the top card
     // of their library, loses life equal to that card's mana value, then puts
     // it into their hand" it stamps the SAME `player_scope` onto every clause.
@@ -7290,7 +7482,7 @@ fn detach_after_player_scope_local_chain(
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
     if next_is_performed_gated
-        || next_is_zone_change_this_way_gated
+        || next_is_scoped_player_zone_change_gated
         || next_is_co_scoped_anaphoric_consumer
         || next_is_optional_clause_continuation
         || next_is_local_continuation
@@ -8398,7 +8590,7 @@ fn grant_affects_parent_target(effect: &Effect) -> bool {
     )
 }
 
-fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
+pub(crate) fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
     node_or_branch_references_tracked_set(ability, ParentAnaphor::NamesPublisher)
 }
 
@@ -9357,43 +9549,34 @@ fn affected_objects_from_events(
                 })
                 .collect()
         }
+        // CR 608.2c + CR 108.2b: a token created in a MIXED chain must not join
+        // a population its consumer reads as CARDS. Locke, Treasure Hunter's
+        // "each player mills a card. If a land card was milled this way, create
+        // a Treasure token. Until end of turn, you may cast a spell from among
+        // those cards" and Ragavan, Nimble Pilferer's "create a Treasure token
+        // and exile the top card of that player's library. Until end of turn,
+        // you may cast that card" both name the moved cards — and a token is
+        // never a card. Without this arm the `_ =>` harvest reads the Treasure's
+        // own `ZoneChanged` and `publish_tracked_set` unions it into the card
+        // producer's set, so the Treasure joins "those cards".
+        //
+        // Two guards, both required:
+        //  * not the sole producer — when the token creation is the chain's
+        //    only producer (Force of Rage's "create two … tokens. Sacrifice
+        //    those tokens …") the tokens ARE the population;
+        //  * the consumer reads only cards — a consumer that names the token
+        //    itself (Ugin, the Ineffable's "When that token leaves the
+        //    battlefield, put the exiled card into your hand") needs it in the
+        //    set alongside the exiled card.
+        // Either guard failing falls through to the `_ =>` harvest unchanged.
+        Effect::Token { .. }
+            if !is_sole_chain_producer(state, ability)
+                && tracked_set_consumer_reads_only_cards(ability) =>
+        {
+            Vec::new()
+        }
         _ => {
-            let dest_zone = match effect {
-                Effect::ChangeZone { destination, .. }
-                | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
-                // CR 701.17a + CR 701.17c: Milled cards land in the `Mill`'s
-                // destination (Graveyard by default). Scoping the tracked set
-                // to that zone makes a downstream "from among the milled cards"
-                // sub-ability resolve against exactly the milled cards.
-                Effect::Mill { destination, .. } => Some(*destination),
-                // Seek: the sought cards land in the Seek's destination, so a
-                // downstream "them" names exactly those cards (Choice of
-                // Fortunes' "shuffle them into your library").
-                Effect::Seek { destination, .. } => Some(*destination),
-                // CR 701.20a + CR 608.2f: The kept card lands in `kept_destination`; scope the
-                // tracked set to that zone so downstream TrackedSet consumers (e.g. IC's
-                // ChangeZoneAll{Exile→Battlefield}) see only the kept card, not the rest pile.
-                Effect::RevealUntil {
-                    kept_destination, ..
-                } => Some(*kept_destination),
-                Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => {
-                    Some(crate::types::zones::Zone::Exile)
-                }
-                // CR 701.9a: discarded cards land in the graveyard; "for each
-                // card discarded this way" counts exactly those (CR 701.9c
-                // excludes a discard redirected by a replacement to another
-                // zone — e.g. Madness — which must not be tracked here).
-                Effect::Discard { .. } | Effect::DiscardCard { .. } => {
-                    Some(crate::types::zones::Zone::Graveyard)
-                }
-                // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
-                // Hand; downstream "those creatures" / "for each of those
-                // permanents" tracking must filter by the actual landing zone.
-                Effect::BounceAll { destination, .. } => {
-                    Some(destination.unwrap_or(crate::types::zones::Zone::Hand))
-                }
-                _ => None,
-            };
+            let dest_zone = effect_destination_zone(effect);
             events
                 .iter()
                 .filter_map(|event| match event {
@@ -9406,6 +9589,55 @@ fn affected_objects_from_events(
                 })
                 .collect()
         }
+    }
+}
+
+/// The zone a card-moving effect's moved objects land in, as the catch-all arm of
+/// `affected_objects_from_events` reads it to scope a tracked set to the landing
+/// zone. `None` means every zone change counts.
+///
+/// This is the destination map of `affected_objects_from_events`' catch-all arm
+/// only. An effect an earlier arm intercepts (for example `RevealUntil` with
+/// `RevealOnly` or with `kept_destination_if`) is published by that arm, not by
+/// this map, so a caller that relies on equality with the authority must only pass
+/// effects that reach the catch-all arm.
+pub(crate) fn effect_destination_zone(effect: &Effect) -> Option<Zone> {
+    match effect {
+        Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
+            Some(*destination)
+        }
+        // CR 701.17a + CR 701.17c: Milled cards land in the `Mill`'s
+        // destination (Graveyard by default). Scoping the tracked set
+        // to that zone makes a downstream "from among the milled cards"
+        // sub-ability resolve against exactly the milled cards.
+        Effect::Mill { destination, .. } => Some(*destination),
+        // Seek: the sought cards land in the Seek's destination, so a
+        // downstream "them" names exactly those cards (Choice of
+        // Fortunes' "shuffle them into your library").
+        Effect::Seek { destination, .. } => Some(*destination),
+        // CR 701.20a + CR 608.2f: The kept card lands in `kept_destination`; scope the
+        // tracked set to that zone so downstream TrackedSet consumers (e.g. IC's
+        // ChangeZoneAll{Exile→Battlefield}) see only the kept card, not the rest pile.
+        Effect::RevealUntil {
+            kept_destination, ..
+        } => Some(*kept_destination),
+        Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => {
+            Some(crate::types::zones::Zone::Exile)
+        }
+        // CR 701.9a: discarded cards land in the graveyard; "for each
+        // card discarded this way" counts exactly those (CR 701.9c
+        // excludes a discard redirected by a replacement to another
+        // zone — e.g. Madness — which must not be tracked here).
+        Effect::Discard { .. } | Effect::DiscardCard { .. } => {
+            Some(crate::types::zones::Zone::Graveyard)
+        }
+        // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
+        // Hand; downstream "those creatures" / "for each of those
+        // permanents" tracking must filter by the actual landing zone.
+        Effect::BounceAll { destination, .. } => {
+            Some(destination.unwrap_or(crate::types::zones::Zone::Hand))
+        }
+        _ => None,
     }
 }
 
@@ -9906,17 +10138,15 @@ fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
     )
 }
 
-fn first_tracked_set_consumer_mode(
-    ability: Option<&ResolvedAbility>,
-) -> Option<TrackedSetPublicationMode> {
+/// The first node at or below `ability` (within its mode) that consumes the
+/// chain tracked set.
+fn first_tracked_set_consumer(ability: Option<&ResolvedAbility>) -> Option<&ResolvedAbility> {
     let ability = ability?;
     if crosses_modal_boundary(ability) {
         return None;
     }
     if is_owner_library_shuffle_consumer(ability) {
-        return Some(TrackedSetPublicationMode::Prospective {
-            cause: ThisWayCause::OwnerLibraryShuffleSubject,
-        });
+        return Some(ability);
     }
     // CR 608.2c: a `ParentTarget`-affected grant is deliberately NOT treated as
     // a consumer here — `grant_affects_parent_target` is applied only inside
@@ -9930,19 +10160,64 @@ fn first_tracked_set_consumer_mode(
             ..
         } | Effect::ChooseFromZone { .. }
     ) || effect_references_tracked_set(&ability.effect)
-        || ability
-            .repeat_for
-            .as_ref()
-            .is_some_and(quantity_expr_references_tracked_set)
+        || node_counts_tracked_set(ability)
         || ability
             .player_scope
             .as_ref()
             .is_some_and(player_filter_references_tracked_set);
     if consumes_here {
-        return Some(TrackedSetPublicationMode::Normal);
+        return Some(ability);
     }
-    first_tracked_set_consumer_mode(ability.sub_ability.as_deref())
-        .or_else(|| first_tracked_set_consumer_mode(ability.else_ability.as_deref()))
+    first_tracked_set_consumer(ability.sub_ability.as_deref())
+        .or_else(|| first_tracked_set_consumer(ability.else_ability.as_deref()))
+}
+
+fn first_tracked_set_consumer_mode(
+    ability: Option<&ResolvedAbility>,
+) -> Option<TrackedSetPublicationMode> {
+    first_tracked_set_consumer(ability).map(|consumer| {
+        if is_owner_library_shuffle_consumer(consumer) {
+            TrackedSetPublicationMode::Prospective {
+                cause: ThisWayCause::OwnerLibraryShuffleSubject,
+            }
+        } else {
+            TrackedSetPublicationMode::Normal
+        }
+    })
+}
+
+/// CR 108.2b + CR 601.2a: does the chain's tracked-set consumer read its
+/// population as CARDS only? Casting from the set ("you may cast that card",
+/// "a spell from among those cards") moves a card to the stack, and a count
+/// "for each card <verb>ed this way" counts cards — a token is neither. A
+/// consumer that names the created object itself ("When that token leaves the
+/// battlefield, put the exiled card into your hand" — Ugin, the Ineffable's
+/// `CreateDelayedTrigger`) is not in this class.
+fn tracked_set_consumer_reads_only_cards(producer: &ResolvedAbility) -> bool {
+    first_tracked_set_consumer(producer.sub_ability.as_deref()).is_some_and(|consumer| {
+        node_counts_tracked_set(consumer)
+            || matches!(
+                consumer.effect,
+                Effect::GrantCastingPermission { .. } | Effect::CastFromZone { .. }
+            )
+    })
+}
+
+/// CR 608.2c: does this node COUNT the chain tracked set — in any quantity its
+/// effect carries ("gain 1 life for each nonland card revealed this way") or in
+/// its `repeat_for` loop count ("for each nonland card revealed this way, draw a
+/// card", Seasoned Pyromancer #740)? One authority for both the consumer walk
+/// and the card-only classification, so the two can never disagree about which
+/// slots count.
+fn node_counts_tracked_set(node: &ResolvedAbility) -> bool {
+    let mut counts_set = node
+        .repeat_for
+        .as_ref()
+        .is_some_and(quantity_expr_references_tracked_set);
+    node.effect.for_each_quantity_expr(&mut |qty| {
+        counts_set |= quantity_expr_references_tracked_set(qty);
+    });
+    counts_set
 }
 
 pub(crate) fn tracked_set_publication_mode(
@@ -13187,6 +13462,77 @@ fn publish_player_scope_clause_results(
     linked_exile_batch_from_events(state, outer.source_id, scoped_events)
 }
 
+/// CR 608.2f + CR 101.4 + CR 608.2c: a paused `player_scope` clause whose frames
+/// are all gone has finished its one action. Publish the whole clause's result
+/// once, from the span its own frames produced, then resolve the tail that reads
+/// it.
+fn complete_player_scope_clause(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(mut clause) = state.resolution_stack.take_active_player_scope_clause() else {
+        return;
+    };
+    clause.absorb_open_span(events);
+    let reads_linked_exile =
+        crate::game::exile_links::ability_contains_linked_exile_consumer(&clause.tail.chain);
+    let batch = match clause.publication {
+        crate::types::resolution::ClausePublication::Recorded {
+            outer,
+            scoped_template,
+            matching_players,
+        } => publish_player_scope_clause_results(
+            state,
+            &outer,
+            &scoped_template,
+            &matching_players,
+            reads_linked_exile,
+            &clause.events,
+        ),
+        crate::types::resolution::ClausePublication::MigratedLinkedExile(seed) => {
+            mark_migrated_linked_exile(state, clause.source_id, &clause.events);
+            let mut batch = seed.into_batch();
+            extend_linked_exile_batch(
+                &mut batch,
+                linked_exile_batch_from_events(state, clause.source_id, &clause.events),
+            );
+            batch
+        }
+    };
+    // CR 608.2e: the clause is complete; its frozen values end with it.
+    state.clause_minimum_snapshot = None;
+    let mut tail = *clause.tail;
+    bind_resolution_exile_batch_paths(&mut tail.chain, &batch);
+    state.park_ability_continuation(tail);
+    drain_pending_continuation(state, events);
+}
+
+/// CR 607.2a + CR 608.2c: the linked-exile write a migrated clause owes for the
+/// work it did after the legacy save: every span object that moved TO exile and
+/// is still there is linked to the source, exactly as the publication authority
+/// links an exile-destination producer's affected objects (the converter admits a
+/// migrated clause only with exile-destination producer evidence). The seed's
+/// pre-save batch is never re-linked here.
+fn mark_migrated_linked_exile(state: &mut GameState, source_id: ObjectId, span: &[GameEvent]) {
+    let exiled: Vec<ObjectId> = span
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Exile,
+                ..
+            } => Some(*object_id),
+            _ => None,
+        })
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.zone == Zone::Exile)
+        })
+        .collect();
+    for object_id in exiled {
+        crate::game::exile_links::push_tracked_by_source(state, object_id, source_id);
+    }
+}
+
 /// CR 400.7 + CR 608.2f: capture only current incarnations exiled by this
 /// completed slice of a multi-player instruction, preserving event order.
 pub(super) fn linked_exile_batch_from_events(
@@ -14198,13 +14544,15 @@ pub(crate) fn drain_pending_discard_batch(
                     return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
                 }
             }
-            // BOUNDARY (measured, and deliberately not repaired here): the seat
-            // paused on something that is not a batch pause — an interactive
-            // `WaitingFor::DiscardChoice`, or any other resolution choice. Hand
-            // the remaining seats back to the generic continuation queue exactly
-            // as the driver does, and publish NOTHING: those legs each publish
-            // node-locally, which is the pre-existing behaviour this change does
-            // not extend to the interactive path.
+            // BOUNDARY: the seat paused on something that is not a batch pause
+            // — an interactive `WaitingFor::DiscardChoice`, or any other
+            // resolution choice. Hand the remaining seats back to the generic
+            // continuation queue exactly as the driver does, and publish
+            // NOTHING. Only a clause whose tail does NOT read the clause result
+            // reaches this fan-out (the driver routes every result-reading tail
+            // to the `PlayerScopeClause` owner, which publishes the whole clause
+            // once), so the node-local publication of these legs has no reader
+            // that needs the whole clause.
             let mut tail: Option<Box<ResolvedAbility>> = None;
             for &remaining_pid in fan_out.remaining_players[i + 1..].iter().rev() {
                 let mut remaining_scoped = (*fan_out.scoped_template).clone();
@@ -15505,6 +15853,15 @@ fn resolve_chain_body(
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
             crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
         });
+        // CR 608.2f + CR 608.2c: a detached tail that reads this clause's result
+        // (its "this way" ledger, its tracked set, or its linked-exile batch) must
+        // see every seat. When the clause pauses, its owner frame publishes the
+        // whole clause once, immediately before that tail.
+        let after_scope_reads_clause_result = after_scope.as_deref().is_some_and(|tail| {
+            after_scope_needs_linked_exile
+                || chain_reads_zone_change_ledger(tail)
+                || ability_or_branch_references_tracked_set(tail)
+        });
 
         if should_collect_player_scope_sacrifice_choices(&scoped_template) {
             start_player_scope_sacrifice_choices(
@@ -15603,7 +15960,9 @@ fn resolve_chain_body(
         // `or_insert(0)`, so it is PRESENCE in the table, not completion, that
         // makes the fill a no-op for them.
         //
-        // WHAT THIS DOES NOT FIX, measured on the tree this comment ships in:
+        // WHAT THIS DOES NOT FIX for a clause whose detached tail does not read
+        // the clause result (a result-reading tail is routed to the
+        // `PlayerScopeClause` owner, which publishes the whole clause once):
         // each resumed continuation leg REPLACES the table rather than extending
         // it — `install_previous_effect_counts_by_player`'s `Some` arm assigns
         // `last_effect_counts_by_player` outright, and `split_player_scope_chain`
@@ -15667,12 +16026,18 @@ fn resolve_chain_body(
                 // source, by a different seat, or one that a nested clause has
                 // already handed off, fails a conjunct and the driver falls
                 // through to the ordinary per-seat leg path below, unchanged.
+                //
+                // CR 608.2f + CR 608.2c: a routed clause's owner is its single
+                // publisher (decision 3). A seat whose discard paused on a
+                // replacement choice (CR 614.1a, e.g. Library of Leng) parks its
+                // own single-subject batch; the clause still takes the owner path
+                // below.
                 let handed_to_discard_batch =
                     state.pending_discard_batch.as_ref().is_some_and(|batch| {
                         batch.source_id == scoped_template.source_id
                             && batch.player == *pid
                             && batch.fan_out.is_none()
-                    });
+                    }) && !after_scope_reads_clause_result;
                 if handed_to_discard_batch {
                     if let Some(batch) = state.pending_discard_batch.as_mut() {
                         // Widen the batch's pre-pause window from this seat's
@@ -15702,10 +16067,10 @@ fn resolve_chain_body(
                     return Ok(());
                 }
                 let remaining = &matching_players[i + 1..];
-                // The unscoped tail is owned explicitly by the continuation
-                // sidecar below. Only generated per-seat nodes are linearized
-                // here, so no ordinary scoped sibling can impersonate them.
-                let mut tail = if after_scope_needs_linked_exile {
+                // A routed tail is owned by the clause owner parked below; only
+                // the generated per-seat legs are linearized here, so no ordinary
+                // scoped sibling can impersonate them.
+                let mut tail = if after_scope_reads_clause_result {
                     None
                 } else {
                     after_scope.clone()
@@ -15738,7 +16103,24 @@ fn resolve_chain_body(
                 // frozen extremum. The next `player_scope` link's
                 // `capture_clause_minimum_snapshot` overwrites it; `apply()`
                 // disposes of any residue once resolution ends.
-                if tail.is_some() {
+                if after_scope_reads_clause_result {
+                    // Decision 5: the remaining seats' legs sit at the clause's
+                    // child boundary, above the owner parked after this loop and
+                    // below every frame this seat's pause raised.
+                    if let Some(legs) = tail {
+                        let legs = PendingContinuation::new(legs, state);
+                        if state.resolution_stack.capture_child_boundary() > child_stack_start {
+                            state
+                                .insert_ability_continuation_parent_at_child_boundary(
+                                    legs,
+                                    child_stack_start,
+                                )
+                                .expect("the paused seat's frames sit above the clause boundary");
+                        } else {
+                            state.park_ability_continuation(legs);
+                        }
+                    }
+                } else if tail.is_some() {
                     append_to_pending_continuation(state, tail);
                 }
                 // `i`, not `i + 1`: player `i` is the one who just paused, so
@@ -15748,6 +16130,38 @@ fn resolve_chain_body(
                 paused = true;
                 break;
             }
+        }
+        if paused && after_scope_reads_clause_result {
+            if let Some(after_scope) = after_scope {
+                // CR 608.2f + CR 101.4: the clause owes ONE result; publishing the
+                // completed seats now would let the tail read a partial clause.
+                // The owner publishes the whole clause when it wakes.
+                debug_assert!(
+                    state
+                        .resolution_stack
+                        .player_scope_clauses()
+                        .all(|clause| clause.source_id != ability.source_id),
+                    "one paused player-scope clause owner per source"
+                );
+                let raised_prompt = (!matches!(state.waiting_for, WaitingFor::Priority { .. }))
+                    .then(|| state.waiting_for.clone());
+                let owner = crate::types::resolution::PendingPlayerScopeClause {
+                    source_id: ability.source_id,
+                    tail: Box::new(PendingContinuation::new(after_scope, state)),
+                    publication: crate::types::resolution::ClausePublication::Recorded {
+                        outer: Box::new(ability.clone()),
+                        scoped_template: Box::new(scoped_template.clone()),
+                        matching_players: matching_players.clone(),
+                    },
+                    events: events[scoped_events_before..].to_vec(),
+                    raised_prompt,
+                    attribution: Default::default(),
+                };
+                state
+                    .resolution_stack
+                    .park_player_scope_clause(owner, child_stack_start);
+            }
+            return Ok(());
         }
         let linked_batch = publish_player_scope_clause_results(
             state,
@@ -15766,22 +16180,6 @@ fn resolve_chain_body(
             if let Some(mut after_scope) = after_scope {
                 bind_resolution_exile_batch_paths(&mut after_scope, &linked_batch);
                 resolve_ability_chain(state, &after_scope, events, depth + 1)?;
-            }
-        } else if after_scope_needs_linked_exile {
-            if let Some(after_scope) = after_scope {
-                if state.active_ability_continuation().is_none() {
-                    park_player_scope_queue_end(state, after_scope.as_ref().clone());
-                }
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    // CR 608.2f: generated APNAP nodes and their exact union are
-                    // explicit pause authority. The detached tail resolves once only
-                    // after every generated seat has drained.
-                    frame.pending.player_scope_linked_exile = Some(PendingPlayerScopeLinkedExile {
-                        source_id: ability.source_id,
-                        after_scope,
-                        batch: linked_batch,
-                    });
-                }
             }
         }
         return Ok(());
@@ -17120,9 +17518,6 @@ fn resolve_chain_body(
         .collect();
     let linked_batch =
         linked_exile_batch_from_events(state, ability.source_id, &events[events_before..]);
-    if let Some(scope) = state.resolving_player_scope_linked_exile.as_mut() {
-        extend_linked_exile_batch(&mut scope.batch, linked_batch.iter().copied());
-    }
     let linked_batch_owned;
     let ability = if linked_batch.is_empty() || ability.sub_ability.is_none() {
         ability
@@ -17523,15 +17918,6 @@ fn resolve_chain_body(
     }) {
         crate::game::sba::apply_city_blessing_if_triggered(state, events);
         crate::game::sba::apply_enduring_story_if_triggered(state, events);
-    }
-
-    if ability.sub_ability.is_none()
-        && waits_for_resolution_choice(&state.waiting_for)
-        && state.resolving_player_scope_linked_exile.is_some()
-        && state.active_ability_continuation().is_none()
-    {
-        park_player_scope_queue_end(state, ability.clone());
-        return Ok(());
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -19556,6 +19942,55 @@ fn subject_dependent_type_condition_has_no_subject(
     }
 }
 
+/// CR 608.2c: the objects a "[noun] was [verb]ed this way" look-back names —
+/// every member of `last_zone_changed_ids` matching `filter`. Single authority
+/// for both the `ZoneChangedThisWay` condition (any member) and the "that many"
+/// that follows it ([`zone_changed_this_way_gate_count`], the member count).
+pub(crate) fn zone_changed_this_way_matches<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    filter: &'a TargetFilter,
+    destination: Option<Zone>,
+) -> impl Iterator<Item = ObjectId> + 'a {
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .last_zone_changed_ids
+        .iter()
+        .copied()
+        .filter(move |&id| {
+            crate::game::filter::matches_target_filter(state, id, filter, &ctx)
+            // CR 608.2c + CR 122.1h + CR 614.6: a destination-bound wording
+            // ("put into a graveyard / dies this way") needs the ARRIVAL, not
+            // just the move — a replacement that redirected the object
+            // elsewhere defeats it. Current zone IS the arrival zone here:
+            // nothing else runs between the parent instruction and this
+            // evaluation.
+            && destination.is_none_or(|zone| {
+                state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
+            })
+        })
+}
+
+/// CR 608.2c: "When one or more nonland cards are exiled this way, put that
+/// many +1/+1 counters …" — read with the rules of English, "that many" names
+/// the population the node's own "this way" gate just tested: not the parent
+/// instruction's whole result (which also counts the land cards), and not the
+/// enclosing trigger's event. `None` when the node is not gated by an
+/// affirmative `ZoneChangedThisWay`, leaving the caller's cascade unchanged.
+pub(crate) fn zone_changed_this_way_gate_count(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<usize> {
+    match ability.condition.as_ref()? {
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination,
+        } => Some(zone_changed_this_way_matches(state, ability, filter, *destination).count()),
+        _ => None,
+    }
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -20399,22 +20834,9 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ZoneChangedThisWay {
             filter,
             destination,
-        } => {
-            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-            let ctx = crate::game::filter::FilterContext::from_ability(ability);
-            state.last_zone_changed_ids.iter().any(|&id| {
-                crate::game::filter::matches_target_filter(state, id, filter, &ctx)
-                    // CR 608.2c + CR 122.1h + CR 614.6: a destination-bound
-                    // wording ("put into a graveyard / dies this way") needs the
-                    // ARRIVAL, not just the move — a replacement that redirected
-                    // the object elsewhere defeats it. Current zone IS the
-                    // arrival zone here: nothing else runs between the parent
-                    // instruction and this evaluation.
-                    && destination.is_none_or(|zone| {
-                        state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
-                    })
-            })
-        }
+        } => zone_changed_this_way_matches(state, ability, filter, *destination)
+            .next()
+            .is_some(),
         // CR 608.2k + CR 608.2h: the cost-paid object is a persistent untargeted
         // reference, so it reads CURRENT information while it is still in a
         // public zone — not the payment-time snapshot. See
@@ -35225,6 +35647,79 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 608.2f: a "this way" zone-change gate stays inside the
+    /// per-player template when its gated clause names the iterated player, and
+    /// that includes a MASS effect whose hidden population names them ("destroy
+    /// all creatures they control"), not only `ChangeZoneAll`. Detached, it would
+    /// resolve once, after the fan-out, with no iterated player to bind.
+    ///
+    /// MATCHED PAIR: the two chains differ only in the population's controller.
+    #[test]
+    fn zone_change_gated_mass_effect_naming_the_scoped_player_stays_per_player() {
+        let gated_destroy_all = |controller: Option<ControllerRef>| {
+            let mut destroy = ResolvedAbility::new(
+                Effect::DestroyAll {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller,
+                        properties: vec![],
+                    }),
+                    cant_regenerate: false,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            destroy.sub_link = SubAbilityLink::SequentialSibling;
+            destroy.condition = Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    controller: None,
+                    properties: vec![],
+                }),
+                destination: None,
+            });
+            let mut mill = ResolvedAbility::new(
+                Effect::Mill {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                    destination: Zone::Graveyard,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            mill.player_scope = Some(PlayerFilter::All);
+            mill.sub_ability = Some(Box::new(destroy));
+            mill
+        };
+
+        let per_player = gated_destroy_all(Some(ControllerRef::ScopedPlayer));
+        let (scoped, tail) = split_player_scope_chain(&per_player, &PlayerFilter::All);
+        assert!(
+            tail.is_none(),
+            "a gated DestroyAll whose population names the iterated player must not detach"
+        );
+        assert!(
+            matches!(
+                scoped.sub_ability.as_deref().map(|sub| &sub.effect),
+                Some(Effect::DestroyAll { .. })
+            ),
+            "the gated mass effect stays in the per-player template"
+        );
+
+        let aggregate = gated_destroy_all(None);
+        let (scoped, tail) = split_player_scope_chain(&aggregate, &PlayerFilter::All);
+        assert!(
+            matches!(
+                tail.as_deref().map(|tail| &tail.effect),
+                Some(Effect::DestroyAll { .. })
+            ) && scoped.sub_ability.is_none(),
+            "non-vacuity: the same gate over a population that does not name the iterated \
+             player is one look-back and detaches"
+        );
+    }
+
     /// CR 608.2c (maintainer review, #7484): the publish gate must judge the
     /// PRE-SPLIT chain. A `player_scope` fan-out hands the per-player resolution
     /// a template whose remainder has been DETACHED, so a walk over that
@@ -44773,5 +45268,145 @@ mod dandan_read_sweep_tests {
             "reach: Standard counts the seat's own pile"
         );
         assert_eq!(read(&standard, 0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod player_scope_clause_owner_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{ExileLinkKind, ZoneChangeRecord};
+    use crate::types::identifiers::CardId;
+    use crate::types::resolution::{
+        ClauseAttribution, ClausePublication, PendingPlayerScopeClause, ResolutionFrame,
+    };
+
+    fn zone_changed(object_id: ObjectId, from: Zone, to: Zone) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(from),
+            to,
+            record: Box::new(ZoneChangeRecord::test_minimal(object_id, Some(from), to)),
+        }
+    }
+
+    fn tracked_by(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+        let mut linked: Vec<ObjectId> = state
+            .exile_links
+            .iter()
+            .filter(|link| link.source_id == source && link.kind == ExileLinkKind::TrackedBySource)
+            .map(|link| link.exiled_id)
+            .collect();
+        linked.sort_by_key(|id| id.0);
+        linked
+    }
+
+    /// CR 607.2a + CR 608.2c (R1.29): the migrated marking links span objects that
+    /// moved TO exile and are still there — the publication authority's
+    /// destination filter — not every span object that happens to sit in exile.
+    /// `a` moved to the graveyard in the span and was exiled later by other work;
+    /// `b` moved to exile and stayed (positive control); `c` moved to exile and
+    /// has since left. Reverting to "currently in Exile" links `{a, b}`.
+    #[test]
+    fn migrated_marking_links_only_span_moves_to_exile_still_in_exile() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(&mut state, CardId(2), PlayerId(1), "a".into(), Zone::Exile);
+        let b = create_object(&mut state, CardId(3), PlayerId(1), "b".into(), Zone::Exile);
+        let c = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "c".into(),
+            Zone::Graveyard,
+        );
+        let span = vec![
+            zone_changed(a, Zone::Hand, Zone::Graveyard),
+            zone_changed(b, Zone::Graveyard, Zone::Exile),
+            zone_changed(c, Zone::Graveyard, Zone::Exile),
+        ];
+        mark_migrated_linked_exile(&mut state, source, &span);
+        assert_eq!(tracked_by(&state, source), vec![b]);
+    }
+
+    fn pair_prompt(player: u8) -> WaitingFor {
+        WaitingFor::PairChoice {
+            player: PlayerId(player),
+            source_id: ObjectId(900 + u64::from(player)),
+            choices: Vec::new(),
+        }
+    }
+
+    fn park_owner(state: &mut GameState, raised_prompt: Option<WaitingFor>) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "clause source".into(),
+            Zone::Battlefield,
+        );
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let owner = PendingPlayerScopeClause {
+            source_id: source,
+            tail: Box::new(PendingContinuation::new(Box::new(tail.clone()), state)),
+            publication: ClausePublication::Recorded {
+                outer: Box::new(tail.clone()),
+                scoped_template: Box::new(tail),
+                matching_players: vec![PlayerId(0)],
+            },
+            events: Vec::new(),
+            raised_prompt,
+            attribution: ClauseAttribution::Closed,
+        };
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::PlayerScopeClause(Box::new(owner)));
+        source
+    }
+
+    fn owner(state: &GameState) -> &PendingPlayerScopeClause {
+        state
+            .resolution_stack
+            .topmost_player_scope_clause()
+            .expect("the owner is parked")
+    }
+
+    /// Decision 1 (R1.33): an answer site stays shut while a prompt the clause
+    /// did not raise stands, so the answer's work is not the clause's. Paired
+    /// positive: the same answer to the clause's own prompt is absorbed.
+    /// Reverting the gate (an always-open answer site) absorbs the foreign answer.
+    #[test]
+    fn answer_site_stays_shut_on_a_prompt_the_clause_did_not_raise() {
+        for (standing, absorbed) in [(pair_prompt(3), 0), (pair_prompt(1), 1)] {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            park_owner(&mut state, Some(pair_prompt(1)));
+            state.waiting_for = standing.clone();
+            let mut events = Vec::new();
+            attribute_to_paused_clause(&mut state, &mut events, ClauseSite::Answer, |_, events| {
+                events.push(zone_changed(ObjectId(77), Zone::Graveyard, Zone::Exile));
+            });
+            assert_eq!(events.len(), 1, "reach guard: the answer's work ran");
+            assert_eq!(
+                owner(&state).events.len(),
+                absorbed,
+                "standing {standing:?}: the owner absorbs only its own prompt's answer"
+            );
+            assert_eq!(owner(&state).attribution, ClauseAttribution::Closed);
+        }
     }
 }
