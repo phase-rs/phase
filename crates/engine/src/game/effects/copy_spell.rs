@@ -191,6 +191,10 @@ pub fn resolve(
             StackEntryKind::Spell { ability: None, .. } => {}
             StackEntryKind::ActivatedAbility { ability, .. } => {
                 preserve_ability_copy_source_recursive(ability);
+                // CR 610.3a + CR 707.10: the copy is put onto the stack now, so
+                // only "until" events after this point can stop its move; it
+                // does not inherit the events latched onto the original.
+                ability.clear_duration_events_recursive();
             }
             StackEntryKind::TriggeredAbility { ability, .. } => {
                 preserve_ability_copy_source_recursive(ability);

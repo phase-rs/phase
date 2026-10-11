@@ -4177,8 +4177,8 @@ pub(crate) fn apply_parent_chain_context(
     // context wholesale, so preserve the node-local intent while inheriting
     // the remaining casting-time facts from its parent.
     let child_face_down_in_exile = child.context.face_down_in_exile;
-    // CR 610.3b: `check_exile_returns` latches a specified "until" event on the
-    // exact duration-bearing ChangeZone node it happened for (after the trigger,
+    // CR 610.3a / CR 610.3b: `check_exile_returns` latches a specified "until" event on the
+    // exact duration-bearing ChangeZone node it happened for (after the activation or trigger,
     // before that node's initial zone change). Like the face-down marker, the
     // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
     // declaration) carries none, so the wholesale hand-off must not erase it.
@@ -9480,7 +9480,7 @@ fn affected_objects_from_events(
 ///
 /// A mass zone move is the exception: CR 603.12 keys the reflexive on the
 /// move EVENT, which CR 118.12's "started to pay" reading of "if you do" does
-/// not need. An empty or CR 610.3b-refused `ChangeZoneAll` moved nothing, so
+/// not need. An empty or CR 610.3a/b-refused `ChangeZoneAll` moved nothing, so
 /// no reflexive — authoritative even over an accepted or inherited performed
 /// mark (`mandatory_parent_event_occurred`).
 fn when_you_do_mandatory_parent_did_nothing(
@@ -16706,7 +16706,7 @@ fn resolve_chain_body(
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
     let mut immediate_effect_result = None;
-    // CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
+    // CR 610.3a / CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
     // move. Each `resolve_effect` call (one per repeat iteration) is judged on
     // its OWN event window by the resolver's own predicate; the node counts as
     // refused only when every bounded call was refused.
@@ -17508,7 +17508,7 @@ fn resolve_chain_body(
         });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
-    // CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
+    // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
     // event had already happened was not performed. That verdict is
     // authoritative for THIS node's dependent "if you do" rider even when the
     // node arrives already marked performed — an accepted "you may" or a

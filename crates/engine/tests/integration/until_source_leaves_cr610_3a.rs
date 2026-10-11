@@ -21,6 +21,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const ANGEL_OF_CONDEMNATION: &str = "Flying, vigilance\n{2}{W}, {T}: Exile another target creature. Return that card to the battlefield under its owner's control at the beginning of the next end step.\n{2}{W}, {T}, Exert this creature: Exile another target creature until this creature leaves the battlefield. (An exerted creature won't untap during your next untap step.)";
+const RINGS_OF_BRIGHTHEARTH: &str = "Whenever you activate an ability, if it isn't a mana ability, you may pay {2}. If you do, copy that ability. You may choose new targets for the copy.";
 const BANISHER_PRIEST: &str = "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.";
 const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
@@ -145,31 +146,37 @@ fn angel_board() -> AngelBoard {
 /// Activates Angel's exert ability targeting C1 and leaves it waiting on the
 /// stack with P0 holding priority.
 fn activate_exert_exile(board: &mut AngelBoard) {
-    let ability_index = board.runner.state().objects[&board.angel]
+    activate_exert_exile_under(&mut board.runner, board.angel, board.c1, 1);
+}
+
+/// Activates `angel`'s exert ability targeting `c1` and passes until P0 holds
+/// priority with `stack_len` entries, the activation at the bottom.
+fn activate_exert_exile_under(
+    runner: &mut GameRunner,
+    angel: ObjectId,
+    c1: ObjectId,
+    stack_len: usize,
+) {
+    let ability_index = runner.state().objects[&angel]
         .abilities
         .iter()
         .position(|ability| ability.duration == Some(Duration::UntilHostLeavesPlay))
         .expect("the exert ability's exile is bounded by Angel leaving");
-    board
-        .runner
+    runner
         .act(GameAction::ActivateAbility {
-            source_id: board.angel,
+            source_id: angel,
             ability_index,
         })
         .expect("Angel's exert ability can be activated");
-    drive(
-        &mut board.runner,
-        priority_with_stack(1),
-        VecDeque::from([board.c1]),
-    );
+    drive(runner, priority_with_stack(stack_len), VecDeque::from([c1]));
     // Reach-guard: the held entry is the activated, duration-bounded exile.
-    let held = board.runner.state().stack.back().expect("activation held");
+    let held = runner.state().stack.front().expect("activation held");
     assert!(
         matches!(
             &held.kind,
             StackEntryKind::ActivatedAbility { ability, .. }
                 if ability.duration == Some(Duration::UntilHostLeavesPlay)
-                    && ability.targets == vec![TargetRef::Object(board.c1)]
+                    && ability.targets == vec![TargetRef::Object(c1)]
         ),
         "the exert ability must wait on the stack targeting C1"
     );
@@ -364,5 +371,121 @@ fn triggered_until_exile_still_skips_after_its_source_was_blinked() {
         runner.state().objects[&c2].zone,
         Zone::Battlefield,
         "CR 610.3: C2 returns when the re-entered Priest leaves"
+    );
+}
+
+/// CR 610.3a + CR 707.10: Rings of Brighthearth copies Angel's exert ability,
+/// and Angel is returned to its owner's hand while the Rings trigger waits.
+/// The original was on the stack when Angel left, so it does nothing; the copy
+/// is put onto the stack only afterwards, so its exile moves C1. Angel left
+/// before that exile, so no return is created (CR 610.3) and C1 stays exiled.
+#[test]
+fn copy_of_a_held_activated_until_exile_put_on_the_stack_after_the_source_left_still_exiles() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let angel = scenario
+        .add_creature_from_oracle(P0, "Angel of Condemnation", 3, 3, ANGEL_OF_CONDEMNATION)
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Rings of Brighthearth", RINGS_OF_BRIGHTHEARTH);
+    let c1 = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    // {2}{W} for the activation and {2} for the Rings.
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+
+    activate_exert_exile_under(&mut runner, angel, c1, 2);
+    assert!(
+        matches!(
+            runner.state().stack.back().map(|entry| &entry.kind),
+            Some(StackEntryKind::TriggeredAbility { .. })
+        ),
+        "reach-guard: the Rings trigger waits above Angel's activation"
+    );
+
+    runner.cast(unsummon).target_object(angel).commit();
+    drive(&mut runner, priority_with_stack(2), VecDeque::new());
+    assert_eq!(
+        runner.state().objects[&angel].zone,
+        Zone::Hand,
+        "reach-guard: Angel left before the Rings trigger resolves"
+    );
+
+    // The Rings trigger resolves: pay {2}, copy the ability, keep C1.
+    drive(
+        &mut runner,
+        |state: &GameState| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+        VecDeque::new(),
+    );
+    let copy = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("P0 pays {2} for the Rings")
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::StackPushed { object_id } => Some(*object_id),
+            _ => None,
+        })
+        .expect("reach-guard: the copy is put onto the stack");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }),
+        "the copy offers new targets"
+    );
+    runner
+        .act(GameAction::KeepAllCopyTargets)
+        .expect("the copy keeps C1 as its target");
+    let top = runner.state().stack.back().expect("the copy waits");
+    assert!(
+        top.id == copy
+            && matches!(
+                &top.kind,
+                StackEntryKind::ActivatedAbility { ability, .. }
+                    if ability.targets == vec![TargetRef::Object(c1)]
+            ),
+        "reach-guard: the copy is an activated ability targeting C1 above the original"
+    );
+
+    let copy_events = drive(&mut runner, priority_with_stack(1), VecDeque::new());
+    assert!(
+        exile_node_resolved(&copy_events, angel)
+            && copy_events.iter().any(|event| matches!(
+                event,
+                GameEvent::StackResolved { object_id } if *object_id == copy
+            )),
+        "reach-guard: the copy resolved its exile node"
+    );
+    assert_eq!(
+        runner.state().objects[&c1].zone,
+        Zone::Exile,
+        "CR 610.3a + CR 707.10: Angel left before the copy was put onto the stack, so the copy exiles C1"
+    );
+
+    drive(&mut runner, priority_with_stack(0), VecDeque::new());
+    assert_eq!(
+        runner.state().objects[&c1].zone,
+        Zone::Exile,
+        "CR 610.3: Angel left before C1 was exiled, so no return is created"
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    assert_eq!(
+        runner.state().objects[&c1].zone,
+        Zone::Exile,
+        "C1 stays exiled through a later pass"
     );
 }

@@ -28712,8 +28712,9 @@ pub struct SpellContext {
     /// these cards. Empty outside such a chain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exile_until_batch: Vec<crate::types::identifiers::ObjectIncarnationRef>,
-    /// CR 610.3b: specified duration events observed after a triggered ability
-    /// triggered but before this initial zone-change effect occurred.
+    /// CR 610.3a / CR 610.3b: specified duration events observed after an activated
+    /// ability was put onto the stack or a triggered ability triggered, but before
+    /// this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duration_events: Vec<DurationEvent>,
     /// CR 118.1 + CR 119.4b: A completed resolution-time `PayCost` that paid
@@ -34351,7 +34352,7 @@ impl Eq for ResolvedAbility {}
 impl ResolvedAbility {
     /// CR 610.3: The "until" event bounding this node's own zone change, for
     /// every bounded zone-move shape (single-object `ChangeZone` and mass
-    /// `ChangeZoneAll`). The single classifier the CR 610.3b latch, the
+    /// `ChangeZoneAll`). The single classifier the CR 610.3a/b latch, the
     /// resolvers' refusal, and stack-reach readers share.
     pub(crate) fn bounded_zone_change_event(&self) -> Option<DurationEvent> {
         match self.effect {
@@ -34617,6 +34618,18 @@ impl ResolvedAbility {
         }
         if let Some(branch) = self.else_ability.as_mut() {
             branch.record_duration_event_recursive(event);
+        }
+    }
+
+    /// Clears the latched "until" events on this ability and every sub/else
+    /// branch, mirroring [`Self::record_duration_event_recursive`].
+    pub(crate) fn clear_duration_events_recursive(&mut self) {
+        self.context.duration_events.clear();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.clear_duration_events_recursive();
+        }
+        if let Some(branch) = self.else_ability.as_mut() {
+            branch.clear_duration_events_recursive();
         }
     }
 

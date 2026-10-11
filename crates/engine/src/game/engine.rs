@@ -18717,8 +18717,8 @@ const LATCHABLE_DURATION_EVENTS: [DurationEvent; 2] = [
     DurationEvent::OpponentBecameMonarch,
 ];
 
-/// CR 610.3b: the specified "until" events in `events` that occurred after a
-/// held triggered ability triggered, in event order. The holder's
+/// CR 610.3a / CR 610.3b: the specified "until" events in `events` that occurred
+/// after a held ability was put onto the stack or triggered, in event order. The holder's
 /// `trigger_event` is located once: when it is in `events`, only later events
 /// count; when it is absent (it occurred in an earlier action) or the holder
 /// has none (CR 610.3a: an activated ability), every event counts. A holder

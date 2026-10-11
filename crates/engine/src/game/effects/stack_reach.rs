@@ -930,7 +930,7 @@ fn node_acted_on(
         {
             Vec::new()
         }
-        // CR 610.3b: an object whose "until" event already happened does not
+        // CR 610.3a / CR 610.3b: an object whose "until" event already happened does not
         // move.
         Effect::ChangeZone { .. }
             if bound
