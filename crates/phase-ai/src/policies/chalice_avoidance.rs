@@ -221,7 +221,7 @@ impl TacticalPolicy for ChaliceAvoidancePolicy {
     }
 }
 
-fn spell_can_be_countered(
+pub(super) fn spell_can_be_countered(
     state: &GameState,
     spell_id: engine::types::identifiers::ObjectId,
 ) -> bool {
