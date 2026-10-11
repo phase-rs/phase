@@ -106,17 +106,19 @@ pub fn resolve(
 /// "if its controller ... changes" via the Layer 2 settlement in
 /// `layers::finish_layer_evaluation`).
 ///
-/// Returns whether `oid` was an attacking creature that this call removed —
-/// the only case that marks layers dirty, because only it can change a Layer 6
-/// `FilterProp::Attacking` grant. An object holding no combat role prunes
-/// nothing, records nothing, and returns `false`.
+/// Returns whether combat membership changed, i.e. whether any combat edge
+/// naming `oid` was pruned (its attacker entry, its blocking-creature entry,
+/// an assignment naming it, or its pending damage). Every such change marks
+/// layers dirty. An object holding no combat role prunes nothing, records
+/// nothing, and returns `false`.
 pub fn remove_object_from_combat(
     state: &mut GameState,
     oid: crate::types::identifiers::ObjectId,
 ) -> bool {
     // CR 733: read the exact roles being pruned BEFORE the prune, so the journal
     // records what this removal actually did. An object holding no combat role
-    // prunes nothing and is not recorded.
+    // prunes nothing and is not recorded. A blocking creature none of whose
+    // attackers remain still holds a role (CR 509.1g), so it is recorded too.
     let participation = CombatParticipation::capture(state, oid);
     if participation.is_empty() {
         return false;
@@ -126,21 +128,21 @@ pub fn remove_object_from_combat(
         .get(&oid)
         .map(ObjectIncarnationRef::from_object);
 
-    let attacker_removed = crate::game::combat::prune_object_from_combat(state, oid);
+    let changed = crate::game::combat::prune_object_from_combat(state, oid);
 
-    // CR 506.4 + CR 613.1f: a creature removed from combat stops being attacking,
-    // so a granted "while attacking" keyword (deathtouch/lifelink via
-    // FilterProp::Attacking { defender: None }, Layer 6) must be revoked immediately. Mark dirty only
-    // when an attacker was actually removed — removing a pure blocker doesn't
-    // affect FilterProp::Attacking { defender: None } statics.
-    if attacker_removed {
+    // CR 506.4 + CR 613.1f: a creature removed from combat stops being an
+    // attacking, blocking, blocked and/or unblocked creature, so a Layer 6
+    // grant keyed on `FilterProp::Attacking` / `Blocking` / `BlockingSource` /
+    // `Blocked`, or a `SourceIsAttacking` / `SourceIsBlocking` gate, must be
+    // re-derived immediately — whichever role was removed.
+    if changed {
         state.layers_dirty.mark_full();
     }
 
     if let Some(reference) = reference {
         record_combat_membership_removal(state, reference, participation);
     }
-    attacker_removed
+    changed
 }
 
 /// CR 733: Journals one settled CR 506.4 removal through its owning family.
@@ -340,12 +342,14 @@ mod tests {
         );
     }
 
-    /// CR 506.4: removing a creature that is NOT an attacker (e.g. a pure blocker)
-    /// does not change which creatures are attacking, so FilterProp::Attacking { defender: None }
-    /// statics are unaffected and layers must NOT be spuriously dirtied. Locks the
-    /// `attacker_removed` gate.
+    /// CR 506.4 + CR 613.1f: removing a pure blocker stops it being a blocking
+    /// creature, which a Layer 6 `FilterProp::Blocking` grant or a
+    /// `SourceIsBlocking` gate reads, so layers must re-evaluate. Paired
+    /// negative: removing an object with no combat role leaves layers clean.
+    /// Fails on revert of the any-edge `changed` gate (the old attacker-only
+    /// gate left layers clean here).
     #[test]
-    fn remove_blocker_does_not_mark_layers_dirty() {
+    fn remove_blocker_marks_layers_dirty() {
         let mut state = GameState::new_two_player(42);
         let attacker_id = create_object(
             &mut state,
@@ -359,6 +363,13 @@ mod tests {
             CardId(2),
             PlayerId(0),
             "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
             Zone::Battlefield,
         );
 
@@ -381,8 +392,15 @@ mod tests {
         state.combat = Some(combat);
         state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
+        // Paired negative: an object holding no combat role prunes nothing.
+        assert!(!remove_object_from_combat(&mut state, bystander_id));
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "removing an object with no combat role must not dirty layers"
+        );
+
         // Remove the blocker — it is not in combat.attackers.
-        remove_object_from_combat(&mut state, blocker_id);
+        assert!(remove_object_from_combat(&mut state, blocker_id));
 
         assert_eq!(
             state.combat.as_ref().unwrap().attackers.len(),
@@ -390,17 +408,26 @@ mod tests {
             "attacker should remain"
         );
         assert!(
-            !state.layers_dirty.is_dirty(),
-            "removing a pure blocker must not dirty layers - no FilterProp::Attacking {{ defender: None }} change"
+            !state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .contains_key(&blocker_id),
+            "reach guard: the blocker really was removed"
+        );
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "removing a blocker must dirty layers - FilterProp::Blocking / SourceIsBlocking change"
         );
     }
 
-    /// CR 506.4: the return value reports exactly whether an attacking creature
-    /// was removed — `true` for an attacker, `false` for a pure blocker and for
-    /// an object holding no combat role. The Layer 2 controller-change
-    /// settlement keys its re-derivation on this value.
+    /// CR 506.4: the return value reports whether combat membership changed —
+    /// `true` for an attacker and for a pure blocker, `false` for an object
+    /// holding no combat role. The Layer 2 controller-change settlement keys
+    /// its re-derivation on this value.
     #[test]
-    fn remove_object_from_combat_reports_attacker_removal() {
+    fn remove_object_from_combat_reports_membership_change() {
         let mut state = GameState::new_two_player(42);
         let attacker_id = create_object(
             &mut state,
@@ -447,8 +474,8 @@ mod tests {
             "an object with no combat role removes nothing"
         );
         assert!(
-            !remove_object_from_combat(&mut state, blocker_id),
-            "a pure blocker is not an attacking creature"
+            remove_object_from_combat(&mut state, blocker_id),
+            "removing a blocking creature changes combat membership"
         );
         assert!(
             !state
@@ -464,6 +491,223 @@ mod tests {
             "removing an attacking creature reports true"
         );
         assert!(state.combat.as_ref().unwrap().attackers.is_empty());
+    }
+
+    /// A fresh two-player state where P0's `attacker` attacks P1 and is blocked
+    /// by P1's `blocker` alone. Returns `(state, attacker, blocker)`.
+    fn blocked_pair() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+                attack_target: AttackTarget::Player(PlayerId(1)),
+                blocked: true,
+                band_id: None,
+            }],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+        (state, attacker, blocker)
+    }
+
+    fn combat_removals(
+        state: &GameState,
+        start: usize,
+    ) -> Vec<crate::types::resolved_commands::ResolvedCombatMembershipCommand> {
+        state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .skip(start)
+            .filter_map(|entry| match &entry.command {
+                Some(crate::types::resolved_commands::ResolvedRulesCommand::CombatMembership(
+                    command,
+                )) => Some(command.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 509.1g + CR 506.4: an attacker leaving combat by ANY route leaves the
+    /// creature that was blocking it a blocking creature (with no attacker
+    /// assigned, CR 510.1d). The class test covers every shared caller of the
+    /// prune: direct removal, `Effect::RemoveFromCombat`, leaving the
+    /// battlefield and phasing out. Fails on revert of the kept-empty key in
+    /// `prune_object_from_combat` (the old prune dropped the blocker's key).
+    #[test]
+    fn attacker_removal_routes_keep_blocker_blocking() {
+        type Route = fn(&mut GameState, ObjectId);
+        let routes: [(&str, Route); 4] = [
+            ("remove_object_from_combat", |state, attacker| {
+                remove_object_from_combat(state, attacker);
+            }),
+            ("Effect::RemoveFromCombat", |state, attacker| {
+                let ability = ResolvedAbility::new(
+                    Effect::RemoveFromCombat {
+                        target: TargetFilter::Any,
+                    },
+                    vec![TargetRef::Object(attacker)],
+                    ObjectId(100),
+                    PlayerId(1),
+                );
+                resolve(state, &ability, &mut Vec::new()).unwrap();
+            }),
+            ("leaves the battlefield", |state, attacker| {
+                crate::game::zones::move_to_zone(state, attacker, Zone::Graveyard, &mut Vec::new());
+            }),
+            ("phases out", |state, attacker| {
+                crate::game::phasing::phase_out_object(
+                    state,
+                    attacker,
+                    crate::game::game_object::PhaseOutCause::Directly,
+                    &mut Vec::new(),
+                );
+            }),
+        ];
+
+        for (name, route) in routes {
+            let (mut state, attacker, blocker) = blocked_pair();
+            assert_eq!(
+                state.combat.as_ref().unwrap().blocker_to_attacker[&blocker],
+                vec![attacker],
+                "{name}: reach guard: the blocker blocks the attacker"
+            );
+
+            route(&mut state, attacker);
+
+            let combat = state.combat.as_ref().unwrap();
+            assert!(
+                combat.attackers.iter().all(|a| a.object_id != attacker),
+                "{name}: reach guard: the attacker left combat"
+            );
+            assert_eq!(
+                combat.blocker_to_attacker.get(&blocker),
+                Some(&vec![]),
+                "{name}: CR 509.1g: the blocker remains a blocking creature with no attacker assigned"
+            );
+            assert!(
+                crate::game::zones::capture_combat_status(&state, blocker).blocking,
+                "{name}: the blocking-role reader still sees a blocking creature"
+            );
+        }
+    }
+
+    /// CR 506.4 + CR 400.7: a blocking creature with no attacker assigned that
+    /// leaves the battlefield is removed from combat like any blocker; when the
+    /// same `ObjectId` re-enters it is a new object and is not blocking. The
+    /// look-back snapshot taken at exit still sees it blocking (CR 603.10a).
+    /// Fails if the receipt treats the orphan as holding no role (the early
+    /// return would leave its key behind for the re-entered object).
+    #[test]
+    fn orphan_exit_prunes_key_and_reentry_is_not_blocking() {
+        let (mut state, attacker, orphan) = blocked_pair();
+        remove_object_from_combat(&mut state, attacker);
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&orphan),
+            Some(&vec![]),
+            "reach guard: the blocker is an orphaned blocking creature"
+        );
+        assert!(
+            crate::game::zones::capture_combat_status(&state, orphan).blocking,
+            "CR 603.10a: the look-back snapshot sees the orphan blocking"
+        );
+
+        crate::game::zones::move_to_zone(&mut state, orphan, Zone::Graveyard, &mut Vec::new());
+        assert!(
+            !state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .contains_key(&orphan),
+            "CR 506.4: leaving the battlefield ends the orphan's blocking membership"
+        );
+
+        crate::game::zones::move_to_zone(&mut state, orphan, Zone::Battlefield, &mut Vec::new());
+        assert_eq!(state.objects[&orphan].zone, Zone::Battlefield);
+        assert!(
+            !state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .contains_key(&orphan),
+            "CR 400.7: the re-entered object does not inherit the blocking role"
+        );
+        assert!(!crate::game::zones::capture_combat_status(&state, orphan).blocking);
+    }
+
+    /// CR 733 + CR 509.1g: removing an orphaned blocking creature journals
+    /// exactly one removal whose receipt says "blocking, no attacker assigned"
+    /// (`Some([])`), and replaying it onto the predecessor reproduces the prune.
+    #[test]
+    fn orphan_removal_journals_once_with_empty_assignment_receipt() {
+        let (mut state, attacker, orphan) = blocked_pair();
+        remove_object_from_combat(&mut state, attacker);
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&orphan),
+            Some(&vec![]),
+            "reach guard: the blocker is an orphaned blocking creature"
+        );
+        let before = state.clone();
+        let start = state.resolved_rules_journal.entries().len();
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        assert!(
+            remove_object_from_combat(&mut state, orphan),
+            "removing the orphan changes combat membership"
+        );
+        assert!(state.layers_dirty.is_dirty());
+        assert!(!state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(&orphan));
+
+        let removals = combat_removals(&state, start);
+        assert_eq!(removals.len(), 1, "exactly one journaled removal");
+        assert_eq!(removals[0].object.object_id, orphan);
+        let ResolvedCombatMembershipEdit::Remove {
+            expected_participation,
+        } = &removals[0].edit
+        else {
+            panic!("the orphan's removal is a Remove edit");
+        };
+        assert_eq!(expected_participation.blocking, Some(vec![]));
+        assert!(expected_participation.attacking.is_none());
+
+        let mut replay = before;
+        crate::game::combat::apply_resolved_combat_membership(&mut replay, &removals[0])
+            .expect("the orphan's removal replays against its predecessor");
+        assert_eq!(replay.combat, state.combat, "replay reproduces the prune");
     }
 
     #[test]

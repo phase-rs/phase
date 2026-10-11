@@ -321,7 +321,20 @@ pub struct CombatState {
     /// attacker_id -> list of blocker ids
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_assignments: HashMap<ObjectId, Vec<ObjectId>>,
-    /// blocker_id -> attacker_ids (reverse lookup; Vec supports multi-blocking via ExtraBlockers)
+    /// blocker_id -> attacker_ids. The engine's blocking-membership authority.
+    ///
+    /// CR 509.1g: a key is present exactly while that creature is a blocking
+    /// creature. It is set when the creature is declared or placed as a blocker
+    /// and cleared only when that creature itself is removed from combat
+    /// (CR 506.4) or combat ends. The value lists the attackers it is currently
+    /// blocking (a `Vec` supports multi-blocking via ExtraBlockers) and may be
+    /// EMPTY once every one of them has left combat: the creature is still a
+    /// blocking creature, but CR 510.1d it assigns no combat damage.
+    ///
+    /// Readers asking for the blocking role use key presence; readers using the
+    /// assignments must tolerate an empty list. The forward map
+    /// `blocker_assignments` (attacker -> blockers) drops its key when that
+    /// attacker is removed from combat.
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_to_attacker: HashMap<ObjectId, Vec<ObjectId>>,
     /// Defending players who have declared blockers this step.
@@ -496,8 +509,12 @@ pub enum DamageTarget {
 pub struct CombatParticipation {
     /// The object's own attacker entry, when it was an attacking creature.
     pub attacking: Option<AttackerInfo>,
-    /// CR 509.1g: attacking creatures this object was blocking.
-    pub blocking: Vec<ObjectId>,
+    /// CR 509.1g: `None` when the object was not a blocking creature;
+    /// `Some(attackers)` when it was, listing the attacking creatures it was
+    /// blocking. `Some(empty)` is a blocking creature none of whose attackers
+    /// remain in combat (CR 510.1d: it assigns no combat damage).
+    #[serde(default, with = "blocking_wire")]
+    pub blocking: Option<Vec<ObjectId>>,
     /// CR 509.1h: blocking creatures assigned to this object as an attacker.
     pub blocked_by: Vec<ObjectId>,
     /// CR 510.1: combat damage this object had already been assigned to deal.
@@ -516,11 +533,7 @@ impl CombatParticipation {
                 .iter()
                 .find(|a| a.object_id == oid)
                 .cloned(),
-            blocking: combat
-                .blocker_to_attacker
-                .get(&oid)
-                .cloned()
-                .unwrap_or_default(),
+            blocking: combat.blocker_to_attacker.get(&oid).cloned(),
             blocked_by: combat
                 .blocker_assignments
                 .get(&oid)
@@ -534,19 +547,70 @@ impl CombatParticipation {
         }
     }
 
-    /// CR 506.4: whether the object held no combat role at all, so removing it
-    /// would prune nothing.
+    /// CR 506.4: whether the object held no combat role at all (not attacking,
+    /// not a blocking creature, no blockers assigned to it, no pending damage),
+    /// so removing it would prune nothing. A blocking creature with an empty
+    /// attacker list still holds a role (CR 509.1g).
     pub fn is_empty(&self) -> bool {
         self.attacking.is_none()
-            && self.blocking.is_empty()
+            && self.blocking.is_none()
             && self.blocked_by.is_empty()
             && self.damage_assignments.is_empty()
     }
 }
 
+/// CR 733: Wire shape of [`CombatParticipation::blocking`].
+///
+/// Journal records are persisted in `GameState::resolved_rules_journal`, and
+/// records written before the field became an `Option` hold a bare array in
+/// which `[]` meant "not a blocking creature" (a blocking creature with no
+/// attacker left was unrepresentable then). So:
+///
+/// | value          | written    | read back as   |
+/// |----------------|------------|----------------|
+/// | `None`         | `[]`       | `None`         |
+/// | `Some([ids..])`| `[ids..]`  | `Some([ids..])`|
+/// | `Some([])`     | `null`     | `Some([])`     |
+///
+/// Legacy records decode exactly, and `None` and `Some([])` never collide.
+mod blocking_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::types::identifiers::ObjectId;
+
+    pub(super) fn serialize<S: Serializer>(
+        blocking: &Option<Vec<ObjectId>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match blocking {
+            None => Vec::<ObjectId>::new().serialize(serializer),
+            Some(attackers) if attackers.is_empty() => serializer.serialize_none(),
+            Some(attackers) => attackers.serialize(serializer),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<ObjectId>>, D::Error> {
+        Ok(match Option::<Vec<ObjectId>>::deserialize(deserializer)? {
+            None => Some(Vec::new()),
+            Some(attackers) if attackers.is_empty() => None,
+            Some(attackers) => Some(attackers),
+        })
+    }
+}
+
 /// CR 506.4: Drops every combat edge that names `oid`, in the live authority's
-/// order. Returns whether `oid` was an attacking creature, which is the only
-/// case that can change a Layer 6 `FilterProp::Attacking` grant.
+/// order. Returns whether any edge was pruned: `oid`'s attacker entry, its
+/// blocking-creature entry, a blocker or attacker assignment naming it, or its
+/// pending damage. Any of those can change a Layer 6 combat-role grant
+/// (`FilterProp::Attacking` / `Blocking` / `BlockingSource` / `Blocked`) or a
+/// `SourceIsAttacking` / `SourceIsBlocking` gate (CR 613.1f).
+///
+/// CR 509.1g: pruning an attacker leaves every creature that was blocking it a
+/// blocking creature, now with that attacker dropped from its list (possibly
+/// leaving it empty, CR 510.1d). Only removing the blocker itself ends its
+/// blocking membership.
 ///
 /// Single structural authority shared by the live `remove_object_from_combat`
 /// and the CR 733 replay applier, so a replayed prune cannot drift from the
@@ -557,24 +621,29 @@ pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> 
     };
     let attackers_before = combat.attackers.len();
     combat.attackers.retain(|a| a.object_id != oid);
-    let attacker_removed = combat.attackers.len() != attackers_before;
+    let mut changed = combat.attackers.len() != attackers_before;
     // Drop attacker-keyed forward assignments (oid was an attacker with blockers
     // assigned to it).
-    combat.blocker_assignments.remove(&oid);
+    changed |= combat.blocker_assignments.remove(&oid).is_some();
     // Remove as blocker from all remaining attacker assignments.
     for blockers in combat.blocker_assignments.values_mut() {
+        let before = blockers.len();
         blockers.retain(|b| *b != oid);
+        changed |= blockers.len() != before;
     }
-    // Remove reverse lookup when oid was a blocker.
-    combat.blocker_to_attacker.remove(&oid);
-    // Prune oid from every blocker's attacker list (oid was an attacker).
-    combat.blocker_to_attacker.retain(|_, attackers| {
+    // CR 506.4: oid itself stops being a blocking creature.
+    changed |= combat.blocker_to_attacker.remove(&oid).is_some();
+    // CR 509.1g: prune oid from every blocker's attacker list (oid was an
+    // attacker) WITHOUT dropping a key whose list empties — that blocker
+    // remains a blocking creature until it is itself removed from combat.
+    for attackers in combat.blocker_to_attacker.values_mut() {
+        let before = attackers.len();
         attackers.retain(|id| *id != oid);
-        !attackers.is_empty()
-    });
+        changed |= attackers.len() != before;
+    }
     // CR 510.1: remove any pending damage assignments for this object.
-    combat.damage_assignments.remove(&oid);
-    attacker_removed
+    changed |= combat.damage_assignments.remove(&oid).is_some();
+    changed
 }
 
 /// CR 733: Journals one settled combat-membership edit through its owning family.
@@ -1097,9 +1166,9 @@ pub fn apply_resolved_combat_membership(
             // CR 506.4: the prune itself is a structural consequence of the
             // verified participation, so it re-runs the live authority.
             //
-            // CR 613.1f: mirror the live authority's narrower marking — only a
-            // removed ATTACKER can change a `FilterProp::Attacking` grant, so
-            // pruning a pure blocker leaves the layer system alone.
+            // CR 613.1f: mirror the live authority's marking — any pruned role
+            // (attacking or blocking) can change a Layer 6 combat-role grant or
+            // a `SourceIsAttacking` / `SourceIsBlocking` gate.
             if prune_object_from_combat(state, object_id) {
                 state.layers_dirty.mark_full();
             }
@@ -6898,6 +6967,15 @@ pub fn declare_blockers_for_player(
         record_block_history(state, blocker_ref, attacker_id);
     }
 
+    // CR 509.1g + CR 509.1h + CR 613.1f: each chosen creature became a blocking
+    // creature and each attacker it blocks a blocked creature, so Layer 6
+    // `FilterProp::Blocking` / `Blocked` grants and `SourceIsBlocking` /
+    // `SourceIsBlocked` gates must re-evaluate before the next priority window,
+    // exactly as `place_blocking` and the CR 733 Block replay do.
+    if !assignments.is_empty() {
+        state.layers_dirty.mark_full();
+    }
+
     Ok(())
 }
 
@@ -6961,7 +7039,9 @@ pub fn attacking_alone(state: &GameState, object_id: ObjectId) -> bool {
 /// creatures are. `blocker_to_attacker` is keyed by blocker id (one entry per
 /// distinct declared blocker), so a single entry that contains `object_id`
 /// means it is the only blocker in combat. Like `attacking_alone`, this reads
-/// live combat; look-back callers snapshot the result (CR 603.10a).
+/// live combat; look-back callers snapshot the result (CR 603.10a). A blocking
+/// creature whose attackers all left combat still counts (CR 509.1g: "it's
+/// blocking" until it is itself removed from combat).
 pub fn blocking_alone(state: &GameState, object_id: ObjectId) -> bool {
     state.combat.as_ref().is_some_and(|combat| {
         combat.blocker_to_attacker.len() == 1 && combat.blocker_to_attacker.contains_key(&object_id)
@@ -22461,5 +22541,372 @@ mod tests {
                 .has_keyword(&Keyword::Trample),
             "a creature that isn't attacking must NOT gain trample"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 509.1g blocking-creature membership independent of attacker
+    // assignments (`blocker_to_attacker` keeps a key with an empty list).
+    // ---------------------------------------------------------------------
+
+    /// Two-player combat: P0's `attackers` all attack P1; each `(blocker,
+    /// attackers)` row is declared as blocking those attackers.
+    fn blocking_combat(
+        state: &mut GameState,
+        attackers: &[ObjectId],
+        blocks: &[(ObjectId, Vec<ObjectId>)],
+    ) {
+        let mut combat = CombatState {
+            attackers: attackers
+                .iter()
+                .map(|&id| AttackerInfo::attacking_player(id, PlayerId(1)))
+                .collect(),
+            ..Default::default()
+        };
+        for (blocker, blocked) in blocks {
+            for attacker in blocked {
+                if let Some(info) = combat
+                    .attackers
+                    .iter_mut()
+                    .find(|a| a.object_id == *attacker)
+                {
+                    info.blocked = true;
+                }
+                combat
+                    .blocker_assignments
+                    .entry(*attacker)
+                    .or_default()
+                    .push(*blocker);
+            }
+            combat.blocker_to_attacker.insert(*blocker, blocked.clone());
+        }
+        state.combat = Some(combat);
+    }
+
+    /// CR 509.1g + CR 506.4: pruning an attacker keeps every creature that was
+    /// blocking it a blocking creature — its key stays, holding the attackers
+    /// it still blocks (possibly none). Fails on revert of the kept-empty key.
+    #[test]
+    fn prune_attacker_keeps_blockers_as_blockers() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 2, 2);
+        let b = create_creature(&mut state, PlayerId(0), "B", 2, 2);
+        let multi = create_creature(&mut state, PlayerId(1), "Multi", 1, 4);
+        let shared = create_creature(&mut state, PlayerId(1), "Shared", 1, 4);
+        let bystander = create_creature(&mut state, PlayerId(1), "Bystander", 1, 1);
+        // `multi` blocks both attackers (ExtraBlockers); `shared` co-blocks A.
+        blocking_combat(
+            &mut state,
+            &[a, b],
+            &[(multi, vec![a, b]), (shared, vec![a])],
+        );
+
+        // Sibling (c): an object with no combat edge prunes nothing.
+        let before = state.combat.clone();
+        assert!(!prune_object_from_combat(&mut state, bystander));
+        assert_eq!(state.combat, before, "a bystander changes nothing");
+
+        assert!(prune_object_from_combat(&mut state, a));
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat.attackers.iter().all(|info| info.object_id != a),
+            "reach guard: the attacker left combat"
+        );
+        assert!(
+            !combat.blocker_assignments.contains_key(&a),
+            "reach guard: the attacker's forward assignments are gone"
+        );
+        assert_eq!(
+            combat.blocker_to_attacker.get(&multi),
+            Some(&vec![b]),
+            "the multi-blocker still blocks the remaining attacker"
+        );
+        assert_eq!(
+            combat.blocker_to_attacker.get(&shared),
+            Some(&vec![]),
+            "CR 509.1g: a blocker whose only attacker left is still a blocking creature"
+        );
+
+        assert!(prune_object_from_combat(&mut state, b));
+        let combat = state.combat.as_ref().unwrap();
+        assert_eq!(combat.blocker_to_attacker.get(&multi), Some(&vec![]));
+        assert_eq!(combat.blocker_to_attacker.get(&shared), Some(&vec![]));
+        assert!(combat.blocker_assignments.is_empty());
+    }
+
+    /// CR 506.5 + CR 603.10a: the "blocking alone" authority and the
+    /// zone-change look-back snapshot read an orphaned blocker as blocking.
+    #[test]
+    fn orphaned_blocker_reads_as_blocking() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        blocking_combat(&mut state, &[attacker], &[(orphan, vec![attacker])]);
+        prune_object_from_combat(&mut state, attacker);
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .get(&orphan),
+            Some(&vec![]),
+            "reach guard: the blocker is orphaned"
+        );
+
+        assert!(blocking_alone(&state, orphan));
+        assert!(crate::game::zones::capture_combat_status(&state, orphan).blocking);
+
+        let second = create_creature(&mut state, PlayerId(1), "Guard", 1, 3);
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .blocker_to_attacker
+            .insert(second, vec![]);
+        assert!(
+            !blocking_alone(&state, orphan),
+            "a second blocking creature means the orphan is not blocking alone"
+        );
+    }
+
+    /// CR 509.1g + CR 733: the removal receipt distinguishes a blocking
+    /// creature with no attacker assigned (`Some([])`, holds a role) from an
+    /// object that is not blocking at all (`None`, holds no role).
+    #[test]
+    fn capture_distinguishes_orphan_from_non_blocker() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        let bystander = create_creature(&mut state, PlayerId(1), "Idle", 1, 1);
+        blocking_combat(&mut state, &[attacker], &[(orphan, vec![attacker])]);
+        prune_object_from_combat(&mut state, attacker);
+        assert!(
+            state.combat.is_some(),
+            "reach guard: both objects are in the same combat"
+        );
+
+        let orphan_receipt = CombatParticipation::capture(&state, orphan);
+        assert_eq!(orphan_receipt.blocking, Some(vec![]));
+        assert!(!orphan_receipt.is_empty(), "the orphan holds a combat role");
+
+        let bystander_receipt = CombatParticipation::capture(&state, bystander);
+        assert_eq!(bystander_receipt.blocking, None);
+        assert!(bystander_receipt.is_empty());
+    }
+
+    fn removal_command(state: &mut GameState, oid: ObjectId) -> ResolvedCombatMembershipCommand {
+        let expected_participation = CombatParticipation::capture(state, oid);
+        ResolvedCombatMembershipCommand {
+            object: ObjectIncarnationRef::from_object(&state.objects[&oid]),
+            edit: ResolvedCombatMembershipEdit::Remove {
+                expected_participation,
+            },
+            cause: state.current_or_begin_rules_execution_node(),
+        }
+    }
+
+    /// CR 733 + CR 506.4: an orphan's removal receipt replays (pruning its
+    /// key) and fails closed when re-applied or when its recorded assignment
+    /// list disagrees with live state.
+    #[test]
+    fn orphan_removal_receipt_replays_and_fails_closed() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        blocking_combat(&mut state, &[attacker], &[(orphan, vec![attacker])]);
+        // Hostile: a receipt recorded while the blocker still had its attacker.
+        let stale = removal_command(&mut state, orphan);
+        prune_object_from_combat(&mut state, attacker);
+        let command = removal_command(&mut state, orphan);
+
+        let mut mismatched = state.clone();
+        assert!(matches!(
+            apply_resolved_combat_membership(&mut mismatched, &stale),
+            Err(ResolvedCombatMembershipReplayInvariantError::ParticipationMismatch { .. })
+        ));
+        assert!(
+            mismatched
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .contains_key(&orphan),
+            "a rejected command leaves no partial edit"
+        );
+
+        let mut replay = state.clone();
+        replay.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+        apply_resolved_combat_membership(&mut replay, &command)
+            .expect("the orphan's receipt matches the live orphan");
+        assert!(!replay
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(&orphan));
+        assert!(
+            replay.layers_dirty.is_dirty(),
+            "CR 613.1f: replaying a blocker removal re-derives layers like the live authority"
+        );
+        assert!(
+            matches!(
+                apply_resolved_combat_membership(&mut replay, &command),
+                Err(ResolvedCombatMembershipReplayInvariantError::ParticipationMismatch { .. })
+            ),
+            "re-applying the removal fails closed"
+        );
+    }
+
+    /// CR 733: a journal holding an orphan-only removal (`blocking: Some([])`,
+    /// nothing else) survives the serialized-authority validation, while an
+    /// all-empty receipt is still rejected.
+    #[test]
+    fn journal_accepts_orphan_only_removal() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        blocking_combat(&mut state, &[attacker], &[(orphan, vec![attacker])]);
+        prune_object_from_combat(&mut state, attacker);
+
+        let command = removal_command(&mut state, orphan);
+        let ResolvedCombatMembershipEdit::Remove {
+            expected_participation,
+        } = &command.edit
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            *expected_participation,
+            CombatParticipation {
+                blocking: Some(vec![]),
+                ..Default::default()
+            },
+            "reach guard: the receipt holds only the orphan role"
+        );
+        let mut journal = state.resolved_rules_journal.clone();
+        journal.record_combat_membership(command).unwrap();
+        let json = serde_json::to_string(&journal).unwrap();
+        let decoded: crate::types::resolved_commands::ResolvedRulesJournal =
+            serde_json::from_str(&json).expect("an orphan-only removal is a real removal");
+        assert_eq!(decoded.entries().len(), journal.entries().len());
+
+        // Paired negative: a receipt that names no role is rejected.
+        let mut bystander_state = state.clone();
+        let bystander = create_creature(&mut bystander_state, PlayerId(1), "Idle", 1, 1);
+        let empty = removal_command(&mut bystander_state, bystander);
+        let mut journal = bystander_state.resolved_rules_journal.clone();
+        journal.record_combat_membership(empty).unwrap();
+        let json = serde_json::to_string(&journal).unwrap();
+        let error =
+            serde_json::from_str::<crate::types::resolved_commands::ResolvedRulesJournal>(&json)
+                .expect_err("a removal that prunes no role is rejected");
+        assert!(error.to_string().contains("prunes no combat role"));
+    }
+
+    /// CR 733: the `blocking` wire shape. Legacy bare arrays decode exactly
+    /// (`[]` = not blocking), `Some([])` is written as `null`, and `None` and
+    /// `Some([])` never collide.
+    #[test]
+    fn blocking_wire_round_trips_and_decodes_legacy() {
+        let legacy_none: CombatParticipation = serde_json::from_str(
+            r#"{"attacking":null,"blocking":[],"blocked_by":[],"damage_assignments":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy_none.blocking, None);
+        assert!(legacy_none.is_empty());
+
+        let legacy_some: CombatParticipation = serde_json::from_str(
+            r#"{"attacking":null,"blocking":[7],"blocked_by":[],"damage_assignments":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy_some.blocking, Some(vec![ObjectId(7)]));
+
+        let missing: CombatParticipation =
+            serde_json::from_str(r#"{"attacking":null,"blocked_by":[],"damage_assignments":[]}"#)
+                .unwrap();
+        assert_eq!(missing.blocking, None);
+
+        let orphan = CombatParticipation {
+            blocking: Some(vec![]),
+            ..Default::default()
+        };
+        let orphan_json = serde_json::to_value(&orphan).unwrap();
+        assert_eq!(orphan_json["blocking"], serde_json::Value::Null);
+        let none_json = serde_json::to_value(CombatParticipation::default()).unwrap();
+        assert_eq!(none_json["blocking"], serde_json::json!([]));
+        assert_ne!(orphan_json, none_json, "None and Some([]) must not collide");
+
+        for value in [
+            CombatParticipation::default(),
+            orphan,
+            CombatParticipation {
+                blocking: Some(vec![ObjectId(7)]),
+                ..Default::default()
+            },
+        ] {
+            let json = serde_json::to_string(&value).unwrap();
+            let back: CombatParticipation = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, value, "round trip of {json}");
+        }
+    }
+
+    /// Serde of a combat state holding an orphaned blocker keeps the empty
+    /// entry, re-serializes byte-identically, and compares equal.
+    #[test]
+    fn orphan_blocker_state_round_trips() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        blocking_combat(&mut state, &[attacker], &[(orphan, vec![attacker])]);
+        prune_object_from_combat(&mut state, attacker);
+        let combat = state.combat.clone().unwrap();
+        assert_eq!(
+            combat.blocker_to_attacker.get(&orphan),
+            Some(&vec![]),
+            "reach guard: the map holds the empty entry"
+        );
+
+        let json = serde_json::to_string(&combat).unwrap();
+        let back: CombatState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.blocker_to_attacker.get(&orphan), Some(&vec![]));
+        assert_eq!(back, combat);
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    /// CR 509.1g + CR 613.1f: declaring a blocker makes it a blocking creature,
+    /// so layers must re-evaluate (a `SourceIsBlocking` gate or
+    /// `FilterProp::Blocking` grant now applies). Paired negative: declaring no
+    /// blockers changes no membership and leaves layers clean. Fails on revert
+    /// of the declaration's `mark_full`.
+    #[test]
+    fn declare_blockers_marks_layers_dirty() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let mut empty_state = state.clone();
+        empty_state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+        declare_blockers(&mut empty_state, &[], &mut Vec::new()).unwrap();
+        assert!(
+            !empty_state.layers_dirty.is_dirty(),
+            "an empty declaration changes no combat membership"
+        );
+
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+        declare_blockers(&mut state, &[(blocker, attacker)], &mut Vec::new()).unwrap();
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_to_attacker
+                .contains_key(&blocker),
+            "reach guard: the blocker was declared"
+        );
+        assert!(state.layers_dirty.is_dirty());
     }
 }

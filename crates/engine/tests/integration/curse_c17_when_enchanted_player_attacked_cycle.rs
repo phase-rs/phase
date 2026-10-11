@@ -27,7 +27,7 @@
 //!   - CR 506.4: a creature removed from combat stops being an attacking
 //!     creature, so its controller is no longer "attacking" that player.
 
-use engine::game::combat::AttackerInfo;
+use engine::game::combat::{apply_resolved_combat_membership, AttackerInfo};
 use engine::game::effects::attach::attach_to_player;
 use engine::game::effects::remove_from_combat::remove_object_from_combat;
 use engine::game::game_object::AttachTarget;
@@ -35,14 +35,21 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{AbilityCost, AbilityKind, Effect, ManaProduction, TargetRef};
+use engine::types::ability::{
+    AbilityCost, AbilityKind, ContinuousModification, Effect, FilterProp, ManaProduction,
+    StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{GameState, LayersDirty, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit, ResolvedRulesCommand,
+};
 use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
@@ -1111,6 +1118,361 @@ fn curse_of_opulence_creature_stolen_before_attack_attacks_for_new_controller() 
         "P2 owns the creature but is not attacking: no Gold"
     );
     assert_eq!(gold_tokens(&runner, P0).len(), 1, "controller gets Gold");
+}
+
+// ─── Blocking-creature membership survives its attacker (CR 509.1g) ─────────
+
+/// Verbatim Oracle text (Scryfall / MTGJSON).
+const INTREPID_ACE_ORACLE: &str =
+    "This creature gets +2/+0 as long as it isn't attacking or blocking.";
+
+/// Controller-agnostic Layer 6 grant keyed on `FilterProp::Blocking`:
+/// "blocking creatures have deathtouch". Built typed because the static parser
+/// reads a bare "Blocking creatures have …" subject as a creature subtype, and
+/// no printed card grants a keyword to blocking creatures this way.
+fn blocking_deathtouch() -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Blocking]),
+        ))
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Deathtouch,
+        }])
+}
+
+/// The 4-player Opulence table (curse controlled by P0, enchanting P1) with
+/// one creature per entry of `attackers`, P1's Intrepid Ace, a P0 enchantment
+/// granting deathtouch to blocking creatures, and a free Act of Aggression in
+/// `act_holder`'s hand. Returns `(runner, curse_id, creature_ids, ace, act)`.
+fn opulence_table_with_ace_and_act(
+    attackers: &[PlayerId],
+    act_holder: PlayerId,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, ObjectId) {
+    let (mut scenario, curse_id, creature_ids) = opulence_scenario(4, attackers);
+    let ace = scenario
+        .add_creature_from_oracle(P1, "Intrepid Ace", 2, 1, INTREPID_ACE_ORACLE)
+        .id();
+    scenario
+        .add_creature(P0, "Blocking Grant", 0, 0)
+        .as_enchantment()
+        .with_static_definition(blocking_deathtouch());
+    let act = scenario
+        .add_spell_to_hand_from_oracle(
+            act_holder,
+            "Act of Aggression",
+            true,
+            ACT_OF_AGGRESSION_ORACLE,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let runner = finish_opulence(scenario, curse_id, P1);
+    (runner, curse_id, creature_ids, ace, act)
+}
+
+fn power_of(runner: &GameRunner, id: ObjectId) -> Option<i32> {
+    runner.state().objects[&id].power
+}
+
+fn has_deathtouch(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id].has_keyword(&Keyword::Deathtouch)
+}
+
+/// The attackers `blocker` is blocking, `None` when it is not a blocking
+/// creature (CR 509.1g).
+fn blocking_list(runner: &GameRunner, blocker: ObjectId) -> Option<Vec<ObjectId>> {
+    runner
+        .state()
+        .combat
+        .as_ref()
+        .and_then(|combat| combat.blocker_to_attacker.get(&blocker).cloned())
+}
+
+/// Combat-membership commands journaled since entry `start`.
+fn combat_commands_since(
+    runner: &GameRunner,
+    start: usize,
+) -> Vec<ResolvedCombatMembershipCommand> {
+    runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(start)
+        .filter_map(|entry| match &entry.command {
+            Some(ResolvedRulesCommand::CombatMembership(command)) => Some(command.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Replays `commands` onto the `before` snapshot and asserts the replayed
+/// combat equals the live one.
+fn assert_combat_replay(
+    before: &GameState,
+    runner: &GameRunner,
+    commands: &[ResolvedCombatMembershipCommand],
+) {
+    let mut replay = before.clone();
+    for command in commands {
+        apply_resolved_combat_membership(&mut replay, command)
+            .expect("the journaled removal replays against its predecessor");
+    }
+    assert_eq!(
+        replay.combat,
+        runner.state().combat,
+        "replaying the journal reproduces the live combat"
+    );
+}
+
+/// Drives the shared prelude: P0 declares `target` and `survivor` attacking
+/// the enchanted P1, the curse trigger resolves, and P1 declares Intrepid Ace
+/// blocking `target` only. Asserts the reach guards along the way.
+fn ace_blocks_target(runner: &mut GameRunner, ace: ObjectId, target: ObjectId, survivor: ObjectId) {
+    hand_turn_to(runner, P0);
+    runner
+        .declare_attackers(&[
+            (target, AttackTarget::Player(P1)),
+            (survivor, AttackTarget::Player(P1)),
+        ])
+        .expect("P0 declares two attackers against the enchanted player P1");
+    runner.advance_until_stack_empty();
+    for _ in 0..8 {
+        if runner.waiting_for_kind() == "DeclareBlockers" {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority toward the declare-blockers step");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == P1),
+        "reach guard: P1 declares blockers"
+    );
+    assert_eq!(
+        power_of(runner, ace),
+        Some(4),
+        "reach guard: Intrepid Ace gets +2/+0 while not attacking or blocking"
+    );
+    assert!(!has_deathtouch(runner, ace));
+
+    runner
+        .declare_blockers(&[(ace, target)])
+        .expect("P1 blocks the target with Intrepid Ace");
+
+    assert_eq!(blocking_list(runner, ace), Some(vec![target]));
+    assert_eq!(
+        power_of(runner, ace),
+        Some(2),
+        "reach guard: a blocking Intrepid Ace loses its bonus"
+    );
+    assert!(
+        has_deathtouch(runner, ace),
+        "reach guard: the blocking grant reaches Intrepid Ace"
+    );
+}
+
+/// CR 509.1g + CR 506.4 + CR 510.1d: P1's Intrepid Ace blocks one of P0's two
+/// attackers; P1 then steals that attacker with Act of Aggression. The
+/// attacker leaves combat (its controller changed), but Ace — whose own
+/// control never changed — remains a blocking creature, now blocking no
+/// creature: it keeps "isn't attacking or blocking" false (power 2) and the
+/// Blocking grant, journals nothing, and assigns no combat damage.
+///
+/// Revert-failing: with the old prune the emptied key was dropped, so Ace read
+/// as not blocking (power 4, no deathtouch); without the CR 510.1d guard the
+/// damage step indexed Ace's empty attacker list.
+#[test]
+fn intrepid_ace_stays_a_blocker_when_its_attacker_is_stolen() {
+    let (mut runner, _curse, creatures, ace, act) = opulence_table_with_ace_and_act(&[P0, P0], P1);
+    let (target, survivor) = (creatures[0], creatures[1]);
+    ace_blocks_target(&mut runner, ace, target, survivor);
+    let before = runner.state().clone();
+    let start = runner.state().resolved_rules_journal.entries().len();
+
+    cast_act_of_aggression(&mut runner, act, P1, target);
+
+    assert_eq!(runner.state().objects[&target].controller, P1);
+    assert_eq!(
+        attack_target_of(&runner, target),
+        None,
+        "CR 506.4: the stolen attacker is removed from combat"
+    );
+    assert_eq!(
+        attack_target_of(&runner, survivor),
+        Some(AttackTarget::Player(P1)),
+        "the other attacker keeps attacking"
+    );
+    assert_eq!(runner.state().objects[&ace].controller, P1);
+    assert_eq!(runner.state().objects[&ace].zone, Zone::Battlefield);
+    assert_eq!(
+        blocking_list(&runner, ace),
+        Some(vec![]),
+        "CR 509.1g: Intrepid Ace remains a blocking creature with no attacker assigned"
+    );
+    assert_eq!(
+        power_of(&runner, ace),
+        Some(2),
+        "Intrepid Ace is still blocking, so it does not get +2/+0"
+    );
+    assert!(
+        has_deathtouch(&runner, ace),
+        "FilterProp::Blocking still matches Intrepid Ace"
+    );
+    assert_eq!(runner.state().layers_dirty, LayersDirty::Clean);
+
+    let commands = combat_commands_since(&runner, start);
+    let for_target: Vec<_> = commands
+        .iter()
+        .filter(|command| command.object.object_id == target)
+        .collect();
+    assert_eq!(for_target.len(), 1, "exactly one removal for the target");
+    let ResolvedCombatMembershipEdit::Remove {
+        expected_participation,
+    } = &for_target[0].edit
+    else {
+        panic!("the target's command is a removal");
+    };
+    assert_eq!(expected_participation.blocked_by, vec![ace]);
+    assert_eq!(expected_participation.blocking, None);
+    assert!(
+        commands
+            .iter()
+            .all(|command| command.object.object_id != ace),
+        "Intrepid Ace was not removed, so nothing is journaled for it"
+    );
+    assert_combat_replay(&before, &runner, &commands);
+
+    let life_before = runner.life(P1);
+    let survivor_power = power_of(&runner, survivor).unwrap();
+    let outcome = runner.combat_damage();
+    assert_eq!(
+        runner.life(P1),
+        life_before - survivor_power,
+        "reach guard: the damage step ran and the unblocked survivor hit P1"
+    );
+    let damage_sources: Vec<ObjectId> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                is_combat: true,
+                ..
+            } => Some(*source_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !damage_sources.contains(&ace),
+        "CR 510.1d: a blocking creature blocking no creature assigns no combat damage"
+    );
+    assert_eq!(runner.state().objects[&ace].damage_marked, 0);
+    assert_eq!(runner.state().objects[&target].damage_marked, 0);
+}
+
+/// CR 506.4 + CR 509.1h: the paired case — P3 steals Intrepid Ace itself while
+/// it blocks. Ace's blocking membership ends (power 4, Blocking grant gone,
+/// one removal journaled with its exact assignment), while the attacker it
+/// blocked stays attacking and blocked, so it deals no combat damage.
+#[test]
+fn intrepid_ace_stolen_while_blocking_leaves_combat() {
+    let (mut runner, _curse, creatures, ace, act) = opulence_table_with_ace_and_act(&[P0, P0], P3);
+    let (target, survivor) = (creatures[0], creatures[1]);
+    ace_blocks_target(&mut runner, ace, target, survivor);
+    let before = runner.state().clone();
+    let start = runner.state().resolved_rules_journal.entries().len();
+
+    cast_act_of_aggression(&mut runner, act, P3, ace);
+
+    assert_eq!(runner.state().objects[&ace].controller, P3);
+    assert_eq!(
+        blocking_list(&runner, ace),
+        None,
+        "CR 506.4: Intrepid Ace is removed from combat"
+    );
+    let combat = runner.state().combat.as_ref().unwrap();
+    let info = combat
+        .attackers
+        .iter()
+        .find(|info| info.object_id == target)
+        .expect("the target keeps attacking");
+    assert!(info.blocked, "CR 509.1h: the target remains blocked");
+    assert!(combat.blocker_assignments[&target].is_empty());
+    assert_eq!(
+        power_of(&runner, ace),
+        Some(4),
+        "Intrepid Ace is no longer attacking or blocking: +2/+0"
+    );
+    assert!(
+        !has_deathtouch(&runner, ace),
+        "the Blocking grant no longer matches Intrepid Ace"
+    );
+
+    let commands = combat_commands_since(&runner, start);
+    assert_eq!(commands.len(), 1, "exactly one combat removal");
+    assert_eq!(commands[0].object.object_id, ace);
+    let ResolvedCombatMembershipEdit::Remove {
+        expected_participation,
+    } = &commands[0].edit
+    else {
+        panic!("Intrepid Ace's command is a removal");
+    };
+    assert_eq!(expected_participation.blocking, Some(vec![target]));
+    assert_combat_replay(&before, &runner, &commands);
+
+    let life_before = runner.life(P1);
+    let survivor_power = power_of(&runner, survivor).unwrap();
+    let outcome = runner.combat_damage();
+    assert_eq!(
+        runner.life(P1),
+        life_before - survivor_power,
+        "reach guard: only the unblocked survivor hits P1"
+    );
+    let damage_sources: Vec<ObjectId> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                is_combat: true,
+                ..
+            } => Some(*source_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !damage_sources.contains(&target),
+        "CR 510.1c: a blocked creature with no blocker assigns no combat damage"
+    );
+    assert!(!damage_sources.contains(&ace));
+}
+
+/// CR 506.4 removes only the permanent whose controller changed: P3 steals
+/// the attacker Intrepid Ace is NOT blocking. Ace keeps blocking its attacker
+/// (power 2) and nothing is journaled for it.
+///
+/// Paired control for the stolen-attacker case.
+#[test]
+fn intrepid_ace_unaffected_when_the_other_attacker_is_stolen() {
+    let (mut runner, _curse, creatures, ace, act) = opulence_table_with_ace_and_act(&[P0, P0], P3);
+    let (target, survivor) = (creatures[0], creatures[1]);
+    ace_blocks_target(&mut runner, ace, target, survivor);
+    let start = runner.state().resolved_rules_journal.entries().len();
+
+    cast_act_of_aggression(&mut runner, act, P3, survivor);
+
+    assert_eq!(
+        runner.state().objects[&survivor].controller,
+        P3,
+        "reach guard: the control change happened"
+    );
+    assert_eq!(attack_target_of(&runner, survivor), None);
+    assert_eq!(blocking_list(&runner, ace), Some(vec![target]));
+    assert_eq!(power_of(&runner, ace), Some(2));
+    assert!(has_deathtouch(&runner, ace));
+    let commands = combat_commands_since(&runner, start);
+    assert_eq!(commands.len(), 1, "only the stolen attacker is removed");
+    assert_eq!(commands[0].object.object_id, survivor);
 }
 
 // ─── Curse of Bounty ─────────────────────────────────────────────────────────

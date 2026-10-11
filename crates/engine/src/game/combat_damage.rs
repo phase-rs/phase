@@ -444,6 +444,9 @@ fn combat_first_strike_participants(
     state: &GameState,
     combat: &CombatState,
 ) -> std::collections::HashSet<ObjectId> {
+    // CR 510.4: the trigger is "at least one attacking or blocking creature"
+    // with first or double strike; a blocking creature whose attackers all left
+    // combat is still a blocking creature (CR 509.1g), so every key counts.
     combat
         .attackers
         .iter()
@@ -478,6 +481,10 @@ fn deals_in_substep(
 /// creatures do not participate in the regular substep, while double-strike
 /// creatures do. This is the shared query for consumers that must reason about
 /// the next damage event without duplicating combat-substep selection.
+///
+/// CR 510.1d: a blocking creature none of whose attackers remain in combat is
+/// still a blocking creature but assigns no combat damage, so it does not
+/// participate.
 pub fn participates_in_pending_combat_damage_substep(
     state: &GameState,
     object_id: ObjectId,
@@ -490,7 +497,10 @@ pub fn participates_in_pending_combat_damage_substep(
             .attackers
             .iter()
             .any(|attacker| attacker.object_id == object_id)
-            && !combat.blocker_to_attacker.contains_key(&object_id))
+            && !combat
+                .blocker_to_attacker
+                .get(&object_id)
+                .is_some_and(|attackers| !attackers.is_empty()))
     {
         return false;
     }
@@ -944,6 +954,12 @@ fn collect_damage_assignments(
             Some(ids) => ids,
             None => continue,
         };
+        // CR 510.1d: a blocking creature that isn't currently blocking any
+        // creature (its attackers were removed from combat, CR 506.4) assigns no
+        // combat damage. No resume-skip key is recorded; re-entry skips it here.
+        if attacker_ids.is_empty() {
+            continue;
+        }
         let obj = match state.objects.get(&blocker_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
@@ -2461,6 +2477,142 @@ mod tests {
         assert_eq!(state.objects[&attacker].damage_marked, 0);
         // No player damage
         assert_eq!(state.players[1].life, 20);
+    }
+
+    /// Marks `blocker` as a blocking creature with no attacker assigned (its
+    /// attackers were removed from combat, CR 509.1g).
+    fn add_orphaned_blocker(state: &mut GameState, blocker: ObjectId) {
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .blocker_to_attacker
+            .insert(blocker, vec![]);
+    }
+
+    fn combat_damage_sources(events: &[GameEvent]) -> Vec<ObjectId> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    is_combat: true,
+                    ..
+                } => Some(*source_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 510.1d: a blocking creature that isn't blocking any creature assigns
+    /// no combat damage — and the damage step does not panic on its empty
+    /// attacker list. Hostile rows: first strike, double strike, power 0, and a
+    /// normal blocker of another attacker beside it. Fails on revert of the
+    /// empty-list guard (index panic on `attacker_ids[0]`).
+    #[test]
+    fn orphaned_blocker_assigns_no_combat_damage() {
+        for keyword in [
+            None,
+            Some(Keyword::FirstStrike),
+            Some(Keyword::DoubleStrike),
+        ] {
+            for orphan_power in [3, 0] {
+                let mut state = setup();
+                let unblocked = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+                let blocked = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
+                let blocker = create_creature(&mut state, PlayerId(1), "Wall", 1, 4);
+                let orphan = create_creature(&mut state, PlayerId(1), "Orphan", orphan_power, 4);
+                if let Some(keyword) = &keyword {
+                    state
+                        .objects
+                        .get_mut(&orphan)
+                        .unwrap()
+                        .keywords
+                        .push(keyword.clone());
+                }
+                setup_combat(
+                    &mut state,
+                    vec![unblocked, blocked],
+                    vec![(blocked, vec![blocker])],
+                );
+                add_orphaned_blocker(&mut state, orphan);
+
+                let mut events = Vec::new();
+                resolve_combat_damage(&mut state, &mut events);
+
+                let row = format!("{keyword:?} power {orphan_power}");
+                assert_eq!(
+                    state.players[1].life, 18,
+                    "{row}: reach guard: the unblocked attacker's damage was dealt"
+                );
+                assert_eq!(
+                    state.objects[&blocked].damage_marked, 1,
+                    "{row}: the normal blocker still deals its damage"
+                );
+                assert!(
+                    !combat_damage_sources(&events).contains(&orphan),
+                    "{row}: CR 510.1d: the orphaned blocker deals no combat damage"
+                );
+                assert!(
+                    state
+                        .combat
+                        .as_ref()
+                        .is_none_or(|combat| !combat.damage_assignments.contains_key(&orphan)),
+                    "{row}: the orphan records no damage assignment"
+                );
+            }
+        }
+    }
+
+    /// CR 510.4: an orphaned blocking creature is still a blocking creature, so
+    /// its first strike opens the first-strike damage step; without first
+    /// strike it does not.
+    #[test]
+    fn orphaned_first_striker_still_opens_first_strike_step() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Orphan", 1, 1);
+        setup_combat(&mut state, vec![attacker], vec![]);
+        add_orphaned_blocker(&mut state, orphan);
+        let combat = state.combat.clone().unwrap();
+        assert!(
+            !combat_first_strike_participants(&state, &combat).contains(&orphan),
+            "paired: an orphan without first strike is excluded"
+        );
+
+        state
+            .objects
+            .get_mut(&orphan)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        assert!(combat_first_strike_participants(&state, &combat).contains(&orphan));
+    }
+
+    /// CR 510.1d: `participates_in_pending_combat_damage_substep` is false for
+    /// a blocking creature with no attacker assigned, true once it blocks one.
+    /// Fails on revert of the non-empty-assignment guard.
+    #[test]
+    fn orphan_does_not_participate_in_pending_damage_substep() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Orphan", 3, 3);
+        setup_combat(&mut state, vec![attacker], vec![]);
+        add_orphaned_blocker(&mut state, orphan);
+        assert!(!participates_in_pending_combat_damage_substep(
+            &state, orphan
+        ));
+
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .blocker_to_attacker
+            .insert(orphan, vec![attacker]);
+        assert!(
+            participates_in_pending_combat_damage_substep(&state, orphan),
+            "reach guard: the same creature blocking an attacker participates"
+        );
     }
 
     // VALIDATION repro for Discord #766/#767: a creature buffed by a transient
