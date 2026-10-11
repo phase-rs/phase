@@ -2012,7 +2012,8 @@ fn declared_player(
 /// as the ability resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeclaredPlayerTarget {
-    /// The first declared player target, still a legal target.
+    /// A declared player target not recorded as illegal: the node's first
+    /// remaining player target, else the root's first declared player slot.
     Legal(PlayerId),
     /// CR 608.2b: the first declared player target is illegal, so a part of the
     /// effect that requires it names nobody.

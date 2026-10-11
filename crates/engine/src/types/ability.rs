@@ -33723,9 +33723,10 @@ pub struct ResolvedAbility {
     /// target failed the legality check made as the chain began to resolve.
     /// Stamped only on the resolution carrier's root by `stack::resolve_top`
     /// (overwritten on every resolution, empty when nothing was checked) and
-    /// read only from the carrier by
+    /// read only from the carrier, by
     /// `targeting::resolve_live_parent_slot_from_root`, which drops those
-    /// slots' targets. A clone of the carrier (a spell copying
+    /// slots' targets, and by `filter::declared_target_player`, which answers
+    /// `Illegal` for a stamped player slot. A clone of the carrier (a spell copying
     /// itself, CR 707.10) carries the stamp unread until its own resolution
     /// overwrites it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
