@@ -82808,6 +82808,103 @@ fn token_for_each_unparsed_fails_closed() {
     assert!(is_gap(&unbound[0]), "{unbound:?}");
 }
 
+/// The count of the first `Effect::Token` in any of the face's trigger bodies.
+fn trigger_token_count(face: &crate::parser::oracle::ParsedAbilities) -> QuantityExpr {
+    face.triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .flat_map(chain_nodes)
+        .find_map(|node| match &*node.effect {
+            Effect::Token { count, .. } => Some(count.clone()),
+            _ => None,
+        })
+        .expect("a trigger creates tokens")
+}
+
+/// CR 608.2k + CR 113.7a: a token count's "its" whose antecedent is the
+/// trigger's own self subject reads the source. An "its" whose antecedent is
+/// another object keeps the deferred anaphor: a target an earlier clause of the
+/// chain chose, or the creature an activation cost sacrificed (Felothar; the
+/// Shilgengar row is `cost_paid_object_instead_clause_reads_its_toughness_anaphorically`).
+#[test]
+fn token_count_its_reads_the_self_trigger_subject_as_source() {
+    let power = |scope| QuantityExpr::Ref {
+        qty: QuantityRef::Power { scope },
+    };
+    for (name, text) in [
+        (
+            "Threefold Thunderhulk",
+            "This creature enters with three +1/+1 counters on it.\nWhenever this creature enters or attacks, create a number of 1/1 colorless Gnome artifact creature tokens equal to its power.\n{2}, Sacrifice another artifact: Put a +1/+1 counter on this creature.",
+        ),
+        (
+            "Goldvein Hydra",
+            "Vigilance, trample, haste\nThis creature enters with X +1/+1 counters on it.\nWhen this creature dies, create a number of tapped Treasure tokens equal to its power.",
+        ),
+        (
+            "Nadier, Agent of the Duskenel",
+            "Whenever a token you control leaves the battlefield, put a +1/+1 counter on Nadier.\nWhen Nadier leaves the battlefield, create a number of 1/1 green Elf Warrior creature tokens equal to its power.\nPartner (You can have two commanders if both have partner.)",
+        ),
+    ] {
+        let face = parse_named_face(text, name, &["Creature"]);
+        assert_eq!(
+            trigger_token_count(&face),
+            power(ObjectScope::Source),
+            "{name}"
+        );
+    }
+
+    // Synthetic (labelled): the earlier clause chose a target, which is the
+    // nearer antecedent.
+    let chosen = parse_named_face(
+        "Whenever this creature attacks, exile target creature an opponent controls. Create a number of 1/1 colorless Gnome artifact creature tokens equal to its power.",
+        "Synthetic Exiler",
+        &["Creature"],
+    );
+    assert_eq!(trigger_token_count(&chosen), power(ObjectScope::Anaphoric));
+
+    let felothar = parse_named_face(
+        "Each creature you control assigns combat damage equal to its toughness rather than its power.\nCreatures you control can attack as though they didn't have defender.\n{3}, {T}, Sacrifice another creature: Draw cards equal to the sacrificed creature's toughness, then discard cards equal to its power.",
+        "Felothar the Steadfast",
+        &["Creature"],
+    );
+    let discard = felothar
+        .abilities
+        .iter()
+        .flat_map(chain_nodes)
+        .find_map(|node| match &*node.effect {
+            Effect::Discard { count, .. } => Some(count.clone()),
+            _ => None,
+        })
+        .expect("Felothar discards");
+    assert_eq!(discard, power(ObjectScope::Anaphoric));
+}
+
+/// CR 107.3c: when a token's count is "X" bound by "where X is", the token's
+/// "X/X" names the same X. The token parser reads that binder itself when it is
+/// called directly (the replacement token paths); the effect chain lowers a
+/// trailing where-X clause before the token parser sees it.
+#[test]
+fn token_where_x_count_binds_the_token_pt() {
+    let text =
+        "Create X X/X green Ooze creature tokens, where X is the number of lands you control.";
+    let direct = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default());
+    let chained = count_slot_effects(text).into_iter().next();
+    for effect in [direct, chained] {
+        let Some(Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        }) = &effect
+        else {
+            panic!("{effect:?}");
+        };
+        assert!(object_count()(count), "{count:?}");
+        assert_eq!(*power, PtValue::Quantity(count.clone()), "{effect:?}");
+        assert_eq!(*toughness, PtValue::Quantity(count.clone()), "{effect:?}");
+    }
+}
+
 /// CR 701.38a + CR 608.2c: a caller-bound count answers the first chunk's
 /// binder-less count position only; the next chunk reads its own text.
 #[test]

@@ -25,8 +25,9 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
 use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
-    comma_short_self_name, normalize_card_name_refs, parse_count_expr, parse_count_slot,
-    parse_rounding_suffix_only, rewrite_quantity_expr_rounding, strip_reminder_text, TextPair,
+    comma_short_self_name, normalize_card_name_refs, parse_count_expr, parse_count_head,
+    parse_count_slot, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
+    strip_reminder_text, CountHead, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -128,7 +129,20 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         .map(|(_, rest)| rest)
         .unwrap_or(&text)
         .trim();
-    let token = parse_token_description_with_context(after, ctx)?;
+    let mut token = parse_token_description_with_context(after, ctx)?;
+    // CR 608.2k + CR 113.7a: an "its" in the count whose antecedent is the
+    // trigger's own self subject ("Whenever this creature enters or attacks,
+    // create … equal to its power") is the ability's source, read live or from
+    // its last known information. The deferred anaphor has no referent when the
+    // trigger event names several objects (an attack beside other creatures).
+    // A nearer antecedent (an earlier clause's target, an "if you do" object, a
+    // condition pin) keeps the deferred anaphor.
+    if ctx.in_trigger
+        && ctx.subject == Some(TargetFilter::SelfRef)
+        && super::resolve_it_pronoun(ctx) == TargetFilter::SelfRef
+    {
+        super::rebind_anaphoric_object_scope(&mut token.count, ObjectScope::Source);
+    }
     Some(Effect::Token {
         name: token.name,
         power: token.power.unwrap_or(PtValue::Fixed(0)),
@@ -528,17 +542,12 @@ fn parse_token_description_with_context(
     // CR 111.1 + CR 107.3c: the token count is the shared count position; its
     // noun is the token descriptor. A body with no count word is a named-token
     // preamble ("Tibalt, the Fiend-Blooded, a … token").
-    let text_lower = text.to_lowercase();
-    let has_count_head = nom_on_lower(text, &text_lower, |i| {
-        value((), tag("a number of ")).parse(i)
-    })
-    .is_some()
-        || parse_count_expr(text).is_some();
-    let (slot_count, text) = if has_count_head {
-        let slot = parse_count_slot(text, &mut ctx.clone())?;
-        (Some(slot.count), slot.noun)
+    let (slot_count, slot_where_x, text) = if matches!(parse_count_head(text).0, CountHead::Absent)
+    {
+        (None, None, text)
     } else {
-        (None, text)
+        let slot = parse_count_slot(text, &mut ctx.clone())?;
+        (Some(slot.count), slot.where_x, slot.noun)
     };
 
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
@@ -757,34 +766,44 @@ fn parse_token_description_with_context(
     // CR 107.3: when the attacking clause was stripped and took the ", where X
     // is …" tail with it, `saved_where_x_expr` carries the expression; fall
     // back to it so the variable count is still resolved.
-    if let Some(where_expression) = extract_token_where_x_expression(suffix)
-        .or(saved_where_x_expr)
-        .or(saved_all_colors_where_x_expr)
-    {
-        // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
-        // the Join-Forces normalization path with non-Token effects via
-        // `super::parse_where_x_quantity_expression`. This makes phrases like
-        // "the total amount of mana paid this way" (Alliance of Arms) collapse
-        // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
-        // loop's accumulated total flows through. Falls back to the CDA path
-        // (and then the raw variable name) for phrases neither layer recognizes.
-        let binds_x = matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
-            || matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X");
-        if binds_x {
-            // CR 107.3c: the clause DEFINES X. If the definition is not
-            // representable, this token clause does not lower — fail the parse
-            // instead of fabricating a raw-text placeholder.
-            //
-            // The fabricated forms (`PtValue::Variable("<oracle text>")` and
-            // `QuantityRef::Variable { name: "<oracle text>" }`) are well-typed
-            // but DEAD: nothing resolves a non-`X` variable name, so the token
-            // entered as a 0/0 (or with a count of 0) while the raw text still
-            // rendered as a supported dynamic quantity in the coverage report —
-            // a fabricated green. Honest failure is the only correct answer.
-            let bound =
+    // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
+    // the Join-Forces normalization path with non-Token effects via
+    // `super::parse_where_x_quantity_expression`. This makes phrases like
+    // "the total amount of mana paid this way" (Alliance of Arms) collapse
+    // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
+    // loop's accumulated total flows through. Falls back to the CDA path
+    // (and then the raw variable name) for phrases neither layer recognizes.
+    let binds_x = matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
+        || matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X");
+    if binds_x {
+        // CR 107.3c: the clause DEFINES X. If the definition is not
+        // representable, this token clause does not lower — fail the parse
+        // instead of fabricating a raw-text placeholder.
+        //
+        // The fabricated forms (`PtValue::Variable("<oracle text>")` and
+        // `QuantityRef::Variable { name: "<oracle text>" }`) are well-typed
+        // but DEAD: nothing resolves a non-`X` variable name, so the token
+        // entered as a 0/0 (or with a count of 0) while the raw text still
+        // rendered as a supported dynamic quantity in the coverage report —
+        // a fabricated green. Honest failure is the only correct answer.
+        //
+        // A where-X binder the count position consumed ("X X/X … tokens,
+        // where X is …") already defined X there.
+        let bound = match (
+            slot_where_x,
+            extract_token_where_x_expression(suffix)
+                .or(saved_where_x_expr)
+                .or(saved_all_colors_where_x_expr),
+        ) {
+            (Some(bound), _) => Some(bound),
+            (None, Some(where_expression)) => Some(
                 super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
                     crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
-                })?;
+                })?,
+            ),
+            (None, None) => None,
+        };
+        if let Some(bound) = bound {
             if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
                 power = Some(PtValue::Quantity(bound.clone()));
             }

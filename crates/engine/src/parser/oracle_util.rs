@@ -869,10 +869,13 @@ pub(crate) struct CountSlot<'a> {
     /// preserved. The verb consumes it whole with its own noun grammar
     /// ("cards", "life", "cards from their hand").
     pub noun: &'a str,
+    /// CR 107.3c: what the "where X is" binder defines X as, when that binder
+    /// bound this count. An X the noun prints (a token's "X/X") is the same X.
+    pub where_x: Option<QuantityExpr>,
 }
 
 /// How a count position opens.
-enum CountHead {
+pub(crate) enum CountHead {
     /// "a number of" — the count is bound later in the clause, or by the caller.
     Deferred,
     /// No count word ("cards equal to …").
@@ -919,6 +922,27 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
     .parse(input)
 }
 
+/// The head of a count position ("a number of", a count word, or none) and the
+/// text after it.
+pub(crate) fn parse_count_head(text: &str) -> (CountHead, &str) {
+    let lower = text.to_lowercase();
+    if let Some(((), rest)) =
+        nom_on_lower(text, &lower, |i| value((), tag("a number of ")).parse(i))
+    {
+        return (CountHead::Deferred, rest);
+    }
+    match parse_count_expr(text) {
+        Some((count, rest))
+            if count
+                .any_ref(&mut |r| matches!(r, QuantityRef::Variable { name } if name == "X")) =>
+        {
+            (CountHead::VariableX(count), rest)
+        }
+        Some((count, rest)) => (CountHead::Counted(count), rest),
+        None => (CountHead::Absent, text),
+    }
+}
+
 /// The one count position every verb shares (draw, mill, scry, surveil,
 /// discard, gain/lose life, reveal from hand, token creation).
 ///
@@ -932,22 +956,7 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
 /// back to a literal.
 pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<CountSlot<'a>> {
     let text = normalize_count_slot_text(text);
-    let lower = text.to_lowercase();
-    let (head, after_head) = if let Some(((), rest)) =
-        nom_on_lower(text, &lower, |i| value((), tag("a number of ")).parse(i))
-    {
-        (CountHead::Deferred, rest)
-    } else if let Some((count, rest)) = parse_count_expr(text) {
-        let head =
-            if count.any_ref(&mut |r| matches!(r, QuantityRef::Variable { name } if name == "X")) {
-                CountHead::VariableX(count)
-            } else {
-                CountHead::Counted(count)
-            };
-        (head, rest)
-    } else {
-        (CountHead::Absent, text)
-    };
+    let (head, after_head) = parse_count_head(text);
 
     let Some((binder_start, binder, quantity_start)) = find_count_binder(&head, after_head) else {
         let count = match head {
@@ -974,11 +983,16 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
                 return Some(CountSlot {
                     count: offset,
                     noun: after_head[..noun.len()].trim_end(),
+                    where_x: None,
                 });
             }
         }
         let (count, noun) = apply_rounding_postmodifier(count, after_head.trim());
-        return Some(CountSlot { count, noun });
+        return Some(CountSlot {
+            count,
+            noun,
+            where_x: None,
+        });
     };
 
     let noun = after_head[..binder_start]
@@ -986,8 +1000,8 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
         .trim_end_matches(',')
         .trim_end();
     let quantity = after_head[quantity_start..].trim();
-    let count = match binder {
-        CountBinder::EqualTo => parse_equal_to_count(quantity, ctx)?,
+    let (count, where_x) = match binder {
+        CountBinder::EqualTo => (parse_equal_to_count(quantity, ctx)?, None),
         // CR 107.3c: the where-X clause defines X. The where-X authority binds X
         // inside any composite ("X plus 1"); a bare X falls back to the cda
         // grammar, as the token where-X binder does ("the number of times …").
@@ -995,14 +1009,23 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             let CountHead::VariableX(count) = head else {
                 return None;
             };
+            let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
+                .or_else(|| parse_cda_quantity(quantity))?;
             let bare_x = matches!(
                 &count,
                 QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X"
             );
-            super::oracle_effect::lower::apply_where_x_quantity_expression(count, Some(quantity))
-                .or_else(|| bare_x.then(|| parse_cda_quantity(quantity)).flatten())?
+            let count = if bare_x {
+                x.clone()
+            } else {
+                super::oracle_effect::lower::apply_where_x_quantity_expression(
+                    count,
+                    Some(quantity),
+                )?
+            };
+            (count, Some(x))
         }
-        // CR 107.3c: "<N> <noun> for each <filter>" multiplies the head count.
+        // "<N> <noun> for each <filter>" multiplies the head count by the for-each quantity.
         CountBinder::ForEach => {
             let (CountHead::Counted(count) | CountHead::VariableX(count)) = head else {
                 return None;
@@ -1011,11 +1034,18 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
                 &quantity.to_lowercase(),
                 ctx,
             )?;
-            super::oracle_ir::ast::replace_fixed_quantity(count, for_each)
+            (
+                super::oracle_ir::ast::replace_fixed_quantity(count, for_each),
+                None,
+            )
         }
     };
     let (count, noun) = apply_rounding_postmodifier(count, noun);
-    Some(CountSlot { count, noun })
+    Some(CountSlot {
+        count,
+        noun,
+        where_x,
+    })
 }
 
 /// CR 614.1a: the count position's text without its trailing period and one
@@ -5772,6 +5802,43 @@ mod tests {
             "1/1 black Fungus creature tokens with \"This token can't block,\""
         );
         assert_eq!(slot("X cards, where X is the gorbleflux"), None);
+
+        // The binder's X travels with the slot: the count for a bare X head,
+        // the X inside a composite head ("X plus 1").
+        let ooze = parse_count_slot(
+            "X X/X green Ooze creature tokens, where X is the number of lands you control",
+            &mut ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ooze.noun, "X/X green Ooze creature tokens");
+        assert!(
+            matches!(
+                ooze.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{ooze:?}"
+        );
+        assert_eq!(ooze.where_x, Some(ooze.count.clone()));
+        let inn = parse_count_slot(
+            "X plus 1 life, where X is the number of green creatures on the battlefield",
+            &mut ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                (&inn.count, &inn.where_x),
+                (QuantityExpr::Offset { inner, offset: 1 }, Some(x)) if **inner == *x
+            ),
+            "{inn:?}"
+        );
+        assert_eq!(
+            parse_count_slot("two cards", &mut ParseContext::default())
+                .unwrap()
+                .where_x,
+            None
+        );
     }
 
     /// CR 107.1a: a rounding postmodifier after the noun sets the fractional

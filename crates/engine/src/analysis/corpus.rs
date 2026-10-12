@@ -566,8 +566,8 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         cards: &["Helm of Obedience", "Rest in Peace"],
         family: ResourceFamily::Mill,
         win_kind: WinKind::Decking,
-        gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        gated_on: Some("Helm of Obedience"),
+        deferral: None,
     },
     ComboRow {
         name: "Food Chain + Squee, the Immortal",

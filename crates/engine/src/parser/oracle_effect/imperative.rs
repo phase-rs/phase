@@ -76,8 +76,9 @@ use super::super::oracle_target::{
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
-    parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
-    split_around, starts_with_possessive, strip_possessive, CountWord, TextPair,
+    parse_count_head, parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only,
+    rewrite_quantity_expr_rounding, split_around, starts_with_possessive, strip_possessive,
+    CountHead, CountWord, TextPair,
 };
 
 fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -4035,19 +4036,14 @@ pub(super) fn parse_hand_reveal_ast(
 
 /// CR 701.20a: the counted reveal shape — "<count> card(s) [at random] from …".
 fn is_counted_hand_reveal(after_reveal_lower: &str) -> bool {
-    tag::<_, _, OracleError<'_>>("a number of ")
-        .parse(after_reveal_lower)
-        .map(|(rest, _)| rest)
-        .ok()
-        .or_else(|| parse_count_expr(after_reveal_lower).map(|(_, rest)| rest))
-        .is_some_and(|after_head| {
-            preceded(
-                alt((tag::<_, _, OracleError<'_>>("cards "), tag("card "))),
-                preceded(opt(tag("at random ")), tag("from ")),
-            )
-            .parse(after_head)
-            .is_ok()
-        })
+    let (head, after_head) = parse_count_head(after_reveal_lower);
+    !matches!(head, CountHead::Absent)
+        && preceded(
+            alt((tag::<_, _, OracleError<'_>>("cards "), tag("card "))),
+            preceded(opt(tag("at random ")), tag("from ")),
+        )
+        .parse(after_head)
+        .is_ok()
 }
 
 /// CR 701.20a + CR 701.20b: "reveals <count> card(s) [at random] from <owner's>

@@ -66,8 +66,8 @@ fn corpus_table_shape_is_locked() {
         .filter(|&i| corpus::row(i).gated_on.is_some())
         .count();
     assert_eq!(
-        gated, 4,
-        "exactly 4 rows are card-gated (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone)"
+        gated, 5,
+        "exactly 5 rows are card-gated (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone / Helm of Obedience)"
     );
     // Every row's expected axis must be derivable (total match over the enum).
     for i in 0..corpus::corpus_len() {
@@ -85,7 +85,7 @@ fn corpus_table_shape_is_locked() {
     }
     // The testable rows are the complement of the gated rows.
     let testable = corpus::corpus_len() - gated;
-    assert_eq!(testable, 57, "57 corpus combos are testable once driven");
+    assert_eq!(testable, 56, "56 corpus combos are testable once driven");
 }
 
 /// META-TEST: the corpus is a clean partition — every row is exactly one of
@@ -105,8 +105,8 @@ fn corpus_partition_is_locked() {
         .collect();
 
     assert_eq!(driven.len(), 22, "22 driven rows");
-    assert_eq!(gated.len(), 4, "4 gated rows");
-    assert_eq!(deferred.len(), 35, "35 deferred rows");
+    assert_eq!(gated.len(), 5, "5 gated rows");
+    assert_eq!(deferred.len(), 34, "34 deferred rows");
 
     assert!(driven.is_disjoint(&gated), "driven ∩ gated must be empty");
     assert!(
@@ -221,7 +221,8 @@ fn confirmed_drivers_match_expected() {
 
 /// The shared CLI dispatch ([`corpus::drive_row`]) classifies each status class
 /// through the REAL pipeline. NOTE: these are ARRAY indices; the gated rows are
-/// 2 / 21 / 39 / 52 (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone) —
+/// 2 / 21 / 39 / 52 / 53 (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone /
+/// Helm of Obedience) —
 /// NOT the ComboRow doc-comment's FEASIBILITY numbering (array idx 50 is a
 /// CONFIRMED driver, Spike Feeder + Archangel, not a gated row).
 #[test]

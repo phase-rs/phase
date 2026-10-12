@@ -15,6 +15,7 @@ use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
@@ -53,6 +54,11 @@ const GOLDVEIN_HYDRA: &str = "Vigilance, trample, haste\nThis creature enters wi
      to its power.";
 
 const DESTROY: &str = "Destroy target creature.";
+
+const THREEFOLD_THUNDERHULK: &str = "This creature enters with three +1/+1 counters on \
+     it.\nWhenever this creature enters or attacks, create a number of 1/1 colorless Gnome \
+     artifact creature tokens equal to its power.\n{2}, Sacrifice another artifact: Put a +1/+1 \
+     counter on this creature.";
 
 fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
     runner.state().objects[&id].zone
@@ -399,4 +405,56 @@ fn goldvein_hydra_dies_creates_power_treasures() {
     let treasures = tokens_named(&runner, "Treasure");
     assert_eq!(treasures.len(), 5);
     assert!(treasures.iter().all(|tapped| *tapped));
+}
+
+/// CR 608.2k + CR 113.7a: Threefold Thunderhulk's "its power" is the
+/// Thunderhulk's own power. Attacking beside another creature, the attack event
+/// names both attackers, and the Thunderhulk still creates as many Gnomes as its
+/// power.
+#[test]
+fn threefold_thunderhulk_attacking_beside_another_creature_creates_power_gnomes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::DeclareAttackers);
+    let hulk = scenario
+        .add_creature_from_oracle(P0, "Threefold Thunderhulk", 0, 0, THREEFOLD_THUNDERHULK)
+        .id();
+    scenario.with_counter(hulk, CounterType::Plus1Plus1, 4);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = build_declare_attackers_waiting_for(runner.state());
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (hulk, AttackTarget::Player(P1)),
+                (bear, AttackTarget::Player(P1)),
+            ],
+            bands: vec![],
+        })
+        .expect("attacking with the Thunderhulk and the Bear must succeed");
+    // Reach guard: the attack trigger is on the stack and the Thunderhulk's
+    // power is 4.
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().objects[&hulk].power, Some(4));
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(tokens_named(&runner, "Gnome").len(), 4);
+}
+
+/// CR 614.1c + CR 608.2k: the Thunderhulk enters with three +1/+1 counters, and
+/// its enters trigger creates three Gnomes.
+#[test]
+fn threefold_thunderhulk_enters_creates_power_gnomes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hulk = scenario
+        .add_creature_to_hand_from_oracle(P0, "Threefold Thunderhulk", 0, 0, THREEFOLD_THUNDERHULK)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let _ = runner.cast(hulk).resolve();
+    runner.advance_until_stack_empty();
+    // Reach guard: the Thunderhulk is on the battlefield with its three counters.
+    assert_eq!(zone(&runner, hulk), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&hulk].power, Some(3));
+    assert_eq!(tokens_named(&runner, "Gnome").len(), 3);
 }
