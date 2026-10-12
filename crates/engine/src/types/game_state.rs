@@ -9224,6 +9224,29 @@ fn visit_mana_ability_resume_events(
 }
 
 impl ManaAbilityResume {
+    /// CR 601.2g-h: Whether this mana ability was activated while paying a
+    /// cast's or activation's cost, so finishing it returns to that payment
+    /// and the announcement's `GameState::pending_cast` is still live.
+    /// Narrower than `withholds_priority`, which also counts special actions
+    /// (they carry no `PendingCast`). Exhaustive so a new root is classified.
+    pub fn resumes_pending_cast(&self) -> bool {
+        match self {
+            ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 605.3a: re-enters the outer mana ability, not the cast;
+            // `PendingManaAbility::resumes_pending_cast` follows that chain.
+            ManaAbilityResume::ManaAbilityManaPayment { .. }
+            | ManaAbilityResume::Priority
+            | ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::UnlessPayment { .. }
+            | ManaAbilityResume::EffectPayCost { .. } => false,
+        }
+    }
+
     /// CR 601.2h + CR 602.2b + CR 116.2: Whether the outer payment root this
     /// resumes is a cast, activation or special action (no priority until it
     /// completes) rather than a resolution. Exhaustive so a new root has to be
@@ -9521,6 +9544,19 @@ impl PendingManaAbility {
             | ManaAbilityResume::EffectPayCost { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => None,
+        })
+    }
+
+    /// CR 601.2g-h + CR 605.3a: whether finishing this activation, or any
+    /// activation suspended beneath it at a payment window, returns to a cast's
+    /// or activation's cost payment (so `GameState::pending_cast` is live).
+    pub(crate) fn resumes_pending_cast(&self) -> bool {
+        self.suspended_chain().any(|pending| {
+            pending.resume.resumes_pending_cast()
+                || pending
+                    .cost_move_resume
+                    .as_ref()
+                    .is_some_and(ManaAbilityResume::resumes_pending_cast)
         })
     }
 
@@ -18112,6 +18148,46 @@ impl WaitingFor {
         }
     }
 
+    /// The `PendingManaAbility` this prompt is continuing, if it is a step of a
+    /// mana ability's activation (CR 605.3b). Single authority for which
+    /// prompts embed one; kept in lockstep with `is_mana_ability_continuation`.
+    pub fn pending_mana_ability_ref(&self) -> Option<&PendingManaAbility> {
+        match self {
+            WaitingFor::ChooseManaColor {
+                context: ManaChoiceContext::ManaAbility(pending),
+                ..
+            }
+            | WaitingFor::PayCost {
+                resume:
+                    CostResume::ManaAbility {
+                        mana_ability: pending,
+                    },
+                ..
+            }
+            | WaitingFor::PayManaAbilityMana {
+                pending_mana_ability: pending,
+                ..
+            }
+            | WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability: pending,
+                ..
+            }
+            | WaitingFor::PayAmountChoice {
+                pending_mana_ability: Some(pending),
+                ..
+            } => Some(pending),
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::ManaAbility {
+                    pending_mana_ability,
+                } => Some(pending_mana_ability),
+                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
+                    None
+                }
+            },
+            _ => None,
+        }
+    }
+
     /// Mutable variant of `pending_cast_ref()` for call sites that need to
     /// annotate in-flight cast metadata (for example rollback markers).
     pub fn pending_cast_mut(&mut self) -> Option<&mut PendingCast> {
@@ -25886,6 +25962,31 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
+    }
+
+    /// CR 601.2: The cast or activation announcement currently in flight, if
+    /// any, resolved through every typed carrier: the prompt's inline
+    /// `PendingCast`, the external `GameState::pending_cast` behind the
+    /// `ManaPayment` family and `DistributeAmong` (CR 601.2d), and the external
+    /// `pending_cast` behind a nested mana ability's continuation prompts
+    /// (CR 605.3b + CR 601.2g) when its `resume` returns to the cast's payment.
+    /// A bare `pending_cast` outside those carriers is not an active
+    /// announcement.
+    pub fn active_cast_announcement(&self) -> Option<&PendingCast> {
+        if let Some(inline) = self.waiting_for.pending_cast_ref() {
+            return Some(inline);
+        }
+        let external = self.waiting_for.has_pending_cast()
+            || matches!(self.waiting_for, WaitingFor::DistributeAmong { .. })
+            || self
+                .waiting_for
+                .pending_mana_ability_ref()
+                .is_some_and(PendingManaAbility::resumes_pending_cast);
+        if external {
+            self.pending_cast.as_deref()
+        } else {
+            None
+        }
     }
 
     /// Returns the active continuation only when its typed frame is the stack

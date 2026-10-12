@@ -10633,6 +10633,64 @@ fn revoke_resolve_all_consent(
     restore_resolve_all_priority_snapshot(state)
 }
 
+/// CR 702.60a + CR 701.20a: a Ripple free cast of a same-named revealed card
+/// can pause mid-announcement (targets, modes, X, payment of additional costs)
+/// before the remaining hits or the bottom-order step. The un-cast revealed
+/// cards are still revealed through those pauses, so the reveal must survive
+/// them. Retention is bound to the ACTIVE announcement only: the live
+/// `pending_cast` (or the pending `ModalFaceChoice`) must itself name the
+/// resolution-owned permission carrying `RippleOfferRemaining` cleanup. The
+/// permission lingers on a successfully cast hit while it sits on the stack,
+/// so its mere presence is not proof the announcement is still running.
+fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+    if state.revealed_cards.is_empty() {
+        return false;
+    }
+    // CR 601.2: resolved through the typed carrier authority — inline prompts,
+    // the `ManaPayment` family, `DistributeAmong`, and a nested mana ability
+    // (CR 605.3b) whose `resume` returns to the cast's payment. A bare
+    // `state.pending_cast` outside those carriers is not an active announcement.
+    let active_cast = state.active_cast_announcement();
+    let permission_index = match (active_cast, &state.waiting_for) {
+        (Some(pending), _) => pending
+            .casting_permission_index
+            .map(|index| (pending.object_id, index)),
+        (
+            None,
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+        ) => {
+            casting::current_resolution_cast_permission_index(state, *player, *object_id, *card_id)
+                .map(|index| (*object_id, index))
+        }
+        (None, _) => None,
+    };
+    permission_index
+        .and_then(|(object_id, index)| {
+            state
+                .objects
+                .get(&object_id)?
+                .casting_permissions
+                .get(index.0)
+        })
+        .is_some_and(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(cleanup),
+                    ..
+                } if matches!(
+                    cleanup.success_action,
+                    crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining { .. }
+                )
+            )
+        })
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -10671,7 +10729,8 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
-    ) {
+    ) && !ripple_resolution_cast_in_flight(state)
+    {
         state.revealed_cards.clear();
     }
 
