@@ -24,7 +24,7 @@ pub(crate) struct PlayerAntecedents {
     /// chain declared exactly one player; the nearer antecedent of "they" than
     /// `third_person`.
     pub declared_they: Option<ControllerRef>,
-    /// The referent of "that player" / "they" when the chain declared none.
+    /// The referent of "that player" / "they" when no chain-declared rung above applies.
     pub third_person: Option<ControllerRef>,
     /// The referent of "its controller" / "their controller".
     pub object_controller: Option<ControllerRef>,
