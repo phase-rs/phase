@@ -8,12 +8,16 @@
 //! only `CastingPermission::ExileWithAltCost` and missed the `PlayFromExile`
 //! authority needed for face-down exile actions.
 
+use std::collections::BTreeSet;
+
 use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{CastingPermission, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, ExileLinkKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, ExileLink, ExileLinkKind, GameState, LookGrant, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -552,5 +556,202 @@ fn old_hideaway_trigger_after_a_blink_does_not_feed_the_new_bridge() {
         linked,
         vec![picks[0]],
         "only the returned Bridge's own hideaway card is exiled with it"
+    );
+}
+
+/// A Mosswort Bridge whose "{G}, {T}: You may play the exiled card ..."
+/// activation waits while Bridge is blinked.
+struct BlinkedBridge {
+    runner: GameRunner,
+    mosswort: ObjectId,
+    /// The Shock the activating Bridge hid.
+    hidden: ObjectId,
+    /// The card the returned Bridge's hideaway hid, when its library had one.
+    rehidden: Option<ObjectId>,
+}
+
+/// Pass priority until `done` holds, hiding the first card each hideaway
+/// offers and accepting every optional play.
+fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
+    for _ in 0..64 {
+        if done(runner.state()) {
+            return;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DigChoice { cards, .. } => GameAction::SelectCards {
+                cards: vec![cards[0]],
+            },
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("prompt answer accepted");
+    }
+    panic!("prompt loop did not settle");
+}
+
+fn priority_with_stack(len: usize) -> impl Fn(&GameState) -> bool {
+    move |state| {
+        matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.len() == len
+    }
+}
+
+/// Mosswort Bridge on the battlefield hiding a Shock face down (the look link
+/// its hideaway makes), a 10-power creature and {G} in pool. Activate Bridge's
+/// second ability and, with it waiting, blink Bridge and a land with Ghostly
+/// Flicker. With `rehide`, P0's library holds one Lightning Bolt for the
+/// returned Bridge's hideaway; otherwise it is empty. Returns with the
+/// activation still waiting.
+fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
+    let db = load_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mosswort = scenario.add_real_card(P0, "Mosswort Bridge", Zone::Battlefield, db);
+    let land = scenario.add_land_from_oracle(P0, "Blank Land", "").id();
+    let hidden = scenario.add_real_card(P0, "Shock", Zone::Exile, db);
+    let rehidden = rehide.then(|| scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db));
+    scenario.add_real_card(P1, "Island", Zone::Library, db);
+    scenario.add_creature(P0, "Power 10", 10, 1);
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let incarnation_activated = runner.state().objects[&mosswort].incarnation;
+    let state = runner.state_mut();
+    // Bridge has been on the battlefield since an earlier turn: untapped.
+    state.objects.get_mut(&mosswort).unwrap().tapped = false;
+    state.objects.get_mut(&hidden).unwrap().face_down = true;
+    state.exile_links.push(ExileLink {
+        exiled_id: hidden,
+        source_id: mosswort,
+        kind: ExileLinkKind::HideawayLookable {
+            grant: LookGrant::SourceController,
+            lookers: BTreeSet::from([P0]),
+            source_incarnation: incarnation_activated,
+        },
+    });
+    fund_green(&mut runner);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: mosswort,
+            ability_index: 1,
+        })
+        .expect("activate Mosswort Bridge's second ability");
+    assert!(
+        priority_with_stack(1)(runner.state()),
+        "the activation waits on the stack; waiting_for = {}",
+        runner.waiting_for_kind()
+    );
+
+    runner
+        .cast(flicker)
+        .target_objects(&[mosswort, land])
+        .commit();
+    resolve_until(&mut runner, priority_with_stack(1));
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&flicker].zone,
+        Zone::Graveyard,
+        "the flicker resolved"
+    );
+    assert_ne!(
+        state.objects[&mosswort].incarnation, incarnation_activated,
+        "Bridge came back as a new object"
+    );
+    Some(BlinkedBridge {
+        runner,
+        mosswort,
+        hidden,
+        rehidden,
+    })
+}
+
+fn has_free_play(state: &GameState, card: ObjectId) -> bool {
+    state.objects[&card]
+        .casting_permissions
+        .iter()
+        .any(|permission| {
+            matches!(
+                permission,
+                CastingPermission::ExileWithAltCost { cost, .. } if cost.is_without_paying_mana()
+            )
+        })
+}
+
+/// CR 113.7a + CR 607.2a + CR 400.7: Bridge's activation waits while Bridge is
+/// blinked, and the returned Bridge's hideaway hides a new card. The activation
+/// is the activating Bridge's, so "the exiled card" is the card that Bridge
+/// hid: it plays that card free and not the new one.
+#[test]
+fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
+    let Some(mut blink) = blink_bridge_under_its_activation(true) else {
+        return;
+    };
+    let rehidden = blink.rehidden.expect("a card for the returned Bridge");
+    let state = blink.runner.state();
+    let live = state.objects[&blink.mosswort].incarnation;
+    assert_eq!(
+        state.objects[&rehidden].zone,
+        Zone::Exile,
+        "the returned Bridge's hideaway hid the new card"
+    );
+    assert!(
+        state
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == rehidden
+                && link.source_id == blink.mosswort
+                && matches!(
+                    link.kind,
+                    ExileLinkKind::HideawayLookable { source_incarnation, .. }
+                        if source_incarnation == live
+                )),
+        "the new card is the returned Bridge's look link"
+    );
+
+    resolve_until(&mut blink.runner, priority_with_stack(0));
+    let state = blink.runner.state();
+    assert!(
+        has_free_play(state, blink.hidden),
+        "the activation plays the card the activating Bridge hid"
+    );
+    assert!(
+        !has_free_play(state, rehidden),
+        "the returned Bridge's card is not the activating Bridge's exiled card"
+    );
+}
+
+/// CR 113.7a + CR 607.2a: as above, but the returned Bridge's hideaway finds
+/// nothing to hide. The activation still plays the card its Bridge hid.
+#[test]
+fn old_bridge_activation_after_an_empty_rehide_still_plays_its_card() {
+    let Some(mut blink) = blink_bridge_under_its_activation(false) else {
+        return;
+    };
+    let state = blink.runner.state();
+    let live = state.objects[&blink.mosswort].incarnation;
+    assert!(
+        state
+            .exile_links
+            .iter()
+            .filter(|link| link.source_id == blink.mosswort)
+            .all(|link| link.exiled_id == blink.hidden
+                && matches!(
+                    link.kind,
+                    ExileLinkKind::HideawayLookable { source_incarnation, .. }
+                        if source_incarnation != live
+                )),
+        "the returned Bridge hid nothing; only the old look link remains"
+    );
+
+    resolve_until(&mut blink.runner, priority_with_stack(0));
+    assert!(
+        has_free_play(blink.runner.state(), blink.hidden),
+        "the activation plays the card the activating Bridge hid"
     );
 }
