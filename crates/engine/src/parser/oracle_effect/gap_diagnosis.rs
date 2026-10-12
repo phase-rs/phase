@@ -1593,15 +1593,27 @@ mod tests {
 
     #[test]
     fn swallowed_gap_reports_the_rejected_quantity_operand() {
+        // Phyresis Outbreak.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Quantity,
+                "each opponent gets a poison counter. then each creature your opponents \
+                 control gets -1/-1 until end of turn for each poison counter its controller \
+                 has."
+            ),
+            Some(ClauseGap::Quantity {
+                operand: "poison counter its controller has".to_string()
+            })
+        );
+        // Chong and Lily, Nomads: the counter census over Sagas now parses, so the
+        // operand is accepted and no gap is reported.
         assert_eq!(
             swallowed_clause_gap(
                 SwallowedAxis::Quantity,
                 "creatures you control get +1/+0 until end of turn for each lore counter \
                  among sagas you control."
             ),
-            Some(ClauseGap::Quantity {
-                operand: "lore counter among sagas you control".to_string()
-            })
+            None
         );
     }
 

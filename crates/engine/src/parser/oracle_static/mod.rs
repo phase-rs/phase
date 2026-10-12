@@ -242,7 +242,10 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 /// transforms below satisfy this today: `populate_active_zones_from_condition`
 /// self-guards on `active_zones.is_empty()` and its collector ignores
 /// `ClassLevelGE`, and `bind_counter_anaphor_to_recipient` rewrites only
-/// `ObjectScope::Anaphoric`, of which none survive the first pass. A
+/// `ObjectScope::Anaphoric`, of which none survive the first pass, and the
+/// counter-kind census's `SelfRef` pronoun placeholder only when binding it to
+/// the recipient — the rewritten filter is no longer `SelfRef`, and a
+/// self-scoped static leaves `SelfRef` as it is, so a second pass is a no-op. A
 /// non-idempotent transform added here would silently double-apply across every
 /// such site.
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {

@@ -6,12 +6,14 @@ use super::sequence::split_clause_sequence;
 use super::*;
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
+use crate::parser::oracle::has_unimplemented;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;
-use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagnostic};
 use crate::parser::oracle_nom::enters_under::{
     bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
 };
 use crate::parser::parse_oracle_text;
+use crate::parser::swallow_evidence::UnitEvidence;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
@@ -10703,6 +10705,59 @@ fn effect_token_for_each_this_way_produces_tracked_set_size() {
         }
         other => panic!("expected Token, got {other:?}"),
     }
+}
+
+#[test]
+fn full_pump_parser_declines_a_discarded_for_each_color_chooser() {
+    // Synthetic grammar control, not an authenticated printed-card claim.
+    let text = "Target creature gets +1/+1 until end of turn for each creature you control of the color of your choice.";
+    let declined = parse_oracle_text(
+        text,
+        "For-Each Chooser Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        declined.abilities.len(),
+        1,
+        "the clause must reach the spell parser"
+    );
+    assert!(
+        declined.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { detector, description, line_index: 0, gap: Some(ClauseGap::Quantity { operand }), .. }
+                if detector == "DynamicQty"
+                    && description == text
+                    && operand == "creature you control of the color of your choice"
+        )),
+        "the rejected complete quantity must keep coverage honest: {declined:#?}",
+    );
+    assert!(
+        !UnitEvidence::of(&declined).any::<FilterProp>(|prop| matches!(prop, FilterProp::IsChosenColor)),
+        "a discarded reader cannot return IsChosenColor without publishing its chooser: {declined:#?}",
+    );
+
+    let admitted = parse_oracle_text(
+        "Target creature gets +1/+1 until end of turn for each creature you control.",
+        "For-Each Chooser Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(admitted.abilities.len(), 1);
+    assert!(
+        !has_unimplemented(&admitted.abilities[0]),
+        "reach guard: the ordinary population clause must still lower: {admitted:#?}",
+    );
+    assert!(matches!(
+        admitted.abilities[0].effect.as_ref(),
+        Effect::Pump {
+            target: TargetFilter::Typed(..),
+            power: PtValue::Quantity(..),
+            toughness: PtValue::Quantity(..),
+        }
+    ));
 }
 
 #[test]
@@ -36578,22 +36633,22 @@ fn have_you_put_parses_as_change_zone() {
 
 #[test]
 fn resolve_it_pronoun_default_context() {
-    let mut ctx = ParseContext::default();
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
+    let ctx = ParseContext::default();
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
 #[test]
 fn resolve_it_pronoun_self_ref_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::SelfRef),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
 #[test]
 fn resolve_it_pronoun_typed_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::Typed(crate::types::ability::TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: Some(ControllerRef::You),
@@ -36601,25 +36656,25 @@ fn resolve_it_pronoun_typed_subject() {
         })),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
 }
 
 #[test]
 fn resolve_it_pronoun_attached_to_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::AttachedTo),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
 }
 
 #[test]
 fn resolve_it_pronoun_any_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::Any),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
 /// Issue #6507 (CR 122.1): `condition_refs_source_object` must
