@@ -766,13 +766,11 @@ fn parse_token_description_with_context(
     // CR 107.3: when the attacking clause was stripped and took the ", where X
     // is …" tail with it, `saved_where_x_expr` carries the expression; fall
     // back to it so the variable count is still resolved.
-    // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
-    // the Join-Forces normalization path with non-Token effects via
-    // `super::parse_where_x_quantity_expression`. This makes phrases like
-    // "the total amount of mana paid this way" (Alliance of Arms) collapse
-    // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
-    // loop's accumulated total flows through. Falls back to the CDA path
-    // (and then the raw variable name) for phrases neither layer recognizes.
+    // CR 107.3c + CR 107.3i: a token's "X/X … where X is …" P/T binds X through
+    // `super::parse_where_x_quantity_expression`, then the CDA grammar; a
+    // definition neither reads fails the clause. A where-X binder on the count
+    // ("create X … tokens, where X is …", Alliance of Arms) is bound by
+    // `oracle_util::parse_count_slot` and reaches here as `slot_where_x`.
     let binds_x = matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
         || matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X");
     if binds_x {
