@@ -7585,6 +7585,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7598,6 +7599,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7638,6 +7640,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7651,6 +7654,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7693,6 +7697,7 @@ mod tests {
                     crate::types::events::ActivationTriggerState::CollectedAtActivation {
                         observers,
                     },
+                stack_entry: None,
             };
             assert!(!match_ability_activated(
                 &collected, &trigger, &context, &state
@@ -7789,6 +7794,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7820,6 +7826,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7832,6 +7839,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7863,6 +7871,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7896,6 +7905,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7930,6 +7940,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7979,6 +7990,7 @@ mod tests {
                     kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                     departed_source_lki: None,
                     trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                    stack_entry: None,
                 };
                 assert_eq!(
                     match_loyalty_ability_activated(&event, &trigger, &context, state),
@@ -8065,6 +8077,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             };
             let matches = |state: &GameState, player, source| {
                 match_loyalty_ability_activated(

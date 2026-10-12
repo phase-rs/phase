@@ -1104,6 +1104,7 @@ pub(crate) fn activate_mana_source_option_with_output(
             player,
             option.object_id,
             crate::types::events::ActivatedAbilityKind::Mana,
+            None,
             crate::types::zones::Zone::Battlefield,
             events,
         );

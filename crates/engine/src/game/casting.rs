@@ -27653,7 +27653,8 @@ pub(crate) fn require_activation_record(
 /// `placed_entry` is the id of the `StackEntry` the caller just pushed. The
 /// placed ability is read from THAT entry by id — never from the top of the
 /// stack, which cannot tell two activations of one permanent's same ability
-/// apart.
+/// apart. It is also the identity the `AbilityActivated` event carries, so an
+/// activation trigger's "that ability" names this entry (CR 602.2a).
 ///
 /// `record` is the activation's facts, captured before any of its cost was
 /// paid (CR 601.2c precedes CR 601.2h). It is a required input: a placement
@@ -27701,6 +27702,7 @@ pub(crate) fn record_activated_ability_placed(
         player,
         source_id,
         kind,
+        Some(placed_entry),
         announced_zone,
         events,
     );

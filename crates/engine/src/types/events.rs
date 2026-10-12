@@ -1010,6 +1010,13 @@ pub enum GameEvent {
         /// Omitted on the wire when `Pending`.
         #[serde(default, skip_serializing_if = "ActivationTriggerState::is_pending")]
         trigger_state: ActivationTriggerState,
+        /// CR 602.2a + CR 113.7a: the stack object this activation created — the
+        /// ability "that ability" / "it" names for a trigger on this event, never
+        /// another object of the same source. `None` when the activation used no
+        /// stack (a mana-ability activation, CR 605.3b) and for an event decoded from
+        /// a state predating the field. Omitted on the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stack_entry: Option<ObjectId>,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -2093,6 +2100,7 @@ mod tests {
                 kind,
                 departed_source_lki,
                 trigger_state,
+                stack_entry,
                 ..
             } => {
                 assert_eq!(kind, ActivatedAbilityKind::Normal);
@@ -2104,6 +2112,10 @@ mod tests {
                     trigger_state,
                     ActivationTriggerState::Pending,
                     "a legacy event is observed by ordinary collection"
+                );
+                assert_eq!(
+                    stack_entry, None,
+                    "a legacy event predating the field names no stack entry"
                 );
             }
             other => panic!("expected AbilityActivated, got {other:?}"),
@@ -2124,6 +2136,7 @@ mod tests {
                 kind,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();
@@ -2132,6 +2145,31 @@ mod tests {
                 other => panic!("expected AbilityActivated, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn ability_activated_stack_entry_round_trips_and_defaults_to_none() {
+        // CR 602.2a: the stack object a stack-using activation created survives
+        // serialization, and a mana activation's absent entry is omitted.
+        let event = |stack_entry| GameEvent::AbilityActivated {
+            player_id: PlayerId(1),
+            source_id: ObjectId(9),
+            kind: ActivatedAbilityKind::Normal,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry,
+        };
+        let named = event(Some(ObjectId(42)));
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json["data"]["stack_entry"], 42);
+        let back: GameEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, named);
+
+        let json = serde_json::to_value(event(None)).unwrap();
+        assert!(
+            json["data"].get("stack_entry").is_none(),
+            "an activation that used no stack omits the key"
+        );
     }
 
     #[test]

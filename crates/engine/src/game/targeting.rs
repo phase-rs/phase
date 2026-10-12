@@ -8081,6 +8081,7 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: None,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }

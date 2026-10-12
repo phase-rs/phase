@@ -15,10 +15,10 @@ use std::collections::VecDeque;
 use engine::game::effects::attach::attach_to;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, EffectKind, TargetRef};
+use engine::types::ability::{Effect, EffectKind, PtValue, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -68,7 +68,19 @@ fn library_size(runner: &GameRunner) -> usize {
 fn drive(
     runner: &mut GameRunner,
     stop: impl Fn(&GameState) -> bool,
+    targets: VecDeque<ObjectId>,
+) -> Vec<GameEvent> {
+    drive_ordering(runner, stop, targets, None)
+}
+
+/// [`drive`], additionally answering a trigger-ordering prompt by placing the
+/// trigger whose source is `copier_last` last — on top of the others (CR
+/// 603.3b; index 0 is placed first). Without a copier the prompt is unexpected.
+fn drive_ordering(
+    runner: &mut GameRunner,
+    stop: impl Fn(&GameState) -> bool,
     mut targets: VecDeque<ObjectId>,
+    copier_last: Option<ObjectId>,
 ) -> Vec<GameEvent> {
     let mut events = Vec::new();
     for _ in 0..64 {
@@ -90,6 +102,11 @@ fn drive(
                         .expect("a declared target for this prompt"),
                 )),
             },
+            WaitingFor::OrderTriggers { triggers, .. } if copier_last.is_some() => {
+                let mut order: Vec<usize> = (0..triggers.len()).collect();
+                order.sort_by_key(|&index| Some(triggers[index].source_id) == copier_last);
+                GameAction::OrderTriggers { order }
+            }
             other => panic!("unexpected prompt: {other:?}"),
         };
         events.extend(
@@ -570,5 +587,341 @@ fn bracers_do_not_copy_an_unrelated_spell_when_the_ability_was_countered() {
     assert!(
         copy_effect_resolved(&events, bracers),
         "the Bracers' copy effect resolves"
+    );
+}
+
+const CHROME_COMPANION: &str = "Whenever this creature becomes tapped, you gain 1 life.\n{2}, {T}: Put target card from a graveyard on the bottom of its owner's library.";
+const STONE_KAVU: &str =
+    "{R}: This creature gets +1/+0 until end of turn.\n{W}: This creature gets +0/+1 until end of turn.";
+/// The quoted text of Rowan Kenrith's −8 emblem, carried by a test artifact.
+const ROWAN_KENRITH_EMBLEM: &str = "Whenever you activate an ability that isn't a mana ability, copy it. You may choose new targets for the copy.";
+
+/// R-ev: the activation's `AbilityActivated` event names the stack object it
+/// created (CR 602.2a).
+fn assert_activation_names_entry(events: &[GameEvent], source: ObjectId, entry: ObjectId) {
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated { source_id, stack_entry: Some(id), .. }
+                if *source_id == source && *id == entry
+        )),
+        "reach: the activation event names the stack entry it created"
+    );
+}
+
+/// The copier's trigger has resolved: P0 holds priority and nothing on the
+/// stack is sourced by `copier`.
+fn copier_trigger_resolved(copier: ObjectId) -> impl Fn(&GameState) -> bool {
+    move |state: &GameState| {
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && !state.stack.iter().any(|entry| entry.source_id == copier)
+    }
+}
+
+/// Chrome Companion, whose `{2}, {T}` activation taps it and so triggers its
+/// own "becomes tapped" ability alongside the copier's trigger, plus a card in
+/// P1's graveyard for the activation to target and a zero-cost Stifle.
+struct TapTriggerBoard {
+    runner: GameRunner,
+    chrome: ObjectId,
+    copier: ObjectId,
+    card: ObjectId,
+    stifle: ObjectId,
+    life_before: i32,
+}
+
+impl TapTriggerBoard {
+    /// `equipment` attaches the copier to Chrome Companion as an Equipment;
+    /// otherwise it is a plain artifact.
+    fn new(copier_name: &str, copier_oracle: &str, equipment: bool, colorless: usize) -> Self {
+        let mut scenario = main_phase();
+        let copier = if equipment {
+            scenario
+                .add_creature(P0, copier_name, 0, 0)
+                .as_artifact()
+                .with_subtypes(vec!["Equipment"])
+                .from_oracle_text(copier_oracle)
+                .id()
+        } else {
+            scenario
+                .add_artifact_from_oracle(P0, copier_name, copier_oracle)
+                .id()
+        };
+        let chrome = scenario
+            .add_creature(P0, "Chrome Companion", 2, 1)
+            .as_artifact_creature()
+            .from_oracle_text(CHROME_COMPANION)
+            .id();
+        let card = scenario.add_creature_to_graveyard(P1, "Bear", 2, 2).id();
+        let stifle = add_zero_cost_instant(&mut scenario, "Stifle", STIFLE);
+        add_colorless(&mut scenario, colorless);
+        let mut runner = scenario.build();
+        if equipment {
+            attach_to(runner.state_mut(), copier, chrome);
+        }
+        let life_before = runner.state().players[0].life;
+        Self {
+            runner,
+            chrome,
+            copier,
+            card,
+            stifle,
+            life_before,
+        }
+    }
+
+    /// Activates Chrome Companion with the copier's trigger ordered on top,
+    /// asserts R-ev and R-stack, and returns the activated ability's id.
+    fn activate_with_copier_on_top(&mut self) -> ObjectId {
+        let mut events = self
+            .runner
+            .act(GameAction::ActivateAbility {
+                source_id: self.chrome,
+                ability_index: 0,
+            })
+            .expect("Chrome Companion's ability activates")
+            .events;
+        let copier = self.copier;
+        events.extend(drive_ordering(
+            &mut self.runner,
+            move |state: &GameState| {
+                matches!(state.waiting_for, WaitingFor::Priority { .. })
+                    && state.stack.iter().any(|entry| entry.source_id == copier)
+            },
+            VecDeque::from([self.card]),
+            Some(self.copier),
+        ));
+        let stack: Vec<_> = self.runner.state().stack.iter().collect();
+        // R-stack, CR 603.3b: the tap trigger and the copier's trigger go on the
+        // stack together, above the activated ability, the copier's on top.
+        assert!(
+            matches!(
+                stack.as_slice(),
+                [activated, tapped, copy_trigger]
+                    if activated.source_id == self.chrome
+                        && matches!(activated.kind, StackEntryKind::ActivatedAbility { .. })
+                        && tapped.source_id == self.chrome
+                        && matches!(tapped.kind, StackEntryKind::TriggeredAbility { .. })
+                        && copy_trigger.source_id == self.copier
+                        && matches!(copy_trigger.kind, StackEntryKind::TriggeredAbility { .. })
+            ),
+            "reach: [activation, its tap trigger, the copier's trigger] bottom to top"
+        );
+        let activated = stack[0].id;
+        assert_activation_names_entry(&events, self.chrome, activated);
+        activated
+    }
+
+    /// Resolves the copier's trigger and returns the events of that resolution.
+    fn resolve_copier_trigger(&mut self) -> Vec<GameEvent> {
+        drive(
+            &mut self.runner,
+            copier_trigger_resolved(self.copier),
+            VecDeque::new(),
+        )
+    }
+
+    fn life_delta_after_stack_empties(&mut self) -> i32 {
+        drive(&mut self.runner, priority_with_empty_stack, VecDeque::new());
+        self.runner.state().players[0].life - self.life_before
+    }
+}
+
+/// J1: the Bracers copy Chrome Companion's activated ability, never the
+/// "becomes tapped" trigger that activation caused, though it has the same
+/// source and waits between them (CR 602.2a + CR 707.10b).
+#[test]
+fn bracers_copy_the_activation_not_a_trigger_it_caused() {
+    let mut board = TapTriggerBoard::new("Illusionist's Bracers", ILLUSIONISTS_BRACERS, true, 2);
+    board.activate_with_copier_on_top();
+    let events = board.resolve_copier_trigger();
+    assert_copy_put_on_stack(&board.runner, &events, board.chrome);
+    assert_eq!(
+        board.life_delta_after_stack_empties(),
+        1,
+        "the tap trigger resolves once and is never copied"
+    );
+}
+
+/// J2: the same through Rings of Brighthearth's `PayCost` root → `CopySpell`
+/// sub node.
+#[test]
+fn rings_copy_the_activation_not_a_trigger_it_caused() {
+    let mut board = TapTriggerBoard::new("Rings of Brighthearth", RINGS_OF_BRIGHTHEARTH, false, 4);
+    board.activate_with_copier_on_top();
+    let events = board.resolve_copier_trigger();
+    assert_eq!(
+        board.runner.state().players[0].mana_pool.total(),
+        0,
+        "the optional {{2}} was paid"
+    );
+    assert_copy_put_on_stack(&board.runner, &events, board.chrome);
+    assert_eq!(
+        board.life_delta_after_stack_empties(),
+        1,
+        "the tap trigger resolves once and is never copied"
+    );
+}
+
+/// J3: "copy it" (`TriggeringSource`) names the activated ability too.
+#[test]
+fn an_activation_copy_it_trigger_copies_the_activation_not_a_trigger_it_caused() {
+    let mut board = TapTriggerBoard::new("Emblem Carrier", ROWAN_KENRITH_EMBLEM, false, 2);
+    board.activate_with_copier_on_top();
+    let events = board.resolve_copier_trigger();
+    assert_copy_put_on_stack(&board.runner, &events, board.chrome);
+    assert_eq!(
+        board.life_delta_after_stack_empties(),
+        1,
+        "the tap trigger resolves once and is never copied"
+    );
+}
+
+/// J4: with the activated ability countered (CR 701.6a), the Bracers do not
+/// copy the tap trigger it caused. Whether the countered ability is still
+/// copied is not asserted (Rings of Brighthearth ruling; no departed-ability
+/// record).
+#[test]
+fn bracers_do_not_copy_a_trigger_the_countered_activation_caused() {
+    let mut board = TapTriggerBoard::new("Illusionist's Bracers", ILLUSIONISTS_BRACERS, true, 2);
+    let activated = board.activate_with_copier_on_top();
+    board
+        .runner
+        .cast(board.stifle)
+        .target_object(activated)
+        .commit();
+    drive(&mut board.runner, priority_with_stack(2), VecDeque::new());
+    let stack = &board.runner.state().stack;
+    assert!(
+        !stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::ActivatedAbility { .. }))
+            && stack
+                .front()
+                .is_some_and(|entry| entry.source_id == board.chrome)
+            && stack
+                .back()
+                .is_some_and(|entry| entry.source_id == board.copier),
+        "reach: the activation was countered while its tap trigger and the copy trigger remain"
+    );
+    let events = board.resolve_copier_trigger();
+    assert!(
+        copy_effect_resolved(&events, board.copier),
+        "reach: the Bracers' copy effect resolved"
+    );
+    assert_eq!(
+        board.life_delta_after_stack_empties(),
+        1,
+        "the tap trigger resolves once and is never copied"
+    );
+}
+
+/// J5: two activations of one source (CR 117.1b). Each Bracers trigger names
+/// its own activation; with the second countered, its trigger never copies the
+/// first one still waiting below.
+#[test]
+fn bracers_copy_each_activation_not_an_earlier_one_of_the_same_source() {
+    let mut scenario = main_phase();
+    let bracers = scenario
+        .add_creature(P0, "Illusionist's Bracers", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(ILLUSIONISTS_BRACERS)
+        .id();
+    let kavu = scenario
+        .add_creature(P0, "Stone Kavu", 3, 3)
+        .from_oracle_text(STONE_KAVU)
+        .id();
+    let stifle = add_zero_cost_instant(&mut scenario, "Stifle", STIFLE);
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Red, ManaType::White]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), bracers, kavu);
+    let pump_index = |runner: &GameRunner, power: i32, toughness: i32| {
+        runner.state().objects[&kavu]
+            .abilities
+            .iter()
+            .position(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::Pump {
+                        power: PtValue::Fixed(p),
+                        toughness: PtValue::Fixed(t),
+                        ..
+                    } if *p == power && *t == toughness
+                )
+            })
+            .expect("Stone Kavu's pump ability")
+    };
+    let red_index = pump_index(&runner, 1, 0);
+    let white_index = pump_index(&runner, 0, 1);
+
+    let mut events = Vec::new();
+    for (ability_index, stack_len) in [(red_index, 2), (white_index, 4)] {
+        events.extend(
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: kavu,
+                    ability_index,
+                })
+                .expect("Stone Kavu's ability activates")
+                .events,
+        );
+        events.extend(drive(
+            &mut runner,
+            priority_with_stack(stack_len),
+            VecDeque::new(),
+        ));
+    }
+    let stack: Vec<_> = runner.state().stack.iter().collect();
+    let activation_index = |entry: &StackEntry| match &entry.kind {
+        StackEntryKind::ActivatedAbility { source_id, ability } if *source_id == kavu => {
+            ability.ability_index
+        }
+        _ => None,
+    };
+    assert!(
+        matches!(
+            stack.as_slice(),
+            [first, first_trigger, second, second_trigger]
+                if activation_index(first) == Some(red_index)
+                    && first_trigger.source_id == bracers
+                    && activation_index(second) == Some(white_index)
+                    && second_trigger.source_id == bracers
+        ),
+        "reach: [A1, T1, A2, T2] bottom to top"
+    );
+    let (first, second, second_trigger) = (stack[0].id, stack[2].id, stack[3].id);
+    assert_activation_names_entry(&events, kavu, first);
+    assert_activation_names_entry(&events, kavu, second);
+
+    runner.cast(stifle).target_object(second).commit();
+    drive(&mut runner, priority_with_stack(3), VecDeque::new());
+    assert!(
+        runner.state().stack.iter().all(|entry| entry.id != second),
+        "reach: the second activation was countered"
+    );
+    let events = drive(
+        &mut runner,
+        move |state: &GameState| {
+            matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.stack.iter().all(|entry| entry.id != second_trigger)
+        },
+        VecDeque::new(),
+    );
+    assert!(
+        copy_effect_resolved(&events, bracers),
+        "reach: the second trigger's copy effect resolved"
+    );
+    drive(&mut runner, priority_with_empty_stack, VecDeque::new());
+    assert_eq!(
+        runner.state().objects[&kavu].power,
+        Some(5),
+        "the first activation resolves twice (original + its own copy); the second trigger copies nothing of it"
     );
 }

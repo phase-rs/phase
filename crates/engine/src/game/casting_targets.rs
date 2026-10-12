@@ -683,11 +683,15 @@ pub(super) fn extract_distribution_total(
 /// carries its last known information, taken when it left. A source announced
 /// from another zone (embalm, cycling) never takes battlefield LKI, so a stale
 /// entry from an earlier departure can't answer for it.
+///
+/// `stack_entry` is the stack object a stack-using activation created (CR
+/// 602.2a); a mana-ability activation passes `None` (CR 605.3b).
 pub(crate) fn emit_ability_activated(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     kind: crate::types::events::ActivatedAbilityKind,
+    stack_entry: Option<ObjectId>,
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
 ) -> usize {
@@ -705,6 +709,7 @@ pub(crate) fn emit_ability_activated(
         kind,
         departed_source_lki,
         trigger_state: crate::types::events::ActivationTriggerState::Pending,
+        stack_entry,
     });
     events.len() - 1
 }
