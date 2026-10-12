@@ -46756,13 +46756,13 @@ enum UnlessCostRider<'a> {
 /// after the unless mana symbols. CR 608.2h: a per-counter multiplier is read from
 /// the source when the unless resolves.
 ///
-/// Single authority for the tail of an unless mana cost; the only place a flat
-/// unless `AbilityCost::Mana` is minted. A riderless cost stays flat; a
+/// Single authority for the tail of a single (non-disjunctive) unless mana cost.
+/// A cost with no "for each" / "plus an additional" rider stays flat; a
 /// "for each <kind> counter on <self>" rider becomes `AbilityCost::PerCounter`
 /// (any base cost); a generic-only base with any other for-each or
-/// "plus an additional … for each" rider keeps its dynamic-mana shape. Every rider
-/// this cannot type returns `None`, which the caller fails closed — never a flat
-/// cost that drops the multiplier.
+/// "plus an additional … for each" rider keeps its dynamic-mana shape. A for-each
+/// or plus-additional rider this cannot type returns `None`, which the caller fails
+/// closed — never a flat cost that drops the multiplier.
 pub(crate) fn parse_unless_mana_cost_tail(
     after_cost: &str,
     cost: &ManaCost,
