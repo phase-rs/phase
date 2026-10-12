@@ -308,10 +308,10 @@ export function get_card_parse_details(name: string): any;
 export function get_card_rulings(name: string): any;
 
 /**
- * Filtered-viewer variant of `get_game_state`. Runs the viewer filter
- * first (hides opponent hand/library per standard multiplayer redaction),
- * then derives views over the filtered state so the wire shape is
- * identical to `get_game_state` regardless of filter path.
+ * Variant of `get_game_state` that takes the viewer seat as an argument.
+ * Runs the viewer filter first (hides opponent hand/library per standard
+ * multiplayer redaction), then wraps the result in the same
+ * `ClientGameStateRef` envelope `get_game_state` returns.
  */
 export function get_filtered_game_state(viewer: number): any;
 

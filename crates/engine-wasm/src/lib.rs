@@ -2278,8 +2278,8 @@ fn handle_debug_create_card_inner(
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     match with_state(|state| {
-        // Single-player WASM: the human is always PlayerId(0). Scope web-slinging
-        // costs to the human's own hand even on this raw/unfiltered path.
+        // The local human is always PlayerId(0). `wrap` filters the state for
+        // that seat and scopes web-slinging costs to its hand.
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             state,
             Some(PlayerId(0)),
@@ -2290,10 +2290,10 @@ pub fn get_game_state() -> JsValue {
     }
 }
 
-/// Filtered-viewer variant of `get_game_state`. Runs the viewer filter
-/// first (hides opponent hand/library per standard multiplayer redaction),
-/// then derives views over the filtered state so the wire shape is
-/// identical to `get_game_state` regardless of filter path.
+/// Variant of `get_game_state` that takes the viewer seat as an argument.
+/// Runs the viewer filter first (hides opponent hand/library per standard
+/// multiplayer redaction), then wraps the result in the same
+/// `ClientGameStateRef` envelope `get_game_state` returns.
 #[wasm_bindgen]
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     match with_state(|state| {

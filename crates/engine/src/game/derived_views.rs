@@ -2,10 +2,10 @@
 //! Engine-authored presentation projections over `GameState`.
 //!
 //! These "derived views" are computed just-in-time at serialization
-//! boundaries (the WASM getter, the server-core broadcast) and sent to
-//! clients alongside the raw state. Display consumers (React components)
-//! consume the pre-grouped shape directly and never compute game logic
-//! themselves — per CLAUDE.md's "engine owns all logic" invariant.
+//! boundaries and sent to clients alongside the viewer-filtered state.
+//! Display consumers (React components) consume the pre-grouped shape
+//! directly and never compute game logic themselves — per CLAUDE.md's
+//! "engine owns all logic" invariant.
 //!
 //! Contrast with `crates/engine/src/game/derived.rs`, which contains
 //! engine-internal state derivation (summoning sickness, commander damage
@@ -762,11 +762,11 @@ pub struct DerivedViews {
     pub auras_attached_to_player: BTreeMap<PlayerId, Vec<ObjectId>>,
 
     /// CR 702.188a + 604.1: web-slinging alt-cost the VIEWING player may pay for each
-    /// qualifying card in their OWN hand (incl. statically-granted web-slinging). Keyed by
-    /// hand ObjectId. Populated ONLY for the `viewer` passed to derive_views and ONLY from
-    /// that viewer's hand — never another player's — so it cannot leak which opponent/AI
-    /// cards qualify, even on the unfiltered get_game_state() path. Empty when no viewer,
-    /// no granting static, or no qualifying card.
+    /// qualifying card in their OWN hand. Keyed by hand ObjectId. Populated ONLY for
+    /// the `viewer` passed to derive_views and ONLY from that viewer's hand — never
+    /// another player's — so it cannot leak which opponent/AI cards qualify, even
+    /// when derive_views is handed an unfiltered state. Empty when no viewer, no
+    /// granting static, or no qualifying card.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub web_slinging_costs: HashMap<ObjectId, ManaCost>,
 
@@ -6171,8 +6171,8 @@ mod tests {
 
     /// CR 702.188a + CR 604.1: web-slinging costs are VIEWER-scoped. P0 controls
     /// the grantor; both P0 and P1 hold a qualifying spell. `derive_views` for P0
-    /// must surface ONLY P0's card (never P1's, even though the grant is symmetric
-    /// in the abstract) so the unfiltered path can't leak opponent hand contents.
+    /// must surface ONLY P0's card (never P1's) so `derive_views` over an
+    /// unfiltered state can't leak opponent hand contents.
     /// `derive_views(_, None)` must surface nothing.
     #[test]
     fn web_slinging_costs_are_viewer_scoped_and_leak_proof() {
