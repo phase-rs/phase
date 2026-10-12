@@ -193,7 +193,19 @@ fn extract_life_cost_root(
     candidate: &CandidateAction,
 ) -> Option<ArmedLifeCostRoot> {
     let semantic_owner = candidate.metadata.semantic_owner?;
-    if !is_complete_generated_candidate(state, candidate) {
+    // Only a `DecideOptionalCost` answer to a `DefilerPayment` /
+    // `OptionalCostChoice` prompt can arm a root (every other pair falls to the
+    // neutral arm below), so check that shape before the completeness probe
+    // re-enumerates the whole candidate set. This shape predicate must stay in
+    // sync with the `Some` arms of the match below.
+    if !matches!(
+        (&state.waiting_for, &candidate.action),
+        (
+            WaitingFor::DefilerPayment { .. } | WaitingFor::OptionalCostChoice { .. },
+            GameAction::DecideOptionalCost { .. }
+        )
+    ) || !is_complete_generated_candidate(state, candidate)
+    {
         return None;
     }
     // A spell announcement's trigger carrier is engine-private custody that
@@ -962,6 +974,46 @@ mod tests {
                 committed: 2,
             },
             "the raw mana-payment carrier must retain the bound receipt"
+        );
+    }
+
+    /// Revert-failing perf: a candidate that can never arm a root (anything but a
+    /// `DecideOptionalCost` answer to a Defiler / optional-cost prompt) is neutral
+    /// without re-enumerating the candidate set. Pre-fix the completeness probe
+    /// ran first, so every scored candidate paid one full enumeration.
+    #[test]
+    fn non_root_shaped_candidate_is_neutral_without_enumerating_candidates() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        let candidate = crate::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| candidate.action == GameAction::PassPriority)
+            .expect("priority always offers a generated pass");
+
+        // Reach-guard: this candidate is complete, and proving so enumerates the
+        // candidate set, which the crew-eligibility scan counter observes.
+        crate::game::perf_counters::reset();
+        assert!(is_complete_generated_candidate(&state, &candidate));
+        assert!(
+            crate::game::perf_counters::snapshot().crew_eligibility_scans >= 1,
+            "reach-guard: the completeness probe must enumerate priority actions"
+        );
+
+        crate::game::perf_counters::reset();
+        assert_eq!(
+            preview_candidate_life_safety(&state, &candidate),
+            CandidateLifeSafety::NotUnsafe
+        );
+        assert_eq!(
+            crate::game::perf_counters::snapshot().crew_eligibility_scans,
+            0,
+            "a non-root shape must not re-enumerate candidates (revert-failing: pre-fix >= 1)"
         );
     }
 
