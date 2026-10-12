@@ -608,7 +608,7 @@ fn parse_token_description_with_context(
     // When the attacking clause is detected and text is truncated at `pos`, any
     // trailing ", where X is …" that followed the clause is cut off from the
     // token body.  Extract and save it now (from the pre-truncation text) so
-    // the X-binding step below can still resolve a variable count.
+    // the X-binding step below can still bind an X/X token's P/T.
     let saved_where_x_expr: Option<String> =
         entry_clause.and_then(|(pos, _)| extract_token_where_x_expression(&text[pos..]));
     let (text, mut enters_attacking, enters_tapped_attacking) = match entry_clause {
@@ -765,7 +765,7 @@ fn parse_token_description_with_context(
 
     // CR 107.3: when the attacking clause was stripped and took the ", where X
     // is …" tail with it, `saved_where_x_expr` carries the expression; fall
-    // back to it so the variable count is still resolved.
+    // back to it so an X/X token's P/T is still bound.
     // CR 107.3c + CR 107.3i: a token's "X/X … where X is …" P/T binds X through
     // `super::parse_where_x_quantity_expression`, then the CDA grammar; a
     // definition neither reads fails the clause. A where-X binder on the count
