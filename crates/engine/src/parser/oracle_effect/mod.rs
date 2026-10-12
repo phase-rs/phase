@@ -23771,7 +23771,7 @@ fn try_parse_compound_subject_each(
     let parsed_body = parse_effect_chain_with_context(body_text, AbilityKind::Spell, &mut body_ctx);
 
     // A body that already carries its own iteration scope is refused by the
-    // channel and keeps the halves path's verdict (which refuses it too).
+    // channel, so the set never overwrites that scope; it takes the halves path.
     if let Some(member) = member.filter(|_| {
         std::iter::successors(Some(&parsed_body), |link| link.sub_ability.as_deref())
             .all(|link| link.player_scope.is_none())
@@ -27667,8 +27667,9 @@ fn is_targeted_player_conjunct(second: &TargetFilter) -> bool {
 /// run seat by seat without the deviation being observable. When several players
 /// make choices for one instruction, each chooses in APNAP order and then the
 /// actions happen simultaneously; the `player_scope` driver instead resolves the
-/// whole body for one seat before prompting the next, so a link that lets a seat
-/// choose and then act before the next seat chooses is observable. Fail-closed
+/// whole body for one seat before prompting the next, so a body that pairs a
+/// choice with any other link is observable: one seat's choice lands before
+/// another seat's earlier action or after its own later one. Fail-closed
 /// allowlist: any link kind not shown unobservable returns `false`.
 fn seat_order_is_unobservable(body: &AbilityDefinition) -> bool {
     let lone_link = body.sub_ability.is_none();
@@ -27685,11 +27686,12 @@ fn seat_order_is_unobservable(body: &AbilityDefinition) -> bool {
             | Effect::RevealTop { .. } => true,
             // CR 701.9b: a random discard asks no choice.
             Effect::Discard { selection, .. } => selection.is_random(),
-            // CR 101.4: as the body's last link the choice is the seat's final
-            // action, so recording it seat by seat is the APNAP choice sequence;
-            // a secret number stays private until revealed. A later link would
-            // act on the choice before the next seat chooses.
-            Effect::Choose { .. } => link.sub_ability.is_none(),
+            // CR 101.4 + CR 608.2e: a lone choice is the seat's whole action, so
+            // recording it seat by seat is the APNAP choice sequence; a secret
+            // number stays private until revealed. Any other link in the body
+            // would run for one seat between another seat's choice and its own
+            // (before or after it).
+            Effect::Choose { .. } => lone_link,
             // CR 101.4 + CR 701.21a: a lone scoped sacrifice takes the driver's
             // coordinator, which announces every seat's choice in APNAP order
             // before any permanent is sacrificed.

@@ -81593,6 +81593,24 @@ fn coordinated_body_with_an_observable_seat_order_fails_closed() {
     let text = "you and target opponent each secretly choose a number, then lose that much life";
     assert_coordinated_decline(&parse_effect_chain(text, AbilityKind::Spell), text);
 
+    // CR 101.4 + CR 608.2e: a public act followed by a choice. Every seat mills
+    // before any seat chooses, so the first seat's choice would land before the
+    // next seat's mill. Reach guard: the bare body is `Mill` → `Choose`, both
+    // parsed, so only the `Choose` arm's lone-link rule declines it.
+    let body = parse_effect_chain("mill two cards, then choose a number", AbilityKind::Spell);
+    let body_links = coordinated_chain_links(&body);
+    assert!(
+        matches!(
+            body_links.as_slice(),
+            [mill, choose]
+                if matches!(&*mill.effect, Effect::Mill { .. })
+                    && matches!(&*choose.effect, Effect::Choose { .. })
+        ),
+        "reach: the body is Mill then Choose: {body:#?}"
+    );
+    let text = "you and target opponent each mill two cards, then choose a number";
+    assert_coordinated_decline(&parse_effect_chain(text, AbilityKind::Spell), text);
+
     for (def, member) in [
         (
             parse_effect_chain(
