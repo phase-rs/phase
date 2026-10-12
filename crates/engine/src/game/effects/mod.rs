@@ -15867,9 +15867,10 @@ fn resolve_chain_body(
         // A seat whose answer is itself the producing choice does not. An
         // `EffectZoneChoice` answer (`publish_effect_zone_choice_tracked_set`)
         // mints a fresh set for each paused seat, so a clause-wide detached
-        // tail read after it sees only the last paused seat's choice, without
-        // the earlier paused seats or the seats that completed before the
-        // pause. This is a known gap, filed separately.
+        // tail read after it loses the earlier paused seats and every seat that
+        // completed before the last pause: it sees only the last paused seat's
+        // choice and the seats that complete after it. This is a known gap,
+        // filed separately.
         //
         // A tail that needs linked exile is not linearized: it rides the
         // frame's `player_scope_linked_exile` sidecar, which that predicate
