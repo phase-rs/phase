@@ -33117,6 +33117,47 @@ fn static_creatures_defending_player_controls_not_via_suffix_parser() {
         "parse_creature_subject_filter must not accept 'defending player controls' as a controller suffix"
     );
 }
+
+#[test]
+fn static_creatures_an_opponent_controls_not_via_suffix_parser() {
+    // Positive guard: the plural opponent form shares `ControllerRef::Opponent`
+    // with "an opponent controls" and IS accepted.
+    let plural = parse_creature_subject_filter("Creatures your opponents control")
+        .expect("'your opponents control' is a static subject controller suffix");
+    assert!(matches!(
+        plural,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        })
+    ));
+    // The singular "an opponent controls" is not in the static subject set.
+    assert!(
+        parse_creature_subject_filter("Creatures an opponent controls").is_none(),
+        "parse_creature_subject_filter must not accept 'an opponent controls' as a controller suffix"
+    );
+}
+
+#[test]
+fn static_creatures_controller_suffix_admits_its_set() {
+    for (subject, expected) in [
+        ("Creatures you don't control", ControllerRef::Opponent),
+        (
+            "Creatures enchanted player controls",
+            ControllerRef::EnchantedPlayer,
+        ),
+    ] {
+        let filter = parse_creature_subject_filter(subject)
+            .unwrap_or_else(|| panic!("{subject:?} should parse"));
+        assert!(
+            matches!(
+                &filter,
+                TargetFilter::Typed(TypedFilter { controller: Some(c), .. }) if *c == expected
+            ),
+            "{subject:?} → {filter:?}"
+        );
+    }
+}
 #[test]
 fn static_creatures_enchanted_player_controls_attack_each_combat_if_able() {
     // Curse of the Nightly Hunt: "Creatures enchanted player controls attack each combat if able."

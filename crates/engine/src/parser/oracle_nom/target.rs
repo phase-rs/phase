@@ -6,7 +6,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{satisfy, space1};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -220,26 +220,263 @@ fn parse_color_prefix(input: &str) -> OracleResult<'_, ManaColor> {
     Ok((rest, c))
 }
 
-/// Parse a controller suffix: "you control", "an opponent controls",
-/// "target player controls".
-///
-/// CR 109.4 + CR 115.1: "target player controls" generates a filter referencing
-/// a chosen player target; the enclosing ability must surface a companion
-/// TargetFilter::Player slot so the player is selected as part of target
-/// declaration.
-pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+/// Tense of a controller phrase's verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerTense {
+    /// "controls" / "control": names current control.
+    Present,
+    /// "controlled": a look-back at past control.
+    Past,
+}
+
+/// A player pronoun or demonstrative whose referent was introduced earlier in
+/// the ability. The grammar never resolves it; `bind_controller_phrase`
+/// (`oracle_ir/context.rs`) does, from the parse context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlayerAnaphor {
+    /// "that player".
+    ThatPlayer,
+    /// "they".
+    They,
+    /// "its controller" / "their controller".
+    ItsController,
+}
+
+/// Who a controller phrase names: a player the phrase itself identifies, or an
+/// anaphor that must be bound against the parse context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControllerSubject {
+    Direct(ControllerRef),
+    Anaphoric(PlayerAnaphor),
+}
+
+/// The clause shape the grammar matched: the subject's grammatical number for
+/// an active clause, else the negated or passive construction. Several phrases
+/// share one `ControllerRef` ("an opponent controls", "your opponents control"
+/// and "you don't control" are all `Opponent`), so a projection that admits
+/// only some of them keys on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerForm {
+    Singular,
+    Plural,
+    Negated,
+    Passive,
+}
+
+/// A parsed controller phrase: "you control", "that player controlled",
+/// "controlled by that player", "its controller controls", ….
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControllerPhrase {
+    pub subject: ControllerSubject,
+    pub form: ControllerForm,
+    pub tense: ControllerTense,
+}
+
+/// " controls" / " controlled" after a singular subject.
+fn controller_verb_singular(input: &str) -> OracleResult<'_, ControllerTense> {
+    preceded(
+        tag(" control"),
+        alt((
+            value(ControllerTense::Present, tag("s")),
+            value(ControllerTense::Past, tag("led")),
+        )),
+    )
+    .parse(input)
+}
+
+/// " control" / " controlled" after a plural subject.
+fn controller_verb_plural(input: &str) -> OracleResult<'_, ControllerTense> {
+    preceded(
+        tag(" control"),
+        alt((
+            value(ControllerTense::Past, tag("led")),
+            value(ControllerTense::Present, success(())),
+        )),
+    )
+    .parse(input)
+}
+
+fn singular_controller_subject(input: &str) -> OracleResult<'_, ControllerSubject> {
     alt((
-        value(ControllerRef::You, tag("you control")),
-        value(ControllerRef::Opponent, tag("an opponent controls")),
-        value(ControllerRef::Opponent, tag("your opponents control")),
-        value(ControllerRef::TargetPlayer, tag("target player controls")),
-        // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
         value(
-            ControllerRef::TargetOpponent,
-            tag("target opponent controls"),
+            ControllerSubject::Direct(ControllerRef::Opponent),
+            tag("an opponent"),
+        ),
+        // CR 109.4 + CR 115.1: "target player controls" names the player chosen
+        // as a target of the enclosing ability; the consumer surfaces a
+        // companion `TargetFilter::Player` slot (`collect_target_slots` in
+        // `game/ability_utils.rs`). "target opponent" is the opponent-constrained
+        // form (CR 102.2 / CR 102.3).
+        preceded(
+            tag("target "),
+            alt((
+                value(
+                    ControllerSubject::Direct(ControllerRef::TargetPlayer),
+                    tag("player"),
+                ),
+                value(
+                    ControllerSubject::Direct(ControllerRef::TargetOpponent),
+                    tag("opponent"),
+                ),
+            )),
+        ),
+        // CR 508.5 / CR 508.5a: the defending player the attacking creature is
+        // attacking, resolved per attacker by
+        // `combat::defending_player_for_attacker`.
+        value(
+            ControllerSubject::Direct(ControllerRef::DefendingPlayer),
+            tag("defending player"),
+        ),
+        // CR 303.4b + CR 702.5a: the player the source Aura is attached to
+        // (the Curse cycle).
+        value(
+            ControllerSubject::Direct(ControllerRef::EnchantedPlayer),
+            tag("enchanted player"),
+        ),
+        preceded(
+            tag("the "),
+            alt((
+                // CR 102.1: the turn player.
+                value(
+                    ControllerSubject::Direct(ControllerRef::ActivePlayer),
+                    tag("active player"),
+                ),
+                value(
+                    ControllerSubject::Direct(ControllerRef::SourceChosenPlayer),
+                    tag("chosen player"),
+                ),
+            )),
+        ),
+        value(
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+            tag("that player"),
+        ),
+        value(
+            ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+            terminated(alt((tag("its"), tag("their"))), tag(" controller")),
         ),
     ))
     .parse(input)
+}
+
+fn plural_controller_subject(input: &str) -> OracleResult<'_, ControllerSubject> {
+    alt((
+        // Before "you": "you" is a prefix of "your".
+        value(
+            ControllerSubject::Direct(ControllerRef::Opponent),
+            tag("your opponents"),
+        ),
+        value(ControllerSubject::Direct(ControllerRef::You), tag("you")),
+        value(
+            ControllerSubject::Anaphoric(PlayerAnaphor::They),
+            tag("they"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// The single grammar for a phrase naming an object's controller, direct or
+/// anaphoric, present or past. It recognizes; it never binds an anaphor (see
+/// `bind_controller_phrase` in `oracle_ir/context.rs`). Each reader admits the
+/// subset it can resolve by projecting this result (`map_opt` / `verify`).
+///
+/// CR 608.2c: "that player", "they" and "its controller" refer back to a player
+/// introduced earlier in the ability, so they are returned as anaphors.
+/// CR 608.2i: a past-tense "controlled" is a look-back at past control, and the
+/// trailing word boundary keeps a present-tense arm from consuming its prefix.
+/// "controlled by that player" names current control, so it is present tense.
+pub(crate) fn parse_controller_phrase(input: &str) -> OracleResult<'_, ControllerPhrase> {
+    terminated(
+        alt((
+            // CR 102.2 / CR 102.3: "you don't control" — every opponent.
+            value(
+                ControllerPhrase {
+                    subject: ControllerSubject::Direct(ControllerRef::Opponent),
+                    form: ControllerForm::Negated,
+                    tense: ControllerTense::Present,
+                },
+                tag("you don't control"),
+            ),
+            value(
+                ControllerPhrase {
+                    subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+                    form: ControllerForm::Passive,
+                    tense: ControllerTense::Present,
+                },
+                preceded(tag("controlled by "), tag("that player")),
+            ),
+            map(
+                (plural_controller_subject, controller_verb_plural),
+                |(subject, tense)| ControllerPhrase {
+                    subject,
+                    form: ControllerForm::Plural,
+                    tense,
+                },
+            ),
+            map(
+                (singular_controller_subject, controller_verb_singular),
+                |(subject, tense)| ControllerPhrase {
+                    subject,
+                    form: ControllerForm::Singular,
+                    tense,
+                },
+            ),
+        )),
+        not(satisfy(char::is_alphanumeric)),
+    )
+    .parse(input)
+}
+
+/// Parse a present-tense direct controller suffix for a type phrase: "you
+/// control", "an opponent controls", "you don't control", "target player
+/// controls", "defending player controls", ….
+///
+/// Anaphors are declined: they need the parse context to bind, which this
+/// context-free combinator does not have.
+pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+    map_opt(parse_controller_phrase, |phrase| match phrase {
+        ControllerPhrase {
+            subject: ControllerSubject::Direct(controller),
+            tense: ControllerTense::Present,
+            ..
+        } => admits_type_phrase_controller(&controller).then_some(controller),
+        ControllerPhrase {
+            subject: ControllerSubject::Direct(_),
+            tense: ControllerTense::Past,
+            ..
+        }
+        | ControllerPhrase {
+            subject: ControllerSubject::Anaphoric(_),
+            ..
+        } => None,
+    })
+    .parse(input)
+}
+
+/// The direct controllers a type phrase's present-tense controller suffix
+/// admits.
+pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool {
+    match controller {
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer => true,
+        // Whether a source's "choose a player" populates the chosen player is
+        // not established for the cards that would read it here.
+        ControllerRef::SourceChosenPlayer => false,
+        // The grammar never yields these as a direct subject.
+        ControllerRef::ScopedPlayer
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => false,
+    }
 }
 
 /// Parse a list of type filters joined by " or ".
@@ -1086,26 +1323,198 @@ mod tests {
         assert_eq!(rest2, "");
     }
 
-    // No-regression guard: the "defending player controls" controller scope is
-    // added only to the high-level `oracle_nom::filter::parse_zone_controller`
-    // path (the bug-card path), NOT to this nom combinator consumed by
-    // `parse_type_phrase`. Folding it in here would change the remainder handed
-    // to the five remainder-coupled `parse_type_phrase` callers. This test
-    // documents that deliberate divergence (it also does not match
-    // "you don't control") so a future edit to this combinator is a conscious
-    // choice, not an accident.
+    /// The type-phrase suffix is the direct, present-tense projection of
+    /// `parse_controller_phrase`: it admits the direct present phrases, declines
+    /// every anaphor (no context to bind it) and the chosen player, and stops at
+    /// a word boundary so a past-tense look-back is not half-consumed.
     #[test]
-    fn test_parse_controller_suffix_excludes_defending_player_and_negated() {
-        assert!(
-            parse_controller_suffix("defending player controls").is_err(),
-            "nom parse_controller_suffix must NOT match 'defending player controls' \
-             (handled by parse_zone_controller on the bug-card path)"
-        );
-        assert!(
-            parse_controller_suffix("you don't control").is_err(),
-            "nom parse_controller_suffix must NOT match 'you don't control' \
-             (pre-existing deliberate divergence from parse_zone_controller)"
-        );
+    fn parse_controller_suffix_is_the_direct_present_projection() {
+        // Positive guard: the projection is reached and keeps the remainder.
+        let (rest, c) = parse_controller_suffix("you control stuff").unwrap();
+        assert_eq!(c, ControllerRef::You);
+        assert_eq!(rest, " stuff");
+
+        // CR 608.2i: a past-tense look-back is not a present-tense "you control".
+        assert!(parse_controller_suffix("you controlled").is_err());
+
+        for (text, expected, expected_rest) in [
+            ("you don't control", ControllerRef::Opponent, ""),
+            (
+                "defending player controls",
+                ControllerRef::DefendingPlayer,
+                "",
+            ),
+            (
+                "defending player controls and ",
+                ControllerRef::DefendingPlayer,
+                " and ",
+            ),
+            (
+                "enchanted player controls",
+                ControllerRef::EnchantedPlayer,
+                "",
+            ),
+            (
+                "the active player controls",
+                ControllerRef::ActivePlayer,
+                "",
+            ),
+            ("your opponents control", ControllerRef::Opponent, ""),
+            ("target player controls", ControllerRef::TargetPlayer, ""),
+            (
+                "target opponent controls",
+                ControllerRef::TargetOpponent,
+                "",
+            ),
+        ] {
+            let (rest, c) = parse_controller_suffix(text)
+                .unwrap_or_else(|e| panic!("{text:?} should project: {e:?}"));
+            assert_eq!(c, expected, "{text:?}");
+            assert_eq!(rest, expected_rest, "{text:?}");
+        }
+
+        for declined in [
+            "that player controls",
+            "they control",
+            "its controller controls",
+            "the chosen player controls",
+        ] {
+            assert!(
+                parse_controller_suffix(declined).is_err(),
+                "{declined:?} must be declined by the type-phrase projection"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_phrase_table() {
+        use ControllerForm::{Negated, Passive, Plural, Singular};
+        use ControllerTense::{Past, Present};
+        let direct = |c: ControllerRef, form, tense| ControllerPhrase {
+            subject: ControllerSubject::Direct(c),
+            form,
+            tense,
+        };
+        let anaphor = |a: PlayerAnaphor, form, tense| ControllerPhrase {
+            subject: ControllerSubject::Anaphoric(a),
+            form,
+            tense,
+        };
+        let rows = [
+            ("you control", direct(ControllerRef::You, Plural, Present)),
+            (
+                "you don't control",
+                direct(ControllerRef::Opponent, Negated, Present),
+            ),
+            (
+                "your opponents control",
+                direct(ControllerRef::Opponent, Plural, Present),
+            ),
+            (
+                "an opponent controls",
+                direct(ControllerRef::Opponent, Singular, Present),
+            ),
+            (
+                "target player controls",
+                direct(ControllerRef::TargetPlayer, Singular, Present),
+            ),
+            (
+                "target opponent controls",
+                direct(ControllerRef::TargetOpponent, Singular, Present),
+            ),
+            (
+                "defending player controls",
+                direct(ControllerRef::DefendingPlayer, Singular, Present),
+            ),
+            (
+                "enchanted player controls",
+                direct(ControllerRef::EnchantedPlayer, Singular, Present),
+            ),
+            (
+                "the active player controls",
+                direct(ControllerRef::ActivePlayer, Singular, Present),
+            ),
+            (
+                "the chosen player controls",
+                direct(ControllerRef::SourceChosenPlayer, Singular, Present),
+            ),
+            ("you controlled", direct(ControllerRef::You, Plural, Past)),
+            (
+                "an opponent controlled",
+                direct(ControllerRef::Opponent, Singular, Past),
+            ),
+            (
+                "your opponents controlled",
+                direct(ControllerRef::Opponent, Plural, Past),
+            ),
+            (
+                "the active player controlled",
+                direct(ControllerRef::ActivePlayer, Singular, Past),
+            ),
+            (
+                "target player controlled",
+                direct(ControllerRef::TargetPlayer, Singular, Past),
+            ),
+            (
+                "that player controls",
+                anaphor(PlayerAnaphor::ThatPlayer, Singular, Present),
+            ),
+            (
+                "they control",
+                anaphor(PlayerAnaphor::They, Plural, Present),
+            ),
+            (
+                "that player controlled",
+                anaphor(PlayerAnaphor::ThatPlayer, Singular, Past),
+            ),
+            (
+                "they controlled",
+                anaphor(PlayerAnaphor::They, Plural, Past),
+            ),
+            (
+                "controlled by that player",
+                anaphor(PlayerAnaphor::ThatPlayer, Passive, Present),
+            ),
+            (
+                "its controller controls",
+                anaphor(PlayerAnaphor::ItsController, Singular, Present),
+            ),
+            (
+                "their controller controls",
+                anaphor(PlayerAnaphor::ItsController, Singular, Present),
+            ),
+        ];
+        for (text, expected) in rows {
+            let (rest, phrase) = parse_controller_phrase(text)
+                .unwrap_or_else(|e| panic!("{text:?} should parse: {e:?}"));
+            assert_eq!(phrase, expected, "{text:?}");
+            assert_eq!(rest, "", "{text:?}");
+        }
+
+        // Remainder is preserved after the word boundary.
+        let (rest, _) = parse_controller_phrase("you control stuff").unwrap();
+        assert_eq!(rest, " stuff");
+        let (rest, _) = parse_controller_phrase("that player controls,").unwrap();
+        assert_eq!(rest, ",");
+
+        // "you controlled" is never read as present tense.
+        let (_, phrase) = parse_controller_phrase("you controlled").unwrap();
+        assert_eq!(phrase.tense, Past);
+
+        for rejected in [
+            // Not a controller verb form.
+            "you controlling",
+            // Subject-verb agreement.
+            "they controls",
+            "that player control",
+            // Not a recognized subject.
+            "your opponent controls",
+        ] {
+            assert!(
+                parse_controller_phrase(rejected).is_err(),
+                "{rejected:?} must not parse"
+            );
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, satisfy, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value};
+use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -26,13 +26,14 @@ use crate::types::zones::Zone;
 use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, resolve_it_pronoun,
 };
-use super::oracle_ir::context::{ChosenColorQualifierScope, ParseContext};
+use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
+use super::oracle_nom::target::{ControllerSubject, ControllerTense, PlayerAnaphor};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, strip_where_x_is_clause, TextPair,
@@ -2241,7 +2242,7 @@ pub(super) fn parse_definite_parent_reference<'a>(
     let (rest, controller) = opt(preceded(
         space1,
         terminated(
-            nom_filter::parse_zone_controller,
+            nom_target::parse_controller_suffix,
             not(satisfy(|c: char| c.is_alphanumeric())),
         ),
     ))
@@ -3728,9 +3729,9 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // attachment "that …" clauses get first crack, and gated on
     // `controller.is_none()` so it only fills a controller not already set
     // (e.g. by an earlier "you control"/"an opponent controls" suffix). The
-    // controller phrase delegates to `parse_controller_suffix`, which routes the
+    // controller phrase delegates to `parse_controller_suffix`, which reads the
     // bare "your opponents control"/"an opponent controls" forms through
-    // `nom_filter::parse_zone_controller`. Composes with a preceding "you own"
+    // `nom_target::parse_controller_phrase`. Composes with a preceding "you own"
     // → `FilterProp::Owned{You}`, yielding the owned-but-opponent-controlled
     // population.
     if controller.is_none() {
@@ -6117,162 +6118,129 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
     (None, None, 0)
 }
 
-/// Parse a controller suffix like " you control", " an opponent controls", " your opponents control".
-/// Returns `(ControllerRef, bytes_consumed)` where consumed includes leading whitespace.
+/// Parse a controller suffix like " you control", " that player controls",
+/// " they controlled". Returns `(ControllerRef, bytes_consumed)` where consumed
+/// includes leading whitespace.
 ///
-/// Delegates to `nom_target::parse_controller_suffix` for the common patterns
-/// ("you control", "an opponent controls", "your opponents control"), then
-/// handles additional patterns not in the shared combinator.
+/// Reads the phrase through `nom_target::parse_controller_phrase`, binds it with
+/// `bind_controller_phrase`, and applies this reader's named anaphor seeds only
+/// when the binder finds no antecedent.
 fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(ControllerRef, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
+    let (rest, phrase) = verify(nom_target::parse_controller_phrase, legacy_reader_admits)
+        .parse(trimmed)
+        .ok()?;
+    let ctrl = bind_controller_phrase(&phrase, &ctx.player_antecedents())
+        .or_else(|| legacy_reader_anaphor_seed(&phrase))?;
+    Some((ctrl, leading_ws + trimmed.len() - rest.len()))
+}
 
-    // CR 608.2i + CR 608.2h: Past-tense controller predicates inside look-back
-    // aggregates over non-battlefield objects (Oversimplify class: "creatures
-    // they controlled that were exiled this way"). These MUST be tried before
-    // the present-tense delegate below because `tag("you control")` would
-    // match "you controlled" as a prefix and leave "led" stranded —
-    // longest-match-first ordering is load-bearing here. Adding a new
-    // past-tense form means extending the `alt()`, not the function shape.
-    if let Ok((rest, ctrl)) = alt((
-        value(
-            ControllerRef::You,
-            tag::<_, _, OracleError<'_>>("you controlled"),
-        ),
-        value(
-            ControllerRef::Opponent,
-            tag::<_, _, OracleError<'_>>("an opponent controlled"),
-        ),
-        value(
-            ControllerRef::Opponent,
-            tag::<_, _, OracleError<'_>>("your opponents controlled"),
-        ),
-        // CR 102.1 + CR 608.2i: past-tense "the active player controlled"
-        // look-back. Longest-match-first preserved (no prefix collision with
-        // the arms above).
-        value(
-            ControllerRef::ActivePlayer,
-            tag::<_, _, OracleError<'_>>("the active player controlled"),
-        ),
-    ))
-    .parse(trimmed)
-    {
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+/// The controller phrases this reader admits.
+fn legacy_reader_admits(phrase: &nom_target::ControllerPhrase) -> bool {
+    match (&phrase.subject, phrase.tense) {
+        (ControllerSubject::Direct(controller), ControllerTense::Present) => {
+            nom_target::admits_type_phrase_controller(controller)
+        }
+        // CR 608.2i: past-tense look-back aggregates over non-battlefield
+        // objects (Oversimplify class: "creatures they controlled that were
+        // exiled this way").
+        (ControllerSubject::Direct(controller), ControllerTense::Past) => {
+            admits_past_direct_controller(controller)
+        }
+        (
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer | PlayerAnaphor::They),
+            ControllerTense::Present | ControllerTense::Past,
+        ) => true,
+        // Present tense only; a past-tense look-back ("its controller
+        // controlled") is not admitted.
+        (ControllerSubject::Anaphoric(PlayerAnaphor::ItsController), ControllerTense::Present) => {
+            true
+        }
+        (ControllerSubject::Anaphoric(PlayerAnaphor::ItsController), ControllerTense::Past) => {
+            false
+        }
     }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they controlled").parse(trimmed) {
-        // CR 608.2i + CR 109.5: "They" inside an each-player iteration body
-        // binds to the iterating player. `ScopedPlayer` is the typed scope for
-        // that iteration; without an explicit `relative_player_scope`, fall
-        // back to `ScopedPlayer` (NOT `You`) — at runtime `ScopedPlayer`
-        // gracefully degrades to the source controller when no iteration is
-        // active (`scoped_player_or_controller`), giving the same behavior as
-        // `You` for solo casts while staying correct for per-player loops.
-        // Intentionally distinct from the present-tense "they control" arm
-        // below: past-tense forms appear only inside look-back aggregates,
-        // where each-player iteration is the dominant context.
-        let ctrl = ctx
-            .relative_player_scope
-            .clone()
-            .unwrap_or(ControllerRef::ScopedPlayer);
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
-    }
-    // CR 608.2i + CR 109.4: Past-tense sibling of the present-tense
-    // "target player controls" / "that player controls" arms below. Same
-    // anaphor semantics — the chosen target player or the
-    // relative-player-scope anaphor — applied to a look-back filter. Kept
-    // here rather than folded into the alt() above because both arms route
-    // through `ctx.relative_player_scope`, while the alt() arms emit fixed
-    // ControllerRef variants.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("target player controlled").parse(trimmed) {
-        return Some((
-            ControllerRef::TargetPlayer,
-            leading_ws + trimmed.len() - rest.len(),
-        ));
-    }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that player controlled").parse(trimmed) {
-        let ctrl = ctx
-            .relative_player_scope
-            .clone()
-            .unwrap_or(ControllerRef::ScopedPlayer);
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
-    }
+}
 
-    // CR 508.1 + CR 608.2c: "its controller controls" / "their controller
-    // controls" — the controller of the anaphoric object ("it"). In a trigger
-    // subject context the anaphor is the triggering source, whose controller is
-    // the triggering player (the active player who declared attackers per
-    // CR 508.1, or whichever player the triggering event identifies); otherwise
-    // ("it" refers to a chosen parent target) it is that target's controller.
-    // The subject discriminator is a verbatim mirror of `resolve_pronoun_target`
-    // / `resolve_it_pronoun`, so "its controller" binds to the SAME anaphor as a
-    // sibling "shares … with it" clause. Present-tense only; a past-tense
-    // look-back ("its controller controlled") would be a new alt() arm.
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, OracleError<'_>>("its controller controls"),
-        tag("their controller controls"),
-    ))
-    .parse(trimmed)
-    {
-        let ctrl = match &ctx.subject {
-            Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
-                ControllerRef::TriggeringPlayer
-            }
-            _ => ControllerRef::ParentTargetController,
-        };
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+/// The direct controllers this reader admits in a past-tense look-back.
+fn admits_past_direct_controller(controller: &ControllerRef) -> bool {
+    match controller {
+        // CR 102.1 + CR 608.2i: "the active player controlled".
+        // CR 608.2i + CR 109.4: "target player controlled".
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::ActivePlayer
+        | ControllerRef::TargetPlayer => true,
+        ControllerRef::ScopedPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => false,
     }
+}
 
-    // Delegate to nom_filter::parse_zone_controller which handles common patterns,
-    // then fall through to additional nom-based patterns.
-    if let Ok((rest, ctrl)) = nom_filter::parse_zone_controller(trimmed) {
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
-    }
+/// This reader's defaults for an anaphor the binder could not bind.
+fn legacy_reader_anaphor_seed(phrase: &nom_target::ControllerPhrase) -> Option<ControllerRef> {
+    interim_you_anaphor_seed(phrase).or_else(|| look_back_scoped_player_seed(phrase))
+}
 
-    // Additional patterns via nom tag().
-    // Note: "target player controls" is handled by `parse_zone_controller` above
-    // (single-authority for `ControllerRef::TargetPlayer`).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that player controls").parse(trimmed) {
-        // CR 109.4 + CR 115.1: "that player controls" is a relative reference
-        // back to a player introduced earlier in the ability (e.g. the attacked
-        // player in a "whenever you attack a player, ... that player controls"
-        // trigger). When the surrounding parser set `ctx.relative_player_scope`,
-        // emit `ControllerRef::TargetPlayer` so the runtime auto-surfaces a
-        // companion `TargetFilter::Player` slot via `effect_references_target_player`
-        // (game/ability_utils.rs). Without a scope, fall back to the legacy
-        // `ControllerRef::You` behaviour relied on by per-player iteration
-        // contexts (`resolve_quantity_scoped`). A player the chain itself declared is the
-        // nearer antecedent (CR 608.2c + CR 115.1a).
-        let ctrl = ctx
-            .declared_player_scope
-            .clone()
-            .or_else(|| ctx.relative_player_scope.clone())
-            .unwrap_or(ControllerRef::You);
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+/// Interim (charter D2′/D18): deleted by phase 6.
+///
+/// A present-tense "that player controls" / "they control" / "controlled by
+/// that player" with no antecedent in scope reads as `You`, the legacy
+/// default relied on by per-player iteration contexts
+/// (`resolve_quantity_scoped`) and "any opponent may" accepting-player
+/// resolution.
+fn interim_you_anaphor_seed(phrase: &nom_target::ControllerPhrase) -> Option<ControllerRef> {
+    match (&phrase.subject, phrase.tense) {
+        (
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer | PlayerAnaphor::They),
+            ControllerTense::Present,
+        ) => Some(ControllerRef::You),
+        (
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer | PlayerAnaphor::They),
+            ControllerTense::Past,
+        )
+        | (
+            ControllerSubject::Direct(_)
+            | ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+            ControllerTense::Present | ControllerTense::Past,
+        ) => None,
     }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("controlled by that player").parse(trimmed)
-    {
-        let ctrl = ctx
-            .declared_player_scope
-            .clone()
-            .or_else(|| ctx.relative_player_scope.clone())
-            .unwrap_or(ControllerRef::You);
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+}
+
+/// Permanent (D18). CR 608.2i + CR 109.5: "they controlled" / "that player
+/// controlled" inside an each-player iteration body binds to the iterating
+/// player. `ScopedPlayer` is the typed scope for that iteration; at runtime it
+/// gracefully degrades to the source controller when no iteration is active
+/// (`scoped_player_or_controller`), giving the same behavior as `You` for solo
+/// casts while staying correct for per-player loops. Past-tense forms appear
+/// only inside look-back aggregates, where each-player iteration is the
+/// dominant context.
+fn look_back_scoped_player_seed(phrase: &nom_target::ControllerPhrase) -> Option<ControllerRef> {
+    match (&phrase.subject, phrase.tense) {
+        (
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer | PlayerAnaphor::They),
+            ControllerTense::Past,
+        ) => Some(ControllerRef::ScopedPlayer),
+        (
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer | PlayerAnaphor::They),
+            ControllerTense::Present,
+        )
+        | (
+            ControllerSubject::Direct(_)
+            | ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+            ControllerTense::Present | ControllerTense::Past,
+        ) => None,
     }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they control").parse(trimmed) {
-        // "They control" is an anaphoric player reference when the surrounding
-        // parser supplies a relative player scope; otherwise keep the legacy
-        // ControllerRef::You fallback used by "any opponent may" accepting-
-        // player resolution. "They" names a chain-declared player only when the chain
-        // declared exactly one (CR 608.2c).
-        let ctrl = ctx
-            .declared_player_scope
-            .clone()
-            .filter(|_| ctx.prior_player_declaration)
-            .or_else(|| ctx.relative_player_scope.clone())
-            .unwrap_or(ControllerRef::You);
-        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
-    }
-    None
 }
 
 fn parse_token_suffix(text: &str) -> Option<usize> {
@@ -16354,9 +16322,9 @@ mod tests {
     // delegate, the end-to-end target verb path, and Or-target propagation.
 
     // High-level `parse_controller_suffix` (the runtime function the bug-card
-    // path relies on). The direct assertion guarantees the `parse_zone_controller`
-    // delegate is actually reached and not shadowed by an earlier past-tense or
-    // "that player controls" arm.
+    // path relies on). The direct assertion guarantees the phrase reaches
+    // `nom_target::parse_controller_suffix`'s direct-present set and is not
+    // shadowed by a past-tense or "that player controls" arm.
     #[test]
     fn parse_controller_suffix_defending_player() {
         let ctx = ParseContext::default();
@@ -16416,6 +16384,65 @@ mod tests {
         let (ctrl_self, _) =
             parse_controller_suffix("its controller controls", &selfref_ctx).unwrap();
         assert_eq!(ctrl_self, ControllerRef::ParentTargetController);
+    }
+
+    /// The legacy reader's anaphor defaults are named seeds keyed on tense, and
+    /// they apply only when the binder finds no antecedent. Its admitted past
+    /// set is unchanged, and the chosen player is excluded.
+    #[test]
+    fn legacy_reader_seeds_are_named_and_tense_keyed() {
+        let default_ctx = ParseContext::default();
+        let scoped_ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        for (text, unscoped) in [
+            (" that player controls", ControllerRef::You),
+            (" they controlled", ControllerRef::ScopedPlayer),
+            (" controlled by that player", ControllerRef::You),
+        ] {
+            assert_eq!(
+                parse_controller_suffix(text, &default_ctx),
+                Some((unscoped, text.len())),
+                "{text:?} without an antecedent"
+            );
+            // The binder wins over the seed.
+            assert_eq!(
+                parse_controller_suffix(text, &scoped_ctx),
+                Some((ControllerRef::TargetPlayer, text.len())),
+                "{text:?} with an antecedent"
+            );
+        }
+
+        for (text, expected) in [
+            (" you controlled", ControllerRef::You),
+            (" an opponent controlled", ControllerRef::Opponent),
+            (" your opponents controlled", ControllerRef::Opponent),
+            (" the active player controlled", ControllerRef::ActivePlayer),
+            (" target player controlled", ControllerRef::TargetPlayer),
+        ] {
+            assert_eq!(
+                parse_controller_suffix(text, &default_ctx),
+                Some((expected, text.len())),
+                "{text:?}"
+            );
+        }
+
+        for declined in [
+            " the chosen player controls",
+            " target opponent controlled",
+            " defending player controlled",
+            " enchanted player controlled",
+            " its controller controlled",
+            " their controller controlled",
+            " the chosen player controlled",
+        ] {
+            assert_eq!(
+                parse_controller_suffix(declined, &default_ctx),
+                None,
+                "{declined:?} must be declined"
+            );
+        }
     }
 
     // End-to-end target verb path: a representative effect phrase parses to a

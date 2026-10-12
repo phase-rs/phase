@@ -1956,6 +1956,7 @@ mod welcome_the_dead;
 mod owned_you_target_authority;
 
 mod base_pt_designation_filter;
+mod controller_anaphor_binds_through_context;
 mod declared_group_identity;
 mod declared_player_gate_arms;
 mod declared_player_object_controller;

@@ -25,7 +25,7 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
     inject_controller_you, parse_life_total_comparator, parse_spell_history_filter,
@@ -489,9 +489,7 @@ pub(crate) fn parse_quantity_ref_with_context(
             }
         }
 
-        // CR 608.2i: past-tense "you controlled" look-back. tag("you control") in
-        // parse_zone_controller has no word boundary and would prefix-match
-        // "you controlled", corrupting the remainder to "led …". Isolate the bare
+        // CR 608.2i: past-tense "you controlled" look-back. Isolate the bare
         // head via take_until(" you controlled ") BEFORE parse_type_phrase_folding, then
         // re-inject ControllerRef::You. Reuses the inject_controller_you building
         // block; same strip-controller-before-type-phrase ordering as
@@ -3299,7 +3297,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
 pub(crate) fn parse_for_each_clause_deferred(clause: &str) -> Option<QuantityRef> {
     parse_for_each_clause_with_they_controller(
         clause,
-        ControllerRef::ScopedPlayer,
+        PlayerAntecedents::for_each_iteration_unscoped(),
         &ParseContext::default(),
     )
 }
@@ -3317,10 +3315,11 @@ pub(crate) fn parse_for_each_clause_with_context(
     clause: &str,
     ctx: &ParseContext,
 ) -> Option<QuantityRef> {
-    let they_controller = ctx
-        .third_person_player_controller_ref()
-        .unwrap_or(ControllerRef::ScopedPlayer);
-    let mut qty = parse_for_each_clause_with_they_controller(clause, they_controller, ctx)?;
+    let mut qty = parse_for_each_clause_with_they_controller(
+        clause,
+        PlayerAntecedents::for_each_iteration(ctx),
+        ctx,
+    )?;
     // CR 608.2k: same settle as `parse_for_each_clause` — this context-carrying
     // entry has no antecedent for the pronoun either, so an unbound anaphor
     // names the ability's own object.
@@ -3330,7 +3329,7 @@ pub(crate) fn parse_for_each_clause_with_context(
 
 fn parse_for_each_clause_with_they_controller(
     clause: &str,
-    they_controller: ControllerRef,
+    antecedents: PlayerAntecedents,
     ctx: &ParseContext,
 ) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
@@ -3341,7 +3340,7 @@ fn parse_for_each_clause_with_they_controller(
 
     if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref_with_context(
         clause,
-        &for_each_anaphor_context(ctx, &they_controller),
+        &for_each_anaphor_context(ctx, &antecedents),
     ) {
         if rest.is_empty() {
             return Some(qty);
@@ -3722,7 +3721,7 @@ fn parse_for_each_clause_with_they_controller(
     // God and other caster-relative counts are unchanged. CR 608.2c: the controller
     // follows instructions in order, so a per-player-scoped count reads the
     // iterating player.
-    let mut tp_ctx = for_each_anaphor_context(ctx, &they_controller);
+    let mut tp_ctx = for_each_anaphor_context(ctx, &antecedents);
     let (filter, remainder) = parse_type_phrase_folding_with_ctx(clause, &mut tp_ctx);
     if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
         return Some(QuantityRef::ObjectCount { filter });
@@ -3731,9 +3730,9 @@ fn parse_for_each_clause_with_they_controller(
     None
 }
 
-fn for_each_anaphor_context(ctx: &ParseContext, they_controller: &ControllerRef) -> ParseContext {
+fn for_each_anaphor_context(ctx: &ParseContext, antecedents: &PlayerAntecedents) -> ParseContext {
     ParseContext {
-        relative_player_scope: Some(they_controller.clone()),
+        relative_player_scope: antecedents.third_person.clone(),
         subject: ctx.subject.clone(),
         card_name: ctx.card_name.clone(),
         host_self_reference: ctx.host_self_reference.clone(),
@@ -6902,6 +6901,24 @@ mod tests {
             panic!("Expected ObjectCount over Typed filter, got {qty:?}");
         };
         assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 109.5: "they" is never "you". The "for each" entry seeds "they" from
+    /// the relative player scope or the iterating player, never from `actor`.
+    #[test]
+    fn for_each_entry_does_not_read_actor() {
+        let ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("creature they control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::ScopedPlayer));
     }
 
     #[test]
