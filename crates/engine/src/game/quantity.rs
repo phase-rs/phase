@@ -654,9 +654,23 @@ fn visit_characteristic_leaf<'s>(
                 None => TargetFilter::ParentTarget,
                 Some(index) => TargetFilter::ParentTargetSlot { index: *index },
             };
-            for target in
-                crate::game::filter::referenced_targets_for_filter(&selector, filter_ctx.ability)
-            {
+            // CR 608.2c: the resolving ability's targets first; parked
+            // ability-targets (suspension-resume reads, where the ability is
+            // gone but its targets survive on the parked frame) second. Both
+            // go through the one positional authority — never a census.
+            let selected: Vec<&TargetRef> = match filter_ctx.ability {
+                Some(_) => crate::game::filter::referenced_targets_for_filter(
+                    &selector,
+                    filter_ctx.ability,
+                ),
+                None => match filter_ctx.ability_targets {
+                    Some(slice) => {
+                        crate::game::filter::referenced_target_slice_for_filter(&selector, slice)
+                    }
+                    None => vec![],
+                },
+            };
+            for target in selected {
                 let TargetRef::Object(oid) = target else {
                     continue;
                 };
@@ -3841,7 +3855,9 @@ pub fn resolve_quantity_with_ctx(
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
+        QuantityExpr::Ref { qty } => {
+            resolve_ref(state, qty, controller, ctx, &[], None, None, None)
+        }
         other => fold_compose(other, |inner| {
             resolve_quantity_with_ctx(state, inner, controller, ctx.clone())
         }),
@@ -4343,6 +4359,7 @@ pub fn resolve_quantity_with_targets(
             &ability.targets,
             ability.chosen_x,
             Some(ability),
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets(state, inner, ability)
@@ -4427,6 +4444,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
             &ability.targets,
             ability.chosen_x,
             Some(ability),
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_and_recipient(state, inner, ability, recipient_id)
@@ -4462,6 +4480,7 @@ pub(crate) fn resolve_quantity_with_targets_and_damage_source(
             &ability.targets,
             ability.chosen_x,
             Some(ability),
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_and_damage_source(state, inner, ability, damage_source)
@@ -4491,9 +4510,53 @@ pub fn resolve_quantity_with_targets_slice(
             targets,
             None,
             None,
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
+        }),
+    }
+}
+
+/// CR 608.2c: Resolve a QuantityExpr against parked ability-targets with no
+/// full `ResolvedAbility` in scope.
+///
+/// Suspension-resume paths (`roll_die::resume_after_ignore` and its callers)
+/// lose the `ResolvedAbility` across the suspension, but the parked frame
+/// carries its targets. Those targets feed ONLY the distinguished
+/// `ability_targets` channel (consumed by `TargetedObjects`); the ordinary
+/// `targets` slice stays empty so every other arm reads exactly as the
+/// ability-blind entry would. The combat-tax slice entry keeps its own
+/// meaning and is untouched.
+pub fn resolve_quantity_with_parked_targets(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    targets: &[TargetRef],
+) -> i32 {
+    match expr {
+        QuantityExpr::Fixed { value } => *value,
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            controller,
+            QuantityContext {
+                entering: None,
+                source: source_id,
+                trigger_source: None,
+                recipient: None,
+                scoped_player: None,
+                damage_source: None,
+                event_amount: None,
+            },
+            &[],
+            None,
+            None,
+            Some(targets),
+        ),
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_parked_targets(state, inner, controller, source_id, targets)
         }),
     }
 }
@@ -4581,6 +4644,7 @@ fn resolve_quantity_scoped_in(
                 ..QuantityContext::new(source_id)
             },
             targets,
+            None,
             None,
             None,
         ),
@@ -5142,6 +5206,7 @@ fn current_cast_occurrence_matches(
         .is_some_and(|record| record.spell_object_id == Some(ability.source_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
@@ -5150,6 +5215,11 @@ fn resolve_ref(
     targets: &[TargetRef],
     chosen_x: Option<u32>,
     ability: Option<&ResolvedAbility>,
+    // CR 608.2c: parked ability-targets for suspension-resume reads, where
+    // the ability is gone but its targets survive (the roll-die parked
+    // frame). `None` in every other context — in particular the combat-tax
+    // slice entry keeps its own meaning for `targets` and never feeds this.
+    ability_targets: Option<&[TargetRef]>,
 ) -> i32 {
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
@@ -5188,6 +5258,7 @@ fn resolve_ref(
         }
     };
     filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.ability_targets = ability_targets;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -21682,7 +21753,8 @@ mod tests {
                 ctx.clone(),
                 &[],
                 None,
-                Some(&ability)
+                Some(&ability),
+                None,
             ),
             2
         );
@@ -21719,6 +21791,7 @@ mod tests {
                     &[],
                     None,
                     Some(&ability),
+                    None,
                 ),
                 7,
                 "a union's inclusive leg keeps the current cast regardless of member order",
@@ -21726,7 +21799,16 @@ mod tests {
         }
         ability.cast_occurrence.as_mut().unwrap().turn_journal_index = 0;
         assert_eq!(
-            resolve_ref(&state, &qty, PlayerId(0), ctx, &[], None, Some(&ability)),
+            resolve_ref(
+                &state,
+                &qty,
+                PlayerId(0),
+                ctx,
+                &[],
+                None,
+                Some(&ability),
+                None,
+            ),
             7,
             "a divergent occurrence must not exclude either record"
         );
@@ -21773,6 +21855,7 @@ mod tests {
                 &[],
                 None,
                 Some(&ability),
+                None,
             ),
             6
         );

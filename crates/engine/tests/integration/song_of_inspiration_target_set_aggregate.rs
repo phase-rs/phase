@@ -10,14 +10,17 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AggregateFunction, CardTypeSetSource, CountScope, DieResultBranch,
-    DieRollModifier, Effect, ObjectProperty, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
+    AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, CountScope,
+    DieResultBranch, DieRollIgnoreRule, DieRollModifier, Effect, ObjectProperty, QuantityExpr,
+    QuantityRef, TargetFilter, TargetRef, ZoneRef,
 };
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::resolution::PendingDieRoll;
 use engine::types::zones::Zone;
 
 /// Song of Inspiration, verbatim Oracle text (the row separator is an en
@@ -492,5 +495,137 @@ fn song_of_inspiration_modifier_drops_a_target_lost_mid_stack() {
         3,
         "Song's d20 modifier must read the surviving target only (3): \
          post-modifier total {song_total}, control natural {natural}"
+    );
+}
+
+/// R1-MED REGRESSION (Step-6 R1 finding: a suspended-then-resumed roll modifier
+/// reads 0 instead of the parked target-set total). The CR 706.6 keep-choice
+/// resume has no ability in scope, so the parked frame's `targets` are the
+/// only carrier for a `TargetedObjects` aggregate: the resume must feed them
+/// to the modifier (CR 608.2c: the roll instruction still means what the
+/// target-selection clause chose; CR 706.2: modifiers add to the natural
+/// result to produce the final number).
+///
+/// Fixture: Oak (MV 3) + Elm (MV 4) parked as the frame's targets with Song's
+/// exact modifier shape — the `assert_target_set_mana_value_modifier` guard
+/// below ties the typed fixture to Song's real parse so it cannot drift —
+/// over naturals [3, 3], a tie under one Lowest rule that forces the keep
+/// prompt (the CR 706.6 suspension under test).
+///
+/// A chained reader on the resume path: the 10-row gains life equal to the roll,
+/// so it observes the post-modifier aggregate through the
+/// `QuantityRef::EventContextAmount` cascade — the consumer the
+/// `SelectDieRolls` save/restore discipline exists to serve.
+///
+/// REVERT-FAILING: without the parked-targets channel the resume resolves the
+/// aggregate against an empty population and reads 0, so the survivor's final
+/// number is 3, the 10-row never matches, and life stays 20.
+#[test]
+fn resumed_keep_choice_modifier_reads_the_parked_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let oak = scenario
+        .add_creature_to_graveyard(P0, "Oak", 2, 3)
+        .with_mana_cost(mv_cost(3))
+        .id();
+    let elm = scenario
+        .add_creature_to_graveyard(P0, "Elm", 2, 4)
+        .with_mana_cost(mv_cost(4))
+        .id();
+    let mut runner = scenario.build();
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::ManaValue,
+                    CardTypeSetSource::TargetedObjects { slot: None },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    assert_target_set_mana_value_modifier(&Some(modifier.clone()));
+
+    // CR 706.3a: each surviving die consults the results table independently.
+    // The 10-row matches only a post-modifier 10 (natural 3 + parked 7), so a
+    // dropped binding (3) misses it and the lifegain never fires.
+    let gain_branch = DieResultBranch {
+        min: 10,
+        max: 10,
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+        )),
+    };
+    runner.state_mut().push_die_roll_frame(PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(oak), TargetRef::Object(elm)],
+        sides: 20,
+        results: vec![3, 3],
+        ignore_rules: vec![DieRollIgnoreRule::Lowest],
+        results_table: vec![gain_branch],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+    });
+    runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
+        player: P0,
+        results: vec![3, 3],
+        ignorable_indices: vec![0, 1],
+        ignore_count: 1,
+    };
+
+    let result = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0],
+        })
+        .expect("submit the tie-break");
+
+    let rolls: Vec<u8> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls.len(),
+        1,
+        "reach-guard: exactly one of the two tied rolls survives the keep choice"
+    );
+    assert_eq!(
+        rolls,
+        vec![10],
+        "CR 706.2: the survivor's final number is its natural 3 plus the parked \
+         targets' total MV (3 + 4); a dropped binding reads 0 and emits 3"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        30,
+        "the 10-row's chained reader must observe the post-modifier aggregate on \
+         the resume path (20 + 10); a dropped binding misses the row and life stays 20"
+    );
+    assert_eq!(
+        runner.state().die_result_this_resolution,
+        None,
+        "post-completion restore discipline: the inner aggregate must not leak \
+         into the outer context once the instruction finishes"
     );
 }

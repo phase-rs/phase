@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
+    DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ResolvingTriggerContext, WaitingFor};
@@ -59,7 +59,9 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
 /// CR 608.2c: the modifier resolves in the resolving ability's context, so a
 /// later instruction can name what an earlier target-selection clause chose
 /// (the ability's chosen targets). Suspension-resume paths have no ability in
-/// scope and pass `None`, keeping the established ability-blind read there.
+/// scope and pass `None`, in which case the parked `targets` feed the
+/// distinguished parked-targets channel — same members the ability would
+/// have named, frozen at park time.
 fn apply_modifier(
     state: &mut GameState,
     natural: u8,
@@ -67,6 +69,7 @@ fn apply_modifier(
     controller: PlayerId,
     source_id: ObjectId,
     ability: Option<&ResolvedAbility>,
+    targets: &[TargetRef],
 ) -> u8 {
     let Some(m) = modifier else {
         return natural;
@@ -78,7 +81,9 @@ fn apply_modifier(
         Some(ability) => {
             crate::game::quantity::resolve_quantity_with_targets(state, value, ability)
         }
-        None => resolve_quantity(state, value, controller, source_id),
+        None => crate::game::quantity::resolve_quantity_with_parked_targets(
+            state, value, controller, source_id, targets,
+        ),
     };
     let combined = match m {
         DieRollModifier::Add { value } => (natural as i32).saturating_add(resolve(state, value)),
@@ -653,6 +658,7 @@ pub(crate) fn resume_after_ignore(
             controller,
             source_id,
             ability,
+            &targets,
         );
 
         // CR 706.2 + CR 706.6: emit the authoritative die-roll event ONCE, with
