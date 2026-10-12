@@ -5460,9 +5460,14 @@ pub(super) fn handle_resolution_choice(
             // permission lands nowhere. Gated on the continuation actually
             // referencing a tracked set so non-consuming continuations
             // (partition sub-abilities reading `ParentTarget`) are unaffected.
-            let continuation_consumes_tracked_set = state
-                .active_ability_continuation()
-                .is_some_and(|cont| effects::chain_references_tracked_set(&cont.chain));
+            // A head that resumes with this pick as its own object publishes its
+            // result itself (`resolution_choice_head_publishes_on_resume`), so
+            // the answer leaves the chain's set to it.
+            let continuation_consumes_tracked_set =
+                state.active_ability_continuation().is_some_and(|cont| {
+                    effects::chain_references_tracked_set(&cont.chain)
+                        && !effects::resolution_choice_head_publishes_on_resume(&cont.chain)
+                });
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
             }

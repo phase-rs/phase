@@ -8231,8 +8231,8 @@ pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
 /// seat's choice parks the clause's remaining seats and its unscoped tail as
 /// the active ability continuation; the paused seat's answer then resolves the
 /// seat's producer with no consumer in its own chain. Its following text is
-/// that parked continuation, so it publishes into the clause's set exactly as
-/// an unpaused seat does.
+/// that parked continuation, so it publishes into the clause's set as the
+/// continuation's generated legs do.
 ///
 /// Two stops keep a parked continuation from being read as following text
 /// when it is not:
@@ -8252,6 +8252,49 @@ fn resolution_next_needs_tracked_set(state: &GameState, producer: &ResolvedAbili
                     continuation.chain.source_id == producer.source_id
                         && chain_references_tracked_set(&continuation.chain)
                 }))
+}
+
+/// CR 608.2d + CR 115.10a: does `ability` choose, while it resolves, the
+/// object it puts counters on or whose counter kinds it reads, rather than
+/// carrying one declared with the ability?
+pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool {
+    let needs_resolution_object_choice = match &ability.effect {
+        // CR 115.10a: "no recipient chosen yet" means "no OBJECT target", not
+        // "no targets at all". A `PutCounter` reached as a `ChooseOneOf` branch
+        // carries the `TargetRef::Player` that `choose_one_of::resolve_branch`
+        // injects for the branch chooser, which is not a recipient. This is a
+        // strict superset of the former `targets.is_empty()` test (an empty
+        // target list contains no `TargetRef::Object` either), so every
+        // pre-existing `PutCounter` caller is unaffected.
+        Effect::PutCounter { .. } => !ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
+        Effect::ChooseCounterKind { target, .. } => {
+            !matches!(target, TargetFilter::SpecificObject { .. })
+        }
+        _ => false,
+    };
+    ability.target_choice_timing == TargetChoiceTiming::Resolution
+        && needs_resolution_object_choice
+        && ability.distribution.is_none()
+}
+
+/// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
+/// does the parked `head` publish its own result into the chain's tracked set?
+///
+/// A head that [`awaits_resolution_object_choice`] parks itself and resumes
+/// with the pick bound as its object. When its own chain reads the set, its
+/// postlude publishes the objects it affected through
+/// [`resolution_next_needs_tracked_set`], extending the chain's set as the
+/// single-candidate binding does. The answer must then publish nothing: a
+/// fresh set would drop what earlier instructions published, such as the
+/// earlier seats of a paused `player_scope` fan-out. This reads the
+/// frame-independent half of that predicate ([`next_sub_needs_tracked_set`]),
+/// because while the choice is pending the head's own parked frame is still
+/// the active continuation.
+pub(crate) fn resolution_choice_head_publishes_on_resume(head: &ResolvedAbility) -> bool {
+    awaits_resolution_object_choice(head) && next_sub_needs_tracked_set(head)
 }
 
 /// CR 700.2 + CR 608.2c: does ENTERING `node` cross into a different modal
@@ -15810,11 +15853,15 @@ fn resolve_chain_body(
         // per-clause table accumulate across continuation legs, which is
         // resume-machinery work well outside a draw-count change.
         //
-        // The clause's TRACKED SET does not share this gap. The postlude below
-        // publishes the seats that completed, each generated leg carries the
-        // unscoped tail and so extends the chain set, and the paused seat's own
-        // producer, resumed under the parked continuation, extends it through
-        // `resolution_next_needs_tracked_set` (CR 608.2c "this way").
+        // The clause's TRACKED SET does not share this gap when the tail is
+        // linearized after the generated legs. The postlude below publishes the
+        // seats that completed, each generated leg's chain ends in the unscoped
+        // tail and so extends the chain set, and the paused seat's own producer,
+        // resumed under the parked continuation, extends it through
+        // `resolution_next_needs_tracked_set` (CR 608.2c "this way"). A tail
+        // that needs linked exile is not linearized: it rides the frame's
+        // `player_scope_linked_exile` sidecar, which that predicate does not
+        // read, so on that branch neither the legs nor the paused seat publish.
         let mut applied_domain_end = matching_players.len();
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
@@ -16666,27 +16713,7 @@ fn resolve_chain_body(
     // `resolve_defined_or_targets`'s existing `resolved_object_ids_for_filter`
     // fallback in `counters.rs`; routing them through an interactive prompt
     // here would be wrong (and untested against that resolver's semantics).
-    let needs_resolution_object_choice = match &ability.effect {
-        // CR 115.10a: "no recipient chosen yet" means "no OBJECT target", not
-        // "no targets at all". A `PutCounter` reached as a `ChooseOneOf` branch
-        // carries the `TargetRef::Player` that `choose_one_of::resolve_branch`
-        // injects for the branch chooser, which is not a recipient. This is a
-        // strict superset of the former `targets.is_empty()` test (an empty
-        // target list contains no `TargetRef::Object` either), so every
-        // pre-existing `PutCounter` caller is unaffected.
-        Effect::PutCounter { .. } => !ability
-            .targets
-            .iter()
-            .any(|target| matches!(target, TargetRef::Object(_))),
-        Effect::ChooseCounterKind { target, .. } => {
-            !matches!(target, TargetFilter::SpecificObject { .. })
-        }
-        _ => false,
-    };
-    if ability.target_choice_timing == TargetChoiceTiming::Resolution
-        && needs_resolution_object_choice
-        && ability.distribution.is_none()
-    {
+    if awaits_resolution_object_choice(ability) {
         if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target, .. } =
             &ability.effect
         {
@@ -24781,6 +24808,68 @@ mod tests {
         assert!(!resolution_next_needs_tracked_set(
             &state,
             &producer(ObjectId(2))
+        ));
+    }
+
+    /// CR 608.2c + CR 608.2d: only a Resolution-timed recipient choice whose own
+    /// chain reads the set publishes on resume; a declared object, a head whose
+    /// chain reads nothing, or a head that is not a counter instruction leaves
+    /// the choice answer's publication in place.
+    #[test]
+    fn resolution_choice_head_publishes_on_resume_only_for_its_own_reader() {
+        let reader = || {
+            ResolvedAbility::new(
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    },
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let non_reader = || {
+            ResolvedAbility::new(
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let head = |effect: Effect, timing: TargetChoiceTiming| {
+            let mut head = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+            head.target_choice_timing = timing;
+            head
+        };
+        let put_counter = || Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        let resolution = TargetChoiceTiming::Resolution;
+
+        let recipient = head(put_counter(), resolution).sub_ability(reader());
+        assert!(awaits_resolution_object_choice(&recipient));
+        assert!(resolution_choice_head_publishes_on_resume(&recipient));
+        // Its own chain reads nothing.
+        assert!(!resolution_choice_head_publishes_on_resume(
+            &head(put_counter(), resolution).sub_ability(non_reader())
+        ));
+        // The object was declared with the ability, not chosen while resolving.
+        assert!(!resolution_choice_head_publishes_on_resume(
+            &head(put_counter(), TargetChoiceTiming::Stack).sub_ability(reader())
+        ));
+        let mut bound = head(put_counter(), resolution).sub_ability(reader());
+        bound.targets = vec![TargetRef::Object(ObjectId(5))];
+        assert!(!resolution_choice_head_publishes_on_resume(&bound));
+        // Not a counter instruction: the choice is the producer of the set.
+        assert!(!resolution_choice_head_publishes_on_resume(
+            &head(non_reader().effect, resolution).sub_ability(reader())
         ));
     }
 
