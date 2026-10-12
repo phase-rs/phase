@@ -882,8 +882,10 @@ impl ParseContext {
             .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
     }
 
-    /// Resolve third-person player pronouns ("they", "their") against the
-    /// nearest parser context that introduced a player referent.
+    /// The nearest player referent a third-person pronoun could name, counting
+    /// the "you may" / "any opponent may" `actor`. Read only by detectors;
+    /// controller phrases bind through `bind_controller_phrase`, which does not
+    /// read `actor`.
     pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {
         self.relative_player_scope
             .clone()

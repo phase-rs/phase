@@ -388,7 +388,9 @@ fn plural_controller_subject(input: &str) -> OracleResult<'_, ControllerSubject>
 pub(crate) fn parse_controller_phrase(input: &str) -> OracleResult<'_, ControllerPhrase> {
     terminated(
         alt((
-            // CR 102.2 / CR 102.3: "you don't control" — every opponent.
+            // "you don't control": every player other than you. `Opponent` is
+            // evaluated as "not the source's controller" (game/filter.rs), which
+            // covers it outside team play.
             value(
                 ControllerPhrase {
                     subject: ControllerSubject::Direct(ControllerRef::Opponent),

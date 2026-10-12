@@ -6192,7 +6192,9 @@ fn legacy_reader_anaphor_seed(phrase: &nom_target::ControllerPhrase) -> Option<C
     interim_you_anaphor_seed(phrase).or_else(|| look_back_scoped_player_seed(phrase))
 }
 
-/// Interim (charter D2′/D18): deleted by phase 6.
+/// Interim default, scheduled for deletion once antecedent writers cover the
+/// constructs that reach this reader; after that an unbound anaphor here fails
+/// closed instead of reading as `You`.
 ///
 /// A present-tense "that player controls" / "they control" / "controlled by
 /// that player" with no antecedent in scope reads as `You`, the legacy
@@ -6217,7 +6219,7 @@ fn interim_you_anaphor_seed(phrase: &nom_target::ControllerPhrase) -> Option<Con
     }
 }
 
-/// Permanent (D18). CR 608.2i + CR 109.5: "they controlled" / "that player
+/// Permanent seed. CR 608.2i + CR 109.5: "they controlled" / "that player
 /// controlled" inside an each-player iteration body binds to the iterating
 /// player. `ScopedPlayer` is the typed scope for that iteration; at runtime it
 /// gracefully degrades to the source controller when no iteration is active
