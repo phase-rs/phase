@@ -22371,8 +22371,10 @@ impl Effect {
                 target: TargetFilter::ParentTarget,
                 ..
             } => true,
-            // Exhaustive on purpose: a new variant that copies a stack object
-            // must decide here, or a binder would pin its referent to the host.
+            // Wildcard-free on purpose: a new variant whose `ParentTarget` names a
+            // copied stack object must answer here, or the binders would pin its
+            // referent to the event's object or the attached host. Do not add an
+            // `_ =>` arm.
             Effect::StartYourEngines { .. }
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
