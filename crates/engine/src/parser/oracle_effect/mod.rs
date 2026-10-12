@@ -27685,10 +27685,11 @@ fn seat_order_is_unobservable(body: &AbilityDefinition) -> bool {
             | Effect::RevealTop { .. } => true,
             // CR 701.9b: a random discard asks no choice.
             Effect::Discard { selection, .. } => selection.is_random(),
-            // CR 101.4: the choice is the whole action, so recording it seat by
-            // seat is the APNAP choice sequence; a secret number stays private
-            // until revealed.
-            Effect::Choose { .. } => true,
+            // CR 101.4: as the body's last link the choice is the seat's final
+            // action, so recording it seat by seat is the APNAP choice sequence;
+            // a secret number stays private until revealed. A later link would
+            // act on the choice before the next seat chooses.
+            Effect::Choose { .. } => link.sub_ability.is_none(),
             // CR 101.4 + CR 701.21a: a lone scoped sacrifice takes the driver's
             // coordinator, which announces every seat's choice in APNAP order
             // before any permanent is sacrificed.

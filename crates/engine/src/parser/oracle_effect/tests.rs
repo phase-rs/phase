@@ -81406,35 +81406,58 @@ fn targeted_coordinated_member_declines_after_a_player_capable_slot() {
 }
 
 /// D8 (iii): a body that already carries its own `player_scope` is refused by the
-/// channel and keeps the halves path's verdict, which refuses it too.
+/// channel, so the set never overwrites the body's own iteration scope.
+///
+/// Reach guard: every body link is a `Draw`, which the (iv-b) seat-order
+/// allowlist admits, so the (iii) refusal is the only guard between this body
+/// and the stamp. Without it the clause would take a `TargetOnly` head and every
+/// body link would carry `AnyOf[Controller, TargetPlayer]`.
 #[test]
 fn coordinated_channel_refuses_a_pre_scoped_body() {
-    let body = "draw a card, then each player discards a card";
-    // Reach guard: the body parses with a scope of its own, so the refusal arm
-    // (not the mapper or the grammar) is what keeps the set off it.
+    let body = "draw a card, then each player draws a card";
+    let bare = parse_effect_chain(body, AbilityKind::Spell);
+    let bare_links = coordinated_chain_links(&bare);
     assert!(
-        coordinated_chain_links(&parse_effect_chain(body, AbilityKind::Spell))
+        bare_links
             .iter()
-            .any(|link| link.player_scope.is_some()),
-        "the fixture body must carry its own player_scope"
+            .all(|link| matches!(&*link.effect, Effect::Draw { .. })),
+        "reach: every body link is an allowlisted Draw: {bare:#?}"
     );
+    let own_scope = bare_links
+        .iter()
+        .find_map(|link| link.player_scope.clone())
+        .unwrap_or_else(|| panic!("reach: the body carries its own player_scope: {bare:#?}"));
+    assert!(
+        !matches!(own_scope, PlayerFilter::AnyOf { .. }),
+        "reach: the body's own scope is not a coordinated set: {own_scope:?}"
+    );
+
     let mut ctx = ParseContext::default();
     let clause =
-        try_parse_compound_subject_each(&format!("You and target opponent each {body}"), &mut ctx);
-    if let Some(clause) = clause {
-        assert!(
-            !matches!(clause.effect, Effect::TargetOnly { .. }),
-            "the channel's head must not be emitted: {:#?}",
-            clause.effect
-        );
-        assert!(
-            std::iter::successors(clause.sub_ability.as_deref(), |link| link
-                .sub_ability
-                .as_deref())
+        try_parse_compound_subject_each(&format!("You and target opponent each {body}"), &mut ctx)
+            .expect("the halves path keeps a Draw body");
+    assert!(
+        !matches!(clause.effect, Effect::TargetOnly { .. }),
+        "the channel's head must not be emitted: {:#?}",
+        clause.effect
+    );
+    let links: Vec<&AbilityDefinition> =
+        std::iter::successors(clause.sub_ability.as_deref(), |link| {
+            link.sub_ability.as_deref()
+        })
+        .collect();
+    assert!(
+        links
+            .iter()
             .all(|link| !matches!(link.player_scope, Some(PlayerFilter::AnyOf { .. }))),
-            "no link carries the coordinated set: {clause:#?}"
-        );
-    }
+        "no link carries the coordinated set: {clause:#?}"
+    );
+    assert!(
+        links
+            .iter()
+            .any(|link| link.player_scope.as_ref() == Some(&own_scope)),
+        "the body's own scope survives: {clause:#?}"
+    );
     assert_eq!(
         ctx.pending_player_scope, None,
         "the refusal writes no carrier"
@@ -81548,6 +81571,27 @@ fn coordinated_body_with_an_observable_seat_order_fails_closed() {
     }
     let text = "you and that player each sacrifice a creature, then draw a card";
     assert_coordinated_decline(&chosen(text), text);
+
+    // CR 101.4 + CR 608.2e: a secret choice followed by a public act on it. The
+    // first seat's life loss would reveal its number before the next seat
+    // chooses. Reach guard: the bare body is `Choose` → `LoseLife`, both parsed,
+    // so only the `Choose` arm's last-link rule declines it.
+    let body = parse_effect_chain(
+        "secretly choose a number, then lose that much life",
+        AbilityKind::Spell,
+    );
+    let body_links = coordinated_chain_links(&body);
+    assert!(
+        matches!(
+            body_links.as_slice(),
+            [choose, lose]
+                if matches!(&*choose.effect, Effect::Choose { .. })
+                    && matches!(&*lose.effect, Effect::LoseLife { .. })
+        ),
+        "reach: the body is Choose then LoseLife: {body:#?}"
+    );
+    let text = "you and target opponent each secretly choose a number, then lose that much life";
+    assert_coordinated_decline(&parse_effect_chain(text, AbilityKind::Spell), text);
 
     for (def, member) in [
         (
