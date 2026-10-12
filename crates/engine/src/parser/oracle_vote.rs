@@ -1813,9 +1813,33 @@ mod tests {
         }
     }
 
+    /// The coordinated set `AnyOf[Controller, TargetPlayer]` behind a
+    /// `TargetOnly { opponent }` head — the declared player target.
+    fn assert_targeted_coordinated_body(parsed: &AbilityDefinition) -> &AbilityDefinition {
+        assert_eq!(
+            *parsed.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
+            },
+            "the head declares the targeted opponent"
+        );
+        let body = parsed.sub_ability.as_deref().expect("the coordinated body");
+        assert_eq!(
+            body.player_scope,
+            Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+            }),
+            "exactly the caster and the targeted opponent act"
+        );
+        assert!(body.sub_ability.is_none(), "one body link, not two halves");
+        body
+    }
+
     /// "you and target opponent each create a Treasure token" — the chosen
-    /// opponent must be surfaced as a real player target, not collapsed into a
-    /// single token effect with `owner: Any`.
+    /// opponent is a real player target (the `TargetOnly` head), and one token
+    /// effect is created per seat, owned by the seat (CR 111.2).
     #[test]
     fn parser_distributes_you_and_target_opponent_each_create_token() {
         let parsed = parse_effect_chain_with_context(
@@ -1823,29 +1847,16 @@ mod tests {
             AbilityKind::Spell,
             &mut ParseContext::default(),
         );
-        match *parsed.effect {
-            Effect::Token { ref owner, .. } => {
-                assert_eq!(*owner, TargetFilter::OriginalController);
-            }
-            other => panic!("expected Token for first half, got {:?}", other),
-        }
-        let sub = parsed
-            .sub_ability
-            .expect("expected second-half sub_ability");
-        match *sub.effect {
-            Effect::Token { ref owner, .. } => {
-                assert_eq!(
-                    *owner,
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-                );
-            }
-            other => panic!("expected Token for second half, got {:?}", other),
+        let body = assert_targeted_coordinated_body(&parsed);
+        match &*body.effect {
+            Effect::Token { owner, .. } => assert_eq!(*owner, TargetFilter::ScopedPlayer),
+            other => panic!("expected the body to create a Token, got {other:?}"),
         }
     }
 
     /// Fall of the First Civilization chapter I: "you and target opponent each
-    /// draw two cards" — both halves distribute; the opponent half keeps a real
-    /// opponent-scoped target slot (not a context ref).
+    /// draw two cards" — the opponent keeps a real opponent-scoped target slot
+    /// (the `TargetOnly` head), and each seat draws two for itself.
     #[test]
     fn parser_distributes_you_and_target_opponent_each_draw_two() {
         let parsed = parse_effect_chain_with_context(
@@ -1853,36 +1864,14 @@ mod tests {
             AbilityKind::Spell,
             &mut ParseContext::default(),
         );
-        match *parsed.effect {
+        let body = assert_targeted_coordinated_body(&parsed);
+        assert_eq!(
+            *body.effect,
             Effect::Draw {
-                ref target, count, ..
-            } => {
-                assert_eq!(*target, TargetFilter::OriginalController);
-                assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+                target: TargetFilter::ScopedPlayer,
+                count: QuantityExpr::Fixed { value: 2 },
             }
-            other => panic!(
-                "expected Draw {{ target: OriginalController, count: 2 }} for first half, got {:?}",
-                other
-            ),
-        }
-        let sub = parsed
-            .sub_ability
-            .expect("expected second-half sub_ability");
-        match *sub.effect {
-            Effect::Draw {
-                ref target, count, ..
-            } => {
-                assert_eq!(
-                    *target,
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-                );
-                assert_eq!(count, QuantityExpr::Fixed { value: 2 });
-            }
-            other => panic!(
-                "expected Draw {{ target: Player, count: 2 }} for second half, got {:?}",
-                other
-            ),
-        }
+        );
     }
 
     /// Issue #3667 — the opponent half must surface a real player target slot.

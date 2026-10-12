@@ -2939,10 +2939,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 ///
 /// Recognized second-subject axes (mirror `try_parse_compound_subject_each`):
 /// - the static player/object axes owned by
-///   `parse_static_compound_second_subject` ("that player each", "target
-///   opponent each", "target player each", "defending player each", "that
-///   creature each"), shared with the effect parser so the two sites cannot
-///   drift.
+///   `parse_static_compound_second_subject` ("that player each", "that
+///   opponent each", "target opponent each", "the attacking player each",
+///   "target player each", "defending player each", "that creature each"),
+///   shared with the effect parser so the two sites cannot drift.
 /// - "target &lt;filter&gt;'s controller/owner each" — the possessive-actor form
 ///   (CR 109.4; Life at Stake's "You and target creature's controller each
 ///   secretly choose a number 0 or greater"), delegated to the shared axis

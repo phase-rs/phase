@@ -10333,9 +10333,20 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     match scope {
         PlayerFilter::All => ("All", Handled),
         PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
-        // CR 102.1 + CR 608.2c: the player_scope driver resolves every member
-        // through the exhaustive ability-aware `speed_effects::players_for_filter`.
-        PlayerFilter::AnyOf { .. } => ("AnyOf", Handled),
+        // CR 102.1 + CR 608.2c: the player_scope driver resolves a union member by
+        // member through `speed_effects::players_for_filter`, so the union is
+        // supported only when every member is.
+        PlayerFilter::AnyOf { filters } => (
+            "AnyOf",
+            if filters
+                .iter()
+                .all(|member| any_of_member_support(member) == Handled)
+            {
+                Handled
+            } else {
+                Unhandled
+            },
+        ),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
@@ -10376,6 +10387,17 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
         // via both `resolve_player_count` and `matches_player_scope`.
         PlayerFilter::TrackedSetPossessor { .. } => ("TrackedSetPossessor", Handled),
+    }
+}
+
+/// The support of one `PlayerFilter::AnyOf` member: its top-level verdict, except
+/// `Controller`, which `speed_effects::players_for_filter` (the union's resolver)
+/// names directly. Deferring to `player_filter_feature` keeps the member rule
+/// exhaustive through that match, and a nested `AnyOf` folds recursively.
+fn any_of_member_support(member: &PlayerFilter) -> FeatureSupport {
+    match member {
+        PlayerFilter::Controller => FeatureSupport::Handled,
+        other => player_filter_feature(other).1,
     }
 }
 
@@ -14033,6 +14055,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// CR 102.1 + CR 608.2c: a `player_scope` union is supported only when every
+    /// member is. `Controller` is a supported member (the union's resolver names
+    /// it directly) while staying `Unhandled` at top level, and a nested union
+    /// folds through the same rule.
+    ///
+    /// Discriminating: reverting the fold makes the `ZoneChangedThisWay` unions
+    /// read `Handled`; dropping the `Controller` member arm (a naive recursion)
+    /// makes every producer shape read `Unhandled`.
+    #[test]
+    fn any_of_player_scope_folds_its_members() {
+        use super::{player_filter_feature, FeatureSupport};
+        use crate::types::ability::PlayerFilter;
+
+        let with_controller = |member: PlayerFilter| PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, member],
+        };
+        for member in [
+            PlayerFilter::TargetPlayer,
+            PlayerFilter::TriggeringPlayer,
+            PlayerFilter::DefendingPlayer,
+            PlayerFilter::ChosenPlayer { index: 0 },
+            PlayerFilter::ChosenPlayer { index: 1 },
+            PlayerFilter::ParentObjectTargetController,
+        ] {
+            assert_eq!(
+                player_filter_feature(&with_controller(member.clone())),
+                ("AnyOf", FeatureSupport::Handled),
+                "AnyOf[Controller, {member:?}] is a supported producer shape"
+            );
+        }
+        assert_eq!(
+            player_filter_feature(&with_controller(PlayerFilter::ZoneChangedThisWay)),
+            ("AnyOf", FeatureSupport::Unhandled),
+            "an unsupported member makes the union unsupported"
+        );
+        assert_eq!(
+            player_filter_feature(&with_controller(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::TargetPlayer, PlayerFilter::ZoneChangedThisWay],
+            })),
+            ("AnyOf", FeatureSupport::Unhandled),
+            "a nested union folds its own members"
+        );
+        assert_eq!(
+            player_filter_feature(&PlayerFilter::Controller),
+            ("Controller", FeatureSupport::Unhandled),
+            "the Controller override is member-only"
+        );
     }
 
     /// CR 601.2f: a cost modifier's `dynamic_count` is parse-significant but

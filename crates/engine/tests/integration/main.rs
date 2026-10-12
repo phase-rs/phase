@@ -192,6 +192,7 @@ mod consume_spirit_legal_targets;
 mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;
 mod converge_colors_spent_trigger_lifetime;
+mod coordinated_player_subjects;
 mod copied_ability_transform_generation;
 mod copied_cost_choices_phase1;
 mod copy_announcement_walk;

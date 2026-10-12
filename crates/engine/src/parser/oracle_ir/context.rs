@@ -431,14 +431,22 @@ pub(crate) struct ParseContext {
     /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
     pub relative_player_scope: Option<ControllerRef>,
     /// CR 608.2c + CR 109.4: Transient per-chunk `player_scope` lifted from a
-    /// subject-predicate whose EFFECT carries no player field to stamp the
-    /// subject onto (the fieldless `Effect::Investigate` — Declaration in Stone's
-    /// "That player investigates"). `inject_subject_target` drops such a subject
-    /// silently, so `lower_subject_predicate_ast` records it here instead; the
-    /// effect-chain loop folds it into the chunk's `player_scope` local (→
+    /// subject the clause cannot carry. Two writers:
+    /// - `lower_subject_predicate_ast`, for a subject-predicate whose EFFECT
+    ///   carries no player field (the fieldless `Effect::Investigate` —
+    ///   Declaration in Stone's "That player investigates"), which
+    ///   `inject_subject_target` would otherwise drop silently;
+    /// - `bind_coordinated_player_set`, for the root of a coordinated body with
+    ///   no `TargetOnly` head ("you and that player each …"), whose
+    ///   `ParsedEffectClause` has no `player_scope` field.
+    ///
+    /// The effect-chain loop folds it into the chunk's `player_scope` local (→
     /// `ClauseIr.player_scope` → `AbilityDefinition.player_scope`) so resolution
-    /// fans the effect out to the anchored player rather than the caster. Set and
-    /// consumed within a single chunk parse; never serialized.
+    /// fans the effect out to the scoped players rather than the caster. The
+    /// chunk loop can parse a chunk's clause more than once with the live ctx,
+    /// so a writer that finds an equal value treats it as its own earlier
+    /// parse; the coordinated writer declines to the unbound gap on a different
+    /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …

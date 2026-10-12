@@ -1226,18 +1226,16 @@ fn two_target_fight_pump_keeps_both_slots_and_buffs_slot_zero() {
 /// creature's controller each secretly choose a number 0 or greater."
 ///
 /// The compound subject's second conjunct names its player THROUGH an announced
-/// object target, so the parse must produce three things, not one:
+/// object target, so the parse must produce:
 ///   1. a `TargetOnly { creature }` head declaring the CR 115.1 target slot the
 ///      possessive reference (and the later "exile that creature" anaphor) read;
-///   2. a `Choose { NumberRange }` whose chooser is the printed controller
-///      ("you", CR 109.5 — the unscoped resolver default);
-///   3. a SECOND `Choose { NumberRange }` bound to a DISTINCT chooser via
-///      `player_scope: ParentObjectTargetController` (CR 109.4).
+///   2. ONE `Choose { NumberRange }` scoped to the coordinated set
+///      `AnyOf[Controller, ParentObjectTargetController]`: the printed
+///      controller ("you", CR 109.5) and the targeted creature's controller
+///      (CR 109.4) each choose, as distinct seats of one fan-out.
 ///
-/// The two choosers being distinct is the whole mechanic — one `Choose`, or two
-/// that both prompt the caster, is the bug. Predecessor of this test pinned a
-/// single `Choose` head while the controller was an unparsed chooser; that gap
-/// is now closed.
+/// Two distinct choosers is the whole mechanic — an unscoped `Choose`, or a
+/// set naming only the caster, is the bug.
 #[test]
 fn life_at_stake_binds_both_number_choosers_to_distinct_players() {
     use crate::types::ability::ChoiceType;
@@ -1276,9 +1274,8 @@ fn life_at_stake_binds_both_number_choosers_to_distinct_players() {
     let mut links = Vec::new();
     collect(ability, &mut links);
 
-    // Both halves of the compound subject choose a number, and their choosers
-    // are DIFFERENT players: the printed controller (no scope) and the targeted
-    // creature's controller (CR 109.4).
+    // One choose-a-number link whose fan-out names both DIFFERENT players: the
+    // printed controller and the targeted creature's controller (CR 109.4).
     let choosers: Vec<Option<PlayerFilter>> = links
         .iter()
         .filter(|link| {
@@ -1294,8 +1291,13 @@ fn life_at_stake_binds_both_number_choosers_to_distinct_players() {
         .collect();
     assert_eq!(
         choosers,
-        vec![None, Some(PlayerFilter::ParentObjectTargetController)],
-        "both conjuncts must choose a number, bound to distinct choosers"
+        vec![Some(PlayerFilter::AnyOf {
+            filters: vec![
+                PlayerFilter::Controller,
+                PlayerFilter::ParentObjectTargetController
+            ],
+        })],
+        "both conjuncts must choose a number through one fan-out over distinct choosers"
     );
 
     let effects: Vec<&Effect> = links.iter().map(|link| &*link.effect).collect();
@@ -1323,9 +1325,10 @@ fn life_at_stake_binds_both_number_choosers_to_distinct_players() {
 
 /// CR 109.4 + CR 115.1 + CR 608.2c: the possessive-actor second-subject axis is
 /// a CLASS, not Life at Stake's card. The same "you and target &lt;filter&gt;'s
-/// controller each &lt;body&gt;" shape must distribute a body that DOES carry a
-/// recipient slot, binding it through the effect's own field rather than
-/// `player_scope` — and the announced target must be declared exactly once.
+/// controller each &lt;body&gt;" shape binds a body that DOES carry a recipient
+/// slot through the coordinated set: the recipient becomes the seat
+/// (`ScopedPlayer`) and the one body link fans out over both players — and the
+/// announced target is declared exactly once, by the head.
 #[test]
 fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
     let ability = parse_effect_chain(
@@ -1340,31 +1343,29 @@ fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
         );
     };
     assert_eq!(*target, TargetFilter::Typed(TypedFilter::creature()));
+    assert_eq!(ability.player_scope, None, "the head stays unscoped");
 
-    let you = ability
+    let body = ability
         .sub_ability
         .as_deref()
-        .expect("expected the caster half");
-    match &*you.effect {
-        Effect::Draw { target, .. } => assert_eq!(*target, TargetFilter::OriginalController),
-        other => panic!("expected the caster half to Draw, got {other:?}"),
+        .expect("expected the coordinated body");
+    match &*body.effect {
+        Effect::Draw { target, .. } => assert_eq!(*target, TargetFilter::ScopedPlayer),
+        other => panic!("expected the body to Draw, got {other:?}"),
     }
     assert_eq!(
-        you.player_scope, None,
-        "a recipient-bearing body binds \"you\" on the effect, not as a fan-out"
+        body.player_scope,
+        Some(PlayerFilter::AnyOf {
+            filters: vec![
+                PlayerFilter::Controller,
+                PlayerFilter::ParentObjectTargetController
+            ],
+        }),
+        "the body fans out over the caster and the targeted creature's controller"
     );
-
-    let them = you
-        .sub_ability
-        .as_deref()
-        .expect("expected the possessive half");
-    match &*them.effect {
-        Effect::Draw { target, .. } => assert_eq!(*target, TargetFilter::ParentTargetController),
-        other => panic!("expected the possessive half to Draw, got {other:?}"),
-    }
-    assert_eq!(
-        them.player_scope, None,
-        "a recipient-bearing body must not ALSO fan out — that would double-apply"
+    assert!(
+        body.sub_ability.is_none(),
+        "one body link, not two halves — a second Draw would double-apply"
     );
 }
 
@@ -1373,8 +1374,9 @@ fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
 /// creature" has no `TargetFilter` recipient slot on `Effect::Sacrifice` either,
 /// and its second conjunct is the opponent a preceding "Choose an opponent."
 /// picked — a choice announced while applying the effect, not an object whose
-/// controller is being read — so the second half binds
-/// `player_scope: ChosenPlayer`.
+/// controller is being read — so the clause binds ONE `Sacrifice` scoped to
+/// `AnyOf[Controller, ChosenPlayer]`. A lone scoped sacrifice is the shape the
+/// fan-out driver announces every seat's choice for before acting (CR 101.4).
 #[test]
 fn recipient_less_body_binds_a_chosen_player_conjunct_by_scope() {
     let parsed = parse_oracle_text(
@@ -1386,42 +1388,40 @@ fn recipient_less_body_binds_a_chosen_player_conjunct_by_scope() {
     );
     let ability = parsed.abilities.first().expect("expected a spell ability");
 
-    let you = ability
+    let sacrifice = ability
         .sub_ability
         .as_deref()
-        .expect("expected the caster half after the Choose");
+        .expect("expected the coordinated sacrifice after the Choose");
     assert!(
-        matches!(&*you.effect, Effect::Sacrifice { .. }),
-        "the caster half must sacrifice, got {:#?}",
-        you.effect
-    );
-    assert_eq!(you.player_scope, None, "\"you\" is the unscoped default");
-
-    let them = you
-        .sub_ability
-        .as_deref()
-        .expect("expected the chosen-player half");
-    assert!(
-        matches!(&*them.effect, Effect::Sacrifice { .. }),
-        "the chosen-player half must sacrifice, got {:#?}",
-        them.effect
+        matches!(&*sacrifice.effect, Effect::Sacrifice { .. }),
+        "the coordinated body must sacrifice, got {:#?}",
+        sacrifice.effect
     );
     assert_eq!(
-        them.player_scope,
-        Some(PlayerFilter::ChosenPlayer { index: 0 }),
-        "the chosen opponent must be the acting player of the second half"
+        sacrifice.player_scope,
+        Some(PlayerFilter::AnyOf {
+            filters: vec![
+                PlayerFilter::Controller,
+                PlayerFilter::ChosenPlayer { index: 0 }
+            ],
+        }),
+        "the caster and the chosen opponent must each be an acting seat"
+    );
+    assert!(
+        sacrifice.sub_ability.is_none(),
+        "one scoped sacrifice, not two halves"
     );
 }
 
-/// CR 115.1: FAIL-CLOSED contract for the recipient-less binding channel. The
-/// second conjunct is a TARGETED player — declared as the spell goes on the
-/// stack — and no `PlayerFilter` names one, so "you and target opponent each
-/// flip a coin" (Mana Clash) / "… each secretly choose 1, 2, or 3"
-/// (Expert-Level Safe) must stay an honest `Unimplemented`. Binding the body to
-/// `PlayerFilter::Opponent` would make EVERY opponent act in a multiplayer game,
-/// and leaving it unbound would make the caster act twice.
+/// CR 115.1 + CR 601.2c: a TARGETED player conjunct — declared as the spell goes
+/// on the stack — binds through a `TargetOnly` head and the
+/// `PlayerFilter::TargetPlayer` member, so "you and target opponent each flip a
+/// coin" (Mana Clash) / "… each secretly choose 1, 2, or 3" (Expert-Level Safe)
+/// fan the recipient-less body out over exactly the caster and the declared
+/// opponent. `PlayerFilter::Opponent` would make EVERY opponent act in a
+/// multiplayer game, and leaving it unbound would make the caster act twice.
 #[test]
-fn recipient_less_body_with_a_targeted_player_conjunct_fails_closed() {
+fn targeted_player_conjunct_binds_through_a_target_only_head() {
     // Positive reach guard: the SAME grammar with a NAMEABLE conjunct must still
     // parse. Without it, every assertion below would also hold if the
     // compound-subject distributor had stopped running altogether — a dead path
@@ -1446,27 +1446,51 @@ fn recipient_less_body_with_a_targeted_player_conjunct_fails_closed() {
     assert!(
         matches!(&*bound_half.effect, Effect::Sacrifice { .. }),
         "reach-guard: the compound-subject distributor must still bind a nameable \
-         conjunct, else the fail-closed assertions below are vacuous, got {:#?}",
+         conjunct, got {:#?}",
         bound_half.effect
     );
 
+    let set = Some(PlayerFilter::AnyOf {
+        filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+    });
     for text in [
         "You and target opponent each flip a coin.",
         "You and target opponent each secretly choose 1, 2, or 3.",
     ] {
         let ability = parse_effect_chain(text, AbilityKind::Spell);
-        let Effect::Unimplemented { name, .. } = &*ability.effect else {
-            panic!("{text:?} must fail closed, got {:#?}", ability.effect);
+        let Effect::TargetOnly { target } = &*ability.effect else {
+            panic!(
+                "{text:?} must declare its opponent through a TargetOnly head, got {:#?}",
+                ability.effect
+            );
         };
         assert_eq!(
-            name, "unbound_subject",
-            "{text:?} must fail closed AT THE SUBJECT — any other gap name means the \
-             clause died earlier and this case stopped covering the targeted-player path"
+            *target,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            "{text:?}: the head declares the targeted opponent"
+        );
+        assert_eq!(ability.player_scope, None, "{text:?}: the head is unscoped");
+        let body = ability
+            .sub_ability
+            .as_deref()
+            .expect("the coordinated body follows the head");
+        assert!(
+            matches!(
+                &*body.effect,
+                Effect::FlipCoin { .. }
+                    | Effect::Choose {
+                        choice_type: ChoiceType::NumberRange { .. },
+                        ..
+                    }
+            ),
+            "{text:?}: the body is the parsed verb, got {:#?}",
+            body.effect
         );
         assert_eq!(
-            ability.player_scope, None,
-            "{text:?} must not fabricate a fan-out scope"
+            body.player_scope, set,
+            "{text:?}: the caster and the targeted opponent each act"
         );
+        assert!(body.sub_ability.is_none(), "{text:?}: one body link");
     }
 }
 
@@ -81005,35 +81029,692 @@ fn ignore_hexproof_effect_fails_closed() {
     }
 }
 
-/// CR 508.5: "defending player" joins the compound-subject recipient axis, with or
-/// without the article, and a ", then <verb>" continuation is part of the
-/// distributed body — every named player does both halves.
+/// The links of an ability chain, root first (`sub_ability` only).
+fn coordinated_chain_links(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(Some(def), |link| link.sub_ability.as_deref()).collect()
+}
+
+/// `AnyOf[Controller, member]` — the coordinated player set.
+fn coordinated_set(member: PlayerFilter) -> Option<PlayerFilter> {
+    Some(PlayerFilter::AnyOf {
+        filters: vec![PlayerFilter::Controller, member],
+    })
+}
+
+/// Assert `def` is the per-seat choice decline: an `unbound_subject` root quoting
+/// `text`, with no node carrying a `player_scope`.
+fn assert_coordinated_decline(def: &AbilityDefinition, text: &str) {
+    let Effect::Unimplemented { name, .. } = &*def.effect else {
+        panic!("{text:?} must fail closed, got {:#?}", def.effect);
+    };
+    assert_eq!(name, "unbound_subject", "{text:?}");
+    assert_eq!(
+        def.effect.unimplemented_description(),
+        Some(text),
+        "{text:?}"
+    );
+    assert!(
+        coordinated_chain_links(def)
+            .iter()
+            .all(|link| link.player_scope.is_none()),
+        "{text:?}: a declined body must not carry a scope: {def:#?}"
+    );
+}
+
+/// CR 101.4 + CR 101.4a + CR 101.4b + CR 608.2e: "you and defending player each
+/// draw a card, then discard a card" makes each player CHOOSE a card to discard.
+/// The fan-out would process one seat's discard before the next seat chooses,
+/// exposing the discarded card (CR 101.4a lets it stay face down while chosen),
+/// so the coordinated body fails closed at the subject, with or without the
+/// article.
+///
+/// Paired positive reach guard: the same body with a RANDOM discard asks no
+/// choice (CR 701.9b) and binds — only the discard's selection differs, so the
+/// pair isolates the per-seat choice decline from the mapper and the grammar.
+/// It is also the shape of Zurzoth, Chaos Rider's body.
 #[test]
-fn compound_subject_each_defending_player_distributes_the_whole_body() {
+fn compound_subject_each_with_a_chosen_discard_fails_closed() {
     for text in [
         "you and defending player each draw a card, then discard a card",
         "you and the defending player each draw a card, then discard a card",
     ] {
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        let effects: Vec<(&str, &TargetFilter)> = collect_chain_effects(&def)
-            .into_iter()
-            .map(|effect| match effect {
-                Effect::Draw { target, .. } => ("draw", target),
-                Effect::Discard { target, .. } => ("discard", target),
-                other => panic!("{text}: unexpected effect {other:?}"),
+        assert_coordinated_decline(&parse_effect_chain(text, AbilityKind::Spell), text);
+    }
+
+    let text = "you and defending player each draw a card, then discard a card at random";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let links = coordinated_chain_links(&def);
+    assert_eq!(links.len(), 2, "{text:?}: {def:#?}");
+    assert!(
+        matches!(
+            &*links[0].effect,
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ),
+        "{text:?}: {:#?}",
+        links[0].effect
+    );
+    assert!(
+        matches!(
+            &*links[1].effect,
+            Effect::Discard {
+                target: TargetFilter::ScopedPlayer,
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "{text:?}: {:#?}",
+        links[1].effect
+    );
+    for link in links {
+        assert_eq!(
+            link.player_scope,
+            coordinated_set(PlayerFilter::DefendingPlayer),
+            "{text:?}: every body link carries the set"
+        );
+    }
+}
+
+/// CR 608.2c + CR 508.1: the two coordinated second-subject arms ("that
+/// opponent", "the attacking player") are recognized by the shared grammar, and
+/// the chunker keeps a conjoined predicate inside the compound chunk.
+#[test]
+fn coordinated_second_subject_arms_are_recognized() {
+    for text in [
+        "you and that opponent each draw a card",
+        "you and the attacking player each draw a card",
+    ] {
+        assert!(text_is_compound_subject_distribution(text), "{text:?}");
+    }
+    let chunks = super::sequence::split_clause_sequence(
+        "you and the attacking player each draw a card and lose 1 life",
+    );
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    // Negative sibling: a demonstrative possessive names no declared target, so
+    // it is not a compound-subject form.
+    assert!(!text_is_compound_subject_distribution(
+        "you and that creature's controller each draw a card"
+    ));
+}
+
+/// CR 109.5 + CR 608.2c: `coordinated_player_member`'s `ScopedPlayer` rows. A
+/// nameable antecedent binds the set (root through the chunk fold); every other
+/// antecedent keeps the halves verdict — `Draw` halves with a `ScopedPlayer`
+/// second recipient for a recipient-slot body, and the `unbound_subject`
+/// refusal for a slot-less body.
+#[test]
+fn coordinated_member_maps_each_relative_antecedent() {
+    let parse = |text: &str, rel: Option<ControllerRef>| {
+        let mut ctx = ParseContext {
+            relative_player_scope: rel,
+            ..Default::default()
+        };
+        parse_effect_chain_with_context(text, AbilityKind::Spell, &mut ctx)
+    };
+    let draw = "You and that player each draw a card.";
+    for (rel, member) in [
+        (
+            ControllerRef::TriggeringPlayer,
+            PlayerFilter::TriggeringPlayer,
+        ),
+        (
+            ControllerRef::ChosenPlayer { index: 1 },
+            PlayerFilter::ChosenPlayer { index: 1 },
+        ),
+        (
+            ControllerRef::DefendingPlayer,
+            PlayerFilter::DefendingPlayer,
+        ),
+        (ControllerRef::TargetPlayer, PlayerFilter::TargetPlayer),
+        (
+            ControllerRef::ParentTargetController,
+            PlayerFilter::ParentObjectTargetController,
+        ),
+    ] {
+        let def = parse(draw, Some(rel.clone()));
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Draw {
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                }
+            ),
+            "{rel:?}: no head, the body is the root: {def:#?}"
+        );
+        assert_eq!(def.player_scope, coordinated_set(member), "{rel:?}");
+        assert!(def.sub_ability.is_none(), "{rel:?}: one link");
+    }
+
+    for rel in [
+        None,
+        Some(ControllerRef::EnchantedPlayer),
+        Some(ControllerRef::SourceChosenPlayer),
+        Some(ControllerRef::ScopedPlayer),
+        Some(ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        }),
+    ] {
+        let def = parse(draw, rel.clone());
+        let recipients: Vec<_> = coordinated_chain_links(&def)
+            .iter()
+            .map(|link| match &*link.effect {
+                Effect::Draw { target, .. } => target.clone(),
+                other => panic!("{rel:?}: expected Draw halves, got {other:?}"),
             })
             .collect();
         assert_eq!(
-            effects,
-            vec![
-                ("draw", &TargetFilter::OriginalController),
-                ("discard", &TargetFilter::OriginalController),
-                ("draw", &TargetFilter::DefendingPlayer),
-                ("discard", &TargetFilter::DefendingPlayer),
-            ],
-            "{text}"
+            recipients,
+            vec![TargetFilter::OriginalController, TargetFilter::ScopedPlayer],
+            "{rel:?}: the halves fallback keeps its verdict"
+        );
+        assert!(
+            coordinated_chain_links(&def)
+                .iter()
+                .all(|link| link.player_scope.is_none()),
+            "{rel:?}: the halves carry no set"
         );
     }
+
+    let def = parse(
+        "You and that player each sacrifice a creature.",
+        Some(ControllerRef::EnchantedPlayer),
+    );
+    let Effect::Unimplemented { name, .. } = &*def.effect else {
+        panic!("a slot-less body under EnchantedPlayer is refused: {def:#?}");
+    };
+    assert_eq!(name, "unbound_subject");
+}
+
+/// CR 608.2c (R-b): once the chain has declared a player, that player is the
+/// nearer antecedent of "that player", which the set cannot name — the
+/// `ScopedPlayer` row declines to the halves even under a nameable relative
+/// antecedent. Paired positive: the same context without the declaration binds.
+#[test]
+fn coordinated_member_declines_after_a_declared_player() {
+    let text = "You and that player each draw a card.";
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+        declared_player_scope: Some(ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        }),
+        ..Default::default()
+    };
+    let halves = try_parse_compound_subject_each(text, &mut ctx).expect("halves");
+    assert!(
+        matches!(
+            halves.effect,
+            Effect::Draw {
+                target: TargetFilter::OriginalController,
+                ..
+            }
+        ),
+        "{:#?}",
+        halves.effect
+    );
+    assert_eq!(
+        ctx.pending_player_scope, None,
+        "a decline writes no carrier"
+    );
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+        ..Default::default()
+    };
+    let bound = try_parse_compound_subject_each(text, &mut ctx).expect("bound");
+    assert!(
+        matches!(
+            bound.effect,
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ),
+        "{:#?}",
+        bound.effect
+    );
+    assert_eq!(
+        ctx.pending_player_scope,
+        coordinated_set(PlayerFilter::TriggeringPlayer)
+    );
+}
+
+/// CR 608.2b + CR 115.1 (B2): a targeted conjunct's `TargetPlayer` member is read
+/// by position, so it declines to the halves whenever an earlier slot of the
+/// chain could hold a player, or the chain already declared one. An earlier
+/// slot that provably names battlefield objects cannot, so it binds. Both
+/// targeted conjuncts take the same rows.
+#[test]
+fn targeted_coordinated_member_declines_after_a_player_capable_slot() {
+    let slot = |filter: TargetFilter| DeclaredSlotEntry {
+        index: Some(0),
+        filter,
+    };
+    let declared = || {
+        Some(ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        })
+    };
+    let rows: Vec<(&str, DeclaredSlotRegistry, Option<ControllerRef>, bool)> = vec![
+        (
+            "a player slot",
+            DeclaredSlotRegistry::Known(vec![slot(TargetFilter::Player)]),
+            None,
+            false,
+        ),
+        (
+            "an indeterminate registry",
+            DeclaredSlotRegistry::Indeterminate,
+            None,
+            false,
+        ),
+        (
+            "any target",
+            DeclaredSlotRegistry::Known(vec![slot(TargetFilter::Any)]),
+            None,
+            false,
+        ),
+        (
+            "a creature slot",
+            DeclaredSlotRegistry::Known(vec![slot(TargetFilter::Typed(TypedFilter::creature()))]),
+            None,
+            true,
+        ),
+        (
+            "a declared player",
+            DeclaredSlotRegistry::Known(vec![]),
+            declared(),
+            false,
+        ),
+        (
+            "no earlier slot",
+            DeclaredSlotRegistry::Known(vec![]),
+            None,
+            true,
+        ),
+    ];
+    for (conjunct, second) in [
+        (
+            "target opponent",
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        ),
+        ("target player", TargetFilter::Player),
+    ] {
+        let text = format!("You and {conjunct} each draw a card.");
+        for (label, slots, declared_player_scope, binds) in rows.clone() {
+            let mut ctx = ParseContext {
+                chain_declared_slots: slots,
+                declared_player_scope,
+                ..Default::default()
+            };
+            let clause = try_parse_compound_subject_each(&text, &mut ctx).expect(&text);
+            let body = clause.sub_ability.as_deref().expect("two links");
+            if binds {
+                assert_eq!(
+                    clause.effect,
+                    Effect::TargetOnly {
+                        target: second.clone()
+                    },
+                    "{conjunct}, {label}: binds through the head"
+                );
+                assert!(
+                    matches!(
+                        &*body.effect,
+                        Effect::Draw {
+                            target: TargetFilter::ScopedPlayer,
+                            ..
+                        }
+                    ),
+                    "{conjunct}, {label}: {:#?}",
+                    body.effect
+                );
+                assert_eq!(
+                    body.player_scope,
+                    coordinated_set(PlayerFilter::TargetPlayer),
+                    "{conjunct}, {label}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        clause.effect,
+                        Effect::Draw {
+                            target: TargetFilter::OriginalController,
+                            ..
+                        }
+                    ),
+                    "{conjunct}, {label}: halves, got {:#?}",
+                    clause.effect
+                );
+                assert_eq!(
+                    *body.effect,
+                    Effect::Draw {
+                        target: second.clone(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    "{conjunct}, {label}: the second half names the target"
+                );
+                assert_eq!(body.player_scope, None, "{conjunct}, {label}");
+            }
+            assert_eq!(
+                ctx.pending_player_scope, None,
+                "{conjunct}, {label}: a head row never writes the carrier"
+            );
+        }
+    }
+}
+
+/// D8 (iii): a body that already carries its own `player_scope` is refused by the
+/// channel and keeps the halves path's verdict, which refuses it too.
+#[test]
+fn coordinated_channel_refuses_a_pre_scoped_body() {
+    let body = "draw a card, then each player discards a card";
+    // Reach guard: the body parses with a scope of its own, so the refusal arm
+    // (not the mapper or the grammar) is what keeps the set off it.
+    assert!(
+        coordinated_chain_links(&parse_effect_chain(body, AbilityKind::Spell))
+            .iter()
+            .any(|link| link.player_scope.is_some()),
+        "the fixture body must carry its own player_scope"
+    );
+    let mut ctx = ParseContext::default();
+    let clause =
+        try_parse_compound_subject_each(&format!("You and target opponent each {body}"), &mut ctx);
+    if let Some(clause) = clause {
+        assert!(
+            !matches!(clause.effect, Effect::TargetOnly { .. }),
+            "the channel's head must not be emitted: {:#?}",
+            clause.effect
+        );
+        assert!(
+            std::iter::successors(clause.sub_ability.as_deref(), |link| link
+                .sub_ability
+                .as_deref())
+            .all(|link| !matches!(link.player_scope, Some(PlayerFilter::AnyOf { .. }))),
+            "no link carries the coordinated set: {clause:#?}"
+        );
+    }
+    assert_eq!(
+        ctx.pending_player_scope, None,
+        "the refusal writes no carrier"
+    );
+}
+
+/// CR 608.2c (D8 (vi)): the coordinated root's carrier. A different pending scope
+/// on entry declines to the unbound gap; an equal one is this chunk's own earlier
+/// parse and binds, leaving the field unchanged.
+#[test]
+fn coordinated_carrier_declines_a_different_pending_scope() {
+    let text = "You and that player each draw three cards.";
+    let rel = Some(ControllerRef::ChosenPlayer { index: 0 });
+    let mut ctx = ParseContext {
+        relative_player_scope: rel.clone(),
+        pending_player_scope: Some(PlayerFilter::ParentObjectTargetController),
+        ..Default::default()
+    };
+    let declined = try_parse_compound_subject_each(text, &mut ctx).expect("declined clause");
+    assert!(
+        matches!(&declined.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject"),
+        "{:#?}",
+        declined.effect
+    );
+    assert_eq!(
+        ctx.pending_player_scope,
+        Some(PlayerFilter::ParentObjectTargetController),
+        "the decline leaves the other writer's value alone"
+    );
+
+    let set = coordinated_set(PlayerFilter::ChosenPlayer { index: 0 });
+    let mut ctx = ParseContext {
+        relative_player_scope: rel,
+        pending_player_scope: set.clone(),
+        ..Default::default()
+    };
+    let bound = try_parse_compound_subject_each(text, &mut ctx).expect("bound clause");
+    assert!(
+        matches!(
+            bound.effect,
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ),
+        "{:#?}",
+        bound.effect
+    );
+    assert_eq!(
+        ctx.pending_player_scope, set,
+        "the equal value is unchanged"
+    );
+}
+
+/// CR 608.2c (D8 (vi)): the coordinated set reaches the root through the chunk
+/// fold and every body link directly, and does not leak into the next sentence.
+#[test]
+fn coordinated_set_does_not_leak_into_the_next_sentence() {
+    let parsed = parse_oracle_text(
+        "Choose an opponent. You and that player each draw a card, then discard a card at random. You gain 1 life.",
+        "Coordinated Probe",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("a spell ability");
+    let links = coordinated_chain_links(ability);
+    let set = coordinated_set(PlayerFilter::ChosenPlayer { index: 0 });
+    let scope_of = |pred: fn(&Effect) -> bool| {
+        links
+            .iter()
+            .find(|link| pred(&link.effect))
+            .unwrap_or_else(|| panic!("missing link in {ability:#?}"))
+            .player_scope
+            .clone()
+    };
+    assert_eq!(
+        scope_of(|e| matches!(e, Effect::Draw { .. })),
+        set,
+        "root draw: through the fold"
+    );
+    assert_eq!(
+        scope_of(|e| matches!(e, Effect::Discard { .. })),
+        set,
+        "discard: direct stamp"
+    );
+    assert_eq!(
+        scope_of(|e| matches!(e, Effect::GainLife { .. })),
+        None,
+        "the next sentence is unscoped"
+    );
+}
+
+/// CR 101.4 + CR 101.4a + CR 101.4b + CR 608.2e (D8 (iv-b)): a coordinated body
+/// whose per-seat processing would expose one seat's processed choice to a later
+/// seat fails closed; each paired body that asks no observable choice binds.
+#[test]
+fn coordinated_body_with_an_observable_seat_order_fails_closed() {
+    let chosen = |text: &str| {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            ..Default::default()
+        };
+        parse_effect_chain_with_context(text, AbilityKind::Spell, &mut ctx)
+    };
+    for text in [
+        "you and defending player each discard a card or sacrifice a permanent",
+        "you and defending player each draw a card, then discard a card",
+    ] {
+        assert_coordinated_decline(&parse_effect_chain(text, AbilityKind::Spell), text);
+    }
+    let text = "you and that player each sacrifice a creature, then draw a card";
+    assert_coordinated_decline(&chosen(text), text);
+
+    for (def, member) in [
+        (
+            parse_effect_chain(
+                "you and defending player each draw a card, then discard a card at random",
+                AbilityKind::Spell,
+            ),
+            PlayerFilter::DefendingPlayer,
+        ),
+        (
+            chosen("you and that player each sacrifice a creature"),
+            PlayerFilter::ChosenPlayer { index: 0 },
+        ),
+    ] {
+        for link in coordinated_chain_links(&def) {
+            assert_eq!(
+                link.player_scope,
+                coordinated_set(member.clone()),
+                "{def:#?}"
+            );
+        }
+    }
+    let def = parse_effect_chain(
+        "you and target opponent each secretly choose 1, 2, or 3",
+        AbilityKind::Spell,
+    );
+    let body = def.sub_ability.as_deref().expect("the head's body");
+    assert!(matches!(&*body.effect, Effect::Choose { .. }), "{def:#?}");
+    assert_eq!(
+        body.player_scope,
+        coordinated_set(PlayerFilter::TargetPlayer)
+    );
+}
+
+/// CR 608.2c (D8 (i)): "the other" inside a coordinated body names the other
+/// member of the pair, which no set member expresses — Twist Allegiance's clause
+/// fails closed under `coordinated_other_player`. Reach guard: the same body
+/// alone parses to a mass gain-control root, so without the guard it would bind
+/// and widen to every creature.
+#[test]
+fn coordinated_body_naming_the_other_member_fails_closed() {
+    let body = parse_effect_chain(
+        "gain control of all creatures the other controls until end of turn",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*body.effect, Effect::GainControlAll { .. }),
+        "reach: the unguarded body is a mass gain-control root, got {:#?}",
+        body.effect
+    );
+    let parsed = parse_oracle_text(
+        "You and target opponent each gain control of all creatures the other controls until end of turn. Untap those creatures. Those creatures gain haste until end of turn.",
+        "Twist Allegiance",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("a spell ability");
+    let Effect::Unimplemented { name, .. } = &*ability.effect else {
+        panic!("the clause must fail closed, got {:#?}", ability.effect);
+    };
+    assert_eq!(name, "coordinated_other_player");
+    assert!(
+        ability
+            .effect
+            .unimplemented_description()
+            .is_some_and(|text| text.contains("the other controls")),
+        "the gap quotes the clause: {:?}",
+        ability.effect
+    );
+}
+
+/// D8 (iv): a coordinated body whose verb is a gap surfaces the BODY's gap name
+/// over the whole clause — the subject is bound, the verb is the gap (Malik, Grim
+/// Manipulator's ETB).
+#[test]
+fn coordinated_body_gap_surfaces_the_body_gap_name() {
+    let parsed = parse_oracle_text(
+        "When Malik, Grim Manipulator enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.\nWhenever an opponent sacrifices a creature, you create a Treasure token.",
+        "Malik, Grim Manipulator",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Rogue".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("the ETB trigger's execute");
+    let Effect::Unimplemented { name, .. } = &*execute.effect else {
+        panic!(
+            "the clause must surface its body gap, got {:#?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        name, "unrecognized_clause_head",
+        "the body's own gap, not `unbound_subject`: the subject is bound"
+    );
+    assert_eq!(
+        execute
+            .effect
+            .unimplemented_description()
+            .map(str::to_lowercase)
+            .as_deref(),
+        Some("you and target opponent each secretly choose a creature that player controls"),
+    );
+}
+
+/// Row 9 (card level): Eumidian Wastewaker's coordinated `ChooseOneOf` body stays
+/// an honest gap — the fan-out would process the controller's chosen branch
+/// before the defending player chooses (CR 101.4 + CR 101.4a + CR 608.2e) — and
+/// its "this way" tail is unchanged.
+#[test]
+fn eumidian_wastewaker_coordinated_choice_stays_unbound() {
+    let parsed = parse_oracle_text(
+        "Whenever this creature attacks, you and defending player each discard a card or sacrifice a permanent. You draw a card for each land card put into a graveyard this way.\nEncore {6}{B}{B} ({6}{B}{B}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)",
+        "Eumidian Wastewaker",
+        &[],
+        &["Creature".to_string()],
+        &["Insect".to_string(), "Cleric".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Attacks)
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("the attack trigger's execute");
+    assert_coordinated_decline_text(
+        execute,
+        "you and defending player each discard a card or sacrifice a permanent",
+    );
+    let tail = execute.sub_ability.as_deref().expect("the draw tail");
+    assert!(
+        matches!(
+            &*tail.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "{:#?}",
+        tail.effect
+    );
+}
+
+/// `assert_coordinated_decline` for a card-path root whose chain continues past
+/// the declined clause: the root is the gap, and no node carries a `player_scope`.
+fn assert_coordinated_decline_text(def: &AbilityDefinition, text: &str) {
+    let Effect::Unimplemented { name, .. } = &*def.effect else {
+        panic!("{text:?} must fail closed, got {:#?}", def.effect);
+    };
+    assert_eq!(name, "unbound_subject", "{text:?}");
+    assert_eq!(
+        def.effect
+            .unimplemented_description()
+            .map(str::to_lowercase)
+            .as_deref(),
+        Some(text),
+        "{text:?}"
+    );
+    assert!(
+        coordinated_chain_links(def)
+            .iter()
+            .all(|link| link.player_scope.is_none()),
+        "{text:?}: {def:#?}"
+    );
 }
 
 /// The chunker keeps the whole compound-subject body together for every recipient

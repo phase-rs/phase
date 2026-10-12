@@ -24223,12 +24223,33 @@ fn karazikar_attack_trigger_scopes_both_opponents() {
     assert_eq!(def.valid_source, Some(opponent.clone()));
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
     assert_eq!(def.valid_target, Some(opponent));
-    assert!(matches!(
-        def.execute
-            .as_deref()
-            .map(|ability| ability.effect.as_ref()),
-        Some(Effect::Unimplemented { .. })
-    ));
+
+    // CR 508.1 + CR 603.2 + CR 608.2e: "you and the attacking player each draw a
+    // card and lose 1 life" — the controller and the attacking player each draw
+    // (CR 121.2) and lose life (CR 119.3), every link scoped to the set and its
+    // implicit recipient bound to the seat.
+    let set = Some(PlayerFilter::AnyOf {
+        filters: vec![PlayerFilter::Controller, PlayerFilter::TriggeringPlayer],
+    });
+    let draw = def.execute.as_deref().expect("execute");
+    assert_eq!(
+        *draw.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_eq!(draw.player_scope, set);
+    let lose = draw.sub_ability.as_deref().expect("the lose-life link");
+    assert_eq!(
+        *lose.effect,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::ScopedPlayer),
+        }
+    );
+    assert_eq!(lose.player_scope, set);
+    assert!(lose.sub_ability.is_none());
 }
 
 #[test]

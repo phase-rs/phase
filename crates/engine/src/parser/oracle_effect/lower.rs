@@ -6139,8 +6139,13 @@ pub(super) fn rebind_clause_recipients_with(
 /// ("for each opponent who doesn't" — "you" stays "you" inside an
 /// Opponent-scoped iteration).
 ///
-/// Same five-variant surface: `{ LoseLife, Draw, Discard, Mill, Token }`.
-/// `Sacrifice` is NOT covered (it carries its own target on the parent node).
+/// Six-variant surface: `{ LoseLife, Draw, Discard, Mill, Token,
+/// AddRestriction{ProhibitActivity} }`. `Sacrifice` is NOT covered (it carries
+/// its own target on the parent node).
+///
+/// Also applied per link by the coordinated player-set channel
+/// (`bind_coordinated_player_set`, "you and <player> each <body>"), where the
+/// body's implicit recipient is the seat performing the instruction.
 pub(super) fn rebind_subject_only_body_recipient(effect: &mut Effect) {
     fn rebind(filter: &mut TargetFilter) {
         if matches!(filter, TargetFilter::Controller) {
