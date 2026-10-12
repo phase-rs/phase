@@ -2787,17 +2787,6 @@ pub struct PendingAttachmentRemainder {
     pub producer: Box<ResolvedAbility>,
 }
 
-/// Private continuation authority for an interactive player-scope exile
-/// instruction. Keeping the detached tail here makes generated APNAP nodes
-/// explicit without adding runtime provenance to `ResolvedAbility`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PendingPlayerScopeLinkedExile {
-    pub source_id: ObjectId,
-    pub after_scope: Box<ResolvedAbility>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub batch: Vec<ObjectIncarnationRef>,
-}
-
 /// One execution of a resolving root, distinct for originals and spell copies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultOccurrenceId(pub u64);
@@ -2841,14 +2830,6 @@ pub struct PendingContinuation {
     /// unprocessed members of a selected multi-attachment operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_remainder: Option<PendingAttachmentRemainder>,
-    /// CR 608.2f: exact linked-exile union and detached unscoped tail owned by
-    /// a generated player-scope continuation. Legacy saves default to `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
-    /// Private queue terminator for generated player-scope continuations. The
-    /// placeholder `chain` is never resolved when this is set.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) player_scope_queue_end: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2869,15 +2850,6 @@ pub struct PendingExileFromTopUntil {
 }
 
 impl PendingContinuation {
-    pub(crate) fn player_scope_queue_end(
-        placeholder: Box<ResolvedAbility>,
-        state: &GameState,
-    ) -> Self {
-        let mut pending = Self::new(placeholder, state);
-        pending.player_scope_queue_end = true;
-        pending
-    }
-
     /// Construct a continuation with no parent-kind emission. Used for chains
     /// whose per-node `EffectResolved` events are the full observable story
     /// (targeted damage continuations, Learn rummage, Bolster, Clash, etc.).
@@ -2892,8 +2864,6 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
-            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
-            player_scope_queue_end: false,
         }
     }
 
@@ -2916,8 +2886,6 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
-            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
-            player_scope_queue_end: false,
         }
     }
 }
@@ -12110,6 +12078,10 @@ pub(crate) fn live_return_result_occurrences(
                         .map(|(id, _)| id),
                 );
             }
+            ResolutionFrame::PlayerScopeClause(clause) => {
+                live.extend(clause.tail.return_result_occurrence);
+                live.extend(clause.tail.pending_return_result_producer.map(|(id, _)| id));
+            }
             ResolutionFrame::ChangeZone(frame) => {
                 live.extend(
                     frame.pending.as_ref().and_then(|pending| {
@@ -12223,40 +12195,44 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             Ok(())
         };
     for frame in state.resolution_stack.iter() {
+        // A clause owner's tail is a parked continuation in its own right.
+        let continuation = match frame {
+            ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
+            ResolutionFrame::PlayerScopeClause(clause) => Some(&*clause.tail),
+            _ => None,
+        };
+        if let Some(pending) = continuation {
+            match pending.return_result_occurrence {
+                Some(id) if !frame_exists(id) => {
+                    return Err(format!(
+                        "return-result continuation names missing occurrence {:?}",
+                        id
+                    ));
+                }
+                None if has_return_result_metadata(&pending.chain) => {
+                    return Err("return-result continuation has no occurrence stamp".to_string());
+                }
+                _ => {}
+            }
+            if let Some(key) = pending.pending_return_result_producer {
+                if pending.return_result_occurrence != Some(key.0) {
+                    return Err(format!(
+                        "return-result continuation publisher {:?} disagrees with its occurrence",
+                        key.1
+                    ));
+                }
+                if !reads_return_result_id(&pending.chain, key.1) {
+                    return Err(format!(
+                        "return-result continuation publisher {:?} has no matching reader",
+                        key.1
+                    ));
+                }
+                validate_parked_publisher(key, "continuation")?;
+            }
+        }
         match frame {
             ResolutionFrame::OptionalEffect(optional) => validate_optional_frame(optional)?,
-            ResolutionFrame::AbilityContinuation(frame) => {
-                let pending = &frame.pending;
-                match pending.return_result_occurrence {
-                    Some(id) if !frame_exists(id) => {
-                        return Err(format!(
-                            "return-result continuation names missing occurrence {:?}",
-                            id
-                        ));
-                    }
-                    None if has_return_result_metadata(&pending.chain) => {
-                        return Err(
-                            "return-result continuation has no occurrence stamp".to_string()
-                        );
-                    }
-                    _ => {}
-                }
-                if let Some(key) = pending.pending_return_result_producer {
-                    if pending.return_result_occurrence != Some(key.0) {
-                        return Err(format!(
-                            "return-result continuation publisher {:?} disagrees with its occurrence",
-                            key.1
-                        ));
-                    }
-                    if !reads_return_result_id(&pending.chain, key.1) {
-                        return Err(format!(
-                            "return-result continuation publisher {:?} has no matching reader",
-                            key.1
-                        ));
-                    }
-                    validate_parked_publisher(key, "continuation")?;
-                }
-            }
+            ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::PlayerScopeClause(_) => {}
             ResolutionFrame::ChangeZone(frame) => {
                 if let Some(key) = frame
                     .pending
@@ -14568,7 +14544,8 @@ impl PersistedGameState {
             | ResolutionFrame::LifeTotalAssignment(_)
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_) => false,
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::PlayerScopeClause(_) => false,
         }) {
             return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
         }
@@ -22685,12 +22662,6 @@ declare_game_state! {
     #[serde(skip)]
     pub resolving_continuation_attach_host: Option<AttachTarget>,
 
-    /// Execution-local view of the active generated player-scope continuation.
-    /// The serialized authority lives on `PendingContinuation`; every pause
-    /// re-parks it before control returns to callers.
-    #[serde(skip)]
-    pub(crate) resolving_player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
-
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
     /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
@@ -24020,6 +23991,9 @@ impl GameStateDecode {
     ) -> Result<GameState, String> {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
+        // Decision 7: the bare/transport decode never migrates; the retired
+        // player-scope sidecar is only ever converted at the versioned wire.
+        crate::types::resolution::reject_retired_player_scope_linked_exile(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(
@@ -29286,7 +29260,6 @@ impl GameState {
             payment_transaction_replay: false,
             payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
-            resolving_player_scope_linked_exile: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
@@ -32312,7 +32285,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         payment_transaction_replay: _,
         payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
-        resolving_player_scope_linked_exile: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,

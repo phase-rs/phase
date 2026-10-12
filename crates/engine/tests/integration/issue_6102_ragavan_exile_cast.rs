@@ -305,3 +305,56 @@ fn ragavan_creates_treasure_when_damaged_player_has_empty_library() {
         "Ragavan must create its Treasure even when ExileTop finds no card"
     );
 }
+
+/// CR 608.2c + CR 108.2b: "you may cast that card" names the exiled CARD. The
+/// Treasure created earlier in the same instruction is a token, never a card,
+/// so it must not join the tracked set the cast grant binds (#9225 companion).
+///
+/// POSITIVE REACH GUARD: the exiled card carries the grant, so the negative
+/// assertion on the Treasure is not vacuous.
+#[test]
+fn ragavan_cast_grant_binds_the_exiled_card_and_not_the_treasure() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let opponent_top = scenario.add_card_to_library_top(P1, "Opponent Bolt");
+    let ragavan = scenario
+        .add_creature(P0, "Ragavan, Nimble Pilferer", 2, 1)
+        .from_oracle_text(RAGAVAN_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(ragavan, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare Ragavan attacking P1");
+    drain_until_ragavan_trigger_resolves(&mut runner, Some(opponent_top));
+
+    let state = runner.state();
+    let has_cast_grant = |id: &ObjectId| {
+        state.objects[id]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(permission, CastingPermission::PlayFromExile { .. }))
+    };
+    assert!(
+        has_cast_grant(&opponent_top),
+        "reach guard: the exiled card must carry Ragavan's cast grant"
+    );
+    let treasures: Vec<&ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[id].is_token && state.objects[id].name == "Treasure")
+        .collect();
+    assert_eq!(
+        treasures.len(),
+        1,
+        "reach guard: Ragavan created its Treasure"
+    );
+    assert!(
+        !has_cast_grant(treasures[0]),
+        "the Treasure is a token, not \"that card\" — it must not receive the cast grant"
+    );
+}

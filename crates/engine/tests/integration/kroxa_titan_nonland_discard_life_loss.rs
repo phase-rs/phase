@@ -33,7 +33,9 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, ResolvedAbility};
+use engine::types::ability::{
+    AbilityCondition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
@@ -327,4 +329,84 @@ fn non_discard_who_didnt_clause_still_draws_a_card() {
         "the non-discard decline-tail clause must still resolve as a Draw, \
          not be misparsed into a dropped ChangeZone effect"
     );
+}
+
+/// CR 608.2c + CR 109.5: the keep-per-iteration decision is STRUCTURAL — a
+/// "this way"-gated clause stays inside each player's iteration because its
+/// effect names the iterated player (`ScopedPlayer`), whatever the effect kind.
+///
+/// SYNTHETIC: Strongarm Tactics' parse with the gated body swapped for a
+/// `GainLife` / `DealDamage` to `ScopedPlayer`, and its `ScopedPlayerMatches`
+/// conjunct removed so the effect's own recipient is the only signal. No
+/// printed card lowers to this shape today; the test pins the building block.
+/// Detached instead, the body would resolve once against the aggregate ledger
+/// (which holds P0's creature, so the negated gate is false) and no player's
+/// life would change.
+#[test]
+fn this_way_gated_body_naming_the_scoped_player_stays_per_player() {
+    let bodies: [(&str, Effect, i32); 2] = [
+        (
+            "GainLife",
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::ScopedPlayer,
+            },
+            4,
+        ),
+        (
+            "DealDamage",
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::ScopedPlayer,
+                damage_source: None,
+                excess: None,
+            },
+            -4,
+        ),
+    ];
+    for (label, body, delta) in bodies {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strongarm Tactics".to_string(),
+            Zone::Battlefield,
+        );
+        add_creature_hand_card(&mut state, 100, PlayerId(0));
+        add_hand_card(&mut state, 200, PlayerId(1), false);
+        // PlayerId(2) has no cards in hand.
+
+        let mut ability = strongarm_tactics_effect(PlayerId(0), source);
+        let gated = ability
+            .sub_ability
+            .as_deref_mut()
+            .expect("Strongarm Tactics parses a gated decline-tail sub");
+        let Some(AbilityCondition::And { conditions }) = gated.condition.take() else {
+            panic!("reach guard: the decline tail is `And[Not ZoneChangedThisWay, ScopedPlayerMatches]`");
+        };
+        let zone_gate = conditions
+            .into_iter()
+            .find(|condition| matches!(condition, AbilityCondition::Not { .. }))
+            .expect("reach guard: the negated this-way gate is present");
+        gated.condition = Some(zone_gate);
+        gated.effect = body;
+
+        let lives_before: Vec<i32> = (0..3).map(|seat| life(&state, PlayerId(seat))).collect();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            life(&state, PlayerId(0)),
+            lives_before[0],
+            "{label}: P0 discarded a creature card — their own gate is false"
+        );
+        for seat in [1, 2] {
+            assert_eq!(
+                life(&state, PlayerId(seat)),
+                lives_before[seat as usize] + delta,
+                "{label}: P{seat} didn't discard a creature card — their own gate is true"
+            );
+        }
+    }
 }

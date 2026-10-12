@@ -210,6 +210,8 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 140 — PlayerScopeClause owns paused player-scope work; the continuation
+ *      linked-exile sidecar is retired. Wire 122 moves with it.
  * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
  *      stack-using activation created, carried in GameState's trigger events —
  *      see PROTOCOL_VERSION's own `/// 134` entry in
@@ -844,7 +846,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 134;
+export const PROTOCOL_VERSION = 140;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

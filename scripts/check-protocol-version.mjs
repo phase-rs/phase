@@ -149,7 +149,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +61: v132 stamps `GameObject::exile_from_stack_linked_source` with the rider's incarnation (`ObjectIncarnationRef`).
 // +62: v133 adds the CR 614.12a pre-entry as-enters choice carriers.
 // +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 63;
+// +69: v140 adds the player-scope clause owner frame, distinct from main v128.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 69;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -240,7 +241,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +60: wire 114 moves with full-game v132 for the stack-exile rider's incarnation.
 // +61: wire 115 moves with full-game v133 for the pre-entry as-enters choice.
 // +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 62;
+// +68: wire 122 moves with full-game v140 for the player-scope clause owner frame.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 68;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
