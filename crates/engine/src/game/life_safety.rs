@@ -980,7 +980,7 @@ mod tests {
     /// Revert-failing perf: a candidate that can never arm a root (anything but a
     /// `DecideOptionalCost` answer to a Defiler / optional-cost prompt) is neutral
     /// without re-enumerating the candidate set. Pre-fix the completeness probe
-    /// ran first, so every scored candidate paid one full enumeration.
+    /// ran first, so every authorized generated candidate paid one full enumeration.
     #[test]
     fn non_root_shaped_candidate_is_neutral_without_enumerating_candidates() {
         let player = PlayerId(0);
