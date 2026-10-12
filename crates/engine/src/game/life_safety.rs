@@ -193,21 +193,6 @@ fn extract_life_cost_root(
     candidate: &CandidateAction,
 ) -> Option<ArmedLifeCostRoot> {
     let semantic_owner = candidate.metadata.semantic_owner?;
-    // Only a `DecideOptionalCost` answer to a `DefilerPayment` /
-    // `OptionalCostChoice` prompt can arm a root (every other pair falls to the
-    // neutral arm below), so check that shape before the completeness probe
-    // re-enumerates the whole candidate set. This shape predicate must stay in
-    // sync with the `Some` arms of the match below.
-    if !matches!(
-        (&state.waiting_for, &candidate.action),
-        (
-            WaitingFor::DefilerPayment { .. } | WaitingFor::OptionalCostChoice { .. },
-            GameAction::DecideOptionalCost { .. }
-        )
-    ) || !is_complete_generated_candidate(state, candidate)
-    {
-        return None;
-    }
     // A spell announcement's trigger carrier is engine-private custody that
     // `announcement_triggers` holds outside the `PendingCast` for the whole
     // reducer action, so the witness names the announcement as the payment
@@ -220,7 +205,11 @@ fn extract_life_cost_root(
         pending
     };
 
-    match (&state.waiting_for, &candidate.action) {
+    // Resolve the root shape first: only a `DecideOptionalCost` answer to a
+    // `DefilerPayment` / `OptionalCostChoice` prompt can arm a root, and the
+    // completeness probe below re-enumerates the whole candidate set, so it
+    // must not run for the candidates this match already leaves neutral.
+    let root = match (&state.waiting_for, &candidate.action) {
         (
             WaitingFor::DefilerPayment {
                 player,
@@ -271,7 +260,8 @@ fn extract_life_cost_root(
         // mechanical choices are deliberately neutral. CR 508.1d / 509.1c
         // combat costs are declaration decisions, not cast/activation costs.
         _ => None,
-    }
+    }?;
+    is_complete_generated_candidate(state, candidate).then_some(root)
 }
 
 /// Preview a generated candidate through the raw reducer boundary.
