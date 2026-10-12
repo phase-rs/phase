@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-10-11T00:00:00Z",
+  "updated": "2026-10-12T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1310,11 +1310,14 @@
       ]
     },
     {
-      "name": "Dimir Midrange",
+      "name": "Domain Zoo",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "U"
+        "W",
+        "G",
+        "R",
+        "U",
+        "B"
       ],
       "tags": [
         "metagame"
@@ -1322,157 +1325,129 @@
       "main": [
         {
           "count": 1,
-          "name": "Swamp"
+          "name": "Thundering Falls"
         },
         {
           "count": 1,
-          "name": "Sheoldred's Edict"
-        },
-        {
-          "count": 1,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 2,
-          "name": "Counterspell"
+          "name": "Lush Portico"
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
+          "name": "Territorial Kavu"
         },
         {
           "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Wan Shi Tong, Librarian"
-        },
-        {
-          "count": 1,
-          "name": "Drown in the Loch"
-        },
-        {
-          "count": 1,
-          "name": "Murktide Regent"
-        },
-        {
-          "count": 1,
-          "name": "Darkslick Shores"
-        },
-        {
-          "count": 2,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 3,
-          "name": "Orcish Bowmasters"
-        },
-        {
-          "count": 2,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 3,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Tamiyo, Inquisitive Student"
-        },
-        {
-          "count": 3,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 2,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
+          "name": "Wild Nacatl"
         },
         {
           "count": 4,
-          "name": "Psychic Frog"
+          "name": "Flooded Strand"
         },
         {
           "count": 4,
-          "name": "Polluted Delta"
+          "name": "Arid Mesa"
         },
         {
-          "count": 3,
-          "name": "Subtlety"
-        },
-        {
-          "count": 3,
-          "name": "Watery Grave"
+          "count": 4,
+          "name": "Lightning Bolt"
         },
         {
           "count": 2,
-          "name": "Sink into Stupor"
+          "name": "Stubborn Denial"
         },
         {
           "count": 1,
-          "name": "Marsh Flats"
+          "name": "Misty Rainforest"
         },
         {
           "count": 1,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 1,
-          "name": "Bloodstained Mire"
+          "name": "Temple Garden"
         },
         {
           "count": 4,
+          "name": "Tribal Flames"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Ragavan, Nimble Pilferer"
+        },
+        {
+          "count": 4,
+          "name": "Leyline of the Guildpact"
+        },
+        {
+          "count": 4,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Indatha Triome"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Leyline Binding"
+        },
+        {
+          "count": 3,
           "name": "Quantum Riddler"
+        },
+        {
+          "count": 4,
+          "name": "Scion of Draco"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 1,
-          "name": "Toxic Deluge"
-        },
-        {
-          "count": 2,
-          "name": "Nihil Spellbomb"
-        },
-        {
-          "count": 1,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 1,
-          "name": "Stern Scolding"
+          "name": "Rest in Peace"
         },
         {
           "count": 2,
           "name": "Mystical Dispute"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 4,
           "name": "Consign to Memory"
         },
         {
           "count": 2,
-          "name": "Engineered Explosives"
+          "name": "Obsidian Charmaw"
         },
         {
           "count": 2,
-          "name": "Harbinger of the Seas"
+          "name": "Stern Scolding"
+        },
+        {
+          "count": 2,
+          "name": "Brotherhood's End"
         },
         {
           "count": 1,
-          "name": "Sheoldred's Edict"
+          "name": "Containment Priest"
         }
       ]
     }
