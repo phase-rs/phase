@@ -6346,11 +6346,6 @@ pub(crate) fn static_condition_to_trigger_condition(
 
         // Not combinator — handle common negation patterns.
         StaticCondition::Not { condition } => match condition.as_ref() {
-            StaticCondition::DuringYourTurn => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Controller,
-                }),
-            }),
             // Negate a quantity comparison by flipping the comparator.
             // Apply the same `Another` → `OtherThanTriggerObject` substitution
             // as the affirmative branch (CR 603.4).
@@ -6374,55 +6369,15 @@ pub(crate) fn static_condition_to_trigger_condition(
                     rhs: QuantityExpr::Fixed { value: 0 },
                 })
             }
-            // CR 110.5b: Not(SourceIsTapped) → source is untapped.
-            StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::SourceIsTapped),
+            // CR 603.4: every other negation recurses through this bridge and wraps
+            // the affirmative mapping, so subject scopes (monarch player, commander
+            // ownership, starting player) ride through unchanged and an
+            // unbridgeable inner condition stays `None` (fail closed).
+            inner => static_condition_to_trigger_condition(inner).map(|condition| {
+                TriggerCondition::Not {
+                    condition: Box::new(condition),
+                }
             }),
-            // CR 725.1 + CR 109.5: "if you're not the monarch" / "if an opponent
-            // is the monarch". The subject scope must survive the bridge —
-            // collapsing it to `Controller` here would silently rebind
-            // "that player is the monarch" to the ability's controller.
-            StaticCondition::IsMonarch { player } => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::IsMonarch {
-                    player: player.clone(),
-                }),
-            }),
-            // CR 725.1: "if there is a monarch" (negated no-monarch check).
-            StaticCondition::NoMonarch => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::NoMonarch),
-            }),
-            // CR 103.1: "you weren't the starting player" → Not(WasStartingPlayer).
-            StaticCondition::WasStartingPlayer { controller } => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasStartingPlayer {
-                    controller: controller.clone(),
-                }),
-            }),
-            // CR 702.185c: "no spell was warped this turn" → Not(SpellCastWithVariantThisTurn).
-            StaticCondition::SpellCastWithVariantThisTurn { variant } => {
-                Some(TriggerCondition::Not {
-                    condition: Box::new(TriggerCondition::SpellCastWithVariantThisTurn {
-                        variant: *variant,
-                    }),
-                })
-            }
-            StaticCondition::CastVariantPaid { variant } => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::CastVariantPaidPersistent {
-                    variant: *variant,
-                }),
-            }),
-            // CR 903.3d + CR 603.4: "if you don't control your/a commander". The
-            // affirmative arm bridges below; without this one the negated form
-            // round-trips through `ability_condition_to_static_condition` and then
-            // dies here, so `triggers::delayed_intervening_if` would silently keep
-            // only the RESOLUTION-time half of CR 603.4 for a negated commander
-            // gate. `ownership` rides through unchanged — CR 903.3 "your commander"
-            // must not widen to CR 903.3d "a commander" under negation either.
-            StaticCondition::ControlsCommander { ownership } => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::ControlsCommander {
-                    ownership: *ownership,
-                }),
-            }),
-            _ => None,
         },
 
         // And/Or — recursive. If ANY child is unmappable, the entire compound

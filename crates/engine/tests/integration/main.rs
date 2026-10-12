@@ -1607,6 +1607,7 @@ mod coalition_victory_win_condition;
 mod coastal_wizard_bounce_self_and_another;
 mod coerced_attack_punisher;
 mod committed_dump_walk;
+mod condition_gates_fail_closed;
 mod conditional_cost_reduction_3223;
 mod conformer_shuriken;
 mod connecting_the_dots_return_exiled_with;

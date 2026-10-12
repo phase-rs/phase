@@ -16,9 +16,9 @@ use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::filter as nom_filter;
 use super::primitives::{
-    parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
-    parse_object_recipient_pronoun, parse_property_keyword, parse_superlative_adjective,
-    scan_at_word_boundaries,
+    parse_article, parse_color, parse_counter_type_typed, parse_keyword_name, parse_mana_cost,
+    parse_number, parse_object_recipient_pronoun, parse_property_keyword,
+    parse_superlative_adjective, scan_at_word_boundaries,
 };
 use super::quantity as nom_quantity;
 use super::target as nom_target;
@@ -2905,7 +2905,24 @@ fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, CounterCondi
 /// - `"more than N"` → `(N+1, None)`
 fn parse_has_counters_quantity(input: &str) -> OracleResult<'_, (u32, Option<u32>)> {
     alt((
-        value((1u32, None), tag("a ")),
+        value(
+            (1u32, None),
+            alt((
+                tag("a "),
+                // CR 122.1: "an" precedes a vowel-initial counter name (ice, oil, odor,
+                // age, egg …). Admit it only when a recognised counter-type token and the
+                // counter noun follow, so "an even/odd number of counters" (Sab-Sunen,
+                // Luxa Embodied) stays grammar-ERR instead of naming a counter
+                // "even number of". `peek` leaves the noun for `parse_counter_noun_match`.
+                terminated(
+                    tag("an "),
+                    peek((
+                        parse_counter_type_typed,
+                        alt((tag(" counters"), tag(" counter"))),
+                    )),
+                ),
+            )),
+        ),
         value((1u32, None), tag("one or more ")),
         value((0u32, Some(0u32)), tag("no ")),
         parse_exactly_n_counters,
@@ -4641,8 +4658,9 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_no_opponent_controls_a,
         // "your opponents control no [type]" → Not(IsPresent { Opponent })
         parse_your_opponents_control_no,
-        // "a player controls no [type]" → QuantityComparison(EQ, ControlledByEachPlayer{Min}, 0)
-        parse_a_player_controls_no,
+        // "a player / an opponent controls no [type]" →
+        // QuantityComparison(EQ, ControlledByEachPlayer{Min, relation}, 0)
+        parse_player_controls_no,
         // CR 702: "a creature you control has <keyword>" — subject-first
         // presence check (Odric, Lunarch Marshal). Grouped into the control
         // family so the parent dispatcher's `alt` arity stays within bounds.
@@ -5818,9 +5836,21 @@ fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition
     ))
 }
 
-/// CR 603.4 + CR 608.2c: Parse "a player controls no [type]" → an existential
-/// zero-control check over every player. Sothera, the Supervoid's end-step
-/// intervening-if ("if a player controls no creatures, ...").
+/// CR 603.4: Parse "a player controls no [type]" / "an opponent
+/// controls no [type]" → an existential zero-control check over the subject's
+/// players. Sothera, the Supervoid's end-step intervening-if ("if a player
+/// controls no creatures, ..."); Hagra Mauling's cost gate ("if an opponent
+/// controls no basic lands").
+///
+/// "an opponent controls no X" is existential over opponents — true iff at
+/// least one opponent controls zero matching permanents — which is
+/// `min over opponents of count(X) == 0`. Two-player it coincides with "your
+/// opponents control no X"; multiplayer it does not, so
+/// `parse_your_opponents_control_no` (the universal `Not(IsPresent{Opponent})`
+/// form) stays separate. CR 109.4: only objects on the stack or battlefield have
+/// a controller, so the count is battlefield-scoped; CR 800.4: a player who has
+/// left the game is excluded from the per-player fold by the
+/// `ControlledByEachPlayer` resolver.
 ///
 /// Emits a `QuantityComparison` whose LHS is
 /// `ControlledByEachPlayer { aggregate: Min }` compared `EQ 0`: the minimum
@@ -5832,8 +5862,12 @@ fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition
 /// controller-less: the resolver (`game::quantity`, `ControlledByEachPlayer`
 /// arm) gates each candidate on `obj.controller == p.id`, enforcing the "they
 /// control" semantics per iterated player (CR 109.5).
-fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("a player controls no ").parse(input)?;
+fn parse_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, relation) = alt((
+        value(PlayerRelation::All, tag("a player controls no ")),
+        value(PlayerRelation::Opponent, tag("an opponent controls no ")),
+    ))
+    .parse(input)?;
     let (filter, remainder) = parse_type_phrase_folding(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -5848,7 +5882,7 @@ fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> 
             QuantityRef::ControlledByEachPlayer {
                 filter,
                 aggregate: AggregateFunction::Min,
-                relation: PlayerRelation::All,
+                relation,
             },
             Comparator::EQ,
             0,
@@ -15246,6 +15280,67 @@ mod tests {
         }
     }
 
+    /// Destructure an existential `controls no` gate into its filter and relation.
+    fn controls_no_parts(text: &str) -> (TargetFilter, PlayerRelation) {
+        let (rest, c) = parse_inner_condition(text).expect("controls-no gate must parse");
+        assert_eq!(rest, "", "the whole clause must be consumed");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ControlledByEachPlayer {
+                            filter,
+                            aggregate: AggregateFunction::Min,
+                            relation,
+                        },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } = c
+        else {
+            panic!("expected ControlledByEachPlayer{{Min}} EQ 0, got {c:?}");
+        };
+        (filter, relation)
+    }
+
+    // CR 109.4 + CR 800.4: Hagra Mauling's cost gate. "an opponent controls no
+    // basic lands" is existential over opponents (min over opponents == 0), the
+    // subject-axis sibling of "a player controls no …".
+    #[test]
+    fn an_opponent_controls_no_is_existential_over_opponents() {
+        let (filter, relation) = controls_no_parts("an opponent controls no basic lands");
+        assert_eq!(relation, PlayerRelation::Opponent);
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected a typed basic-land filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Land));
+        assert!(tf.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Basic,
+        }));
+        assert!(tf.controller.is_none(), "filter must be controller-less");
+
+        // Preservation: the "a player" subject keeps `All` over the same filter.
+        let (all_filter, all_relation) = controls_no_parts("a player controls no basic lands");
+        assert_eq!(all_relation, PlayerRelation::All);
+        assert_eq!(all_filter, filter);
+
+        // The universal opponents form stays Not(IsPresent), and the affirmative
+        // existential stays IsPresent.
+        let (_, universal) =
+            parse_inner_condition("your opponents control no basic lands").unwrap();
+        assert!(
+            matches!(&universal, StaticCondition::Not { condition } if matches!(**condition, StaticCondition::IsPresent { .. })),
+            "got {universal:?}"
+        );
+        let (rest, affirmative) =
+            parse_inner_condition("an opponent controls a basic land").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(affirmative, StaticCondition::IsPresent { .. }),
+            "got {affirmative:?}"
+        );
+    }
+
     // Negative guard: the single-controller "you control no X" form must remain
     // Not(IsPresent) — the new existential arm must not hijack it.
     #[test]
@@ -22152,6 +22247,67 @@ mod tests {
                 maximum: None,
             }
         );
+    }
+
+    // CR 122.1: the `an ` article before a vowel-initial counter-type token.
+    #[test]
+    fn has_counters_an_article_before_counter_type_token() {
+        let cases = [
+            (
+                "~ has an ice counter on it",
+                CounterMatch::OfType(CounterType::Generic("ice".to_string())),
+            ),
+            (
+                "~ has an oil counter on it",
+                CounterMatch::OfType(CounterType::Generic("oil".to_string())),
+            ),
+            (
+                "it has an indestructible counter on it",
+                CounterMatch::OfType(CounterType::Keyword(
+                    crate::types::keywords::KeywordKind::Indestructible,
+                )),
+            ),
+            // Preservation: the `a ` article is unchanged.
+            ("~ has a counter on it", CounterMatch::Any),
+            (
+                "~ has a +1/+1 counter on it",
+                CounterMatch::OfType(CounterType::Plus1Plus1),
+            ),
+        ];
+        for (text, counters) in cases {
+            let (rest, c) = parse_inner_condition(text).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                c,
+                StaticCondition::HasCounters {
+                    counters,
+                    minimum: 1,
+                    maximum: None,
+                },
+                "{text}"
+            );
+        }
+    }
+
+    // CR 122.1: the `an ` article admits only a counter-type token followed by
+    // the counter noun, so the parity phrase (Sab-Sunen, Luxa Embodied) stays
+    // grammar-ERR rather than typing a counter named "even number of".
+    #[test]
+    fn has_counters_an_article_rejects_counter_count_parity() {
+        // Reach-guard: the `an ` arm fires in this test.
+        let (rest, _) = parse_inner_condition("~ has an ice counter on it")
+            .expect("the an-article arm must accept a counter-type token");
+        assert_eq!(rest, "");
+        for text in [
+            "it has an even number of counters on it",
+            "~ has an odd number of counters on it",
+        ] {
+            assert!(
+                parse_inner_condition(text).is_err(),
+                "{text} must stay grammar-ERR, got {:?}",
+                parse_inner_condition(text)
+            );
+        }
     }
 
     #[test]

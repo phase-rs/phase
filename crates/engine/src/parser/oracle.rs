@@ -114,7 +114,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
+    as_long_as_gate_is_unparsed, enters_with_gate_fails_closed, find_copy_verb_present,
+    is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_as_enters_one_shot_replacement, parse_bidirectional_damage_prevention,
     parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
@@ -5723,10 +5724,15 @@ fn parse_normalized_oracle_ir(
                     // CR 702.166a analogue: reduction only applies when the optional
                     // additional cost is declared, not when the player declines it.
                     def.condition = Some(match def.condition {
+                        // CR 701.59c + CR 702.166a: the reduction's own gate already names the
+                        // linked optional additional cost ("if evidence was collected"); wrapping
+                        // it again would only duplicate the same conjunct.
+                        None | Some(StaticCondition::AdditionalCostPaid) => {
+                            StaticCondition::AdditionalCostPaid
+                        }
                         Some(existing) => StaticCondition::And {
                             conditions: vec![existing, StaticCondition::AdditionalCostPaid],
                         },
-                        None => StaticCondition::AdditionalCostPaid,
                     });
                     emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
                 }
@@ -6972,6 +6978,22 @@ fn parse_normalized_oracle_ir(
                     i += 1;
                     continue;
                 }
+                // CR 604.2 + CR 611.3a: the replacement parser declined and the printed gate is
+                // one the typed surface cannot carry. Falling through would let the static chain's
+                // terminal "as long as" fallback claim the line as a modification-less static with
+                // the body dropped (fail-open). Land it honestly instead.
+                if as_long_as_gate_is_unparsed(&line, card_name) {
+                    emitter.ability_at(
+                        item_line,
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::unimplemented("as_long_as_gate", &line),
+                        )
+                        .description(line.clone()),
+                    );
+                    i += 1;
+                    continue;
+                }
             } else if is_enters_with_counter_replacement_line(&lower) {
                 // CR 614.1c + CR 614.12: distributive "[Other/each] [type] you
                 // control enter(s) with [an additional] [counter] on them [for
@@ -7422,6 +7444,22 @@ fn parse_normalized_oracle_ir(
             // parser can in fact represent.
             if let Some(ir) = parse_windowed_replacement_install_ir(&line) {
                 emitter.ability_ir_at(item_line, ir);
+                i += 1;
+                continue;
+            }
+            // CR 614.1c: "[This permanent] enters with …" is a replacement effect. When the
+            // condition printed on it cannot be represented, the whole line is recorded as an
+            // `Effect::unimplemented` gap rather than shipped as an ungated replacement or left
+            // for a later route (the effect-first `dispatch_line_nom`) to claim.
+            if enters_with_gate_fails_closed(&line, card_name) {
+                emitter.ability_at(
+                    item_line,
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::unimplemented("enters_with_gate", &line),
+                    )
+                    .description(line.clone()),
+                );
                 i += 1;
                 continue;
             }

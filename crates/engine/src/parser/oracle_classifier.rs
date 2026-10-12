@@ -1086,7 +1086,7 @@ pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
 ///
 /// Shared by `is_replacement_pattern_head_scoped` and
 /// `is_enters_with_counter_replacement_line` so the two cannot drift.
-fn has_enters_with_counter_tokens(lower: &str) -> bool {
+pub(crate) fn has_enters_with_counter_tokens(lower: &str) -> bool {
     (scan_contains(lower, "enters")
         || scan_contains(lower, "escapes")
         || scan_contains(lower, "enter with")

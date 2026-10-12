@@ -2235,6 +2235,68 @@ fn static_condition_to_trigger_condition_source_in_battlefield() {
     );
 }
 
+/// CR 603.4: the trigger bridge's `Not` arm recurses through the bridge, so any
+/// bridgeable inner condition negates and an unbridgeable one stays `None`.
+#[test]
+fn static_condition_to_trigger_condition_not_recurses() {
+    let not = |inner: StaticCondition| StaticCondition::Not {
+        condition: Box::new(inner),
+    };
+    // Not(SourceIsEquipped) → Not(SourceMatchesFilter) (None before recursion).
+    let equipped = static_condition_to_trigger_condition(&StaticCondition::SourceIsEquipped)
+        .expect("the affirmative form bridges");
+    assert!(matches!(
+        equipped,
+        TriggerCondition::SourceMatchesFilter { .. }
+    ));
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::SourceIsEquipped)),
+        Some(TriggerCondition::Not {
+            condition: Box::new(equipped),
+        })
+    );
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::HasCityBlessing)),
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::HasCityBlessing),
+        })
+    );
+    // Unbridgeable inner condition: still `None`.
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::IsRingBearer)),
+        None
+    );
+    // Preserved shapes: comparator flip, and IsPresent{None} → ObjectCount == 0.
+    let hand = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 3 },
+    };
+    assert!(matches!(
+        static_condition_to_trigger_condition(&not(hand)),
+        Some(TriggerCondition::QuantityComparison {
+            comparator: Comparator::LT,
+            ..
+        })
+    ));
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::IsPresent { filter: None })),
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Any,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+}
+
 #[test]
 fn intervening_if_source_attacked_this_turn_populates_condition() {
     // CR 508.1 + CR 603.4: a source-scoped "if ~ attacked this turn"
