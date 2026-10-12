@@ -114,8 +114,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    as_long_as_gate_is_unparsed, enters_with_gate_fails_closed, find_copy_verb_present,
-    is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
+    as_long_as_gate_is_unparsed, damage_prevention_fails_closed, enters_with_gate_fails_closed,
+    find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_as_enters_one_shot_replacement, parse_bidirectional_damage_prevention,
     parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
@@ -6994,6 +6994,21 @@ fn parse_normalized_oracle_ir(
                     i += 1;
                     continue;
                 }
+                // CR 615.1a: the gate parsed, but the prevention shield it gates prints a
+                // part the shield cannot carry (an unreadable "by <subject>" source scope,
+                // a coordinated "and it <verb> …" clause). Same fail-open hazard; land it.
+                if let Some(reason) = damage_prevention_fails_closed(&line, card_name) {
+                    emitter.ability_at(
+                        item_line,
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::unimplemented(reason.gap_name(), &line),
+                        )
+                        .description(line.clone()),
+                    );
+                    i += 1;
+                    continue;
+                }
             } else if is_enters_with_counter_replacement_line(&lower) {
                 // CR 614.1c + CR 614.12: distributive "[Other/each] [type] you
                 // control enter(s) with [an additional] [counter] on them [for
@@ -7457,6 +7472,21 @@ fn parse_normalized_oracle_ir(
                     AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::unimplemented("enters_with_gate", &line),
+                    )
+                    .description(line.clone()),
+                );
+                i += 1;
+                continue;
+            }
+            // CR 615.1a: a prevention shield whose printed source scope or coordinated
+            // clause cannot be carried is recorded as an `Effect::unimplemented` gap rather
+            // than left for a later route (the effect-first `dispatch_line_nom`) to claim.
+            if let Some(reason) = damage_prevention_fails_closed(&line, card_name) {
+                emitter.ability_at(
+                    item_line,
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::unimplemented(reason.gap_name(), &line),
                     )
                     .description(line.clone()),
                 );

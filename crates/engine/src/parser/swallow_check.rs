@@ -7109,36 +7109,55 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         use crate::types::replacements::ReplacementEvent;
         use crate::types::ContinuousModification;
 
+        // CR 615.1a: Bronze Horse's gate parses, but its shield is scoped to
+        // "spells that target it", a source subject no filter expresses. The line
+        // fails closed as a line-owned `Effect::unimplemented` — the known gap —
+        // rather than shipping a shield that prevents damage from every source.
         let bronze = parse_named(
             "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
             "Bronze Horse",
             &["Artifact", "Creature"],
         );
         assert!(
-            !bronze
+            bronze.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            )),
+            "Bronze Horse's shield line must report its source-scope gap: {:#?}",
+            bronze.abilities
+        );
+        assert!(
+            bronze
                 .replacements
                 .iter()
-                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
-            "Bronze Horse replacement must parse without Unimplemented"
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "no unscoped Bronze Horse shield may be built: {:#?}",
+            bronze.replacements
+        );
+
+        // CR 611.3: a gated "as long as" prevention is a CONTINUOUS shield — the
+        // exact `Prevention { .. }` assertion (no `PreventionOneShot`) pins the
+        // one-shot classification from leaking onto a duration-bound "as long
+        // as" shield: if an implementation misclassified this line as
+        // `PreventionOneShot` ("the next time" single opportunity, CR 615.3), the
+        // assertion fails.
+        let baldric = parse_named(
+            "As long as you have a full party, prevent all damage that would be dealt to equipped creature.",
+            "Multiclass Baldric",
+            &["Artifact", "Equipment"],
         );
         let as_long_as = "as long as";
-        // CR 611.3: Bronze Horse's "as long as" prevention is a CONTINUOUS
-        // shield — the exact `Prevention { .. }` assertion (no
-        // `PreventionOneShot`) pins the one-shot classification from leaking
-        // onto a duration-bound "as long as" shield: if an implementation
-        // misclassified this card as `PreventionOneShot` ("the next time"
-        // single opportunity, CR 615.3), the assertion fails.
         assert!(
-            bronze.replacements.iter().any(|r| {
+            baldric.replacements.iter().any(|r| {
                 r.event == ReplacementEvent::DamageDone
-                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.condition.is_some()
                     && matches!(r.shield_kind, ShieldKind::Prevention { .. })
                     && r.description
                         .as_deref()
                         .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))
             }),
             "expected gated damage-prevention replacement, got {:#?}",
-            bronze.replacements
+            baldric.replacements
         );
         // CR 615.3: the Awe Strike class — "the next time [target creature]
         // would deal damage this turn, prevent that damage" — is the one-shot
@@ -7176,22 +7195,6 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "the one-shot spell sentence must NOT lower to a replacement definition, got {:#?}",
             one_shot.replacements
         );
-        // CR 604.2 + CR 611.3a: the "as long as you control another creature" gate
-        // is lifted into a typed replacement condition, so nothing is swallowed.
-        // Reach-guard: the gate is on the replacement (without it, this negative
-        // would pass vacuously — the detector only stays quiet because the gate is
-        // carried).
-        assert!(
-            bronze.replacements.iter().any(|r| r.condition.is_some()),
-            "Bronze Horse's as-long-as gate must be typed on its replacement: {:#?}",
-            bronze.replacements
-        );
-        assert!(
-            !has_swallowed_detector(&bronze, "Condition_AsLongAs"),
-            "Bronze Horse's as-long-as gate is typed, not swallowed. Warnings: {:?}",
-            bronze.parse_warnings
-        );
-
         let helm = parse_named(
             "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
             "Champion's Helm",

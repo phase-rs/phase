@@ -1,32 +1,48 @@
 //! Condition gates fail closed: a printed gate the parser can type is carried on
 //! the definition and enforced at runtime, instead of being dropped so the
-//! ungated effect ships.
+//! ungated effect ships. A gated shield that prints a part the parser cannot
+//! carry fails closed as a whole.
 //!
 //! Cards (Oracle text verbatim from card-data / Scryfall):
 //!   * Bronze Horse — "As long as you control another creature, prevent all
 //!     damage that would be dealt to this creature by spells that target it."
 //!   * Woolly Razorback — "As long as this creature has an ice counter on it,
 //!     prevent all combat damage it would deal and it has defender."
+//!   * Champion Lancer — "Prevent all damage that would be dealt to this
+//!     creature by creatures."
+//!   * Argothian Treefolk — "Prevent all damage that would be dealt to this
+//!     creature by artifact sources."
 //!   * Ascendant Packleader — "This creature enters with a +1/+1 counter on it if
 //!     you control a permanent with mana value 4 or greater."
 //!   * Hagra Mauling — "This spell costs {1} less to cast if an opponent controls
 //!     no basic lands."
 //!
-//! Every test drives the production pipeline (cast, combat, castability).
+//! Runtime tests drive the production pipeline (cast, combat, castability); the
+//! two lines that fail closed are pinned at `parse_oracle_text`, where the gap is
+//! recorded.
 
 use engine::game::casting::can_cast_object_now;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::Effect;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const BRONZE_HORSE: &str = "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.";
 
 const WOOLLY_RAZORBACK: &str = "This creature enters with three ice counters on it.\nAs long as this creature has an ice counter on it, prevent all combat damage it would deal and it has defender.\nWhenever this creature blocks, remove an ice counter from it.";
+
+const CHAMPION_LANCER: &str =
+    "Prevent all damage that would be dealt to this creature by creatures.";
+
+const ARGOTHIAN_TREEFOLK: &str =
+    "Prevent all damage that would be dealt to this creature by artifact sources.";
 
 const ASCENDANT_PACKLEADER: &str = "This creature enters with a +1/+1 counter on it if you control a permanent with mana value 4 or greater.\nWhenever you cast a spell with mana value 4 or greater, put a +1/+1 counter on this creature.";
 
@@ -40,66 +56,56 @@ fn pool(colors: &[ManaType]) -> Vec<ManaUnit> {
         .collect()
 }
 
-// ── Bronze Horse (CR 604.2 + CR 615.1a + CR 611.3a) ──────────────────────────
+// ── Gated shields that fail closed (CR 615.1a) ───────────────────────────────
 
-/// Which other permanent the Bronze Horse board carries.
-enum HorseCompanion {
-    None,
-    OwnCreature,
-    OpponentCreature,
-    OwnArtifact,
+/// Parse `oracle` as a creature and return the gap names of its `Unimplemented`
+/// abilities, plus whether any `DamageDone` replacement was built.
+fn parsed_gaps_and_damage_shield(
+    oracle: &str,
+    name: &str,
+    keywords: &[&str],
+) -> (Vec<String>, bool) {
+    let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+    let parsed = parse_oracle_text(oracle, name, &keywords, &["Creature".to_string()], &[]);
+    let gaps = parsed
+        .abilities
+        .iter()
+        .filter_map(|a| match &*a.effect {
+            Effect::Unimplemented { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let shield = parsed
+        .replacements
+        .iter()
+        .any(|r| r.event == ReplacementEvent::DamageDone);
+    (gaps, shield)
 }
 
-/// Bolt Bronze Horse with the given companion on board; returns damage marked.
-fn bolt_bronze_horse(companion: HorseCompanion) -> u32 {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let horse = scenario
-        .add_creature(P0, "Bronze Horse", 4, 4)
-        .from_oracle_text_with_keywords(&["Trample"], BRONZE_HORSE)
-        .id();
-    match companion {
-        HorseCompanion::None => {}
-        HorseCompanion::OwnCreature => {
-            scenario.add_creature(P0, "Grizzly Bears", 2, 2);
-        }
-        HorseCompanion::OpponentCreature => {
-            scenario.add_creature(P1, "Grizzly Bears", 2, 2);
-        }
-        HorseCompanion::OwnArtifact => {
-            scenario
-                .add_creature(P0, "Ornithopter Husk", 0, 2)
-                .as_artifact();
-        }
-    }
-    let bolt = scenario.add_bolt_to_hand(P0);
-    let mut runner = scenario.build();
-    runner
-        .cast(bolt)
-        .target_object(horse)
-        .resolve()
-        .damage_marked(horse)
-}
-
-/// CR 604.2 + CR 611.3a: the shield applies only while its controller controls
-/// another creature. Alone, the Horse takes the Bolt's 3 damage (red at base:
-/// the ungated shield prevented it).
+/// CR 615.1a: Bronze Horse's shield is scoped to "spells that target it", a
+/// source subject no filter expresses ("that target" is not in the target
+/// grammar). Its gate parses, so the line fails closed on the source scope: no
+/// shield (which would prevent combat damage and every untargeted source while
+/// the gate holds), one line-owned gap.
 #[test]
-fn bronze_horse_shield_applies_only_with_another_creature() {
-    assert_eq!(
-        bolt_bronze_horse(HorseCompanion::None),
-        3,
-        "with no other creature the gate is false — the Bolt's damage is dealt"
-    );
-    // Positive control: another creature you control turns the shield on.
-    assert_eq!(bolt_bronze_horse(HorseCompanion::OwnCreature), 0);
-    // Hostile: a creature an opponent controls is not "you control".
-    assert_eq!(bolt_bronze_horse(HorseCompanion::OpponentCreature), 3);
-    // Hostile: another permanent you control that is not a creature.
-    assert_eq!(bolt_bronze_horse(HorseCompanion::OwnArtifact), 3);
+fn bronze_horse_source_scope_fails_closed() {
+    let (gaps, shield) = parsed_gaps_and_damage_shield(BRONZE_HORSE, "Bronze Horse", &["Trample"]);
+    assert_eq!(gaps, vec!["prevention_source_scope".to_string()]);
+    assert!(!shield, "no unscoped damage-prevention shield may be built");
 }
 
-// ── Woolly Razorback (CR 604.2 + CR 122.1 + CR 510.1a) ───────────────────────
+/// CR 615.1a + CR 702.3a: Woolly Razorback's gated line also grants defender
+/// ("and it has defender"); the shield alone would drop it, so the line fails
+/// closed. Its other two lines still parse (the ice counters and the block
+/// trigger carry no gap).
+#[test]
+fn woolly_razorback_coordinated_conjunct_fails_closed() {
+    let (gaps, shield) = parsed_gaps_and_damage_shield(WOOLLY_RAZORBACK, "Woolly Razorback", &[]);
+    assert_eq!(gaps, vec!["prevention_conjunct".to_string()]);
+    assert!(!shield, "no shield may be built without the defender grant");
+}
+
+// ── "dealt to <recipient> by <subject>" source scope (CR 615.1a) ─────────────
 
 fn advance_to_declare_blockers(runner: &mut GameRunner) {
     for _ in 0..12 {
@@ -117,19 +123,51 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
     );
 }
 
-/// Woolly blocks an attacking Grizzly Bears with `ice` counters on it; its block
-/// trigger removes one before combat damage. Returns (bear zone, bear damage).
-fn woolly_blocks_bears(ice: u32) -> (Zone, u32) {
+/// Bolt the shielded creature; returns the damage marked on it.
+fn bolt_shielded(name: &str, oracle: &str, power: i32, toughness: i32) -> u32 {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let shielded = scenario
+        .add_creature(P0, name, power, toughness)
+        .from_oracle_text(oracle)
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+    runner
+        .cast(bolt)
+        .target_object(shielded)
+        .resolve()
+        .damage_marked(shielded)
+}
+
+/// What attacks the shielded blocker.
+enum Attacker {
+    Creature,
+    ArtifactCreature,
+}
+
+/// The shielded creature blocks an attacking 2/2; returns the damage marked on
+/// the blocker after combat damage.
+fn shielded_blocks(
+    name: &str,
+    oracle: &str,
+    power: i32,
+    toughness: i32,
+    attacker: Attacker,
+) -> u32 {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Filler A"]);
     scenario.with_library_top(P1, &["Filler B"]);
-    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    let woolly = scenario
-        .add_creature(P1, "Woolly Razorback", 7, 7)
-        .from_oracle_text(WOOLLY_RAZORBACK)
+    let mut bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+    if matches!(attacker, Attacker::ArtifactCreature) {
+        bear.as_artifact_creature();
+    }
+    let bear = bear.id();
+    let blocker = scenario
+        .add_creature(P1, name, power, toughness)
+        .from_oracle_text(oracle)
         .id();
-    scenario.with_counter(woolly, CounterType::Generic("ice".to_string()), ice);
     let mut runner = scenario.build();
 
     runner.pass_both_players();
@@ -138,27 +176,59 @@ fn woolly_blocks_bears(ice: u32) -> (Zone, u32) {
         .expect("Grizzly Bears may attack");
     advance_to_declare_blockers(&mut runner);
     runner
-        .declare_blockers(&[(woolly, bear)])
-        .expect("Woolly Razorback may block");
-    let outcome = runner.combat_damage();
-    (outcome.zone_of(bear), outcome.damage_marked(bear))
+        .declare_blockers(&[(blocker, bear)])
+        .expect("the shielded creature may block");
+    runner.combat_damage().damage_marked(blocker)
 }
 
-/// CR 604.2 + CR 122.1: the combat-damage shield is gated on an ice counter. The
-/// block trigger removes the last one before damage (CR 510.1a), so Woolly deals
-/// its damage and the Bears die (red at base: the ungated shield kept them alive).
+/// CR 615.1a: Champion Lancer's shield prevents only damage from creatures. A
+/// Bolt is an instant, so its damage is dealt (red at the candidate: the source
+/// scope was dropped and the shield prevented every source).
 #[test]
-fn woolly_razorback_deals_combat_damage_once_last_ice_counter_removed() {
-    let (zone, _) = woolly_blocks_bears(1);
+fn champion_lancer_prevents_creature_damage_only() {
     assert_eq!(
-        zone,
-        Zone::Graveyard,
-        "with its last ice counter removed, Woolly's combat damage is dealt"
+        bolt_shielded("Champion Lancer", CHAMPION_LANCER, 3, 3),
+        3,
+        "an instant is not a creature — its damage is not prevented"
     );
-    // Positive control: a counter remains after the block trigger → shield on.
-    let (zone, damage) = woolly_blocks_bears(2);
-    assert_eq!(zone, Zone::Battlefield);
-    assert_eq!(damage, 0);
+    // Positive control: a creature's combat damage is prevented.
+    assert_eq!(
+        shielded_blocks("Champion Lancer", CHAMPION_LANCER, 3, 3, Attacker::Creature),
+        0
+    );
+}
+
+/// CR 615.1a: Argothian Treefolk's shield prevents only damage from artifact
+/// sources (red at the candidate: the unscoped shield prevented the Bolt).
+#[test]
+fn argothian_treefolk_prevents_artifact_source_damage_only() {
+    assert_eq!(
+        bolt_shielded("Argothian Treefolk", ARGOTHIAN_TREEFOLK, 3, 5),
+        3,
+        "a red instant is not an artifact source"
+    );
+    // Positive control: an artifact creature's combat damage is prevented.
+    assert_eq!(
+        shielded_blocks(
+            "Argothian Treefolk",
+            ARGOTHIAN_TREEFOLK,
+            3,
+            5,
+            Attacker::ArtifactCreature
+        ),
+        0
+    );
+    // Hostile: a non-artifact creature is not an artifact source.
+    assert_eq!(
+        shielded_blocks(
+            "Argothian Treefolk",
+            ARGOTHIAN_TREEFOLK,
+            3,
+            5,
+            Attacker::Creature
+        ),
+        2
+    );
 }
 
 // ── Ascendant Packleader (CR 614.1c + CR 614.1d) ─────────────────────────────

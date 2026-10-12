@@ -4,9 +4,9 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map_opt, map_parser, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -45,11 +45,11 @@ use super::oracle_util::{
     parse_ordinal, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
-    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
-    EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
+    AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, ChoiceType,
+    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
+    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
+    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
+    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -394,8 +394,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
         return Some(def);
     }
-    if let Some(def) = parse_damage_prevention_replacement(&norm_lower, &text) {
-        return Some(def);
+    match parse_damage_prevention_replacement(&norm_lower, &text) {
+        Ok(def) => return Some(def),
+        // CR 615.1a: a prevention shield with a printed part it cannot carry is
+        // claimed by no later parser; the route lands the line as
+        // `Effect::unimplemented` (`damage_prevention_fails_closed`).
+        Err(PreventionDecline::FailsClosed(_)) => return None,
+        Err(PreventionDecline::NotThisShape) => {}
     }
     // "damage can't be prevented" is handled by effect parsing (Effect::AddRestriction),
     // not replacement parsing. See oracle_effect.rs damage prevention disabled handler.
@@ -8848,6 +8853,33 @@ pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<Target
 /// stripping, and the untyped "a spell"/"a source" no-filter cases before
 /// delegating to `parse_damage_source_subject_filter`.
 fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
+    damage_source_subject_scope(subject).into_filter()
+}
+
+/// CR 615.1a: what a printed damage-source subject scopes an effect to. Keeps
+/// "every source" apart from "a subject the parser cannot read" — both carry no
+/// filter, but only the first is unscoped by the card's own text.
+#[derive(Debug, Clone, PartialEq)]
+enum DamageSourceScope {
+    /// "a source" / "sources" with no qualifier — every source matches.
+    AnySource,
+    /// A subject the runtime evaluates against the damage event's source.
+    Scoped(TargetFilter),
+    /// A subject is printed but does not parse to a filter.
+    Unrecognized,
+}
+
+impl DamageSourceScope {
+    fn into_filter(self) -> Option<TargetFilter> {
+        match self {
+            Self::Scoped(filter) => Some(filter),
+            Self::AnySource | Self::Unrecognized => None,
+        }
+    }
+}
+
+/// Three-state form of `finish_damage_source_subject` (see its doc comment).
+fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
     let subject = subject.trim();
 
     // Handle ability word prefixes ("Revolt — ..., if a source you control")
@@ -8891,7 +8923,7 @@ fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
         || subject == "this creature"
         || subject == "this permanent"
     {
-        return Some(TargetFilter::SelfRef);
+        return DamageSourceScope::Scoped(TargetFilter::SelfRef);
     }
 
     // CR 614.1a: A disjunction of controlled damage-source subjects ("a red
@@ -8902,10 +8934,15 @@ fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
     if let Ok((_, (head, tail))) = nom_primitives::split_once_on(subject, " you control or ") {
         if nom_primitives::parse_article.parse(tail).is_ok() {
             let first_leg = &subject[..head.len() + " you control".len()];
-            return Some(merge_or_filters(
-                finish_damage_source_subject(first_leg)?,
-                finish_damage_source_subject(tail)?,
-            ));
+            return match (
+                damage_source_subject_scope(first_leg),
+                damage_source_subject_scope(tail),
+            ) {
+                (DamageSourceScope::Scoped(first), DamageSourceScope::Scoped(second)) => {
+                    DamageSourceScope::Scoped(merge_or_filters(first, second))
+                }
+                _ => DamageSourceScope::Unrecognized,
+            };
         }
     }
 
@@ -8919,15 +8956,16 @@ fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
     // precede `parse_type_phrase_folding`, which maps bare "spell" to Card.
     // `StackSpell` excludes permanent and activated/triggered-ability damage.
     if subject == "spell" {
-        return Some(TargetFilter::StackSpell);
+        return DamageSourceScope::Scoped(TargetFilter::StackSpell);
     }
 
     // "a source" / "sources" with no qualifier — no filter needed (matches any source).
     if matches!(subject, "source" | "sources") {
-        return None;
+        return DamageSourceScope::AnySource;
     }
 
     parse_damage_source_subject_filter(subject)
+        .map_or(DamageSourceScope::Unrecognized, DamageSourceScope::Scoped)
 }
 
 /// Isolate the source-subject clause following a "dealt by " (or "dealt to
@@ -8982,12 +9020,46 @@ fn parse_damage_source_filter_active(norm_lower: &str) -> Option<TargetFilter> {
 /// Parse the damage source filter from passive-voice phrasing — "...would be
 /// dealt ... by <subject>" (Candletrap, Defang) — where the source subject
 /// trails the verb, unlike the active-voice "<subject> would deal ...".
-/// Anchored at "dealt by " (mirrors the existing recipient-side "dealt to "
-/// scan in `parse_damage_recipient_after_prefix`), isolating the subject
-/// clause at the shared clause-boundary terminator before handing it to
-/// `finish_damage_source_subject` — the same postprocessing authority the
-/// active-voice extraction uses.
+/// Delegates to `parse_damage_source_scope_passive`; an unreadable subject
+/// carries no filter here (callers that must fail closed read the scope).
 fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> {
+    parse_damage_source_scope_passive(norm_lower).and_then(DamageSourceScope::into_filter)
+}
+
+/// CR 615.1a: the passive-voice source axis of a damage clause. `None` when the
+/// text prints no passive "by <subject>" source clause; otherwise the subject's
+/// scope, read through `damage_source_subject_scope` — the same postprocessing
+/// authority the active-voice extraction uses.
+fn parse_damage_source_scope_passive(norm_lower: &str) -> Option<DamageSourceScope> {
+    passive_damage_source_subject(norm_lower).map(damage_source_subject_scope)
+}
+
+/// CR 615.1a: "dealt to <recipient> [<duration>] by <subject>" (Champion
+/// Lancer, Artifact Ward, Energy Field) — the source subject trails the
+/// recipient. The recipient-to-"by" span is bounded by the sentence
+/// (`take_till('.')`), so the "by" anchor can never be found in a following
+/// sentence; the subject then closes at the shared clause-boundary terminator.
+fn take_recipient_then_damage_source_subject(input: &str) -> OracleResult<'_, &str> {
+    preceded(
+        tag::<_, _, OracleError<'_>>("dealt to "),
+        map_parser(
+            take_till(|c: char| c == '.'),
+            preceded(
+                pair(take_until(" by "), tag(" by ")),
+                take_damage_source_subject_clause,
+            ),
+        ),
+    )
+    .parse(input)
+}
+
+/// Isolate the passive-voice source subject: the adjacent "dealt by " anchor
+/// (mirrors the recipient-side "dealt to " scan in
+/// `parse_damage_recipient_after_prefix`; also reads the "dealt to and dealt by"
+/// ellipsis) first, then "dealt to <recipient> by ". Trying the adjacent anchor
+/// over the whole text first keeps every text that carries it on its existing
+/// reading.
+fn passive_damage_source_subject(norm_lower: &str) -> Option<&str> {
     // Bail out entirely when the text carries a "doesn't affect .../does not
     // affect ..." exception clause (Undergrowth: "Prevent all combat damage
     // that would be dealt this turn. If this spell's additional cost was
@@ -9007,14 +9079,19 @@ fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> 
     {
         return None;
     }
-    let subject = nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+    nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
         preceded(
             tag::<_, _, OracleError<'_>>("dealt by "),
             take_damage_source_subject_clause,
         )
         .parse(input)
-    })?;
-    finish_damage_source_subject(subject)
+    })
+    .or_else(|| {
+        nom_primitives::scan_at_word_boundaries(
+            norm_lower,
+            take_recipient_then_damage_source_subject,
+        )
+    })
 }
 
 /// Parse the damage source filter, trying active voice first, then passive
@@ -9052,6 +9129,25 @@ pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<Target
     }
     if let Some(filter) = parse_damage_source_subject(subject) {
         return Some(filter);
+    }
+    // CR 303.4: the plural "enchanted <type>s" (Wall of Putrid Flesh, Enchanted
+    // Being: "… by enchanted creatures") names every object with an Aura attached,
+    // not the host of this source (the singular arm above). The generic type
+    // grammar below reads it as `EnchantedBy` — enchanted by THIS source — which
+    // a shield on a non-Aura permanent never matches.
+    // A compound noun ("enchanted creatures and enchantment creatures") does not
+    // fold to one typed filter and keeps the generic reading below.
+    if let Ok((noun, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(subject) {
+        if let (TargetFilter::Typed(mut typed), rest) = parse_type_phrase_folding(noun) {
+            if rest.trim().is_empty() {
+                typed.properties.push(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: SourceExclusion::Include,
+                });
+                return Some(TargetFilter::Typed(typed));
+            }
+        }
     }
 
     // Typed damage sources ("creature you control with a +1/+1 counter on it",
@@ -9098,11 +9194,23 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
         tail = rest.trim();
     }
 
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("of the chosen type").parse(tail) {
+    // CR 607.2d: "of the chosen type/color" reads the choice made by the linked
+    // "choose a …" ability printed on the same object (Charm School, Prismatic
+    // Ward), which the runtime reads off the shield's host. "The last chosen
+    // color" names a different linkage and is not recognized here.
+    if let Ok((rest, prop)) = alt((
+        value(
+            FilterProp::IsChosenCreatureType,
+            tag::<_, _, OracleError<'_>>("of the chosen type"),
+        ),
+        value(FilterProp::IsChosenColor, tag("of the chosen color")),
+    ))
+    .parse(tail)
+    {
         if !rest.trim().is_empty() {
             return None;
         }
-        props.push(FilterProp::IsChosenCreatureType);
+        props.push(prop);
     } else if !tail.is_empty() {
         return None;
     }
@@ -9166,37 +9274,48 @@ fn apply_damage_source_qualifier(
         {
             props.push(FilterProp::NonToken);
         } else {
-            let inner = alt((
-                value(
-                    TypeFilter::Creature,
-                    tag::<_, _, OracleError<'_>>("creature"),
-                ),
-                value(TypeFilter::Land, tag::<_, _, OracleError<'_>>("land")),
-                value(
-                    TypeFilter::Artifact,
-                    tag::<_, _, OracleError<'_>>("artifact"),
-                ),
-                value(
-                    TypeFilter::Enchantment,
-                    tag::<_, _, OracleError<'_>>("enchantment"),
-                ),
-                value(
-                    TypeFilter::Planeswalker,
-                    tag::<_, _, OracleError<'_>>("planeswalker"),
-                ),
-            ))
-            .parse(rest)
-            .ok()
-            .filter(|(after, _)| after.is_empty())
-            .map_or_else(
-                || TypeFilter::Subtype(capitalize_first(rest)),
-                |(_, filter)| filter,
-            );
+            let inner = damage_source_qualifier_type(rest);
             *filter = filter.clone().with_type(TypeFilter::Non(Box::new(inner)));
         }
     } else if !qualifier.is_empty() {
-        *filter = filter.clone().subtype(capitalize_first(qualifier));
+        // CR 205.2a: a card-type qualifier ("artifact sources") is a type, not a
+        // subtype; any other word ("Giant source") is a subtype.
+        *filter = filter
+            .clone()
+            .with_type(damage_source_qualifier_type(qualifier));
     }
+}
+
+/// CR 205.2a + CR 205.3: the type a damage-source qualifier word names — a card
+/// type ("artifact", "creature", …) when the whole word is one, else a subtype
+/// ("Giant", "Goblin").
+fn damage_source_qualifier_type(word: &str) -> TypeFilter {
+    alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, OracleError<'_>>("creature"),
+        ),
+        value(TypeFilter::Land, tag::<_, _, OracleError<'_>>("land")),
+        value(
+            TypeFilter::Artifact,
+            tag::<_, _, OracleError<'_>>("artifact"),
+        ),
+        value(
+            TypeFilter::Enchantment,
+            tag::<_, _, OracleError<'_>>("enchantment"),
+        ),
+        value(
+            TypeFilter::Planeswalker,
+            tag::<_, _, OracleError<'_>>("planeswalker"),
+        ),
+    ))
+    .parse(word)
+    .ok()
+    .filter(|(after, _)| after.is_empty())
+    .map_or_else(
+        || TypeFilter::Subtype(capitalize_first(word)),
+        |(_, filter)| filter,
+    )
 }
 
 /// Parse the damage target filter from the clause after "damage".
@@ -12983,6 +13102,90 @@ fn sentence_carrying_anchor<'a>(clause_lower: &'a str, anchor: &str) -> Option<&
     }
 }
 
+/// Why `parse_damage_prevention_replacement` declined a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreventionDecline {
+    /// Not a prevention shield this parser reads — later parsers may claim it.
+    /// An unparsed "as long as" gate also declines here; the "as long as" route
+    /// lands that line (`as_long_as_gate_is_unparsed`).
+    NotThisShape,
+    /// The line IS a prevention shield, but a printed part of it cannot be
+    /// carried. It must land as `Effect::unimplemented`, never as a shield that
+    /// drops that part or as a later route's reading.
+    FailsClosed(PreventionFailClosed),
+}
+
+/// CR 615.1a: the printed part of a prevention shield the parser cannot carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreventionFailClosed {
+    /// A "by <subject>" source clause whose subject does not parse to a filter.
+    SourceScope,
+    /// A coordinated "and it <verb> …" clause after the prevention clause.
+    CoordinatedConjunct,
+}
+
+impl PreventionFailClosed {
+    /// The `Effect::unimplemented` gap name the route records for the line.
+    pub(crate) fn gap_name(self) -> &'static str {
+        match self {
+            Self::SourceScope => "prevention_source_scope",
+            Self::CoordinatedConjunct => "prevention_conjunct",
+        }
+    }
+}
+
+/// CR 615.1a: parser-owned predicate for the prevention route — why a
+/// damage-prevention line fails closed, if it does. Normalizes exactly as
+/// `parse_replacement_line_inner` does, so the route and the parser agree, and
+/// reads the line with or without a leading "as long as" gate.
+pub(crate) fn damage_prevention_fails_closed(
+    text: &str,
+    card_name: &str,
+) -> Option<PreventionFailClosed> {
+    let text = strip_reminder_text(text);
+    let norm_lower = replace_self_refs(&text, card_name).to_lowercase();
+    match parse_damage_prevention_replacement(&norm_lower, &text) {
+        Err(PreventionDecline::FailsClosed(reason)) => Some(reason),
+        Ok(_) | Err(PreventionDecline::NotThisShape) => None,
+    }
+}
+
+/// CR 615.1a: true when the prevention sentence continues with a coordinated
+/// clause that has its own subject and verb ("… prevent all combat damage it
+/// would deal and it has defender" — Woolly Razorback). The subject axis is a
+/// pronoun or self-reference and the verb axis a predicate verb, so a recipient
+/// list ("dealt to you and creatures you control") and the "dealt to and dealt
+/// by" ellipsis never match. Bounded to the first sentence, the prevention
+/// clause, so a follow-up sentence is not read.
+fn has_coordinated_predicate_conjunct(working_lower: &str) -> bool {
+    let sentence = take_till::<_, _, OracleError<'_>>(|c: char| c == '.')
+        .parse(working_lower)
+        .map_or(working_lower, |(_, sentence)| sentence);
+    nom_primitives::scan_at_word_boundaries(sentence, |input| {
+        (
+            tag::<_, _, OracleError<'_>>("and "),
+            alt((tag("it "), tag("they "), tag("~ "))),
+            alt((
+                tag("has "),
+                tag("have "),
+                tag("gains "),
+                tag("gain "),
+                tag("gets "),
+                tag("get "),
+                tag("loses "),
+                tag("lose "),
+                tag("is "),
+                tag("are "),
+                tag("can't "),
+                tag("doesn't "),
+                tag("don't "),
+            )),
+        )
+            .parse(input)
+    })
+    .is_some()
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -12994,10 +13197,14 @@ fn sentence_carrying_anchor<'a>(clause_lower: &'a str, anchor: &str) -> Option<&
 ///   is prevented (Inviolability, General's Kabuto, Magebane Armor, Artifact Ward, Multiclass Baldric).
 /// - Optional leading "as long as <condition>, " gate (CR 614.1a) — Multiclass Baldric's
 ///   "As long as you have a full party, prevent all damage that would be dealt to equipped creature."
+///
+/// Declines are typed (`PreventionDecline`) so the route can tell "not my shape"
+/// from "my shape, a printed part of it cannot be carried"
+/// (`damage_prevention_fails_closed`).
 fn parse_damage_prevention_replacement(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Result<ReplacementDefinition, PreventionDecline> {
     // CR 614.1a: An "as long as <cond>, " prefix on a prevention replacement gates
     // the shield itself, not its post-replacement followup. Strip the gate first
     // and lift it to a typed `ReplacementCondition` so the rest of the parser
@@ -13012,25 +13219,25 @@ fn parse_damage_prevention_replacement(
         // CR 604.2 + CR 611.3a: a printed gate the typed surface cannot carry must not
         // become an unconditional shield — fail closed (the route lands the line in
         // `Effect::unimplemented`, see `as_long_as_gate_is_unparsed`).
-        AsLongAsGate::Unparsed => return None,
+        AsLongAsGate::Unparsed => return Err(PreventionDecline::NotThisShape),
     };
 
     // Must contain "prevent" and "damage" to be a prevention pattern
     if !nom_primitives::scan_contains(working_lower, "prevent")
         || !nom_primitives::scan_contains(working_lower, "damage")
     {
-        return None;
+        return Err(PreventionDecline::NotThisShape);
     }
 
     // "damage can't be prevented" is NOT a prevention replacement -- it's a restriction.
     if nom_primitives::scan_contains(working_lower, "can't be prevented") {
-        return None;
+        return Err(PreventionDecline::NotThisShape);
     }
 
     // CR 615: "sources of the color of your choice" requires interactive color choice —
     // handled as a Choose → PreventDamage spell effect chain, not a passive replacement.
     if nom_primitives::scan_contains(working_lower, "color of your choice") {
-        return None;
+        return Err(PreventionDecline::NotThisShape);
     }
 
     // Redirection patterns ("prevent that damage. ~ deals that much damage to") are handled
@@ -13038,13 +13245,23 @@ fn parse_damage_prevention_replacement(
     if nom_primitives::scan_contains(working_lower, "prevent that damage")
         && nom_primitives::scan_contains(working_lower, "deals that much damage")
     {
-        return None;
+        return Err(PreventionDecline::NotThisShape);
     }
     // "is dealt to ~ instead" patterns are also redirections, not pure prevention
     if nom_primitives::scan_contains(working_lower, "is dealt to")
         && nom_primitives::scan_contains(working_lower, "instead")
     {
-        return None;
+        return Err(PreventionDecline::NotThisShape);
+    }
+
+    // CR 615.1a: the shield is built from the prevention clause alone; a
+    // coordinated clause with its own subject and verb in the same sentence
+    // (Woolly Razorback: "… prevent all combat damage it would deal and it has
+    // defender") is a second effect this parser would drop. Fail closed.
+    if has_coordinated_predicate_conjunct(working_lower) {
+        return Err(PreventionDecline::FailsClosed(
+            PreventionFailClosed::CoordinatedConjunct,
+        ));
     }
 
     // --- 1. Extract prevention amount ---
@@ -13085,14 +13302,14 @@ fn parse_damage_prevention_replacement(
     let repr = if let Some((after_all_but, _)) =
         after_prevent.and_then(|s| tag::<_, _, OracleError<'_>>("all but ").parse(s).ok())
     {
-        let (n, _) = parse_number(after_all_but)?;
+        let (n, _) = parse_number(after_all_but).ok_or(PreventionDecline::NotThisShape)?;
         PreventionRepr::Shield(PreventionAmount::AllBut(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent all") {
         PreventionRepr::Shield(PreventionAmount::All)
     } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
-        let (n, _) = parse_number(rest)?;
+        let (n, _) = parse_number(rest).ok_or(PreventionDecline::NotThisShape)?;
         PreventionRepr::Shield(PreventionAmount::Next(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
@@ -13109,8 +13326,9 @@ fn parse_damage_prevention_replacement(
         // stays with the chunk-level where-X machinery. Any miss (no number, or
         // no adjacent " of that damage" anchor) means this is not a recognized
         // prevention pattern, so `?` bails the whole parse.
-        let formula =
-            after_prevent.and_then(|s| nom_parse_lower(s, parse_damage_prevention_formula))?;
+        let formula = after_prevent
+            .and_then(|s| nom_parse_lower(s, parse_damage_prevention_formula))
+            .ok_or(PreventionDecline::NotThisShape)?;
         PreventionRepr::Reduce(formula)
     };
 
@@ -13279,11 +13497,25 @@ fn parse_damage_prevention_replacement(
         damage_target_filter.is_some() || valid_card_filter.is_some() || recipient_scope_parsed;
 
     if has_recipient_clause && !recipient_recognized {
-        return None;
+        return Err(PreventionDecline::NotThisShape);
     }
 
     // --- 4. Extract damage source filter ---
-    let damage_source_filter = parse_damage_source_filter(working_lower);
+    // CR 615.1a: a printed "by <subject>" source clause bounds the shield the
+    // same way the recipient clause does (mirror of the recipient guard above):
+    // a subject the runtime cannot evaluate must not become an unscoped shield
+    // that prevents damage from every source.
+    let damage_source_filter = match parse_damage_source_filter_active(working_lower) {
+        Some(filter) => Some(filter),
+        None => match parse_damage_source_scope_passive(working_lower) {
+            Some(DamageSourceScope::Unrecognized) => {
+                return Err(PreventionDecline::FailsClosed(
+                    PreventionFailClosed::SourceScope,
+                ));
+            }
+            scope => scope.and_then(DamageSourceScope::into_filter),
+        },
+    };
 
     // --- 5. Build the replacement definition ---
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -13338,7 +13570,7 @@ fn parse_damage_prevention_replacement(
         match stated_clause_expiry(working_lower, PREVENTION_VERB_ANCHOR) {
             StatedClauseExpiry::Explicit(expiry) => def = def.expiry(expiry),
             StatedClauseExpiry::Durable => {}
-            StatedClauseExpiry::Unsupported => return None,
+            StatedClauseExpiry::Unsupported => return Err(PreventionDecline::NotThisShape),
         }
     }
     // Capture whether the recipient filter was event-driven (typed
@@ -13461,7 +13693,7 @@ fn parse_damage_prevention_replacement(
         def = def.execute(followup_def);
     }
 
-    Some(def)
+    Ok(def)
 }
 
 /// CR 615.1a: Extract the typed event-recipient filter from a damage-prevention
@@ -14770,6 +15002,129 @@ mod tests {
         let (_, subject) = take_damage_source_subject_clause("creatures you control.")
             .expect("terminator scan should succeed");
         assert_eq!(subject, "creatures you control");
+    }
+
+    /// CR 615.1a: the passive source axis reads "dealt to <recipient> [<duration>]
+    /// by <subject>" as well as the adjacent "dealt by <subject>", and keeps a
+    /// subject it cannot read apart from an unscoped "by sources".
+    #[test]
+    fn passive_source_scope_reads_recipient_then_by_subject() {
+        let typed = |type_filters: Vec<TypeFilter>, properties: Vec<FilterProp>| {
+            DamageSourceScope::Scoped(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                properties,
+                ..TypedFilter::default()
+            }))
+        };
+        let opponents_sources = DamageSourceScope::Scoped(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        for (text, expected) in [
+            // Type-phrase subjects.
+            (
+                "prevent all damage that would be dealt to ~ by creatures.",
+                typed(vec![TypeFilter::Creature], vec![]),
+            ),
+            (
+                "prevent all damage that would be dealt to ~ by artifact creatures.",
+                typed(vec![TypeFilter::Artifact, TypeFilter::Creature], vec![]),
+            ),
+            (
+                "prevent all combat damage that would be dealt to ~ by walls.",
+                typed(vec![TypeFilter::Subtype("Wall".to_string())], vec![]),
+            ),
+            (
+                "prevent all damage that would be dealt to ~ by creatures with first strike.",
+                typed(
+                    vec![TypeFilter::Creature],
+                    vec![FilterProp::WithKeyword {
+                        value: Keyword::FirstStrike,
+                    }],
+                ),
+            ),
+            // CR 303.4: the plural "enchanted creatures" — any creature with an Aura.
+            (
+                "prevent all combat damage that would be dealt to ~ by enchanted creatures.",
+                typed(
+                    vec![TypeFilter::Creature],
+                    vec![FilterProp::HasAttachment {
+                        kind: AttachmentKind::Aura,
+                        controller: None,
+                        exclude_source: SourceExclusion::Include,
+                    }],
+                ),
+            ),
+            // Source-noun subjects; a card-type qualifier is a type (CR 205.2a).
+            (
+                "prevent all damage that would be dealt to enchanted creature by artifact sources.",
+                typed(vec![TypeFilter::Artifact], vec![]),
+            ),
+            (
+                "prevent all damage that would be dealt to you by sources you don't control.",
+                opponents_sources.clone(),
+            ),
+            // A duration between the recipient and "by".
+            (
+                "prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control.",
+                opponents_sources,
+            ),
+            // An unqualified "by sources" is every source.
+            (
+                "prevent all damage that would be dealt to you by sources.",
+                DamageSourceScope::AnySource,
+            ),
+            // CR 607.2d: the linked chosen color (Charm School, Prismatic Ward).
+            (
+                "prevent all damage that would be dealt to you by sources of the chosen color.",
+                typed(vec![], vec![FilterProp::IsChosenColor]),
+            ),
+            // Subjects no filter expresses.
+            (
+                "prevent all damage that would be dealt to ~ by spells that target it.",
+                DamageSourceScope::Unrecognized,
+            ),
+            (
+                "prevent all damage that would be dealt to ~ by creatures it's blocking.",
+                DamageSourceScope::Unrecognized,
+            ),
+            (
+                "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
+                DamageSourceScope::Unrecognized,
+            ),
+            // "The last chosen color" (Chromatic Armor) is a different linkage.
+            (
+                "prevent all damage that would be dealt to enchanted creature by sources of the last chosen color.",
+                DamageSourceScope::Unrecognized,
+            ),
+            // The adjacent anchor keeps its reading, including the ellipsis (Fog Bank).
+            (
+                "prevent all combat damage that would be dealt to and dealt by ~.",
+                DamageSourceScope::Scoped(TargetFilter::SelfRef),
+            ),
+        ] {
+            assert_eq!(
+                parse_damage_source_scope_passive(text),
+                Some(expected),
+                "{text}"
+            );
+        }
+        // A compound "enchanted …" noun (Inspire Awe's "enchanted creatures and
+        // enchantment creatures") is not the plural arm's shape: it keeps the
+        // generic type-phrase reading.
+        const COMPOUND: &str = "enchanted creatures and enchantment creatures";
+        assert_eq!(
+            parse_damage_source_subject_filter(COMPOUND),
+            Some(parse_type_phrase_folding(COMPOUND).0)
+        );
+        // No source clause: no "by", a "by" only in a following sentence, and the
+        // "doesn't affect" exception guard over the recipient-then-by form.
+        for text in [
+            "prevent all damage that would be dealt to ~.",
+            "prevent all damage that would be dealt to ~. ~ can't be blocked by walls.",
+            "prevent all damage that would be dealt to you this turn. this effect doesn't affect damage that would be dealt to you by red creatures.",
+        ] {
+            assert_eq!(parse_damage_source_scope_passive(text), None, "{text}");
+        }
     }
 
     /// Corpus regression, found via PR #7615's card-data.json parse-diff:
@@ -16783,11 +17138,6 @@ mod tests {
                 "a nested relative clause owns its own 'this turn'",
             ),
             (
-                "Prevent all combat damage that would be dealt to you by creatures \
-                 that entered the battlefield this turn.",
-                "a nested relative clause on the SOURCE owns its own 'this turn'",
-            ),
-            (
                 "Prevent all damage that would be dealt to you if you've gained 3 \
                  or more life this turn.",
                 "a trailing 'if' condition owns its own 'this turn'",
@@ -16819,6 +17169,18 @@ mod tests {
                  turn window from it ({text})"
             );
         }
+
+        // A nested relative clause on the SOURCE ("by creatures that entered the
+        // battlefield this turn") owns its own "this turn", and no filter reads
+        // that subject, so the line fails closed on its source scope (CR 615.1a)
+        // rather than building a shield with a turn window or with no source scope.
+        const SOURCE_RELATIVE: &str = "Prevent all combat damage that would be dealt to you by \
+                                       creatures that entered the battlefield this turn.";
+        assert!(parse_replacement_line(SOURCE_RELATIVE, "Probe Card").is_none());
+        assert_eq!(
+            damage_prevention_fails_closed(SOURCE_RELATIVE, "Probe Card"),
+            Some(PreventionFailClosed::SourceScope)
+        );
     }
 
     /// CR 611.2a + CR 514.2: the bidirectional "dealt to and dealt by <subject>"
@@ -27290,15 +27652,18 @@ mod tests {
     }
 
     /// CR 604.2 + CR 614.1d: Bronze Horse's "as long as you control another
-    /// creature" gate is carried as an object-count gate on the shield.
+    /// creature" gate still bridges to an object-count gate; the line declines
+    /// only because its "by spells that target it" source scope does not parse
+    /// (CR 615.1a), so the route lands it instead of an unscoped shield.
     #[test]
-    fn bronze_horse_as_long_as_gate_is_carried_on_the_shield() {
-        let def = parse_replacement_line(
-            "As long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
-            "Bronze Horse",
-        )
-        .expect("the prevention shield must parse");
-        let Some(ReplacementCondition::OnlyIfQuantity {
+    fn bronze_horse_gate_bridges_but_source_scope_fails_closed() {
+        const LINE: &str = "As long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.";
+        let norm_lower = replace_self_refs(LINE, "Bronze Horse").to_lowercase();
+        let AsLongAsGate::Parsed { condition, .. } = strip_as_long_as_condition_prefix(&norm_lower)
+        else {
+            panic!("the another-creature gate must parse");
+        };
+        let ReplacementCondition::OnlyIfQuantity {
             lhs:
                 QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount { filter },
@@ -27306,9 +27671,9 @@ mod tests {
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
             active_player_req: None,
-        }) = &def.condition
+        } = *condition
         else {
-            panic!("expected an ObjectCount GE 1 gate, got {:?}", def.condition);
+            panic!("expected an ObjectCount GE 1 gate");
         };
         let TargetFilter::Typed(tf) = filter else {
             panic!("expected a typed creature filter, got {filter:?}");
@@ -27316,21 +27681,28 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Another));
-        assert_eq!(def.event, ReplacementEvent::DamageDone);
+
+        assert!(parse_replacement_line(LINE, "Bronze Horse").is_none());
+        assert_eq!(
+            damage_prevention_fails_closed(LINE, "Bronze Horse"),
+            Some(PreventionFailClosed::SourceScope)
+        );
     }
 
-    /// CR 604.2 + CR 122.1: Woolly Razorback's "has an ice counter" gate is a
-    /// source-counter gate on its combat-damage shield.
+    /// CR 604.2 + CR 122.1: Woolly Razorback's "has an ice counter" gate still
+    /// bridges to a source-counter gate; the line declines because "and it has
+    /// defender" is a second effect the shield would drop (CR 615.1a).
     #[test]
-    fn woolly_razorback_ice_counter_gate_is_carried_on_the_shield() {
-        let def = parse_replacement_line(
-            "As long as this creature has an ice counter on it, prevent all combat damage it would deal and it has defender.",
-            "Woolly Razorback",
-        )
-        .expect("the prevention shield must parse");
+    fn woolly_razorback_gate_bridges_but_conjunct_fails_closed() {
+        const LINE: &str = "As long as this creature has an ice counter on it, prevent all combat damage it would deal and it has defender.";
+        let norm_lower = replace_self_refs(LINE, "Woolly Razorback").to_lowercase();
+        let AsLongAsGate::Parsed { condition, .. } = strip_as_long_as_condition_prefix(&norm_lower)
+        else {
+            panic!("the ice-counter gate must parse");
+        };
         assert_eq!(
-            def.condition,
-            Some(ReplacementCondition::OnlyIfQuantity {
+            *condition,
+            ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: crate::types::ability::ObjectScope::Source,
@@ -27340,10 +27712,14 @@ mod tests {
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
                 active_player_req: None,
-            })
+            }
         );
-        assert_eq!(def.damage_source_filter, Some(TargetFilter::SelfRef));
-        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+
+        assert!(parse_replacement_line(LINE, "Woolly Razorback").is_none());
+        assert_eq!(
+            damage_prevention_fails_closed(LINE, "Woolly Razorback"),
+            Some(PreventionFailClosed::CoordinatedConjunct)
+        );
     }
 
     /// CR 604.2 + CR 615.1a: Sanwell's "an artifact creature you control is
@@ -27421,17 +27797,17 @@ mod tests {
         );
 
         // Reach-guard: a bridgeable gate through the same entry is a replacement.
-        let bronze = parse_oracle_text(
-            "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
-            "Bronze Horse",
-            &["Trample".to_string()],
-            &["Artifact".to_string(), "Creature".to_string()],
-            &["Horse".to_string()],
+        let baldric = parse_oracle_text(
+            "Equipped creature has lifelink if you control a Cleric, deathtouch if you control a Rogue, haste if you control a Warrior, and flying if you control a Wizard.\nAs long as you have a full party, prevent all damage that would be dealt to equipped creature.\nEquip {2}",
+            "Multiclass Baldric",
+            &["Equip".to_string()],
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
         );
         assert!(
-            bronze.replacements.iter().any(|r| r.condition.is_some()),
+            baldric.replacements.iter().any(|r| r.condition.is_some()),
             "{:?}",
-            bronze.replacements
+            baldric.replacements
         );
 
         // Sibling: Elderscale Wurm's gate parses (the body declines), so the
@@ -27460,6 +27836,90 @@ mod tests {
             "{:?}",
             elderscale.abilities
         );
+    }
+
+    /// CR 615.1a: an ungated prevention line whose "by <subject>" source scope
+    /// does not parse lands at the Priority-8 route as a line-owned
+    /// `Effect::unimplemented` — never an unscoped shield, and never a later
+    /// route's one-shot `PreventDamage` reading of a static shield.
+    #[test]
+    fn prevention_source_scope_fails_closed_at_the_route() {
+        const LINE: &str =
+            "Prevent all damage that would be dealt to ~ by creatures it's blocking.";
+        let parsed = parse_oracle_text(
+            "Defender (This creature can't attack.)\nPrevent all damage that would be dealt to this creature by creatures it's blocking.\nThis creature can't be the target of spells that can target only Walls or of abilities that can target only Walls.",
+            "Wall of Shadows",
+            &["Defender".to_string()],
+            &["Creature".to_string()],
+            &["Wall".to_string()],
+        );
+        let line_abilities: Vec<_> = parsed
+            .abilities
+            .iter()
+            .filter(|a| a.description.as_deref() == Some(LINE))
+            .collect();
+        assert_eq!(line_abilities.len(), 1, "abilities: {:?}", parsed.abilities);
+        assert!(
+            matches!(
+                &*line_abilities[0].effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            ),
+            "{:?}",
+            line_abilities[0].effect
+        );
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "no unscoped shield: {:?}",
+            parsed.replacements
+        );
+
+        // Reach-guard: a typed subject through the same entry is a scoped shield.
+        let lancer = parse_oracle_text(
+            "Prevent all damage that would be dealt to this creature by creatures.",
+            "Champion Lancer",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Knight".to_string()],
+        );
+        assert!(
+            lancer.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.damage_source_filter.is_some()
+            }),
+            "{:?}",
+            lancer.replacements
+        );
+    }
+
+    /// CR 615.1a: the coordinated-conjunct detector reads a second clause with
+    /// its own subject and verb, and nothing a prevention clause itself prints.
+    #[test]
+    fn coordinated_predicate_conjunct_reads_only_a_second_clause() {
+        // Positive: subject axis (it / they / ~) × verb axis.
+        for text in [
+            "prevent all combat damage it would deal and it has defender.",
+            "prevent all damage they would deal and they can't block.",
+            "prevent all damage that would be dealt to ~ and ~ gains flying.",
+        ] {
+            assert!(has_coordinated_predicate_conjunct(text), "{text}");
+        }
+        // Negative: the "dealt to and dealt by" ellipsis (Fog Bank), recipient
+        // lists, "prevent that damage and <verb>" riders, and a conjunct in a
+        // following sentence.
+        for text in [
+            "prevent all combat damage that would be dealt to and dealt by ~.",
+            "prevent all damage that would be dealt to you and permanents you control by sources with the chosen name.",
+            "prevent all noncombat damage that would be dealt to you and creatures you control.",
+            "if damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on it.",
+            "prevent all damage that would be dealt to you and ~ this turn.",
+            "prevent all damage that would be dealt to ~. it gets +1/+1 and it has flying.",
+        ] {
+            assert!(!has_coordinated_predicate_conjunct(text), "{text}");
+        }
     }
 
     /// CR 614.1c + CR 614.1d: Ascendant Packleader's trailing presence gate is
