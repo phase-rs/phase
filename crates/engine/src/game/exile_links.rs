@@ -337,9 +337,10 @@ pub(crate) fn push_with_kind(
 }
 
 /// CR 400.7 + CR 607.2a + CR 113.7a: Link a card exiled by `creator`, an
-/// incarnation of `source_id`. A tracked exile made by an incarnation that is
-/// no longer the live object is that incarnation's: it is kept in the
-/// linked-exile LKI and never becomes a link of the object that replaced it.
+/// incarnation of `source_id`. A tracked exile, or an exile "until [this
+/// object] leaves the battlefield", made by an incarnation that is no longer
+/// the live object is that incarnation's: it is kept in the linked-exile LKI
+/// and never becomes a link of the object that replaced it.
 pub(crate) fn push_with_kind_as(
     state: &mut GameState,
     exiled_id: ObjectId,
@@ -350,18 +351,23 @@ pub(crate) fn push_with_kind_as(
     let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     let departed_creator = creator.filter(|creator| live != Some(*creator));
     let recorded = match (&kind, departed_creator) {
-        (ExileLinkKind::TrackedBySource, Some(creator)) => {
-            record_departed_linked_exile(state, exiled_id, source_id, creator)
-        }
-        // The live object's own tracked exile, or a kind that is never
-        // diverted: a look link carries its creator (`push_look_link`); a
-        // craft material is linked at cost time; cipher, haunt and paradigm
-        // links are keyed to the object they belong to; and the "until" kinds
-        // track a return (CR 610.3).
-        (ExileLinkKind::TrackedBySource, None)
+        // CR 610.3 + CR 400.7: the incarnation that made an "until it leaves"
+        // exile had already left the battlefield (a copy of its ability put
+        // onto the stack afterwards still exiles, CR 610.3a + CR 707.10). The
+        // specified event is past, so no return is ever created; the object
+        // that replaced it is a new object whose departure is not that event.
+        (
+            ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. },
+            Some(creator),
+        ) => record_departed_linked_exile(state, exiled_id, source_id, creator),
+        // The live object's own exile, or a kind that is never diverted: a
+        // look link carries its creator (`push_look_link`); a craft material is
+        // linked at cost time; cipher, haunt and paradigm links are keyed to
+        // the object they belong to; and a monarch-bounded exile returns on an
+        // event that is not about its source (CR 610.3).
+        (ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. }, None)
         | (
             ExileLinkKind::HideawayLookable { .. }
-            | ExileLinkKind::UntilSourceLeaves { .. }
             | ExileLinkKind::UntilOpponentBecomesMonarch { .. }
             | ExileLinkKind::ParadigmSource { .. }
             | ExileLinkKind::Cipher
@@ -2255,6 +2261,65 @@ mod tests {
         );
         push_tracked_by_source(&mut state, card, source);
         assert!(!has_link(&state, card, source));
+        assert!(!state.linked_exile_lki.contains_key(&source));
+    }
+
+    /// CR 610.3 + CR 400.7 + CR 113.7a: an "until it leaves" exile made by an
+    /// ability of a departed incarnation installs no return link and no per-turn
+    /// ledger entry; the card is kept in that incarnation's linked-exile LKI. Made
+    /// by the live object, it is an ordinary return link. A monarch-bounded exile
+    /// is never diverted: its event is not about its source.
+    #[test]
+    fn until_source_leaves_exile_by_a_departed_incarnation_installs_no_return() {
+        let until = || ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        };
+
+        // Stamped 4, live 6.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        push_with_kind(&mut state, card, source, until());
+        assert!(!has_link(&state, card, source), "no return link");
+        assert!(
+            !state
+                .cards_exiled_with_source_this_turn
+                .contains_key(&source),
+            "the live object did not exile it this turn"
+        );
+        assert_eq!(
+            state.linked_exile_lki[&source],
+            vec![LinkedExileLki {
+                departed: 4,
+                successor: 4,
+                snapshot: vec![snapshot_of(&state, card)],
+            }],
+            "kept for the incarnation that exiled it"
+        );
+
+        // Stamped 6 (the live object): the return link, the LKI untouched.
+        let (mut state, source) = departed_creator_fixture();
+        stamp_resolving(&mut state, source, 6);
+        let card = exile_card(&mut state);
+        push_with_kind(&mut state, card, source, until());
+        assert!(
+            state.exile_links.iter().any(|link| link.exiled_id == card
+                && link.source_id == source
+                && link.kind == until()),
+            "the live object's return link"
+        );
+        assert!(!state.linked_exile_lki.contains_key(&source));
+
+        // Stamped 4, monarch-bounded: linked regardless of the departure.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        let monarch = ExileLinkKind::UntilOpponentBecomesMonarch {
+            return_zone: Zone::Battlefield,
+            controller: PlayerId(0),
+        };
+        push_with_kind(&mut state, card, source, monarch.clone());
+        assert!(state.exile_links.iter().any(|link| link.exiled_id == card
+            && link.source_id == source
+            && link.kind == monarch));
         assert!(!state.linked_exile_lki.contains_key(&source));
     }
 
