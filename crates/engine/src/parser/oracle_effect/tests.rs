@@ -81988,6 +81988,263 @@ fn compound_subject_each_over_a_disjunction_fails_closed() {
     assert_eq!(chunks.len(), 2, "{chunks:?}");
 }
 
+/// Zurzoth, Chaos Rider's attack line, verbatim.
+const ZURZOTH_ATTACK_LINE: &str = "Whenever one or more Devils you control attack one or more players, you and those players each draw a card, then discard a card at random.";
+
+/// The attacked players of the trigger's attack event (CR 508.6).
+fn event_attackers() -> PlayerFilter {
+    PlayerFilter::OpponentAttacked {
+        subject: AttackSubject::EventAttackers,
+        scope: CombatHistoryScope::ThisCombat,
+    }
+}
+
+/// The single trigger `text` parses to.
+fn only_trigger(text: &str) -> TriggerDefinition {
+    let mut triggers = parse_oracle_text(text, "Probe Card", &[], &[], &[]).triggers;
+    assert_eq!(triggers.len(), 1, "{text:?}: {triggers:#?}");
+    triggers.remove(0)
+}
+
+/// P-1. CR 508.3a + CR 508.6 + CR 603.2c: Zurzoth's head is one batched attack
+/// trigger on Devils you control, restricted to player attacks, and "you and those
+/// players" binds both body links to `AnyOf[Controller, the event's attacked
+/// players]`.
+#[test]
+fn zurzoth_attack_head_binds_those_players_to_the_event_attackers() {
+    let trigger = only_trigger(ZURZOTH_ATTACK_LINE);
+    assert_eq!(trigger.mode, TriggerMode::Attacks);
+    assert!(
+        trigger.batched,
+        "one or more Devils: one trigger per declaration"
+    );
+    assert_eq!(
+        trigger.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Devil".to_string())
+                .controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(
+        trigger.attack_target_filter,
+        Some(crate::types::triggers::AttackTargetFilter::Player),
+        "CR 508.3a: a planeswalker or battle attack does not trigger it"
+    );
+    let execute = trigger.execute.as_deref().expect("execute");
+    let links = coordinated_chain_links(execute);
+    assert_eq!(links.len(), 2, "{execute:#?}");
+    assert!(
+        matches!(
+            &*links[0].effect,
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ),
+        "{:#?}",
+        links[0].effect
+    );
+    assert!(
+        matches!(
+            &*links[1].effect,
+            Effect::Discard {
+                target: TargetFilter::ScopedPlayer,
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "{:#?}",
+        links[1].effect
+    );
+    for link in links {
+        assert_eq!(link.player_scope, coordinated_set(event_attackers()));
+    }
+}
+
+/// P-2. CR 508.6: "those players" binds only under an attack head that names its
+/// attacked players, and only through the coordinated channel. Every other head
+/// or conjunct stays the `unbound_subject` gap quoting `clause`, never the halves
+/// rewrite that would bind the set as one recipient. One test per row, so each
+/// row's verdict is observable on its own. Paired positives: P-1 and P-3.
+fn assert_those_players_declines(text: &str, clause: &str) {
+    let trigger = only_trigger(text);
+    let execute = trigger.execute.as_deref().expect("execute");
+    assert_coordinated_decline_text(execute, clause);
+    assert_no_player_set_recipient(execute, text);
+}
+
+/// P-2, damage head: a damage head's damaged players are not the attack antecedent.
+#[test]
+fn those_players_declines_under_a_damage_head() {
+    assert_those_players_declines(
+        "Whenever one or more creatures you control deal combat damage to one or more players, you and those players each draw a card.",
+        "you and those players each draw a card",
+    );
+}
+
+/// P-2, enchanted-player attack head: its antecedent is the enchanted player.
+#[test]
+fn those_players_declines_under_an_enchanted_player_attack_head() {
+    assert_those_players_declines(
+        "Whenever enchanted player is attacked, you and those players each draw a card.",
+        "you and those players each draw a card",
+    );
+}
+
+/// P-2, cast head: no player antecedent.
+#[test]
+fn those_players_declines_under_a_cast_head() {
+    assert_those_players_declines(
+        "Whenever you cast a spell, you and those players each draw a card.",
+        "you and those players each draw a card",
+    );
+}
+
+/// P-2, bare spell: no head, no antecedent. The channel's decline is the
+/// effect-level `unbound_subject` gap. At card level the dispatcher reports the
+/// unparsed spell line under its own gap name; it stays a gap with no scope.
+#[test]
+fn those_players_declines_in_a_spell() {
+    let text = "you and those players each draw a card";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_coordinated_decline(&def, text);
+    assert_no_player_set_recipient(&def, text);
+
+    let card = "You and those players each draw a card.";
+    let parsed = parse_oracle_text(card, "Probe Card", &[], &[], &[]);
+    let [spell] = parsed.abilities.as_slice() else {
+        panic!("{card:?}: one spell ability, got {:#?}", parsed.abilities);
+    };
+    assert!(
+        matches!(&*spell.effect, Effect::Unimplemented { .. }),
+        "{card:?}: {spell:#?}"
+    );
+    assert!(
+        coordinated_chain_links(spell)
+            .iter()
+            .all(|link| link.player_scope.is_none()),
+        "{card:?}: {spell:#?}"
+    );
+    assert_no_player_set_recipient(spell, card);
+}
+
+/// P-2, object first conjunct under the attack head: "~" is not the coordinated
+/// "you", so the channel never names a member.
+#[test]
+fn those_players_declines_after_an_object_first_conjunct() {
+    assert_those_players_declines(
+        "Whenever one or more Devils you control attack one or more players, ~ and those players each draw a card.",
+        "~ and those players each draw a card",
+    );
+}
+
+/// P-2, pre-scoped body under the attack head: a body that carries its own
+/// player scope is refused by the channel.
+#[test]
+fn those_players_declines_a_body_with_its_own_player_scope() {
+    assert_those_players_declines(
+        "Whenever one or more Devils you control attack one or more players, you and those players each draw a card, then each player discards a card at random.",
+        "you and those players each draw a card, then each player discards a card at random",
+    );
+}
+
+/// No link of `def` names the "those players" set as a recipient.
+fn assert_no_player_set_recipient(def: &AbilityDefinition, text: &str) {
+    for link in coordinated_chain_links(def) {
+        assert!(
+            !matches!(
+                extract_target_filter_from_effect(&link.effect),
+                Some(TargetFilter::PlayerMatching { .. })
+            ),
+            "{text:?}: {:#?}",
+            link.effect
+        );
+    }
+}
+
+/// P-3. Building block: the singular attack head "attacks a player" introduces
+/// the same attacked-player antecedent, so "you and those players" binds the
+/// event's attacked players on any body.
+#[test]
+fn singular_attack_head_binds_those_players_to_the_event_attackers() {
+    let trigger = only_trigger(
+        "Whenever a creature you control attacks a player, you and those players each draw a card.",
+    );
+    let execute = trigger.execute.as_deref().expect("execute");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ),
+        "{execute:#?}"
+    );
+    assert_eq!(execute.player_scope, coordinated_set(event_attackers()));
+    assert!(execute.sub_ability.is_none(), "{execute:#?}");
+}
+
+/// P-4. Preservation: the plural damage heads keep their base parse — one
+/// batched `DamageDone` trigger on creatures you control, with no player set on
+/// any link. Contaminant Grafter's body is `Proliferate`. The Destined Thief's
+/// body is not asserted: its "instead" branch is a pre-existing suspicion this
+/// change does not touch.
+#[test]
+fn plural_damage_heads_keep_their_parse() {
+    for (text, body_is_proliferate) in [
+        (
+            "Whenever one or more creatures you control deal combat damage to one or more players, proliferate.",
+            true,
+        ),
+        (
+            "Whenever one or more creatures you control deal combat damage to one or more players, draw a card, then discard a card. If you have a full party, instead draw three cards.",
+            false,
+        ),
+    ] {
+        let trigger = only_trigger(text);
+        assert_eq!(trigger.mode, TriggerMode::DamageDone, "{text:?}");
+        assert!(trigger.batched, "{text:?}");
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            )),
+            "{text:?}"
+        );
+        let execute = trigger.execute.as_deref().expect("execute");
+        assert!(
+            coordinated_chain_links(execute)
+                .iter()
+                .all(|link| link.player_scope.is_none()),
+            "{text:?}: {execute:#?}"
+        );
+        if body_is_proliferate {
+            assert_eq!(*execute.effect, Effect::Proliferate, "{text:?}");
+            assert!(execute.sub_ability.is_none(), "{text:?}");
+        }
+    }
+}
+
+/// P-5. CR 508.6: the "one or more players" antecedent is confined to attack
+/// heads. Zurzoth's head introduces the attacked (defending) players; the plural
+/// damage head, whose players are damaged rather than attacked, introduces none.
+#[test]
+fn one_or_more_players_antecedent_is_confined_to_attack_heads() {
+    let scope = crate::parser::oracle_trigger::relative_player_scope_for_condition;
+    assert_eq!(
+        scope("whenever one or more devils you control attack one or more players"),
+        Some(ControllerRef::DefendingPlayer)
+    );
+    assert_eq!(
+        scope(
+            "whenever one or more creatures you control deal combat damage to one or more players"
+        ),
+        None
+    );
+}
+
 /// CR 601.2b + CR 601.2h + CR 608.2c: "if you revealed a <type> card or controlled a
 /// <type> as you cast this spell" gates the following instruction on the optional
 /// reveal additional cost OR the cast-time battlefield snapshot. Two subtypes and two

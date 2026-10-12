@@ -1074,6 +1074,20 @@ fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 508.6: the players an attack head names. Adds the plural set
+/// ("one or more players", Zurzoth, Chaos Rider) to the single referents
+/// of `parse_referenced_player_phrase`. Attack heads only: a damage head's
+/// damaged players are not a `DefendingPlayer` antecedent.
+fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_referenced_player_phrase,
+        // CR 508.6: "one or more players" — the attacked players a plural attack
+        // head introduces (Zurzoth, Chaos Rider).
+        value((), tag::<_, _, OracleError<'_>>("one or more players")),
+    ))
+    .parse(input)
+}
+
 /// CR 508.3e: the attacked-player OBJECT of a bare "you attack …" trigger
 /// condition, i.e. the `[another player]` slot in "Whenever [a player] attacks
 /// [another player], . . .".
@@ -1126,7 +1140,7 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
     while !remaining.is_empty() {
         if let Ok((after_actor, ())) = parse_trigger_actor(remaining) {
             if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
-                if parse_referenced_player_phrase(after_verb).is_ok() {
+                if parse_attacked_player_phrase(after_verb).is_ok() {
                     return true;
                 }
             }
@@ -1139,7 +1153,7 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
         // unambiguous in trigger-condition text — "attack" never appears as a
         // noun before "a player" here.
         if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
-            if parse_referenced_player_phrase(after_verb).is_ok() {
+            if parse_attacked_player_phrase(after_verb).is_ok() {
                 return true;
             }
         }
@@ -14586,6 +14600,9 @@ fn try_parse_event(
                     preceded(tag(" "), parse_one_of_your_opponents),
                 ),
                 value(AttackTargetFilter::Player, tag(" a player")),
+                // CR 508.3a: an attack head naming players restricts its
+                // attackers to player attacks.
+                value(AttackTargetFilter::Player, tag(" one or more players")),
                 // CR 102.1 + CR 508.1b: "attacks the player with the most life or
                 // tied for most life" (Preacher of the Schism, Seraphic
                 // Greatsword, Undercover Butler). Only matched when the whole

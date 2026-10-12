@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  122 — game_setup and state_update carry GameState whose ability player scopes
+ *       may hold AttackSubject EventAttackers. Bumped in lockstep with full-game
+ *       protocol 140.
  *  121 — game_setup and state_update carry GameState with the per-turn crew
  *       relation (crew_history_this_turn) and FilterProp::CrewedThisTurn
  *       (CR 702.122c). Bumped in lockstep with full-game protocol 139.
@@ -665,7 +668,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 121 as const;
+export const WIRE_PROTOCOL_VERSION = 122 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

@@ -11135,6 +11135,13 @@ pub enum AttackSubject {
     You,
     /// The ability's source creature — "opponents this creature attacked".
     Source,
+    /// CR 508.1b + CR 508.6: the attacking creatures of the attack event the
+    /// resolving trigger answers to ("those players" of "one or more Devils you
+    /// control attack one or more players"). Read from `state.current_trigger_event`'s
+    /// `AttackersDeclared.attacks`, which a batched trigger narrows to its matching
+    /// attackers. One declaration is one combat, so `CombatHistoryScope` is inert
+    /// for this subject; the parser emits `ThisCombat`.
+    EventAttackers,
 }
 
 /// CR 500.8 + CR 511.3: The time window a combat-history predicate is measured over.

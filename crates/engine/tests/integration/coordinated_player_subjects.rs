@@ -1,19 +1,22 @@
 //! Coordinated player subjects: "you and <player> each <body>" binds ONE body to
 //! the player set `AnyOf[Controller, member]` (CR 608.2c + CR 608.2e), where the
 //! member is the targeted, triggering, chosen or possessive-actor player the
-//! second conjunct names. Each seat performs the body for itself, and a player
-//! outside the set is untouched.
+//! second conjunct names, or the players an attack trigger's matching attackers
+//! were declared attacking (CR 508.6). Each seat performs the body for itself,
+//! and a player outside the set is untouched.
 //!
 //! Runtime rows drive the real cast / combat pipeline with verbatim Oracle text.
 
 use engine::game::combat::AttackTarget;
+use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    ControllerRef, Effect, EffectKind, PlayerFilter, StaticDefinition, TargetFilter, TypedFilter,
+    AttackSubject, CombatHistoryScope, ControllerRef, Effect, EffectKind, PlayerFilter,
+    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -43,6 +46,9 @@ const EARLIER_PLAYER_THEN_COORDINATED: &str =
 /// Building block: the same two clauses in the other order.
 const COORDINATED_THEN_LATER_PLAYER: &str =
     "You and target opponent each draw a card. Target player mills two cards.";
+const ZURZOTH: &str = "Whenever an opponent draws their first card each turn, if it's not their turn, you create a 1/1 red Devil creature token with \"When this token dies, it deals 1 damage to any target.\"\nWhenever one or more Devils you control attack one or more players, you and those players each draw a card, then discard a card at random.";
+/// Control head: CR 508.3e triggers once per attacked player.
+const YOU_ATTACK_A_PLAYER: &str = "Whenever you attack a player, you gain 1 life.";
 
 const FILLER: [&str; 8] = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"];
 
@@ -55,6 +61,10 @@ fn game(players: u8) -> GameScenario {
     scenario.at_phase(Phase::PreCombatMain);
     for player in (0..players).map(PlayerId) {
         scenario.with_library_top(player, &FILLER);
+        // A three-card hand, so a random discard always has a card to take.
+        for card in 0..3 {
+            scenario.add_card_to_hand(player, &format!("Hand {} {card}", player.0));
+        }
     }
     scenario
 }
@@ -665,5 +675,315 @@ fn diviner_spirit_controller_and_damaged_player_each_draw_that_many() {
     assert_eq!(
         deltas(&zone_counts(&runner, 2, Zone::Hand), &hands),
         vec![2, 2]
+    );
+}
+
+fn zurzoth(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, "Zurzoth, Chaos Rider", 2, 2, ZURZOTH)
+        .with_subtypes(vec!["Devil"])
+        .id()
+}
+
+fn devil(scenario: &mut GameScenario, name: &str) -> ObjectId {
+    scenario
+        .add_creature(P0, name, 1, 1)
+        .with_subtypes(vec!["Devil"])
+        .id()
+}
+
+fn walker(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
+    scenario
+        .add_planeswalker_from_oracle(controller, "Walker", "Gideon", 5, "+1: You gain 1 life.")
+        .id()
+}
+
+/// Declare `attacks`, order a simultaneous batch of triggers, and return the
+/// source of every triggered ability on the stack before anything resolves.
+fn declare_and_stack(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+) -> Vec<ObjectId> {
+    runner.declare_attackers(attacks).expect("attack");
+    if let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for {
+        let order = (0..triggers.len()).collect();
+        runner
+            .act(GameAction::OrderTriggers { order })
+            .expect("order triggers");
+    }
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { source_id, .. } => Some(*source_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Resolve the stack. Row R-7: CR 701.9b — a random discard asks no choice. A
+/// chosen discard parks on `WaitingFor::DiscardChoice`, which `settle` has no
+/// arm for (it panics there), so reaching an empty stack is the assertion.
+/// `settle` must not gain a `DiscardChoice` arm.
+fn resolve_all(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let (events, _) = settle(runner, P1);
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack resolved without a discard choice: {:?}",
+        runner.state().waiting_for
+    );
+    events
+}
+
+/// Per-seat draws and discards in `events`. A draw followed by a discard leaves
+/// the hand size unchanged, so the events are what count.
+fn draws_and_discards(events: &[GameEvent], players: u8) -> (Vec<usize>, Vec<usize>) {
+    let per_seat = |is_seat: &dyn Fn(&GameEvent, PlayerId) -> bool| -> Vec<usize> {
+        (0..players)
+            .map(|p| {
+                events
+                    .iter()
+                    .filter(|event| is_seat(event, PlayerId(p)))
+                    .count()
+            })
+            .collect()
+    };
+    (
+        per_seat(
+            &|event, seat| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == seat),
+        ),
+        per_seat(
+            &|event, seat| matches!(event, GameEvent::Discarded { player_id, .. } if *player_id == seat),
+        ),
+    )
+}
+
+/// Row R-1 (Zurzoth, Chaos Rider). Two Devils attack P1 and P2. CR 603.2c: the
+/// batched head fires once for the one declaration, while the CR 508.3e control
+/// fires once per attacked player. CR 508.6 + CR 608.2e: the controller and both
+/// attacked players each draw a card, then discard a card at random. Zurzoth's
+/// first ability then makes one Devil token for each opponent who drew their
+/// first card on P0's turn.
+#[test]
+fn zurzoth_controller_and_each_attacked_player_draw_then_discard_at_random() {
+    let mut scenario = game(3);
+    let zurzoth = zurzoth(&mut scenario);
+    let devil_a = devil(&mut scenario, "Devil A");
+    let devil_b = devil(&mut scenario, "Devil B");
+    let control = scenario
+        .add_creature_from_oracle(P0, "Attack Counter", 0, 4, YOU_ATTACK_A_PLAYER)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    let stacked = declare_and_stack(
+        &mut runner,
+        &[
+            (devil_a, AttackTarget::Player(P1)),
+            (devil_b, AttackTarget::Player(P2)),
+        ],
+    );
+    assert_eq!(
+        stacked.iter().filter(|source| **source == zurzoth).count(),
+        1,
+        "one declaration fires the batched head once: {stacked:?}"
+    );
+    assert_eq!(
+        stacked.iter().filter(|source| **source == control).count(),
+        2,
+        "reach: the per-player control fired for each attacked player"
+    );
+    let devils_before = tokens(&runner, P0, "Devil").len();
+    let events = resolve_all(&mut runner);
+    assert!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == zurzoth
+            ))
+            .count()
+            >= 2,
+        "reach: Zurzoth's trigger resolved"
+    );
+    assert_eq!(runner.life(P0), 22, "reach: the control resolved twice");
+    let (draws, discards) = draws_and_discards(&events, 3);
+    assert_eq!(draws, vec![1, 1, 1], "each set member draws one");
+    assert_eq!(discards, vec![1, 1, 1], "each set member discards one");
+    assert_eq!(
+        tokens(&runner, P0, "Devil").len() - devils_before,
+        2,
+        "both opponents drew their first card on P0's turn"
+    );
+}
+
+/// Rows R-2, R-3, R-5 (Zurzoth). CR 508.6: "those players" are the players a
+/// Devil was declared attacking.
+/// - R-2: a non-Devil's defender is not in the set.
+/// - R-3: a Devil attacking a planeswalker attacks no player (CR 506.3), so its
+///   controller is not in the set (Zurzoth ruling, 2020-06-23).
+/// - R-5: a player two Devils attacked is in the set once.
+#[test]
+fn zurzoth_set_is_the_players_a_devil_attacked() {
+    enum Second {
+        BearsAtP2,
+        DevilAtP2Walker,
+        DevilAtP1,
+    }
+    for second in [
+        Second::BearsAtP2,
+        Second::DevilAtP2Walker,
+        Second::DevilAtP1,
+    ] {
+        let mut scenario = game(3);
+        let zurzoth = zurzoth(&mut scenario);
+        let devil_a = devil(&mut scenario, "Devil A");
+        let (label, other) = match second {
+            Second::BearsAtP2 => (
+                "R-2 Devil→P1, Bears→P2",
+                (
+                    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+                    AttackTarget::Player(P2),
+                ),
+            ),
+            Second::DevilAtP2Walker => (
+                "R-3 Devil→P1, Devil→P2's planeswalker",
+                (
+                    devil(&mut scenario, "Devil B"),
+                    AttackTarget::Planeswalker(walker(&mut scenario, P2)),
+                ),
+            ),
+            Second::DevilAtP1 => (
+                "R-5 Devil→P1 ×2",
+                (devil(&mut scenario, "Devil B"), AttackTarget::Player(P1)),
+            ),
+        };
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        let stacked = declare_and_stack(&mut runner, &[(devil_a, AttackTarget::Player(P1)), other]);
+        assert_eq!(
+            stacked.iter().filter(|source| **source == zurzoth).count(),
+            1,
+            "{label}: fires once"
+        );
+        let (draws, discards) = draws_and_discards(&resolve_all(&mut runner), 3);
+        assert_eq!(draws, vec![1, 1, 0], "{label}: draws");
+        assert_eq!(discards, vec![1, 1, 0], "{label}: discards");
+    }
+}
+
+/// Row R-4 (Zurzoth). CR 508.3a: "attack one or more players" triggers only on a
+/// creature declared attacking a player. Devils attacking only a planeswalker do
+/// not trigger it; R-3 (a Devil at a player beside one at a planeswalker) is the
+/// positive.
+#[test]
+fn zurzoth_does_not_trigger_when_devils_attack_only_a_planeswalker() {
+    let mut scenario = game(3);
+    let zurzoth = zurzoth(&mut scenario);
+    let devil_a = devil(&mut scenario, "Devil A");
+    let walker = walker(&mut scenario, P2);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    let stacked = declare_and_stack(
+        &mut runner,
+        &[(devil_a, AttackTarget::Planeswalker(walker))],
+    );
+    assert!(
+        !stacked.contains(&zurzoth),
+        "a planeswalker-only declaration does not trigger: {stacked:?}"
+    );
+    let (draws, discards) = draws_and_discards(&resolve_all(&mut runner), 3);
+    assert_eq!(draws, vec![0, 0, 0]);
+    assert_eq!(discards, vec![0, 0, 0]);
+}
+
+/// Row R-6 (Zurzoth, two players). Zurzoth, itself a Devil, attacks P1 alone:
+/// P0 and P1 each draw a card, then discard a card at random.
+#[test]
+fn zurzoth_two_player_controller_and_defender_draw_then_discard() {
+    let mut scenario = game(2);
+    let zurzoth = zurzoth(&mut scenario);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    let stacked = declare_and_stack(&mut runner, &[(zurzoth, AttackTarget::Player(P1))]);
+    assert_eq!(
+        stacked,
+        vec![zurzoth],
+        "Zurzoth's own attack fires the head"
+    );
+    let (draws, discards) = draws_and_discards(&resolve_all(&mut runner), 2);
+    assert_eq!(draws, vec![1, 1]);
+    assert_eq!(discards, vec![1, 1]);
+}
+
+/// Row R-8 (building block: the `EventAttackers` read). CR 508.6: the set is the
+/// players the trigger event's attackers were declared attacking; a planeswalker
+/// attack attacks no player (CR 506.3), and with no event in scope the set is
+/// empty. The read is the declaration as narrowed, not live combat membership:
+/// with no combat in progress (attacker `a` is in no combat) it still answers
+/// from the event, and the `PlayerCount` path agrees.
+#[test]
+fn event_attackers_reads_the_trigger_events_attacked_players() {
+    let mut scenario = game(3);
+    let a = scenario.add_creature(P0, "Attacker A", 1, 1).id();
+    let b = scenario.add_creature(P0, "Attacker B", 1, 1).id();
+    let walker = walker(&mut scenario, P2);
+    let mut runner = scenario.build();
+    let attacked = |state: &GameState, player| {
+        state.opponent_attacked(
+            AttackSubject::EventAttackers,
+            CombatHistoryScope::ThisCombat,
+            P0,
+            a,
+            player,
+        )
+    };
+    let count = |state: &GameState| {
+        resolve_quantity(
+            state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentAttacked {
+                        subject: AttackSubject::EventAttackers,
+                        scope: CombatHistoryScope::ThisCombat,
+                    },
+                },
+            },
+            P0,
+            a,
+        )
+    };
+    assert!(
+        runner.state().combat.is_none(),
+        "reach: no combat is in progress"
+    );
+    assert_eq!(
+        (
+            attacked(runner.state(), P1),
+            attacked(runner.state(), P2),
+            count(runner.state())
+        ),
+        (false, false, 0),
+        "no attack event in scope: the set is empty"
+    );
+
+    runner.state_mut().current_trigger_event = Some(GameEvent::AttackersDeclared {
+        attacker_ids: vec![a, b],
+        defending_player: P1,
+        attacks: vec![
+            (a, AttackTarget::Player(P1)),
+            (b, AttackTarget::Planeswalker(walker)),
+        ],
+        declaration_records: vec![],
+    });
+    assert!(attacked(runner.state(), P1), "a attacked P1");
+    assert!(
+        !attacked(runner.state(), P2),
+        "b attacked P2's planeswalker, which attacks no player"
+    );
+    assert_eq!(
+        count(runner.state()),
+        1,
+        "the count reads the event without a combat in progress"
     );
 }

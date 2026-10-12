@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
@@ -28988,7 +28989,26 @@ impl GameState {
             (AttackSubject::Source, CombatHistoryScope::ThisCombat) => {
                 self.creature_attacked_player_this_combat(source_id, target)
             }
+            // CR 508.6: one declaration is one combat, so the scope does not
+            // narrow the event's attacked players.
+            (AttackSubject::EventAttackers, _) => {
+                self.event_attacked_players().any(|player| player == target)
+            }
         }
+    }
+
+    /// CR 508.1b + CR 508.6: the players the current trigger event's attackers were
+    /// declared attacking. A planeswalker or battle attack attacks no player
+    /// (CR 506.3). Empty when no attack event is in scope.
+    fn event_attacked_players(&self) -> impl Iterator<Item = PlayerId> + '_ {
+        let attacks = match &self.current_trigger_event {
+            Some(GameEvent::AttackersDeclared { attacks, .. }) => attacks.as_slice(),
+            _ => &[],
+        };
+        attacks.iter().filter_map(|(_, target)| match target {
+            AttackTarget::Player(player) => Some(*player),
+            AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => None,
+        })
     }
 
     /// CR 509.1g + CR 400.7: Did exactly `blocker` block exactly `attacker` within `scope`?
@@ -29048,19 +29068,33 @@ impl GameState {
     }
 
     /// CR 508.6 + CR 702.121a: Defending players the subject attacked in the
-    /// current combat, read from declaration history for Melee-style counts.
+    /// current combat, read from declaration history for Melee-style counts. For
+    /// `EventAttackers`, the players the current trigger event's attackers were
+    /// declared attacking, read from the event rather than the combat ledger.
     pub fn attacked_defenders_this_combat_for(
         &self,
         subject: AttackSubject,
         controller: PlayerId,
         source_id: ObjectId,
-    ) -> Option<&HashSet<PlayerId>> {
-        let combat = self.combat.as_ref()?;
+    ) -> Option<Cow<'_, HashSet<PlayerId>>> {
         match subject {
-            AttackSubject::You => combat.attacked_defenders_this_combat.get(&controller),
-            AttackSubject::Source => combat
+            // CR 508.6: the event's attacked players; read from the trigger event,
+            // not from the combat ledger.
+            AttackSubject::EventAttackers => {
+                Some(Cow::Owned(self.event_attacked_players().collect()))
+            }
+            AttackSubject::You => self
+                .combat
+                .as_ref()?
+                .attacked_defenders_this_combat
+                .get(&controller)
+                .map(Cow::Borrowed),
+            AttackSubject::Source => self
+                .combat
+                .as_ref()?
                 .creature_attacked_defenders_this_combat
-                .get(&source_id),
+                .get(&source_id)
+                .map(Cow::Borrowed),
         }
     }
 

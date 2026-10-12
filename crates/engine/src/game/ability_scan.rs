@@ -94,9 +94,9 @@
 use crate::analysis::resource::{HistoryMember, HistoryReads};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
-    AttachmentReferent, CardTypeSetSource, ContinuousModification, ControllerRef, CountScope,
-    DelayedTriggerCondition, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
-    ForEachCategoryAction, GuessSubject, KeeperConstraint, ManaProduction, ModalChoice,
+    AttachmentReferent, AttackSubject, CardTypeSetSource, ContinuousModification, ControllerRef,
+    CountScope, DelayedTriggerCondition, Duration, EachDamageRecipient, Effect, EffectScope,
+    FilterProp, ForEachCategoryAction, GuessSubject, KeeperConstraint, ManaProduction, ModalChoice,
     ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, NameStickerSet,
     ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition, ResolvedAbility,
@@ -4973,10 +4973,17 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             }
             acc
         }
-        PlayerFilter::OpponentAttacked {
-            subject: _,
-            scope: _,
-        } => Axes::NONE,
+        // CR 603.2: the event attackers are read from the trigger event, like
+        // `TriggeringPlayer`.
+        PlayerFilter::OpponentAttacked { subject, scope: _ } => match subject {
+            AttackSubject::You | AttackSubject::Source => Axes::NONE,
+            AttackSubject::EventAttackers => Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+                history: HistoryReads::NONE,
+            },
+        },
         // CR 508.6: inverse combat relation of `OpponentAttacked` — reads the
         // per-combat attack-declaration ledger and the source's (static)
         // AttachedTo host. Neither is an event-context or projected-growth
@@ -7512,10 +7519,10 @@ fn effect_census_role(e: &Effect) -> CensusRole {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator,
-        CostDerivation, DamageKindFilter, DelayedTriggerLifetime, DestinationConstraint,
-        ManaContribution, OriginConstraint, ReciprocalZoneChoiceRole, ReplacementDefinition,
-        StaticDefinition, TurnGate, WheneverEventExpiry, ZoneChangeClause,
+        AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
+        CombatHistoryScope, Comparator, CostDerivation, DamageKindFilter, DelayedTriggerLifetime,
+        DestinationConstraint, ManaContribution, OriginConstraint, ReciprocalZoneChoiceRole,
+        ReplacementDefinition, StaticDefinition, TurnGate, WheneverEventExpiry, ZoneChangeClause,
         ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
     };
     use crate::types::counter::CounterType;
@@ -7527,6 +7534,23 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// U-a. CR 603.2: `OpponentAttacked { EventAttackers }` reads the trigger event,
+    /// like `TriggeringPlayer`; the controller's own attacks read no event.
+    #[test]
+    fn opponent_attacked_event_attackers_scans_the_event_axis() {
+        let scan = |subject| {
+            scan_player_filter(
+                &PlayerFilter::OpponentAttacked {
+                    subject,
+                    scope: CombatHistoryScope::ThisCombat,
+                },
+                ScanMode::Conservative,
+            )
+        };
+        assert!(scan(AttackSubject::EventAttackers).event);
+        assert!(!scan(AttackSubject::You).event);
+    }
 
     #[test]
     fn extra_turn_scan_reaches_dynamic_count() {

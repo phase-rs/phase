@@ -2223,6 +2223,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             (AttackSubject::Source, CombatHistoryScope::ThisCombat) => {
                 "each opponent this source attacked this combat"
             }
+            (AttackSubject::EventAttackers, _) => "each player those attackers attacked",
         },
         PlayerFilter::OpponentAttackingEnchantedPlayer => {
             "each opponent attacking the enchanted player"

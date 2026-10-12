@@ -117,21 +117,22 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, BounceSelection, CardPlayMode, CardTypeSetSource,
-    CastFromZoneDriver, CastMechanism, CastPermissionConstraint, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, Chooser, ChosenGroupId, CombatDamageScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
-    CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
-    IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition,
-    ManaProduction, ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec,
-    NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
+    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
+    CastingPermission, ChoiceType, ChooseFromZoneConstraint, Chooser, ChosenGroupId,
+    CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard, ConjureSource,
+    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject, IntensityScope,
+    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
     SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
     TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource,
@@ -143,7 +144,7 @@ use crate::types::ability::{
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackSubject, CombatHistoryScope, DoubleTarget};
+use crate::types::ability::DoubleTarget;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -23586,7 +23587,7 @@ struct CompoundSubjectPrefix {
 /// the clause chunker (`remainder_trimmed_starts_with_compound_subject_each`) so
 /// its no-split guard and this distributor recognize the same forms: "that
 /// player", "that opponent", "target opponent", "the attacking player", "target
-/// player", "that creature" and "[the] defending player".
+/// player", "that creature", "[the] defending player" and "those players".
 fn parse_static_compound_second_subject(lower: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         value(
@@ -23613,6 +23614,18 @@ fn parse_static_compound_second_subject(lower: &str) -> OracleResult<'_, TargetF
         value(
             TargetFilter::DefendingPlayer,
             (opt(tag("the ")), tag("defending player each ")),
+        ),
+        // CR 508.6: "those players" of an attack head — the players the event's
+        // matching attackers attacked (Zurzoth, Chaos Rider). Bound only by the
+        // coordinated channel under the head's `DefendingPlayer` antecedent.
+        value(
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::EventAttackers,
+                    scope: CombatHistoryScope::ThisCombat,
+                }),
+            },
+            tag("those players each "),
         ),
     ))
     .parse(lower)
@@ -23759,7 +23772,9 @@ fn try_parse_shared_equal_to_quantity_compound(
 ///   body cloned per conjunct with its recipient rewritten): members no
 ///   `PlayerFilter` names (a vote-body "that player", `EnchantedPlayer`), a
 ///   targeted conjunct after an earlier player-capable slot, a body that already
-///   carries its own `player_scope`, and the object axis ("~ and", "it and").
+///   carries its own `player_scope`, and the object axis ("~ and", "it and"). A
+///   set conjunct ("those players") never takes it: when the channel declines
+///   it, the clause stays the `unbound_subject` gap.
 fn try_parse_compound_subject_each(
     text: &str,
     ctx: &mut ParseContext,
@@ -23830,6 +23845,16 @@ fn try_parse_compound_subject_each(
             text,
             ctx,
         ));
+    }
+
+    // CR 508.6: "those players" names a player SET; only the coordinated channel
+    // carries it. A conjunct the channel declined stays the unbound gap and never
+    // reaches the halves rewrite, which would bind the set as one recipient.
+    if matches!(second_filter, TargetFilter::PlayerMatching { .. }) {
+        return Some(parsed_clause(Effect::unimplemented(
+            subject::UNBOUND_SUBJECT_GAP,
+            text,
+        )));
     }
 
     // CR 109.4 + CR 608.2c (issue #6381): "that player" in "you and that
@@ -27689,6 +27714,13 @@ fn coordinated_player_member(second: &TargetFilter, ctx: &ParseContext) -> Optio
         }
         TargetFilter::TriggeringPlayer => Some(PlayerFilter::TriggeringPlayer),
         TargetFilter::DefendingPlayer => Some(PlayerFilter::DefendingPlayer),
+        // CR 508.6: "those players" names the attacked players only inside an
+        // attack trigger — the head's `DefendingPlayer` antecedent.
+        TargetFilter::PlayerMatching { player } => matches!(
+            ctx.relative_player_scope,
+            Some(ControllerRef::DefendingPlayer)
+        )
+        .then(|| player.as_ref().clone()),
         possessive => player_scope_from_parent_target_subject(possessive),
     }
 }
