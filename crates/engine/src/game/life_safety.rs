@@ -188,6 +188,12 @@ fn optional_additional_cost_path(pending: &PendingCast) -> OptionalAdditionalCos
     }
 }
 
+/// Name the life-cost root a generated candidate would arm, if any.
+///
+/// Only a `DecideOptionalCost` answer to a `DefilerPayment` /
+/// `OptionalCostChoice` prompt can arm a root. Every other candidate is
+/// neutral and returns `None` without running the completeness probe, which
+/// re-enumerates the whole candidate set.
 fn extract_life_cost_root(
     state: &GameState,
     candidate: &CandidateAction,
