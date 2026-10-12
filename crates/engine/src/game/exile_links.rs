@@ -182,8 +182,8 @@ pub(crate) fn links_for_reader(
     state.exile_links.iter().filter(move |link| {
         link.source_id == source_id
             && match &link.kind {
-                // CR 400.7 + CR 406.3: a look link belongs to the incarnation
-                // that made it.
+                // CR 400.7 + CR 607.2a: a look link's card belongs to the
+                // incarnation that made it.
                 ExileLinkKind::HideawayLookable {
                     source_incarnation, ..
                 } => reader == Some(*source_incarnation),
