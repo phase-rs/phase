@@ -12,6 +12,8 @@
 //!     creature by creatures."
 //!   * Argothian Treefolk — "Prevent all damage that would be dealt to this
 //!     creature by artifact sources."
+//!   * Enchanted Being — "Prevent all combat damage that would be dealt to this
+//!     creature by enchanted creatures."
 //!   * Ascendant Packleader — "This creature enters with a +1/+1 counter on it if
 //!     you control a permanent with mana value 4 or greater."
 //!   * Hagra Mauling — "This spell costs {1} less to cast if an opponent controls
@@ -23,7 +25,8 @@
 
 use engine::game::casting::can_cast_object_now;
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::effects::attach::attach_to;
+use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::Effect;
 use engine::types::counter::CounterType;
@@ -43,6 +46,12 @@ const CHAMPION_LANCER: &str =
 
 const ARGOTHIAN_TREEFOLK: &str =
     "Prevent all damage that would be dealt to this creature by artifact sources.";
+
+const ENCHANTED_BEING: &str =
+    "Prevent all combat damage that would be dealt to this creature by enchanted creatures.";
+
+const FIREBREATHING: &str =
+    "Enchant creature\n{R}: Enchanted creature gets +1/+0 until end of turn.";
 
 const ASCENDANT_PACKLEADER: &str = "This creature enters with a +1/+1 counter on it if you control a permanent with mana value 4 or greater.\nWhenever you cast a spell with mana value 4 or greater, put a +1/+1 counter on this creature.";
 
@@ -144,6 +153,8 @@ fn bolt_shielded(name: &str, oracle: &str, power: i32, toughness: i32) -> u32 {
 enum Attacker {
     Creature,
     ArtifactCreature,
+    /// A creature with an Aura (Firebreathing) attached.
+    EnchantedCreature,
 }
 
 /// The shielded creature blocks an attacking 2/2; returns the damage marked on
@@ -155,6 +166,19 @@ fn shielded_blocks(
     toughness: i32,
     attacker: Attacker,
 ) -> u32 {
+    let (outcome, blocker) = shielded_block_outcome(name, oracle, power, toughness, attacker);
+    outcome.damage_marked(blocker)
+}
+
+/// The shielded creature blocks an attacking 2/2; returns the combat outcome
+/// and the blocker.
+fn shielded_block_outcome(
+    name: &str,
+    oracle: &str,
+    power: i32,
+    toughness: i32,
+    attacker: Attacker,
+) -> (Outcome, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Filler A"]);
@@ -164,11 +188,26 @@ fn shielded_blocks(
         bear.as_artifact_creature();
     }
     let bear = bear.id();
+    let aura = matches!(attacker, Attacker::EnchantedCreature).then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "Firebreathing", FIREBREATHING)
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text_with_keywords(&["Enchant"], FIREBREATHING)
+            .id()
+    });
     let blocker = scenario
         .add_creature(P1, name, power, toughness)
         .from_oracle_text(oracle)
         .id();
     let mut runner = scenario.build();
+    if let Some(aura) = aura {
+        attach_to(runner.state_mut(), aura, bear);
+        assert_eq!(
+            runner.state().objects[&bear].attachments,
+            vec![aura],
+            "reach-guard: the Aura must be attached to the attacker"
+        );
+    }
 
     runner.pass_both_players();
     runner
@@ -178,7 +217,7 @@ fn shielded_blocks(
     runner
         .declare_blockers(&[(blocker, bear)])
         .expect("the shielded creature may block");
-    runner.combat_damage().damage_marked(blocker)
+    (runner.combat_damage(), blocker)
 }
 
 /// CR 615.1a: Champion Lancer's shield prevents only damage from creatures. A
@@ -229,6 +268,27 @@ fn argothian_treefolk_prevents_artifact_source_damage_only() {
         ),
         2
     );
+}
+
+/// CR 615.1a + CR 303.4b: Enchanted Being's shield prevents combat damage from
+/// creatures with an Aura attached. The 2/2 blocks an attacking 2/2: with an
+/// Aura on the attacker its damage is prevented; without one the Being takes 2
+/// and dies (CR 704.5g).
+#[test]
+fn enchanted_being_prevents_only_enchanted_creatures_damage() {
+    let (outcome, being) = shielded_block_outcome(
+        "Enchanted Being",
+        ENCHANTED_BEING,
+        2,
+        2,
+        Attacker::EnchantedCreature,
+    );
+    assert_eq!(outcome.damage_marked(being), 0);
+    assert_eq!(outcome.zone_of(being), Zone::Battlefield);
+    // Hostile: an attacker with no Aura is not an enchanted creature.
+    let (outcome, being) =
+        shielded_block_outcome("Enchanted Being", ENCHANTED_BEING, 2, 2, Attacker::Creature);
+    assert_eq!(outcome.zone_of(being), Zone::Graveyard);
 }
 
 // ── Ascendant Packleader (CR 614.1c + CR 614.1d) ─────────────────────────────

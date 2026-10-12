@@ -45,11 +45,11 @@ use super::oracle_util::{
     parse_ordinal, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, ChoiceType,
-    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
-    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
-    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
-    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
+    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
+    EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -9130,25 +9130,6 @@ pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<Target
     if let Some(filter) = parse_damage_source_subject(subject) {
         return Some(filter);
     }
-    // CR 303.4: the plural "enchanted <type>s" (Wall of Putrid Flesh, Enchanted
-    // Being: "… by enchanted creatures") names every object with an Aura attached,
-    // not the host of this source (the singular arm above). The generic type
-    // grammar below reads it as `EnchantedBy` — enchanted by THIS source — which
-    // a shield on a non-Aura permanent never matches.
-    // A compound noun ("enchanted creatures and enchantment creatures") does not
-    // fold to one typed filter and keeps the generic reading below.
-    if let Ok((noun, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(subject) {
-        if let (TargetFilter::Typed(mut typed), rest) = parse_type_phrase_folding(noun) {
-            if rest.trim().is_empty() {
-                typed.properties.push(FilterProp::HasAttachment {
-                    kind: AttachmentKind::Aura,
-                    controller: None,
-                    exclude_source: SourceExclusion::Include,
-                });
-                return Some(TargetFilter::Typed(typed));
-            }
-        }
-    }
 
     // Typed damage sources ("creature you control with a +1/+1 counter on it",
     // "creatures you control with counters on them", ...) share the normal
@@ -9197,7 +9178,9 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
     // CR 607.2d: "of the chosen type/color" reads the choice made by the linked
     // "choose a …" ability printed on the same object (Charm School, Prismatic
     // Ward), which the runtime reads off the shield's host. "The last chosen
-    // color" names a different linkage and is not recognized here.
+    // color" (Chromatic Armor) is linked the same way, but its later re-choice comes
+    // from an activated ability whose persistence on the host is unverified, so it
+    // is not recognized here and the line fails closed.
     if let Ok((rest, prop)) = alt((
         value(
             FilterProp::IsChosenCreatureType,
@@ -13155,12 +13138,11 @@ pub(crate) fn damage_prevention_fails_closed(
 /// would deal and it has defender" — Woolly Razorback). The subject axis is a
 /// pronoun or self-reference and the verb axis a predicate verb, so a recipient
 /// list ("dealt to you and creatures you control") and the "dealt to and dealt
-/// by" ellipsis never match. Bounded to the first sentence, the prevention
-/// clause, so a follow-up sentence is not read.
+/// by" ellipsis never match. Bounded to the sentence that carries the
+/// prevention verb (`sentence_carrying_anchor`), so another sentence is not read.
 fn has_coordinated_predicate_conjunct(working_lower: &str) -> bool {
-    let sentence = take_till::<_, _, OracleError<'_>>(|c: char| c == '.')
-        .parse(working_lower)
-        .map_or(working_lower, |(_, sentence)| sentence);
+    let sentence =
+        sentence_carrying_anchor(working_lower, PREVENTION_VERB_ANCHOR).unwrap_or(working_lower);
     nom_primitives::scan_at_word_boundaries(sentence, |input| {
         (
             tag::<_, _, OracleError<'_>>("and "),
@@ -15045,14 +15027,7 @@ mod tests {
             // CR 303.4: the plural "enchanted creatures" — any creature with an Aura.
             (
                 "prevent all combat damage that would be dealt to ~ by enchanted creatures.",
-                typed(
-                    vec![TypeFilter::Creature],
-                    vec![FilterProp::HasAttachment {
-                        kind: AttachmentKind::Aura,
-                        controller: None,
-                        exclude_source: SourceExclusion::Include,
-                    }],
-                ),
+                typed(vec![TypeFilter::Creature], vec![FilterProp::EnchantedBy]),
             ),
             // Source-noun subjects; a card-type qualifier is a type (CR 205.2a).
             (
@@ -15091,7 +15066,7 @@ mod tests {
                 "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
                 DamageSourceScope::Unrecognized,
             ),
-            // "The last chosen color" (Chromatic Armor) is a different linkage.
+            // "The last chosen color" (Chromatic Armor): re-choice persistence is unverified, so it fails closed.
             (
                 "prevent all damage that would be dealt to enchanted creature by sources of the last chosen color.",
                 DamageSourceScope::Unrecognized,
@@ -15109,8 +15084,7 @@ mod tests {
             );
         }
         // A compound "enchanted …" noun (Inspire Awe's "enchanted creatures and
-        // enchantment creatures") is not the plural arm's shape: it keeps the
-        // generic type-phrase reading.
+        // enchantment creatures") keeps the generic type-phrase reading.
         const COMPOUND: &str = "enchanted creatures and enchantment creatures";
         assert_eq!(
             parse_damage_source_subject_filter(COMPOUND),
@@ -27904,12 +27878,14 @@ mod tests {
             "prevent all combat damage it would deal and it has defender.",
             "prevent all damage they would deal and they can't block.",
             "prevent all damage that would be dealt to ~ and ~ gains flying.",
+            // The prevention sentence is the second sentence.
+            "~ can't block. prevent all combat damage it would deal and it has defender.",
         ] {
             assert!(has_coordinated_predicate_conjunct(text), "{text}");
         }
         // Negative: the "dealt to and dealt by" ellipsis (Fog Bank), recipient
         // lists, "prevent that damage and <verb>" riders, and a conjunct in a
-        // following sentence.
+        // sentence other than the prevention sentence.
         for text in [
             "prevent all combat damage that would be dealt to and dealt by ~.",
             "prevent all damage that would be dealt to you and permanents you control by sources with the chosen name.",
@@ -27917,6 +27893,7 @@ mod tests {
             "if damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on it.",
             "prevent all damage that would be dealt to you and ~ this turn.",
             "prevent all damage that would be dealt to ~. it gets +1/+1 and it has flying.",
+            "~ gets +1/+1 and it has flying. prevent all damage that would be dealt to ~.",
         ] {
             assert!(!has_coordinated_predicate_conjunct(text), "{text}");
         }
