@@ -21761,9 +21761,10 @@ enum PossessiveRelation {
 /// Strip a trailing ANAPHORIC possessive from a compound damage subject's object
 /// conjunct, returning the bare object phrase and the relation it binds.
 ///
-/// Suffix-anchored rather than scanned (the `strip_trailing_duration` idiom): the
-/// possessive closes the phrase, so `take_until` locating it is a position
-/// computation, not a substring dispatch. One `alt` per axis — the relation — and
+/// Suffix-anchored (the `strip_trailing_duration` idiom): the possessive closes the
+/// phrase, so locating it — `take_until`, or a word-bounded `many_till` scan of the
+/// controller-phrase projection for "they control" — is a position computation, not
+/// a substring dispatch. One `alt` per axis — the relation — and
 /// the whole suffix must close the phrase, which is what makes this a gate rather
 /// than a probe.
 ///
