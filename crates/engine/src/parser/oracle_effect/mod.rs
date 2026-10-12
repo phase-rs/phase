@@ -27669,8 +27669,9 @@ fn is_targeted_player_conjunct(second: &TargetFilter) -> bool {
 /// actions happen simultaneously; the `player_scope` driver instead resolves the
 /// whole body for one seat before prompting the next, so a body that pairs a
 /// choice with any other link is observable: one seat's choice lands before
-/// another seat's earlier action or after its own later one. Fail-closed
-/// allowlist: any link kind not shown unobservable returns `false`.
+/// another seat's earlier link has run, or after another seat's later link has
+/// run. Fail-closed allowlist: any link kind not shown unobservable returns
+/// `false`.
 fn seat_order_is_unobservable(body: &AbilityDefinition) -> bool {
     let lone_link = body.sub_ability.is_none();
     std::iter::successors(Some(body), |link| link.sub_ability.as_deref()).all(|link| {
