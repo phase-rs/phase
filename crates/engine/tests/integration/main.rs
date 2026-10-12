@@ -404,6 +404,7 @@ mod face_down_spell_cost_filter;
 mod fact_or_fiction_pile_separation;
 mod fall_from_favor_monarch_untap;
 mod fallaji_archaeologist_up_to_may_put;
+mod fan_out_pause_this_way;
 mod fantastic_four_bounded_loop;
 mod farideh_fireball_die_branch_selection;
 mod fateful_handoff_target_mana_value_draw;

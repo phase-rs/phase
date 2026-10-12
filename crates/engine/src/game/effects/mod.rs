@@ -8223,6 +8223,37 @@ pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
     branch_references_tracked_set(ability.sub_ability.as_deref())
 }
 
+/// CR 608.2c + CR 608.2e: does the text that FOLLOWS `producer` consume the
+/// chain's tracked set?
+///
+/// Ordinarily that text is `producer`'s own `sub_ability` chain
+/// ([`next_sub_needs_tracked_set`]). A `player_scope` fan-out that pauses on a
+/// seat's choice parks the clause's remaining seats and its unscoped tail as
+/// the active ability continuation; the paused seat's answer then resolves the
+/// seat's producer with no consumer in its own chain. Its following text is
+/// that parked continuation, so it publishes into the clause's set exactly as
+/// an unpaused seat does.
+///
+/// Two stops keep a parked continuation from being read as following text
+/// when it is not:
+///  * a CR 700.2 mode boundary inside `producer`'s own chain
+///    ([`crosses_modal_boundary`]): the continuation then follows a later mode;
+///  * a different source: another object's chain resolving during the pause
+///    (a replacement effect's, CR 614.1) is not this instruction's text.
+fn resolution_next_needs_tracked_set(state: &GameState, producer: &ResolvedAbility) -> bool {
+    next_sub_needs_tracked_set(producer)
+        || (std::iter::successors(producer.sub_ability.as_deref(), |node| {
+            node.sub_ability.as_deref()
+        })
+        .all(|node| !crosses_modal_boundary(node))
+            && state
+                .active_ability_continuation()
+                .is_some_and(|continuation| {
+                    continuation.chain.source_id == producer.source_id
+                        && chain_references_tracked_set(&continuation.chain)
+                }))
+}
+
 /// CR 700.2 + CR 608.2c: does ENTERING `node` cross into a different modal
 /// instruction?
 ///
@@ -10201,7 +10232,7 @@ pub(crate) fn publish_tracked_set_for_resolution(
         (
             TrackedSetPublicationMode::Normal,
             TrackedSetPublicationInput::ResolvedEvents { ability, events },
-        ) if next_sub_needs_tracked_set(producer) => {
+        ) if resolution_next_needs_tracked_set(state, producer) => {
             let affected = affected_objects_with_causes(state, ability, &ability.effect, events);
             publish_tracked_set_with_causes(state, affected);
         }
@@ -15778,6 +15809,12 @@ fn resolve_chain_body(
         // `EffectResolved` gap at that site). Repairing it means making the
         // per-clause table accumulate across continuation legs, which is
         // resume-machinery work well outside a draw-count change.
+        //
+        // The clause's TRACKED SET does not share this gap. The postlude below
+        // publishes the seats that completed, each generated leg carries the
+        // unscoped tail and so extends the chain set, and the paused seat's own
+        // producer, resumed under the parked continuation, extends it through
+        // `resolution_next_needs_tracked_set` (CR 608.2c "this way").
         let mut applied_domain_end = matching_players.len();
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
@@ -17418,7 +17455,7 @@ fn resolve_chain_body(
     //   - Counter-adding effects → `CounterAdded` (CR 122.1), so "those
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
-    if next_sub_needs_tracked_set(ability) {
+    if resolution_next_needs_tracked_set(state, ability) {
         publish_tracked_set_for_resolution(
             state,
             ability,
@@ -24675,6 +24712,76 @@ mod tests {
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
         );
+    }
+
+    /// CR 608.2c + CR 608.2e: a producer at the end of a chain resumed under a
+    /// parked same-source continuation reads that continuation as its following
+    /// text; its own consumer, a mode boundary in its own chain, or a different
+    /// source decide otherwise.
+    #[test]
+    fn resolution_next_needs_tracked_set_reads_a_parked_same_source_continuation() {
+        let source = ObjectId(1);
+        let draw = |count: QuantityExpr, src: ObjectId| {
+            ResolvedAbility::new(
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    count,
+                },
+                vec![],
+                src,
+                PlayerId(0),
+            )
+        };
+        let producer = |src| draw(QuantityExpr::Fixed { value: 1 }, src);
+        let non_consumer = |src| draw(QuantityExpr::Fixed { value: 2 }, src);
+        let consumer = |src| {
+            draw(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                src,
+            )
+        };
+        let mut state = GameState::new_two_player(7);
+        // Nothing parked and no consumer of its own.
+        assert!(!resolution_next_needs_tracked_set(
+            &state,
+            &producer(source)
+        ));
+        // Its own consumer, nothing parked: the existing rule.
+        assert!(resolution_next_needs_tracked_set(
+            &state,
+            &producer(source).sub_ability(consumer(source))
+        ));
+        // A parked same-source continuation that consumes nothing.
+        append_to_pending_continuation(&mut state, Some(Box::new(non_consumer(source))));
+        assert!(!resolution_next_needs_tracked_set(
+            &state,
+            &producer(source)
+        ));
+        state
+            .take_active_ability_continuation()
+            .expect("the parked non-consumer is the active frame");
+        // A parked same-source consumer: the producer's chain end hands off.
+        append_to_pending_continuation(&mut state, Some(Box::new(consumer(source))));
+        assert!(resolution_next_needs_tracked_set(&state, &producer(source)));
+        // A non-consuming own chain still ends in the parked consumer.
+        assert!(resolution_next_needs_tracked_set(
+            &state,
+            &producer(source).sub_ability(non_consumer(source))
+        ));
+        // CR 700.2: a mode boundary inside the producer's own chain stops it.
+        let mut next_mode = non_consumer(source);
+        next_mode.modal_instruction_ordinal = Some(1);
+        assert!(!resolution_next_needs_tracked_set(
+            &state,
+            &producer(source).sub_ability(next_mode)
+        ));
+        // CR 614.1: another object's chain resolving during the pause.
+        assert!(!resolution_next_needs_tracked_set(
+            &state,
+            &producer(ObjectId(2))
+        ));
     }
 
     /// CR 601.2c + CR 608.2c: a node that declares a single optional object target

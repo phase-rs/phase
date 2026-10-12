@@ -20,7 +20,7 @@ use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
-    parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
@@ -5032,6 +5032,10 @@ pub(crate) fn strip_for_each_prefix_with_difference(
             let parsed_comparison = nom_quantity::parse_for_each_clause_ref_with_difference(clause)
                 .ok()
                 .and_then(|(rest, parsed)| rest.is_empty().then_some(parsed));
+            if let Some(short_of) = parse_for_each_short_of_clause_expr(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(short_of), None, text[offset..].to_string());
+            }
             let parsed_clause = parsed_comparison
                 .clone()
                 .map(|(qty, difference)| (qty, Some(difference)))
@@ -5081,6 +5085,7 @@ pub(crate) fn strip_for_each_prefix_with_difference(
 #[cfg(test)]
 mod difference_binding_tests {
     use super::strip_for_each_prefix_with_difference;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
 
     #[test]
     fn comparison_parser_product_carries_difference_provenance() {
@@ -5101,6 +5106,40 @@ mod difference_binding_tests {
             let (_, difference, _) = strip_for_each_prefix_with_difference(text);
             assert!(difference.is_none(), "nested property must not bind: {text}");
         }
+    }
+
+    /// CR 107.1b + CR 608.2c: a leading "for each <noun> less than N …" counts
+    /// the shortfall below N (Truce), while the same clause without "less than"
+    /// keeps the plain "this way" count.
+    #[test]
+    fn leading_less_than_clause_counts_the_shortfall() {
+        let tracked = || QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let (repeat_for, difference, rest) = strip_for_each_prefix_with_difference(
+            "For each card less than two a player draws this way, that player gains 2 life.",
+        );
+        assert_eq!(
+            repeat_for,
+            Some(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(tracked()),
+                    }),
+                    offset: 2,
+                }),
+                minimum: 0,
+            })
+        );
+        assert!(difference.is_none());
+        assert_eq!(rest, "that player gains 2 life.");
+
+        let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(
+            "For each card a player draws this way, that player gains 2 life.",
+        );
+        assert_eq!(repeat_for, Some(tracked()));
+        assert_eq!(rest, "that player gains 2 life.");
     }
 }
 

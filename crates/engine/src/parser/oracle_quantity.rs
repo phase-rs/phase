@@ -2715,6 +2715,10 @@ fn parse_for_each_clause_expr_with_parser(
         return rest.is_empty().then_some(expr);
     }
 
+    if let Some(expr) = parse_for_each_short_of_clause_expr_with_parser(clause, parse_clause) {
+        return Some(expr);
+    }
+
     fn segment(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
@@ -2761,6 +2765,46 @@ fn parse_for_each_beyond_first_clause_expr_with_parser(
             minimum: 0,
         },
     ))
+}
+
+/// CR 107.1b + CR 608.2c: "for each <noun> less than N <qualifier>" (or
+/// "fewer than N") counts how far the qualified count of `<noun>` falls short of
+/// N: N minus the count of "<noun> <qualifier>", clamped at zero because a
+/// calculation that yields a negative number uses zero. Truce: "for each card
+/// less than two a player draws this way". The noun is a single type word, so a
+/// property comparison ("creature with power less than 0") never matches here.
+fn parse_for_each_short_of_clause_expr_with_parser(
+    input: &str,
+    parse_clause: impl Fn(&str) -> Option<QuantityRef>,
+) -> Option<QuantityExpr> {
+    let (qualifier, (noun, _, ceiling, _)) = (
+        recognize(nom_target::parse_type_filter_word),
+        alt((
+            tag::<_, _, OracleError<'_>>(" less than "),
+            tag(" fewer than "),
+        )),
+        nom_primitives::parse_number,
+        tag(" "),
+    )
+        .parse(input)
+        .ok()?;
+    let qty = parse_clause(&format!("{noun} {qualifier}"))?;
+    Some(QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref { qty }),
+            }),
+            offset: i32::try_from(ceiling).ok()?,
+        }),
+        minimum: 0,
+    })
+}
+
+/// CR 107.1b + CR 608.2c: the leading-prefix entry for
+/// [`parse_for_each_short_of_clause_expr_with_parser`].
+pub(crate) fn parse_for_each_short_of_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_short_of_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
 /// CR 109.4 + CR 400.1 + CR 608.2c: Parse an anaphoric hand-card union like
@@ -7643,6 +7687,42 @@ mod tests {
                 assert_eq!(filter.properties, vec![FilterProp::BlockingSource]);
             }
             other => panic!("expected blocking-source ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1b + CR 608.2c: "for each <noun> fewer than N <qualifier>" is N
+    /// minus the count of "<noun> <qualifier>", clamped at zero (Stabwhisker the
+    /// Odious). A property comparison on the noun is not a shortfall count.
+    #[test]
+    fn for_each_fewer_than_clamps_shortfall_below_ceiling() {
+        let qty = parse_for_each_clause("card in their hand").expect("base clause parses");
+        assert_eq!(
+            parse_for_each_clause_expr("card fewer than three in their hand"),
+            Some(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(QuantityExpr::Ref { qty }),
+                    }),
+                    offset: 3,
+                }),
+                minimum: 0,
+            })
+        );
+        for clause in [
+            "creature with power less than 0 on the battlefield",
+            "opponent whose life total is less than half their starting life total",
+        ] {
+            let result = parse_for_each_clause_expr(clause);
+            assert!(
+                !matches!(
+                    &result,
+                    Some(QuantityExpr::ClampMin { inner, .. })
+                        if matches!(inner.as_ref(), QuantityExpr::Offset { inner, .. }
+                            if matches!(inner.as_ref(), QuantityExpr::Multiply { .. }))
+                ),
+                "a property comparison must not parse as a shortfall: {clause} → {result:?}"
+            );
         }
     }
 
