@@ -151,6 +151,17 @@ pub struct StackBulkCounters {
     pub post_action_pipeline_passes: u64,
 }
 
+/// Test-only count of full `TriggerIndex` rebuilds, whatever the caller. Kept
+/// out of [`PerfCounterSnapshot`], whose fields `phase-ai`'s
+/// `PerfCounters::from_snapshot` maps one-for-one into the AI performance
+/// baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TriggerIndexCounters {
+    /// Calls to `TriggerIndex::rebuild_from_battlefield`.
+    pub full_rebuilds: u64,
+}
+
 /// Test-only counters for the CR 508.1d attack-declaration solver
 /// (`combat::selectable_targets_by_attacker` and the strict validator it
 /// drives). Kept out of [`PerfCounterSnapshot`] for the same reason the two
@@ -504,6 +515,10 @@ thread_local! {
             bulk_entries: 0,
             post_action_pipeline_passes: 0,
         })
+    };
+    #[cfg(feature = "test-support")]
+    static TRIGGER_INDEX_COUNTERS: Cell<TriggerIndexCounters> = const {
+        Cell::new(TriggerIndexCounters { full_rebuilds: 0 })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
 }
@@ -1133,6 +1148,8 @@ pub fn reset() {
     EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
     #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
+    #[cfg(feature = "test-support")]
+    TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
 }
 
 /// One committed bulk token run resolved `n` stack entries.
@@ -1158,4 +1175,19 @@ pub fn record_post_action_pipeline_pass() {
 #[cfg(feature = "test-support")]
 pub fn stack_bulk_snapshot() -> StackBulkCounters {
     STACK_BULK_COUNTERS.with(Cell::get)
+}
+
+/// One full `TriggerIndex::rebuild_from_battlefield`.
+#[cfg(feature = "test-support")]
+pub fn record_trigger_index_rebuild() {
+    TRIGGER_INDEX_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.full_rebuilds += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn trigger_index_snapshot() -> TriggerIndexCounters {
+    TRIGGER_INDEX_COUNTERS.with(Cell::get)
 }

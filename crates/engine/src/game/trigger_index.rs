@@ -61,7 +61,7 @@ use smallvec::SmallVec;
 use crate::types::ability::{EffectKind, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, TriggerIndex};
+use crate::types::game_state::{DerivedIndexReadiness, GameState, TriggerIndex};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::triggers::{TriggerEventKey, TriggerMode};
@@ -1143,8 +1143,7 @@ impl TriggerIndex {
 
     /// CR 603.6a + CR 611.2e: Rebuild from scratch by scanning every phased-in
     /// battlefield permanent and re-deriving its keys via
-    /// `keys_from_trigger_def`. Called at the end of `evaluate_layers` and
-    /// lazily on first consult after deserialize.
+    /// `keys_from_trigger_def`.
     pub fn rebuild_from_battlefield(state: &mut GameState) {
         let mut fresh = TriggerIndex::default();
         // CR 702.26: phased-out permanents don't trigger.
@@ -1164,20 +1163,25 @@ impl TriggerIndex {
                 fresh.add(obj_id, &defs, synthetic);
             }
         }
+        fresh.readiness = DerivedIndexReadiness::Built;
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_trigger_index_rebuild();
         state.trigger_index = fresh;
     }
 }
 
-/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index is available
-/// before a consult. The layer pipeline remains the authoritative rebuild path
-/// for live granted and removed definitions; this only restores the empty
-/// derived index after deserialize when battlefield state is already present.
+/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index has been
+/// populated by a full battlefield scan before a consult. Rebuilds only an
+/// `Unbuilt` index (fresh from `Default`, as after deserialize), and only
+/// while the battlefield is non-empty. A `Built` index is not rebuilt here
+/// even when its buckets are empty because no permanent carries a trigger.
+/// The layer pipeline remains the authoritative rebuild path for live
+/// granted and removed definitions.
 pub fn ensure_ready(state: &mut GameState) {
-    if state.trigger_index.by_key.is_empty()
-        && state.trigger_index.unclassified.is_empty()
-        && !state.battlefield.is_empty()
-    {
-        TriggerIndex::rebuild_from_battlefield(state);
+    match state.trigger_index.readiness {
+        DerivedIndexReadiness::Built => {}
+        DerivedIndexReadiness::Unbuilt if state.battlefield.is_empty() => {}
+        DerivedIndexReadiness::Unbuilt => TriggerIndex::rebuild_from_battlefield(state),
     }
 }
 
@@ -1611,6 +1615,42 @@ mod tests {
             candidates_for_event(&restored, &event).as_slice(),
             &[object_id],
             "the first post-deserialize inline-mana consult must restore its candidate"
+        );
+    }
+
+    /// CR 603.2: a consult while the battlefield is empty has nothing to scan,
+    /// so it must not mark the index as populated; the first consult after a
+    /// permanent arrives still has to restore it.
+    #[test]
+    fn ensure_ready_defers_build_while_battlefield_is_empty() {
+        let mut state = GameState::new_two_player(42);
+
+        ensure_ready(&mut state);
+        assert_eq!(
+            state.trigger_index.readiness,
+            DerivedIndexReadiness::Unbuilt,
+            "a consult over an empty battlefield must leave the index unbuilt"
+        );
+
+        let object_id = ObjectId(80);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(80),
+            PlayerId(0),
+            "Late Mana Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        ensure_ready(&mut state);
+        assert_eq!(
+            candidates_for_event(&state, &tapped_for_mana_event()).as_slice(),
+            &[object_id],
+            "the first consult after a permanent arrives must index it"
         );
     }
 

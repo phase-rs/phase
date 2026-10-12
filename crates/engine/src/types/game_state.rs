@@ -20325,6 +20325,24 @@ pub struct TriggerIndex {
     /// Consulted on every event regardless of `keys_from_event` output.
     /// Empty for the common case where every trigger's mode is known.
     pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
+    /// `Built` once `TriggerIndex::rebuild_from_battlefield` has populated this
+    /// value; `Unbuilt` from `Default`, which is also what a deserialize produces
+    /// (the `GameState` field is `#[serde(skip)]`). `add` and `remove` (and
+    /// `reindex_object_triggers`, which composes them) leave it unchanged.
+    pub readiness: DerivedIndexReadiness,
+}
+
+/// Whether a derived index has been populated by a full scan of the state it
+/// indexes. Distinguishes "never built" from "built and legitimately empty",
+/// which bucket emptiness cannot. `Unbuilt` is the default, so a
+/// `#[serde(skip)]` index restores as `Unbuilt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DerivedIndexReadiness {
+    /// Not populated by a full scan since this index value was created.
+    #[default]
+    Unbuilt,
+    /// Populated by a full scan since this index value was created.
+    Built,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21296,9 +21314,8 @@ declare_game_state! {
     #[serde(skip)]
     pub static_gate_truth: im::HashMap<StaticGateKey, bool>,
     /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
-    /// lazily after deserialize via a sentinel check at the top of the consult
-    /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
-    /// post-layer trigger set is reflected. `#[serde(skip)]` because the index
+    /// eagerly at the end of `evaluate_layers` so the post-layer
+    /// trigger set is reflected. `#[serde(skip)]` because the index
     /// is derived state — reconstructed from `state.battlefield` + per-object
     /// `trigger_definitions` whenever needed.
     #[serde(skip)]
