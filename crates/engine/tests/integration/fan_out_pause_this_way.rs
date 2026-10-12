@@ -134,20 +134,20 @@ fn two_seat_pause_skips_nonland_head_seat() {
 /// seat's optional prompt with `accept[seat]`, and returns each creature's
 /// (+1/+1 counters, goaded by P0) in seat order.
 fn agitator_ant_end_step(accept: [bool; 3]) -> Vec<(u32, bool)> {
-    agitator_ant_end_step_with_bears(accept, [1, 1])
+    agitator_ant_end_step_with_bears(accept, [0, 1, 1])
 }
 
-/// As [`agitator_ant_end_step`], but P1 and P2 control `bears[0]` and
-/// `bears[1]` Grizzly Bears. A seat with two or more creatures chooses at
-/// resolution (CR 608.2d) and picks its first Bears. Returns the Ant, then P1's
-/// Bears, then P2's Bears, each in creation order.
-fn agitator_ant_end_step_with_bears(accept: [bool; 3], bears: [usize; 2]) -> Vec<(u32, bool)> {
+/// As [`agitator_ant_end_step`], but each seat `i` controls `bears[i]` Grizzly
+/// Bears (P0's beside the Ant). A seat with two or more creatures chooses at
+/// resolution (CR 608.2d) and picks its first Bears. Returns the Ant, then P0's,
+/// P1's and P2's Bears, each in creation order.
+fn agitator_ant_end_step_with_bears(accept: [bool; 3], bears: [usize; 3]) -> Vec<(u32, bool)> {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PostCombatMain);
     let ant = scenario
         .add_creature_from_oracle(P0, "Agitator Ant", 2, 2, AGITATOR_ANT)
         .id();
-    let bears_by_seat: Vec<Vec<ObjectId>> = [P1, P2]
+    let bears_by_seat: Vec<Vec<ObjectId>> = [P0, P1, P2]
         .into_iter()
         .zip(bears)
         .map(|(seat, count)| {
@@ -181,7 +181,7 @@ fn agitator_ant_end_step_with_bears(accept: [bool; 3], bears: [usize; 2]) -> Vec
             }
             WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
                 creature_prompts.push(*player);
-                let first_bears = bears_by_seat[usize::from(player.0) - 1][0];
+                let first_bears = bears_by_seat[usize::from(player.0)][0];
                 assert!(cards.contains(&first_bears), "the seat's Bears is offered");
                 GameAction::SelectCards {
                     cards: vec![first_bears],
@@ -193,10 +193,13 @@ fn agitator_ant_end_step_with_bears(accept: [bool; 3], bears: [usize; 2]) -> Vec
     }
     assert_eq!(optional_prompts, vec![P0, P1, P2]);
     // Reach-guard: each accepting seat with two or more creatures chose one.
-    let choosing_seats: Vec<PlayerId> = [P1, P2]
+    let choosing_seats: Vec<PlayerId> = [P0, P1, P2]
         .into_iter()
         .zip(bears)
-        .filter(|&(seat, count)| accept[usize::from(seat.0)] && count >= 2)
+        .filter(|&(seat, count)| {
+            let creatures = count + usize::from(seat == P0);
+            accept[usize::from(seat.0)] && creatures >= 2
+        })
         .map(|(seat, _)| seat)
         .collect();
     assert_eq!(creature_prompts, choosing_seats);
@@ -247,13 +250,24 @@ fn agitator_ant_head_seat_declines() {
     );
 }
 
+/// CR 608.2c + CR 608.2d + CR 701.15a: the head seat, P0, controls the Ant and
+/// a Bears and chooses the Bears at resolution. The chosen Bears and every
+/// later seat's creature are goaded; the Ant, unchosen, gets nothing.
+#[test]
+fn agitator_ant_head_seat_chooses_among_two_creatures() {
+    assert_eq!(
+        agitator_ant_end_step_with_bears([true, true, true], [1, 1, 1]),
+        vec![(0, false), (2, true), (2, true), (2, true)]
+    );
+}
+
 /// CR 608.2c + CR 608.2d + CR 701.15a: P1 controls two creatures and chooses
 /// one at resolution. Every chosen creature is goaded, including the head
 /// seat's Ant; the creature P1 did not choose gets nothing.
 #[test]
 fn agitator_ant_middle_seat_chooses_among_two_creatures() {
     assert_eq!(
-        agitator_ant_end_step_with_bears([true, true, true], [2, 1]),
+        agitator_ant_end_step_with_bears([true, true, true], [0, 2, 1]),
         vec![(2, true), (2, true), (0, false), (2, true)]
     );
 }
@@ -264,7 +278,7 @@ fn agitator_ant_middle_seat_chooses_among_two_creatures() {
 #[test]
 fn agitator_ant_last_seat_chooses_among_two_creatures() {
     assert_eq!(
-        agitator_ant_end_step_with_bears([true, true, true], [1, 2]),
+        agitator_ant_end_step_with_bears([true, true, true], [0, 1, 2]),
         vec![(2, true), (2, true), (2, true), (0, false)]
     );
 }
