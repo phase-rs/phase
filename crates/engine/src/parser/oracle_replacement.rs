@@ -14871,6 +14871,8 @@ mod tests {
         QuantityModification, QuantityRef, ReplacementCondition, RestrictionExpiry, ShieldKind,
         ZoneRef,
     };
+    use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::keywords::Keyword;
 
     #[test]
     fn damage_target_chosen_player_marker() {
@@ -14903,8 +14905,6 @@ mod tests {
             assert_eq!(rest, format!(" or a permanent {declined}"), "{declined:?}");
         }
     }
-    use crate::types::card_type::{CoreType, Supertype};
-    use crate::types::keywords::Keyword;
 
     #[test]
     fn shape_fixed_damage_threshold_parameterizes_both_numbers() {
