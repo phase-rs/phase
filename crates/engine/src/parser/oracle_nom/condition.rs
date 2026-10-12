@@ -22,6 +22,7 @@ use super::primitives::{
 };
 use super::quantity as nom_quantity;
 use super::target as nom_target;
+use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
     cast_capable_zones_except, parse_shared_quality, parse_type_phrase_folding, parse_zone_suffix,
     parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
@@ -4307,7 +4308,11 @@ fn parse_they_hand_size_exact_disjunction(input: &str) -> OracleResult<'_, Stati
 }
 
 fn parse_they_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("they control ").parse(input)?;
+    let (rest, _) = terminated(
+        controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+        tag(" "),
+    )
+    .parse(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase_folding(type_text);
@@ -10248,7 +10253,11 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
 /// source controller's. `ControllerRef::ScopedPlayer` binds to the event player
 /// at both detection and resolution (`resolve_quantity_for_trigger_check`).
 fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("that player controls more ").parse(input)?;
+    let (rest, _) = (
+        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]),
+        tag(" more "),
+    )
+        .parse(input)?;
     let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
     let (rest, _) = tag(" than you").parse(rest)?;
 
@@ -10783,7 +10792,9 @@ fn parse_unless_pay_condition(input: &str) -> OracleResult<'_, StaticCondition> 
     let (rest, scaling) = opt(value(
         UnlessPayScaling::PerAffectedCreature,
         (
-            tag(" for each creature they control that"),
+            tag(" for each creature "),
+            controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+            tag(" that"),
             alt((recognize(parse_apostrophe_s), tag(" is"))),
             tag(" blocking it"),
         ),
@@ -11861,10 +11872,114 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         CardTypeSetSource, ControllerRef, CountScope, PtStat, PtValueScope, RoundingMode,
-        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, UnlessPayScaling, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    /// The "they control" sites decline every other controller phrase.
+    const NOT_THEY_CONTROL: [&str; 4] = [
+        "you control",
+        "that player controls",
+        "controlled by that player",
+        "the chosen player controls",
+    ];
+
+    #[test]
+    fn they_control_count_ge_marker() {
+        let (rest, condition) =
+            parse_they_control_count_ge("they control three or more creatures").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::ScopedPlayer)
+                                .properties(vec![FilterProp::InZone {
+                                    zone: Zone::Battlefield,
+                                }])
+                        ),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+        for declined in NOT_THEY_CONTROL {
+            assert!(
+                parse_they_control_count_ge(&format!("{declined} three or more creatures"))
+                    .is_err(),
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn that_player_controls_more_marker() {
+        let (rest, condition) = parse_that_player_controls_more_comparison(
+            "that player controls more creatures than you",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::GT,
+            ..
+        } = condition
+        else {
+            panic!("comparison: {condition:?}");
+        };
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer))
+        );
+        for declined in [
+            "they control",
+            "you control",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert!(
+                parse_that_player_controls_more_comparison(&format!(
+                    "{declined} more creatures than you"
+                ))
+                .is_err(),
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unless_pay_scaling_marker() {
+        let parse = |controller: &str| {
+            let text = format!("you pay {{1}} for each creature {controller} that's blocking it");
+            let (rest, condition) = parse_unless_pay_condition(&text).unwrap();
+            let StaticCondition::UnlessPay { scaling, .. } = condition else {
+                panic!("unless pay: {condition:?}");
+            };
+            (rest.to_string(), scaling)
+        };
+        assert_eq!(
+            parse("they control"),
+            (String::new(), UnlessPayScaling::PerAffectedCreature)
+        );
+        for declined in NOT_THEY_CONTROL {
+            assert_eq!(
+                parse(declined),
+                (
+                    format!(" for each creature {declined} that's blocking it"),
+                    UnlessPayScaling::Flat
+                ),
+                "{declined:?}"
+            );
+        }
+    }
 
     /// CR 603.4 + CR 102.1: "a player has more `<property>` than each other
     /// player" via the public `parse_inner_condition` seam — the exact shape,

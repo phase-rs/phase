@@ -34,7 +34,9 @@ use super::oracle_nom::prevention::{
 };
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
-use super::oracle_nom::target::{parse_type_filter_word, parse_type_phrase};
+use super::oracle_nom::target::{
+    controller_phrase_among, parse_type_filter_word, parse_type_phrase, ControllerPhrase,
+};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_target_with_ctx,
@@ -9390,10 +9392,13 @@ fn parse_damage_target_phrase(
     alt((
         value(
             damage_target_source_chosen_player_or_permanents(),
-            alt((
-                tag("to the chosen player or a permanent they control"),
-                tag("to the chosen player or a permanent the chosen player controls"),
-            )),
+            preceded(
+                tag("to the chosen player or a permanent "),
+                controller_phrase_among(&[
+                    ControllerPhrase::THEY_CONTROL,
+                    ControllerPhrase::THE_CHOSEN_PLAYER_CONTROLS,
+                ]),
+            ),
         ),
         value(
             damage_target_opponent_or_permanents(),
@@ -14866,6 +14871,38 @@ mod tests {
         QuantityModification, QuantityRef, ReplacementCondition, RestrictionExpiry, ShieldKind,
         ZoneRef,
     };
+
+    #[test]
+    fn damage_target_chosen_player_marker() {
+        for admitted in ["they control", "the chosen player controls"] {
+            assert_eq!(
+                parse_damage_target_phrase(&format!(
+                    "to the chosen player or a permanent {admitted}"
+                ))
+                .ok(),
+                Some(("", damage_target_source_chosen_player_or_permanents())),
+                "{admitted:?}"
+            );
+        }
+        // A declined controller phrase falls through to the bare "to the chosen
+        // player" arm, which leaves the permanent leg unconsumed.
+        for declined in [
+            "that player controls",
+            "you control",
+            "controlled by that player",
+        ] {
+            let text = format!("to the chosen player or a permanent {declined}");
+            let (rest, filter) = parse_damage_target_phrase(&text).unwrap();
+            assert_eq!(
+                filter,
+                DamageTargetFilter::Player {
+                    player: DamageTargetPlayerScope::SourceChosenPlayer,
+                },
+                "{declined:?}"
+            );
+            assert_eq!(rest, format!(" or a permanent {declined}"), "{declined:?}");
+        }
+    }
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
 

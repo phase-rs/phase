@@ -84,7 +84,7 @@ use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::{many0, many1, many_till, separated_list1};
-use nom::sequence::{pair, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
@@ -95,7 +95,7 @@ use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
-use super::oracle_nom::target::ControllerSubject;
+use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase, ControllerSubject};
 use super::oracle_quantity::{
     parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause_with_context,
@@ -3548,10 +3548,10 @@ fn parse_that_player_or_their_permanent(input: &str) -> Option<&str> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("a permanent ")
         .parse(rest)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that player controls"),
-        tag("controlled by that player"),
-    ))
+    let (rest, _) = controller_phrase_among(&[
+        ControllerPhrase::THAT_PLAYER_CONTROLS,
+        ControllerPhrase::CONTROLLED_BY_THAT_PLAYER,
+    ])
     .parse(rest)
     .ok()?;
     Some(rest)
@@ -5821,7 +5821,12 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     // turn" duration are required discriminators. Do not let an incomplete
     // prefix become a broad blanket attack ban.
     if let Some((defended, remaining)) = nom_on_lower(tp.original, tp.lower, |input| {
-        let (input, _) = tag("creatures that player controls ").parse(input)?;
+        let (input, _) = (
+            tag("creatures "),
+            controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]),
+            tag(" "),
+        )
+            .parse(input)?;
         let (input, _) =
             preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
         let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
@@ -17041,7 +17046,12 @@ fn balance_filter_scoped_player(filter: &TargetFilter) -> TargetFilter {
 fn parse_balance_arm_b(input: &str) -> OracleResult<'_, (EqualizeVerb, TargetFilter)> {
     let (input, _) = tag("each player chooses a number of ").parse(input)?;
     let (input, filter) = super::oracle_nom::target::parse_type_phrase(input)?;
-    let (input, _) = tag(" they control equal to ").parse(input)?;
+    let (input, _) = delimited(
+        tag(" "),
+        controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+        tag(" equal to "),
+    )
+    .parse(input)?;
     // CR 107.1b: the min-quantity phrase MUST parse to the equalization shape
     // (`ControlledByEachPlayer { aggregate: Min, .. }` — "the number of [type]
     // controlled by the player who controls the fewest"). The parsed ref is
@@ -17263,24 +17273,32 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
 
     let (rest, filter) = nom_target::parse_type_phrase(rest)?;
 
-    // Recognized for its POSITION, not for a payload — which is why this
-    // production is a bare `alt` and carries no typed value. Nothing downstream
-    // could read one: both lowerings leave the emitted keeper filter's
-    // `controller` unset and carry the seat on the clause's player scope
-    // instead, and the per-seat eligibility is enforced at resolution by
+    // Recognized for its POSITION, not for a payload — which is why this reads
+    // the controller-phrase grammar (`nom_target::parse_controller_phrase`)
+    // through its recognize-only projection, `controller_phrase_among`, which
+    // carries no typed value. Nothing downstream could read one: both lowerings
+    // leave the emitted keeper filter's `controller` unset and carry the seat on
+    // the clause's player scope instead, and the per-seat eligibility is
+    // enforced at resolution by
     // `choose_and_sacrifice_rest.rs::compute_eligible_creatures`, whose
     // `obj.controller == player` test scopes each seat's choice to its own
-    // permanents whether or not the line prints this clause. The spellings are
-    // deliberately NOT routed through `nom_target::parse_controller_suffix` —
-    // that is the authority for `ControllerRef`-valued suffixes and accepts
-    // neither of them, and binding one here would bind the domain to the
+    // permanents whether or not the line prints this clause. The binding
+    // projection `nom_target::parse_controller_suffix` is the wrong reader: it
+    // declines both anaphors, and binding one here would bind the domain to the
     // SPELL's controller rather than to each nominating seat.
     //
     // What this production does contribute is the ADJACENCY the disposal tail
     // must follow: `keeper_dispose_head_recognizes_the_control_clause_positionally`
     // pins that both spellings and their absence parse, and that an unmodelled
     // possessive between the domain and the connector declines.
-    let (rest, _) = opt(alt((tag(" they control"), tag(" that player controls")))).parse(rest)?;
+    let (rest, _) = opt(preceded(
+        tag(" "),
+        controller_phrase_among(&[
+            ControllerPhrase::THEY_CONTROL,
+            ControllerPhrase::THAT_PLAYER_CONTROLS,
+        ]),
+    ))
+    .parse(rest)?;
     let keeper_end = offset(rest);
 
     let (rest, connector) = alt((
@@ -17967,12 +17985,22 @@ fn parse_threshold_land_balance_ir(
             let (input, sacrifice_threshold) = nom_primitives::parse_number.parse(input)?;
             let (input, _) = tag(" or more lands chooses ").parse(input)?;
             let (input, keep_count) = nom_primitives::parse_number.parse(input)?;
-            let (input, _) = tag(" lands they control and sacrifices the rest. ").parse(input)?;
+            let (input, _) = (
+                tag(" lands "),
+                controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                tag(" and sacrifices the rest. "),
+            )
+                .parse(input)?;
             let (input, _) = tag("each player who controls ").parse(input)?;
             let (input, search_threshold) = nom_primitives::parse_number.parse(input)?;
             let (input, _) = tag(" or fewer lands may search their library for up to x basic land cards and put them onto the battlefield, where x is ").parse(input)?;
             let (input, x_base) = nom_primitives::parse_number.parse(input)?;
-            let (input, _) = tag(" minus the number of lands they control. then each player who searched their library this way shuffles").parse(input)?;
+            let (input, _) = (
+                tag(" minus the number of lands "),
+                controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                tag(". then each player who searched their library this way shuffles"),
+            )
+                .parse(input)?;
             let (input, _) = opt(tag(".")).parse(input)?;
             let (input, _) = eof.parse(input)?;
             Ok((
@@ -21745,8 +21773,20 @@ enum PossessiveRelation {
 fn parse_anaphoric_possessive_suffix(phrase: &str) -> Option<(&str, PossessiveRelation)> {
     let mut suffix = alt((
         pair(
-            take_until::<_, _, OracleError<'_>>(" they control"),
-            value(PossessiveRelation::Controls, tag(" they control")),
+            recognize(many_till(
+                anychar,
+                peek(preceded(
+                    tag(" "),
+                    controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                )),
+            )),
+            value(
+                PossessiveRelation::Controls,
+                preceded(
+                    tag(" "),
+                    controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                ),
+            ),
         ),
         pair(
             take_until(" those players control"),
@@ -38647,7 +38687,13 @@ pub(crate) fn parse_each_player_copy_chosen_ir(
     // the shared type-phrase parser so any object class (not just "creature") is
     // supported.
     let (i, noun) = alt((
-        take_until::<_, _, OracleError<'_>>(" they control"),
+        recognize(many_till(
+            anychar,
+            peek(preceded(
+                tag::<_, _, OracleError<'_>>(" "),
+                controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+            )),
+        )),
         take_until::<_, _, OracleError<'_>>(" controlled by "),
     ))
     .parse(i)
@@ -38661,7 +38707,10 @@ pub(crate) fn parse_each_player_copy_chosen_ir(
     let (i, choose_scope) = alt((
         value(
             CopyChooseScope::Chooser,
-            tag::<_, _, OracleError<'_>>(" they control"),
+            preceded(
+                tag::<_, _, OracleError<'_>>(" "),
+                controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+            ),
         ),
         map(
             preceded(
@@ -50215,6 +50264,217 @@ mod exile_graveyard_origin_shape {
                 (scalar, original, original_rem),
                 "{operand}"
             );
+        }
+    }
+}
+
+/// Structural-marker sites recognize a controller phrase without binding it: the
+/// enclosing construct fixes whose objects are meant. Each test pins the site's
+/// admitted phrase set: every admitted phrase is accepted in its construct, and
+/// every other controller phrase at the same position keeps the result the
+/// literal alternatives gave.
+#[cfg(test)]
+mod structural_marker_tests {
+    use super::*;
+
+    #[test]
+    fn that_player_or_their_permanent_marker() {
+        let tail = ", ~ deals double that damage instead";
+        for admitted in ["that player controls", "controlled by that player"] {
+            assert_eq!(
+                parse_that_player_or_their_permanent(&format!(
+                    "that player or a permanent {admitted}{tail}"
+                )),
+                Some(tail),
+                "{admitted:?}"
+            );
+        }
+        for declined in ["they control", "you control", "the chosen player controls"] {
+            assert_eq!(
+                parse_that_player_or_their_permanent(&format!(
+                    "that player or a permanent {declined}{tail}"
+                )),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cant_attack_bounded_subject_marker() {
+        let parse = |subject: &str| {
+            let text = format!("creatures {subject} can't attack you until your next turn");
+            let lower = text.to_lowercase();
+            try_parse_that_player_cant_attack_prohibition(TextPair::new(&text, &lower))
+        };
+        let clause = parse("that player controls").expect("bounded form");
+        assert!(matches!(
+            clause.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    ..
+                },
+            }
+        ));
+        for declined in [
+            "they control",
+            "you control",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn balance_arm_b_marker() {
+        let parse = |controller: &str| {
+            parse_balance_arm_b(&format!(
+                "each player chooses a number of lands {controller} equal to the number of \
+                 lands controlled by the player who controls the fewest, then sacrifices the rest"
+            ))
+            .ok()
+            .map(|(rest, (verb, _))| (rest.to_string(), verb))
+        };
+        assert_eq!(
+            parse("they control"),
+            Some((String::new(), EqualizeVerb::Sacrifice))
+        );
+        for declined in [
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+        // "you control" never reaches the marker: `parse_type_phrase` consumes it
+        // as the type phrase's own controller suffix, and the marker then sees
+        // " equal to". Pinned, not counted as the marker declining it.
+        assert!(parse("you control").is_none());
+    }
+
+    #[test]
+    fn keeper_dispose_head_marker() {
+        let parse = |controller: &str| {
+            parse_keeper_dispose_head(&format!(
+                "each player chooses three permanents {controller}, then sacrifices the rest."
+            ))
+            .ok()
+            .map(|(_, head)| head)
+        };
+        for admitted in ["they control", "that player controls"] {
+            let head = parse(admitted).expect("keeper head");
+            assert_eq!(
+                head.keeper_end,
+                format!("each player chooses three permanents {admitted}").len(),
+                "{admitted:?}"
+            );
+            let TargetFilter::Typed(filter) = &head.filter else {
+                panic!("typed keeper filter: {:?}", head.filter)
+            };
+            assert_eq!(filter.controller, None, "{admitted:?}");
+        }
+        for declined in ["controlled by that player", "the chosen player controls"] {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+        // "you control" never reaches the marker: `parse_type_phrase` consumes it
+        // as the type phrase's own controller suffix. Pinned, not counted as the
+        // marker declining it.
+        let head = parse("you control").expect("type phrase takes the suffix");
+        let TargetFilter::Typed(filter) = &head.filter else {
+            panic!("typed keeper filter: {:?}", head.filter)
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert_eq!(
+            head.keeper_end,
+            "each player chooses three permanents you control".len()
+        );
+    }
+
+    #[test]
+    fn threshold_land_balance_marker() {
+        let parse = |keep: &str, count: &str| {
+            parse_threshold_land_balance_ir(
+                &format!(
+                    "Each player who controls 7 or more lands chooses 4 lands {keep} and \
+                     sacrifices the rest. Each player who controls 3 or fewer lands may search \
+                     their library for up to X basic land cards and put them onto the \
+                     battlefield, where X is 6 minus the number of lands {count}. Then each \
+                     player who searched their library this way shuffles."
+                ),
+                AbilityKind::Spell,
+                &ParseContext::default(),
+            )
+        };
+        assert!(parse("they control", "they control").is_some());
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert!(
+                parse(declined, "they control").is_none(),
+                "keeper {declined:?}"
+            );
+            assert!(
+                parse("they control", declined).is_none(),
+                "count {declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anaphoric_possessive_suffix_marker() {
+        assert_eq!(
+            parse_anaphoric_possessive_suffix("each creature and planeswalker they control"),
+            Some((
+                "each creature and planeswalker",
+                PossessiveRelation::Controls
+            ))
+        );
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert_eq!(
+                parse_anaphoric_possessive_suffix(&format!("each creature {declined}")),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_chosen_scope_marker() {
+        let parse = |controller: &str| {
+            parse_each_player_copy_chosen_ir(
+                &format!(
+                    "Each player chooses a creature {controller}. Each player creates a token \
+                     that's a copy of the creature they chose."
+                ),
+                AbilityKind::Spell,
+                &ParseContext::default(),
+            )
+        };
+        let ir = parse("they control").expect("copy-chosen chain");
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::EachPlayerCopyChosen {
+                choose_scope: CopyChooseScope::Chooser,
+                ..
+            }
+        ));
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert!(parse(declined).is_none(), "{declined:?}");
         }
     }
 }

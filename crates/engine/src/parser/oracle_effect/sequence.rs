@@ -13,10 +13,12 @@ use super::super::oracle_nom::enters_under::{
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
+use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
 use super::super::oracle_util::{
     contains_possessive, parse_count_expr, parse_ordinal, parse_subtype, TextPair,
 };
+use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -9264,11 +9266,10 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
         after_domain,
         &ParseContext::default(),
     ) {
-        let (rest, _) = opt(alt((
-            tag::<_, _, OracleError<'_>>(" they control"),
-            tag(" you control"),
-            tag(" that player controls"),
-        )))
+        let (rest, _) = opt(preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS),
+        ))
         .parse(rest)?;
         if let TargetFilter::Typed(ref mut typed) = filter {
             typed.properties.push(prop);
@@ -9283,12 +9284,7 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
 /// domain for Slaughter the Strong's "sacrifices all other creatures they control".
 fn parse_creature_domain(input: &str) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
     let (input, _) = tag::<_, _, OracleError<'_>>("creatures ").parse(input)?;
-    let (input, _) = alt((
-        tag::<_, _, OracleError<'_>>("they control"),
-        tag("you control"),
-        tag("that player controls"),
-    ))
-    .parse(input)?;
+    let (input, _) = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(input)?;
     Ok((input, TargetFilter::Typed(TypedFilter::creature())))
 }
 
@@ -9296,12 +9292,7 @@ fn parse_nonland_permanent_domain(
     input: &str,
 ) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
     let (input, _) = tag::<_, _, OracleError<'_>>("nonland permanents ").parse(input)?;
-    let (input, _) = alt((
-        tag::<_, _, OracleError<'_>>("they control"),
-        tag("you control"),
-        tag("that player controls"),
-    ))
-    .parse(input)?;
+    let (input, _) = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(input)?;
     Ok((
         input,
         TargetFilter::Typed(
@@ -10016,6 +10007,100 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    /// The sacrifice-rest domains admit "they control", "you control" and "that
+    /// player controls".
+    const CHOOSER_DOMAIN: [&str; 3] = ["they control", "you control", "that player controls"];
+
+    /// Controller phrases the sacrifice-rest domains decline.
+    const NOT_CHOOSER_DOMAIN: [&str; 2] =
+        ["controlled by that player", "the chosen player controls"];
+
+    #[test]
+    fn sacrifice_rest_trailing_qualifier_marker() {
+        let text = |qualifier: &str| {
+            format!(
+                "each player sacrifices all other creatures they control that don't share a \
+                 creature type with the chosen creature {qualifier}"
+            )
+        };
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ContinuationAst::ChooseAndSacrificeRestFilter {
+                sacrifice_filter: Some(TargetFilter::Typed(filter)),
+            }) = parse_choose_and_sacrifice_rest_followup(&text(admitted))
+            else {
+                panic!("{admitted:?} must be admitted");
+            };
+            assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(filter.properties.len(), 1, "{admitted:?}");
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            let declined_text = text(declined);
+            let (rest, filter) = parse_explicit_choose_and_sacrifice_rest_filter(&declined_text)
+                .expect("the qualifier is optional");
+            assert_eq!(rest, format!(" {declined}"), "{declined:?}");
+            assert!(filter.is_some(), "{declined:?}");
+            assert_eq!(
+                parse_choose_and_sacrifice_rest_followup(&text(declined)),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sacrifice_rest_domain_marker() {
+        let nonland =
+            TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)));
+        for admitted in CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_creature_domain(&format!("creatures {admitted} not chosen this way")).ok(),
+                Some((
+                    " not chosen this way",
+                    TargetFilter::Typed(TypedFilter::creature())
+                )),
+                "creatures {admitted:?}"
+            );
+            assert_eq!(
+                parse_nonland_permanent_domain(&format!(
+                    "nonland permanents {admitted} not chosen this way"
+                ))
+                .ok(),
+                Some((" not chosen this way", TargetFilter::Typed(nonland.clone()))),
+                "nonland permanents {admitted:?}"
+            );
+            assert_eq!(
+                parse_choose_and_sacrifice_rest_followup(&format!(
+                    "each player sacrifices all other nonland permanents {admitted}."
+                )),
+                Some(ContinuationAst::ChooseAndSacrificeRestFilter {
+                    sacrifice_filter: Some(TargetFilter::Typed(nonland.clone())),
+                }),
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert!(
+                parse_creature_domain(&format!("creatures {declined} not chosen this way"))
+                    .is_err(),
+                "creatures {declined:?}"
+            );
+            assert!(
+                parse_nonland_permanent_domain(&format!(
+                    "nonland permanents {declined} not chosen this way"
+                ))
+                .is_err(),
+                "nonland permanents {declined:?}"
+            );
+            assert_eq!(
+                parse_choose_and_sacrifice_rest_followup(&format!(
+                    "each player sacrifices all creatures {declined} not chosen this way."
+                )),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
 
     /// CR 603.7b + CR 608.2c: an inline delayed trigger keeps the following
     /// sentences of its effect in its own chunk (The Last Ronin III), but a

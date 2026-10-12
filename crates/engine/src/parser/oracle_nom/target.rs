@@ -6,11 +6,12 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{satisfy, space1};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
 use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
@@ -427,6 +428,71 @@ pub(crate) fn parse_controller_phrase(input: &str) -> OracleResult<'_, Controlle
         not(satisfy(char::is_alphanumeric)),
     )
     .parse(input)
+}
+
+impl ControllerPhrase {
+    /// "you control".
+    pub(crate) const YOU_CONTROL: Self = Self {
+        subject: ControllerSubject::Direct(ControllerRef::You),
+        form: ControllerForm::Plural,
+        tense: ControllerTense::Present,
+    };
+    /// "they control".
+    pub(crate) const THEY_CONTROL: Self = Self {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::They),
+        form: ControllerForm::Plural,
+        tense: ControllerTense::Present,
+    };
+    /// "that player controls".
+    pub(crate) const THAT_PLAYER_CONTROLS: Self = Self {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
+    /// "controlled by that player".
+    pub(crate) const CONTROLLED_BY_THAT_PLAYER: Self = Self {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+        form: ControllerForm::Passive,
+        tense: ControllerTense::Present,
+    };
+    /// "the chosen player controls".
+    pub(crate) const THE_CHOSEN_PLAYER_CONTROLS: Self = Self {
+        subject: ControllerSubject::Direct(ControllerRef::SourceChosenPlayer),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
+}
+
+/// Recognize-only projection of [`parse_controller_phrase`] for a structural-marker
+/// site: consumes a controller phrase that is one of `admitted` and binds nothing,
+/// because the enclosing construct, not the phrase, fixes whose objects are meant.
+pub(crate) fn controller_phrase_among<'a>(
+    admitted: &'static [ControllerPhrase],
+) -> impl Parser<&'a str, Output = (), Error = OracleError<'a>> {
+    value(
+        (),
+        verify(parse_controller_phrase, move |phrase: &ControllerPhrase| {
+            admitted.contains(phrase)
+        }),
+    )
+}
+
+/// [`controller_phrase_among`] for a structural-marker site that reads
+/// original-case text (a `tag_no_case` construct). The lowercase grammar runs
+/// through the mixed-case bridge [`nom_on_lower`], and the remainder is mapped
+/// back onto the original-case input.
+pub(crate) fn controller_phrase_among_mixed_case<'a>(
+    admitted: &'static [ControllerPhrase],
+) -> impl Parser<&'a str, Output = (), Error = OracleError<'a>> {
+    move |input: &'a str| {
+        // ASCII lowercasing keeps byte offsets aligned with `input`.
+        let lower = input.to_ascii_lowercase();
+        nom_on_lower(input, &lower, |i| {
+            controller_phrase_among(admitted).parse(i)
+        })
+        .map(|((), rest)| (rest, ()))
+        .ok_or_else(|| oracle_err(input))
+    }
 }
 
 /// Parse a present-tense direct controller suffix for a type phrase: "you
@@ -1268,6 +1334,71 @@ pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each constant is the grammar's reading of its phrase, and the
+    /// recognize-only projection admits exactly its slice: a phrase sharing the
+    /// subject in a different form or tense is declined.
+    #[test]
+    fn controller_phrase_constants_and_marker() {
+        for (text, constant) in [
+            ("you control", ControllerPhrase::YOU_CONTROL),
+            ("they control", ControllerPhrase::THEY_CONTROL),
+            (
+                "that player controls",
+                ControllerPhrase::THAT_PLAYER_CONTROLS,
+            ),
+            (
+                "controlled by that player",
+                ControllerPhrase::CONTROLLED_BY_THAT_PLAYER,
+            ),
+            (
+                "the chosen player controls",
+                ControllerPhrase::THE_CHOSEN_PLAYER_CONTROLS,
+            ),
+        ] {
+            assert_eq!(
+                parse_controller_phrase(text).ok(),
+                Some(("", constant)),
+                "{text:?}"
+            );
+        }
+
+        let mut they_control = controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]);
+        assert_eq!(they_control.parse("they control").ok(), Some(("", ())));
+        for declined in [
+            "that player controls",
+            "controlled by that player",
+            "they controlled",
+        ] {
+            assert!(they_control.parse(declined).is_err(), "{declined:?}");
+        }
+    }
+
+    /// The mixed-case projection admits the same phrases as the lowercase one
+    /// in any casing, and returns the remainder in the input's original case.
+    #[test]
+    fn controller_phrase_among_mixed_case_bridges_original_case() {
+        let mut they_control =
+            controller_phrase_among_mixed_case(&[ControllerPhrase::THEY_CONTROL]);
+        for text in [
+            "they control Into",
+            "They Control Into",
+            "THEY CONTROL Into",
+        ] {
+            assert_eq!(
+                they_control.parse(text).ok(),
+                Some((" Into", ())),
+                "{text:?}"
+            );
+        }
+        for declined in [
+            "That Player Controls",
+            "Controlled By That Player",
+            "They Controlled",
+        ] {
+            assert!(they_control.parse(declined).is_err(), "{declined:?}");
+        }
+    }
 
     #[test]
     fn object_exclusion_list_refuses_a_granter_reference() {

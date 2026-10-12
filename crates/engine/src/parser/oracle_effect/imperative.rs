@@ -1,12 +1,12 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
-use nom::character::complete::{one_of, satisfy, space0, space1, u8 as parse_u8};
+use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
     all_consuming, eof, map, map_res, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::error::ParseError;
-use nom::multi::separated_list0;
+use nom::multi::{many_till, separated_list0};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -40,6 +40,7 @@ use crate::parser::oracle_nom::prevention::{
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
+use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_static::{parse_activated_ability_cost_head, ActivatedAbilityCostHead};
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
@@ -4368,10 +4369,17 @@ fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<Targeted
 /// `alt()`, covering the edict class (exile / sacrifice / destroy) without
 /// proliferating recognizers.
 fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    let they_control_and = || {
+        (
+            tag::<_, _, OracleError<'_>>(" "),
+            controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+            tag(" and "),
+        )
+    };
     let (_, (_, type_text, _, verb, _, _, _)) = (
         alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
-        take_until::<_, _, OracleError<'_>>(" they control and "),
-        tag::<_, _, OracleError<'_>>(" they control and "),
+        recognize(many_till(anychar, peek(they_control_and()))),
+        they_control_and(),
         alt((
             value("exile", tag::<_, _, OracleError<'_>>("exiles")),
             value("sacrifice", tag("sacrifices")),
@@ -5592,7 +5600,7 @@ fn parse_controlled_battlefield_body(
     }
 
     let (control_clause_start, _) = nom_primitives::scan_split_at_phrase(after_other, |i| {
-        value((), tag::<_, _, E>("that player controls")).parse(i)
+        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
     })?;
     let type_phrase = control_clause_start.trim_end();
     if type_phrase.is_empty() {
@@ -5729,10 +5737,9 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
     let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
     // Nothing may follow "that player controls": a trailing instruction on the
     // same clause would otherwise be dropped silently.
-    let (_, tail) = nom_primitives::scan_split_at_phrase(after_verb, |i| {
-        value((), tag::<_, _, E>("that player controls")).parse(i)
+    let (_, (), after_clause) = nom_primitives::scan_preceded(after_verb, |i| {
+        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
     })?;
-    let (after_clause, _) = tag::<_, _, E>("that player controls").parse(tail).ok()?;
     if !terminal_punctuation_only(after_clause) {
         return None;
     }
@@ -6038,6 +6045,15 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
         })
 }
 
+/// The controller phrases a per-player chooser's domain admits: "they control",
+/// "you control" and "that player controls". Each is a marker; the resolver
+/// scopes the domain to each choosing seat.
+pub(super) const CHOOSER_DOMAIN_CONTROLLERS: &[ControllerPhrase] = &[
+    ControllerPhrase::THEY_CONTROL,
+    ControllerPhrase::YOU_CONTROL,
+    ControllerPhrase::THAT_PLAYER_CONTROLS,
+];
+
 /// CR 608.2d + CR 701.21a: Parse the single-category form specific to the
 /// "for each player, [you ]choose" entry point: "a <type> [they/you/that
 /// player] control[s]". Keeping this arm outside the generic `choose` parser
@@ -6047,11 +6063,10 @@ fn parse_single_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseIm
     type E<'a> = OracleError<'a>;
 
     let (rest, core_type) = parse_category_item(rest_lower).ok()?;
-    alt((
-        tag::<_, _, E>(" they control"),
-        tag(" you control"),
-        tag(" that player controls"),
-    ))
+    preceded(
+        tag::<_, _, E>(" "),
+        controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS),
+    )
     .parse(rest)
     .ok()?;
 
@@ -6097,12 +6112,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     // rest" are sacrificed. Matching only through "of each permanent type" and
     // discarding the remainder mirrors patterns 1 and 2 (no "sacrifice" token matched).
     if let Ok((rest, _)) = tag::<_, _, E>("a permanent ").parse(rest_lower) {
-        let controller = alt((
-            tag::<_, _, E>("they control"),
-            tag("you control"),
-            tag("that player controls"),
-        ))
-        .parse(rest);
+        let controller = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(rest);
         if let Ok((rest, _)) = controller {
             if tag::<_, _, E>(" of each permanent type")
                 .parse(rest)
@@ -6159,13 +6169,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     if let Ok((rest, _)) =
         preceded(opt(tag::<_, _, E>("any number of ")), tag("creatures ")).parse(rest_lower)
     {
-        if let Ok((rest, _)) = alt((
-            tag::<_, _, E>("they control"),
-            tag("you control"),
-            tag("that player controls"),
-        ))
-        .parse(rest)
-        {
+        if let Ok((rest, _)) = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(rest) {
             if let Ok((rest, cap)) = preceded(
                 tag::<_, _, E>(" with total power "),
                 nom_primitives::parse_number,
@@ -6207,12 +6211,7 @@ fn parse_choose_domain(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = tag::<_, _, E>("the ").parse(input)?;
     let (rest, nonland) = opt(tag::<_, _, E>("nonland ")).parse(rest)?;
     let (rest, _) = tag::<_, _, E>("permanents ").parse(rest)?;
-    let (rest, _) = alt((
-        tag::<_, _, E>("they control"),
-        tag("you control"),
-        tag("that player controls"),
-    ))
-    .parse(rest)?;
+    let (rest, _) = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(rest)?;
     let (rest, _) = opt(alt((tag::<_, _, E>(", "), tag(" ")))).parse(rest)?;
     Ok((
         rest,
@@ -17100,6 +17099,208 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
     use crate::types::phase::PhaseGroup;
+
+    /// The chooser-domain sites admit "they control", "you control" and "that
+    /// player controls"; these controller phrases are declined at each of them.
+    const NOT_CHOOSER_DOMAIN: [&str; 2] =
+        ["controlled by that player", "the chosen player controls"];
+
+    /// The "they control" sites decline every other controller phrase.
+    const NOT_THEY_CONTROL: [&str; 4] = [
+        "you control",
+        "that player controls",
+        "controlled by that player",
+        "the chosen player controls",
+    ];
+
+    /// The "that player controls" sites decline every other controller phrase.
+    const NOT_THAT_PLAYER_CONTROLS: [&str; 4] = [
+        "they control",
+        "you control",
+        "controlled by that player",
+        "the chosen player controls",
+    ];
+
+    const CHOOSER_DOMAIN: [&str; 3] = ["they control", "you control", "that player controls"];
+
+    #[test]
+    fn choose_and_verb_it_edict_marker() {
+        assert_eq!(
+            try_parse_choose_and_verb_it_edict("a creature they control and exiles it."),
+            Some(ChooseImperativeAst::Reparse {
+                text: "exile a creature you control".to_string(),
+            })
+        );
+        for declined in NOT_THEY_CONTROL {
+            assert_eq!(
+                try_parse_choose_and_verb_it_edict(&format!(
+                    "a creature {declined} and exiles it."
+                )),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_battlefield_body_marker() {
+        let parse = |controller: &str| {
+            parse_controlled_battlefield_body(
+                &format!("up to one creature {controller}"),
+                &mut ParseContext::default(),
+            )
+        };
+        let (up_to, filter) = parse("that player controls").expect("battlefield body");
+        assert!(up_to);
+        assert!(
+            matches!(&filter, TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Creature]),
+            "{filter:?}"
+        );
+        for declined in NOT_THAT_PLAYER_CONTROLS {
+            assert_eq!(parse(declined), None, "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_choose_marker() {
+        let parse = |controller: &str| {
+            parse_for_each_opponent_choose_controlled(
+                &format!("for each opponent, choose up to one creature {controller}."),
+                &mut ParseContext::default(),
+            )
+        };
+        let clause = parse("that player controls").expect("for-each-opponent choose");
+        assert!(matches!(
+            clause.effect,
+            Effect::ChooseFromZone {
+                zone: Zone::Battlefield,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                up_to: true,
+                ..
+            }
+        ));
+        for declined in NOT_THAT_PLAYER_CONTROLS {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn single_category_sacrifice_rest_marker() {
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope,
+                ..
+            }) = parse_single_category_and_sacrifice_rest(&format!("a creature {admitted}"))
+            else {
+                panic!("{admitted:?} must be admitted");
+            };
+            assert_eq!(categories, vec![CoreType::Creature], "{admitted:?}");
+            assert_eq!(
+                chooser_scope,
+                CategoryChooserScope::EachPlayerSelf,
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_single_category_and_sacrifice_rest(&format!("a creature {declined}")),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn category_sacrifice_rest_marker() {
+        // Pattern 3: "a permanent <controller> of each permanent type".
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ChooseImperativeAst::CategoryAndSacrificeRest { categories, .. }) =
+                parse_category_and_sacrifice_rest(&format!(
+                    "a permanent {admitted} of each permanent type"
+                ))
+            else {
+                panic!("pattern 3 {admitted:?} must be admitted");
+            };
+            assert_eq!(
+                categories,
+                PERMANENT_TYPE_CATEGORIES.to_vec(),
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_category_and_sacrifice_rest(&format!(
+                    "a permanent {declined} of each permanent type"
+                )),
+                None,
+                "pattern 3 {declined:?}"
+            );
+        }
+        // Pattern 4: "any number of creatures <controller> with total power N or less".
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                total_power_cap, ..
+            }) = parse_category_and_sacrifice_rest(&format!(
+                "any number of creatures {admitted} with total power 4 or less"
+            ))
+            else {
+                panic!("pattern 4 {admitted:?} must be admitted");
+            };
+            assert_eq!(
+                total_power_cap,
+                Some(QuantityExpr::Fixed { value: 4 }),
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_category_and_sacrifice_rest(&format!(
+                    "any number of creatures {declined} with total power 4 or less"
+                )),
+                None,
+                "pattern 4 {declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn choose_domain_marker() {
+        let categories = "an artifact, a creature, an enchantment, and a land";
+        for admitted in CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_choose_domain(&format!("the nonland permanents {admitted} {categories}"))
+                    .ok(),
+                Some((categories, nonland_permanent_filter())),
+                "{admitted:?}"
+            );
+            // Pattern 1 ("from among <domain> <categories>") and pattern 2
+            // ("<categories> from among <domain>") both reach the domain.
+            for text in [
+                format!("from among the permanents {admitted} {categories}"),
+                format!("{categories} from among the permanents {admitted}"),
+            ] {
+                let Some(ChooseImperativeAst::CategoryAndSacrificeRest { choose_filter, .. }) =
+                    parse_category_and_sacrifice_rest(&text)
+                else {
+                    panic!("{text:?} must be admitted");
+                };
+                assert_eq!(choose_filter, permanent_filter(), "{text:?}");
+            }
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert!(
+                parse_choose_domain(&format!("the permanents {declined} {categories}")).is_err(),
+                "{declined:?}"
+            );
+            for text in [
+                format!("from among the permanents {declined} {categories}"),
+                format!("{categories} from among the permanents {declined}"),
+            ] {
+                assert_eq!(parse_category_and_sacrifice_rest(&text), None, "{text:?}");
+            }
+        }
+    }
 
     #[test]
     fn put_counter_list_preserves_self_ref_for_every_entry_shape() {

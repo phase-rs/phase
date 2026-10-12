@@ -49,6 +49,7 @@ use super::oracle_nom::primitives::{
 };
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
+use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use super::oracle_static::{
     add_property, parse_commander_subject_filter_prefix, typed_filter_for_subtype,
 };
@@ -9614,7 +9615,11 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         // player (Avalanche of Sector 7). Only a third-person subject can be its
         // antecedent.
         let (rest, they_control) = if person == SubjectPerson::Third {
-            opt(value((), tag(" they control"))).parse(rest)?
+            opt(preceded(
+                tag(" "),
+                controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+            ))
+            .parse(rest)?
         } else {
             (rest, None)
         };
@@ -24047,5 +24052,36 @@ mod saga_chapter_ability_trigger_tests {
                 scope: ObjectScope::EventSource
             }
         );
+    }
+}
+
+/// Structural-marker site: "<source> they control" after an activation trigger's
+/// third-person subject. The phrase is a marker; the construct binds the
+/// source's controller to the activating player.
+#[cfg(test)]
+mod structural_marker_tests {
+    use super::try_parse_ability_activation_trigger;
+    use crate::types::ability::{ControllerRef, TargetFilter};
+
+    #[test]
+    fn ability_object_they_control_marker() {
+        let parse = |controller: &str| {
+            try_parse_ability_activation_trigger(&format!(
+                "whenever an opponent activates an ability of an artifact {controller}"
+            ))
+        };
+        let (_, def) = parse("they control").expect("activation trigger");
+        let Some(TargetFilter::Typed(source)) = def.valid_card else {
+            panic!("typed source filter: {:?}", def.valid_card);
+        };
+        assert_eq!(source.controller, Some(ControllerRef::TriggeringPlayer));
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
     }
 }

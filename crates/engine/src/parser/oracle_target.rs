@@ -33,7 +33,9 @@ use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
-use super::oracle_nom::target::{ControllerSubject, ControllerTense, PlayerAnaphor};
+use super::oracle_nom::target::{
+    controller_phrase_among, ControllerPhrase, ControllerSubject, ControllerTense, PlayerAnaphor,
+};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, strip_where_x_is_clause, TextPair,
@@ -6441,30 +6443,46 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
         return Some((prop, text.len() - rest.len()));
     }
 
-    for (pattern, defender) in [
+    // Each row is a printed defender head, then the controller phrase that must
+    // follow it, if any (a marker: the row fixes the defender either way).
+    let rows: [(&str, Option<&'static [ControllerPhrase]>, ControllerRef); 6] = [
         (
             "attacking you or a planeswalker you control",
+            None,
             ControllerRef::You,
         ),
         (
             "attacking you and/or planeswalkers you control",
+            None,
             ControllerRef::You,
         ),
-        ("attacking you", ControllerRef::You),
+        ("attacking you", None, ControllerRef::You),
         (
-            "attacking your opponents and/or planeswalkers they control",
+            "attacking your opponents and/or planeswalkers",
+            Some(&[ControllerPhrase::THEY_CONTROL]),
             ControllerRef::Opponent,
         ),
-        ("attacking your opponents", ControllerRef::Opponent),
+        ("attacking your opponents", None, ControllerRef::Opponent),
         // CR 508.1b: "attacking one of your opponents" — in a multiplayer
         // attack-multiple-players game each attacker is assigned one defending
         // player; "one of your opponents" scopes the defender to any of the
         // controller's opponents (Oviya, Automech Artisan). Same defender scope
         // as the plural "your opponents" form; the singular phrasing only
         // changes the surface text, not the `ControllerRef::Opponent` mapping.
-        ("attacking one of your opponents", ControllerRef::Opponent),
-    ] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(trimmed) {
+        (
+            "attacking one of your opponents",
+            None,
+            ControllerRef::Opponent,
+        ),
+    ];
+    for (head, controller, defender) in rows {
+        let matched = tag::<_, _, OracleError<'_>>(head)
+            .parse(trimmed)
+            .and_then(|(rest, _)| match controller {
+                Some(admitted) => preceded(tag(" "), controller_phrase_among(admitted)).parse(rest),
+                None => Ok((rest, ())),
+            });
+        if let Ok((rest, ())) = matched {
             let rest_trim = rest.trim_start();
             // "...attacking you if it's controlled by..." is a target resolution
             // gate, not a defender suffix (Stalking Leonin). Accepting the bare
@@ -10885,6 +10903,34 @@ mod tests {
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
+
+    #[test]
+    fn attacking_defender_suffix_marker() {
+        let text = "attacking your opponents and/or planeswalkers they control";
+        assert_eq!(
+            parse_attacking_defender_suffix(text),
+            Some((
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                },
+                text.len()
+            ))
+        );
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert_eq!(
+                parse_attacking_defender_suffix(&format!(
+                    "attacking your opponents and/or planeswalkers {declined}"
+                )),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
 
     fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
         match filter {
