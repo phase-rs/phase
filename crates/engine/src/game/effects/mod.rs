@@ -8232,7 +8232,9 @@ pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
 /// the active ability continuation; the paused seat's answer then resolves the
 /// seat's producer with no consumer in its own chain. Its following text is
 /// that parked continuation, so it publishes into the clause's set as the
-/// continuation's generated legs do.
+/// continuation's generated legs do. A seat whose answer is itself the
+/// producing choice (an `EffectZoneChoice`) resumes no producer and does not
+/// reach this predicate; the fan-out driver's comment records that gap.
 ///
 /// Two stops keep a parked continuation from being read as following text
 /// when it is not:
@@ -15853,15 +15855,26 @@ fn resolve_chain_body(
         // per-clause table accumulate across continuation legs, which is
         // resume-machinery work well outside a draw-count change.
         //
-        // The clause's TRACKED SET does not share this gap when the tail is
-        // linearized after the generated legs. The postlude below publishes the
-        // seats that completed, each generated leg's chain ends in the unscoped
-        // tail and so extends the chain set, and the paused seat's own producer,
-        // resumed under the parked continuation, extends it through
-        // `resolution_next_needs_tracked_set` (CR 608.2c "this way"). A tail
-        // that needs linked exile is not linearized: it rides the frame's
-        // `player_scope_linked_exile` sidecar, which that predicate does not
-        // read, so on that branch neither the legs nor the paused seat publish.
+        // When the tail is linearized after the generated legs, the clause's
+        // TRACKED SET is complete for seats whose producer publishes from its
+        // own resolution. The postlude below publishes the seats that completed,
+        // each generated leg's chain ends in the unscoped tail and so extends
+        // the chain set, and a paused seat's producer resumed under the parked
+        // continuation (a choose-one or optional answer, or a Resolution-timed
+        // recipient choice) extends it through
+        // `resolution_next_needs_tracked_set` (CR 608.2c "this way").
+        //
+        // A seat whose answer is itself the producing choice does not. An
+        // `EffectZoneChoice` answer (`publish_effect_zone_choice_tracked_set`)
+        // mints a fresh set for each paused seat, so a clause-wide detached
+        // tail read after it sees only the last paused seat's choice, without
+        // the earlier paused seats or the seats that completed before the
+        // pause. This is a known gap, filed separately.
+        //
+        // A tail that needs linked exile is not linearized: it rides the
+        // frame's `player_scope_linked_exile` sidecar, which that predicate
+        // does not read, so on that branch neither the legs nor the paused
+        // seat publish.
         let mut applied_domain_end = matching_players.len();
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
