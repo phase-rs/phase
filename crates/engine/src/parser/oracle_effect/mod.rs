@@ -33037,7 +33037,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
         // where "they" refers to the targeted player (CR 608.2d).
         // CR 109.4 + CR 102.2: the NEGATED controller form "a creature you
         // don't control" is equally a controller-scoped selection — only this
-        // exact phrase is admitted, because `nom_target::parse_controller_suffix`
+        // exact phrase is admitted, because `nom_target::parse_controller_phrase`
         // (`oracle_nom/target.rs`) maps `"you don't control"` →
         // `ControllerRef::Opponent` and nothing else. Broader negated forms
         // ("they don't control", "an opponent doesn't control") are NOT

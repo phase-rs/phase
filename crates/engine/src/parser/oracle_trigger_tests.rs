@@ -30804,7 +30804,7 @@ fn attack_one_or_more_opponents_uses_defending_player_controller() {
 /// cards) — distinct from the "attack a player ... that player controls"
 /// anaphor path covered above. Drives the full trigger→effect→target
 /// pipeline on the real Oracle text; the assertion flips to `None` if the
-/// "defending player" arm of `nom_target::parse_controller_suffix` is reverted.
+/// "defending player" arm of `nom_target::parse_controller_phrase` is reverted.
 #[test]
 fn attack_trigger_destroy_or_target_defending_player_controls() {
     use crate::types::ability::Effect;

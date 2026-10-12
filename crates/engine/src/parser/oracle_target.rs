@@ -16325,8 +16325,8 @@ mod tests {
 
     // High-level `parse_controller_suffix` (the runtime function the bug-card
     // path relies on). The direct assertion guarantees the phrase reaches
-    // `nom_target::parse_controller_suffix`'s direct-present set and is not
-    // shadowed by a past-tense or "that player controls" arm.
+    // `nom_target::admits_type_phrase_controller`, the direct-present set this
+    // reader shares with `nom_target::parse_controller_suffix`.
     #[test]
     fn parse_controller_suffix_defending_player() {
         let ctx = ParseContext::default();

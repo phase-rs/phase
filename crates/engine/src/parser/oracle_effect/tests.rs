@@ -32245,7 +32245,7 @@ fn choose_creature_you_dont_control_routes_to_opponent_target() {
             parse_effect(text)
         );
     }
-    // Only `"you don't control"` is admitted: `nom_target::parse_controller_suffix`
+    // Only `"you don't control"` is admitted: `nom_target::parse_controller_phrase`
     // maps that exact phrase to `ControllerRef::Opponent` and nothing else.
     // Broader negated forms are NOT consumed by `parse_target`, so the gate
     // must NOT route them as targeting (which would silently drop the
