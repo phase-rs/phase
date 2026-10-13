@@ -7667,26 +7667,23 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
             // CR 115.1a + CR 601.2c:
             // "[each of ]one or two target …" / "[each of ]one, two, or three
             // target …" announce a bounded target set (Predictive
-            // Preparations). The stem vocabulary is the shared
-            // `BOUNDED_TARGET_CARDINALITIES` table; the "target …" span stays
-            // unconsumed for the downstream target parse. min is 1, so
+            // Preparations). The stem recognition is `parse_bounded_target_cardinality`,
+            // the single authority shared with the damage grammar; the "target …"
+            // span stays unconsumed for the downstream target parse. min is 1, so
             // CR 115.6 (zero-target legality) does not apply.
             (_, None) => {
-                for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
-                    if let Ok((after_ws, _)) =
-                        terminated(tag::<_, _, OracleError<'_>>(stem), multispace1).parse(after_on)
-                    {
-                        if peek(alt((
-                            tag::<_, _, OracleError<'_>>("target "),
-                            tag("other target "),
-                            tag("another target "),
-                        )))
-                        .parse(after_ws)
-                        .is_ok()
-                        {
-                            return Ok((after_ws, MultiTargetSpec::fixed(min, max)));
-                        }
-                    }
+                if let Ok((after_ws, (spec, _, _))) = (
+                    parse_bounded_target_cardinality,
+                    multispace1,
+                    peek(alt((
+                        tag("target "),
+                        tag("other target "),
+                        tag("another target "),
+                    ))),
+                )
+                    .parse(after_on)
+                {
+                    return Ok((after_ws, spec));
                 }
                 // CR 601.2c + CR 115.3: "each of <N|X> target …" announces exactly N different
                 // targets for the one instance of "target"; X comes from the cost (CR 107.3a).
@@ -7970,7 +7967,7 @@ enum EachOfTargetNoun {
 /// Composes the trailing noun off `BOUNDED_TARGET_CARDINALITIES` exactly as
 /// that constant's doc comment prescribes, so a future cardinality is added in
 /// one place.
-fn parse_bounded_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+pub(crate) fn parse_bounded_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
     for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(stem).parse(input) {
             return Ok((rest, MultiTargetSpec::fixed(min, max)));

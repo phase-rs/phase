@@ -20013,8 +20013,8 @@ fn put_counter_each_of_exact_count_target_is_exactly_multi_targeted() {
 /// target …" and "[each of ]one, two, or three target …" announce a bounded
 /// target set, stamped `fixed(1, 2)` / `fixed(1, 3)`.
 /// CR 115.1a + CR 601.2c + CR 122.1:
-/// the stem vocabulary is the shared `BOUNDED_TARGET_CARDINALITIES` table; min
-/// is 1, so CR 115.6 (zero-target legality) does not apply.
+/// the stem recognition is the shared `parse_bounded_target_cardinality`
+/// helper; min is 1, so CR 115.6 (zero-target legality) does not apply.
 /// Parity row: the chain, the counter parser, and the counter-placement
 /// recovery agree on the same spec for the same text.
 #[test]
@@ -20067,8 +20067,39 @@ fn put_counter_each_of_bounded_count_target_is_bounded_multi_targeted() {
 
 /// Negative guards: without the inter-word space ("twotarget") or without the
 /// target article ("one or two creatures") no bounded spec is stamped.
+/// The valid neighboring placement is parsed first in this same test as the
+/// reach-guard: it proves the bounded recognizer is enabled, so the malformed
+/// rows below cannot pass vacuously.
 #[test]
 fn put_counter_bounded_count_without_space_or_article_is_not_multi_targeted() {
+    // Reach-guard: the enabled recognizer stamps the valid placement through
+    // every seam with a consumed remainder.
+    let valid = "Put a +1/+1 counter on each of one or two target creatures.";
+    let (effect, remainder, parser_spec) =
+        counter::try_parse_put_counter(&valid.to_lowercase(), valid, &mut ParseContext::default())
+            .unwrap_or_else(|| panic!("{valid}: the counter parser must accept the placement"));
+    assert!(
+        matches!(
+            effect,
+            Effect::PutCounter {
+                counter_type: ref ct,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(_),
+            } if *ct == CounterType::Plus1Plus1
+        ),
+        "{valid}: expected a targeted PutCounter, got {effect:?}"
+    );
+    assert_eq!(parser_spec, Some(MultiTargetSpec::fixed(1, 2)), "{valid}");
+    assert!(
+        remainder.trim_matches(['.', ' ']).is_empty(),
+        "{valid}: remainder must be consumed, got {remainder:?}"
+    );
+    assert_eq!(
+        extract_put_counter_multi_target(valid),
+        parser_spec,
+        "{valid}: the recovery must agree with the counter parser"
+    );
+
     for text in [
         "Put a +1/+1 counter on each of one or twotarget creatures.",
         "Put a +1/+1 counter on each of one or two creatures.",
@@ -20078,11 +20109,18 @@ fn put_counter_bounded_count_without_space_or_article_is_not_multi_targeted() {
             None,
             "{text}"
         );
-        let lower = text.to_lowercase();
-        if let Some((_, _, parser_spec)) =
-            counter::try_parse_put_counter(&lower, text, &mut ParseContext::default())
-        {
-            assert_eq!(parser_spec, None, "{text}: counter parser's count");
+        // Unconditional: intentional rejection may decline inside placement
+        // (Some with no spec) or upstream of it (None); both are pinned
+        // explicitly, and the reach-guard above proves the recognizer runs.
+        match counter::try_parse_put_counter(
+            &text.to_lowercase(),
+            text,
+            &mut ParseContext::default(),
+        ) {
+            Some((_, _, parser_spec)) => {
+                assert_eq!(parser_spec, None, "{text}: counter parser's count")
+            }
+            None => {}
         }
         assert_eq!(
             extract_put_counter_multi_target(text),

@@ -23,7 +23,8 @@ use super::super::oracle_target::{
 };
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::{
-    parse_for_each_multiplier_prefix, strip_optional_target_prefix, BOUNDED_TARGET_CARDINALITIES,
+    parse_bounded_target_cardinality, parse_for_each_multiplier_prefix,
+    strip_optional_target_prefix,
 };
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
@@ -377,30 +378,22 @@ fn resolve_counter_placement_target<'a>(
     } else if let Some((spec, after_bounded)) = nom_on_lower(on_rest, on_rest, |i| {
         // CR 115.1a + CR 601.2c + CR 122.1: "[each of ]one or two target …" / "[each of ]one, two, or
         // three target …" announce a bounded target set (Predictive
-        // Preparations). The stem vocabulary is the shared
-        // `BOUNDED_TARGET_CARDINALITIES` table; the trailing `space1` +
-        // `peek("<article> target ")` leaves the "target …" span unconsumed
-        // for the downstream `parse_target_with_ctx` and declines article-less
-        // ("one or two creatures") and zero-space ("one or twotarget") text.
-        // min is 1, so CR 115.6 (zero-target legality) does not apply.
+        // Preparations). The stem recognition is `parse_bounded_target_cardinality`
+        // (lower.rs), the single authority shared with the damage grammar; the
+        // trailing `space1` + `peek("<article> target ")` leaves the "target …"
+        // span unconsumed for the downstream `parse_target_with_ctx` and declines
+        // article-less ("one or two creatures") and zero-space ("one or twotarget")
+        // text. min is 1, so CR 115.6 (zero-target legality) does not apply.
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("each of ")).parse(i)?;
-        for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
-            if let Ok((after_ws, _)) =
-                terminated(tag::<_, _, OracleError<'_>>(stem), space1).parse(i)
-            {
-                if peek(alt((
-                    tag::<_, _, OracleError<'_>>("target "),
-                    tag("other target "),
-                    tag("another target "),
-                )))
-                .parse(after_ws)
-                .is_ok()
-                {
-                    return Ok((after_ws, MultiTargetSpec::fixed(min, max)));
-                }
-            }
-        }
-        Err(oracle_err(i))
+        let (after_stem, spec) = parse_bounded_target_cardinality(i)?;
+        let (after_ws, _) = space1::<_, OracleError<'_>>(after_stem)?;
+        peek(alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("other target "),
+            tag("another target "),
+        )))
+        .parse(after_ws)?;
+        Ok((after_ws, spec))
     }) {
         let on_offset = lower.len() - after_bounded.len();
         (&text[on_offset..], Some(spec))
