@@ -3191,6 +3191,7 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         continuation: None,
         replacement_applied: Default::default(),
         remaining_players: vec![],
+        trigger_context: None,
     };
 
     apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();

@@ -3313,7 +3313,7 @@ fn masked_outer_bound_fragment(duration: &Option<Duration>) -> Option<String> {
     }
 }
 
-fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+pub(crate) fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
     match duration {
         duration if is_play_from_exile_lifetime_duration(&duration) => {
             // CR 400.7i + CR 611.2a: exile-play permissions persist until the
@@ -3489,6 +3489,7 @@ mod duration_distribution_tests_7923 {
             // play-from-exile construction in `oracle_effect/mod.rs`.
             mode: CardPlayMode::Cast,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             granted_to: crate::types::player::PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,

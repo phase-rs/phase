@@ -781,23 +781,25 @@ const UNTAP_SCOPED_GRANT: &str = "When ~ enters, exile the top card of your libr
 /// Nashi, Moon Sage's Scion is the printed card that reaches this shape: its
 /// combat-damage trigger states BOTH a lifetime ("Until end of turn, you may
 /// play one of those cards") and a non-mana alternative cost ("pay life equal to
-/// its mana value rather than paying its mana cost"). The alternative cost
-/// routes the grant into `CastingPermission::ExileWithAltAbilityCost`, which
-/// carried no `duration` field at all — so the stated lifetime was dropped where
-/// the permission was built, and the exiled cards stayed playable for the rest
-/// of the game.
+/// its mana value rather than paying its mana cost"). The grant is the SHARED
+/// single-use budget over the exiled batch — per-card lingering would be
+/// Oracle-wrong for "one of those cards" — so the life rider lives ON the
+/// shared `CastingPermission::PlayFromExile { single_use: true,
+/// alt_ability_cost: Some(PayLife), duration: UntilEndOfTurn }` grant (Inside
+/// Information semantics; run boon-blockers-20261010 fix round), which carries
+/// the stated lifetime; the exiled cards stop being playable at cleanup.
 ///
 /// DISCRIMINATING ASSERTION: `!can_cast(exiled)` after the turn ends, guarded by
 /// the same call returning true during the turn. Removing `duration` from the
-/// grant in `cast_from_zone::record_lingering_permissions` restores the
-/// indefinite permission and fails this test; so does removing
-/// `ExileWithAltAbilityCost` from `CastingPermission::lifetime`, because the
+/// grant restores the indefinite permission and fails this test; so does
+/// removing `PlayFromExile` from `CastingPermission::lifetime`, because the
 /// cleanup seam then reads `duration: None` and retains the grant.
 ///
 /// The recorded-shape assertion is deliberately separate from the behavioural
-/// one: it pins that this really is the alternative-ability-cost variant and not
-/// its mana-cost sibling, so a future re-routing of the parse cannot make the
-/// expiry assertion pass through a different code path.
+/// one: it pins that this really is the shared single-use grant carrying the
+/// alternative-ability-cost rider and not its mana-cost sibling, so a future
+/// re-routing of the parse cannot make the expiry assertion pass through a
+/// different code path.
 #[test]
 fn stated_lifetime_survives_the_non_mana_alternative_cost_form() {
     let mut scenario = GameScenario::new();
@@ -840,15 +842,27 @@ fn stated_lifetime_survives_the_non_mana_alternative_cost_form() {
     );
     assert_eq!(zone_of(&runner, p1_top), Zone::Exile);
 
-    // Reach-guard 2: the grant really is the NON-MANA alternative-cost form,
-    // and it carries the stated lifetime.
+    // Reach-guard 2: the grant really is the shared single-use budget carrying
+    // the NON-MANA alternative-cost rider, and it carries the stated lifetime.
+    // (Run boon-blockers-20261010 fix round: per-card lingering is
+    // Oracle-wrong for "one of those cards" — "Until end of turn, you may play
+    // one of those cards" is a cap-of-one shared budget — so the life rider
+    // lives ON the shared grant, Inside Information semantics. Shape confirmed
+    // against the GREEN one_time_boon Nashi baseline.)
     let permissions = &runner.state().objects[&p0_top].casting_permissions;
     assert!(
-        permissions
-            .iter()
-            .any(|p| matches!(p, CastingPermission::ExileWithAltAbilityCost { .. })),
+        permissions.iter().any(|p| matches!(
+            p,
+            CastingPermission::PlayFromExile {
+                single_use: true,
+                alt_ability_cost: Some(_),
+                duration: Duration::UntilEndOfTurn,
+                ..
+            }
+        )),
         "reach-guard: CR 118.9 — \"pay life equal to its mana value rather than paying its mana \
-         cost\" must route the grant into the non-mana alternative-cost permission, \
+         cost\" must ride ON the shared single-use play grant \
+         (PlayFromExile {{ single_use, alt_ability_cost: Some, duration: EOT }}), \
          got {permissions:#?}"
     );
     assert_eq!(

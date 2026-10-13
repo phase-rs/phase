@@ -644,7 +644,12 @@ fn try_parse_subject_continuous_clause(
         return Some(clause);
     }
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    build_continuous_clause(application, predicate, ctx)
+    build_continuous_clause(
+        application,
+        predicate,
+        ctx,
+        clause_names_deferred_parser(text),
+    )
 }
 
 /// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
@@ -4552,6 +4557,7 @@ fn try_split_pump_compound(
     normalized: &str,
     application: &SubjectApplication,
     ctx: &ParseContext,
+    names_deferred: bool,
 ) -> Option<ParsedEffectClause> {
     let lower = normalized.to_lowercase();
     // Find " and " that separates two independent clauses after a pump+duration.
@@ -4595,7 +4601,7 @@ fn try_split_pump_compound(
     let sub_ability = if remainder.is_empty() {
         None
     } else if let Some((choice, choice_duration)) =
-        build_keyword_choice_sub_ability(application, remainder)
+        build_keyword_choice_sub_ability(application, remainder, ctx, names_deferred)
     {
         duration = duration.or(choice_duration);
         Some(Box::new(choice))
@@ -4628,6 +4634,8 @@ fn try_split_pump_compound(
 fn build_keyword_choice_sub_ability(
     application: &SubjectApplication,
     remainder: &str,
+    ctx: &ParseContext,
+    names_deferred: bool,
 ) -> Option<(AbilityDefinition, Option<Duration>)> {
     // The split remainder keeps its conjugated verb ("gains ..."):
     // `deconjugate_verb` in `build_continuous_clause` only normalizes the
@@ -4635,7 +4643,9 @@ fn build_keyword_choice_sub_ability(
     // "gains your choice of ...". `parse_keyword_choice_grant` anchors on the
     // bare "gain ..." form, so deconjugate the remainder here first.
     let normalized = deconjugate_verb(remainder);
-    let (keywords, duration) = parse_keyword_choice_grant(&normalized)?;
+    let (keywords, inline) = parse_keyword_choice_grant(&normalized)?;
+    let outer = ctx.stated_clause_duration.clone();
+    let duration = resolve_choice_grant_duration(inline, outer, names_deferred);
     let affected = static_affected_for_application(application);
     let choice_duration = duration.clone();
     let branches = keywords
@@ -4652,6 +4662,41 @@ fn build_keyword_choice_sub_ability(
         ),
         choice_duration,
     ))
+}
+
+/// True when the full clause text names a parser that declines the grant and
+/// leaves a fallback duration behind — the `perpetually` arms in
+/// `oracle_effect/mod.rs` (Smogbelcher Chariot, Putrefying Rotboar, Putrid
+/// Hexhag, Kami of Mourning) and the emblem parser (`gets an emblem with`,
+/// declined: Garruk Apex Predator, Ob Nixilis Reignited, Rowan Kenrith, Will
+/// Kenrith; mixed-held You Compleat Me and Tend to the Kiln). Quoted spans are
+/// masked first (CR 113.1a, mirroring `strip_trailing_duration`) so a word
+/// inside a granted ability's quotes cannot trip the flag.
+/// FOLLOW-UP: make the dropping subject arms honest instead of flagging them.
+fn clause_names_deferred_parser(clause: &str) -> bool {
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(clause);
+    nom_primitives::scan_contains(&masked, "perpetual")
+        || nom_primitives::scan_contains(&masked, "emblem")
+}
+
+/// CR 611.2a precedence for keyword/protection-choice grants: an inline
+/// trailing duration wins, then the outer (leading/trailing) clause duration,
+/// then — when the card states none — Permanent. The `names_deferred` flag
+/// preserves the legacy end-of-turn stamp byte-identically for clauses naming
+/// a declining parser (see `clause_names_deferred_parser`), whose fallback
+/// duration must survive until that follow-up lands.
+fn resolve_choice_grant_duration(
+    inline: Option<Duration>,
+    outer: Option<Duration>,
+    names_deferred: bool,
+) -> Option<Duration> {
+    if let Some(duration) = inline.or(outer) {
+        return Some(duration);
+    }
+    if names_deferred {
+        return Some(Duration::UntilEndOfTurn);
+    }
+    Some(Duration::Permanent)
 }
 
 fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<Duration>)> {
@@ -4676,7 +4721,10 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<D
             .iter()
             .map(|item| parse_granted_keyword_fragment(item.trim()))
             .collect::<Option<Vec<Keyword>>>()?;
-        return Some((keywords, duration.or(Some(Duration::UntilEndOfTurn))));
+        // The inline duration is returned raw; the caller resolves the
+        // inline → outer → Permanent precedence via
+        // `resolve_choice_grant_duration`.
+        return Some((keywords, duration));
     }
 
     // Shape 2: "gain/have protection from X or from the color of your choice"
@@ -4708,10 +4756,8 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<D
     let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
         right.trim(),
     ));
-    Some((
-        vec![first, second],
-        duration.or(Some(Duration::UntilEndOfTurn)),
-    ))
+    // Raw inline duration; precedence resolved by the caller (see above).
+    Some((vec![first, second], duration))
 }
 
 fn keyword_choice_branch(
@@ -4741,8 +4787,12 @@ fn keyword_choice_branch(
 fn build_keyword_choice_clause(
     application: &SubjectApplication,
     predicate: &str,
+    ctx: &ParseContext,
+    names_deferred: bool,
 ) -> Option<ParsedEffectClause> {
-    let (keywords, duration) = parse_keyword_choice_grant(predicate)?;
+    let (keywords, inline) = parse_keyword_choice_grant(predicate)?;
+    let outer = ctx.stated_clause_duration.clone();
+    let duration = resolve_choice_grant_duration(inline, outer, names_deferred);
     let affected = static_affected_for_application(application);
     let branches = keywords
         .into_iter()
@@ -4973,10 +5023,14 @@ fn build_pt_choice_clause(
     })
 }
 
+/// Continuous-clause builder. Unstated durations default to Permanent at four
+/// keyword-driven arms: Suspend, in-addition-to-types, Licid attachable
+/// subtypes, and pure `GrantTrigger` grants (CR 611.2a).
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
     ctx: &ParseContext,
+    names_deferred: bool,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
 
@@ -5017,11 +5071,13 @@ fn build_continuous_clause(
     // Compound: "get +1/+1 until end of turn and you gain 1 life"
     // Split on " and " that follows a duration marker, producing a pump
     // with a chained sub_ability for the remainder.
-    if let Some(clause) = try_split_pump_compound(&normalized, &application, ctx) {
+    if let Some(clause) = try_split_pump_compound(&normalized, &application, ctx, names_deferred) {
         return Some(clause);
     }
 
-    if let Some(clause) = build_keyword_choice_clause(&application, &normalized) {
+    if let Some(clause) =
+        build_keyword_choice_clause(&application, &normalized, ctx, names_deferred)
+    {
         return Some(clause);
     }
 
@@ -5138,6 +5194,28 @@ fn build_continuous_clause(
             TargetFilter::SelfRef
         )
         && super::modifications_grant_attachable_subtype(&modifications)
+    {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
+    // CR 611.2a: a pure quoted-trigger grant stating no duration ("it gains
+    // 'When this creature enters, ...'" — Bloodrage Alpha's boon body) lasts
+    // until end of game. Mirrors the GrantReplacement promotion's mixed-def
+    // line in `effect.rs`: any non-trigger modification keeps the parsed
+    // duration. The `stated_clause_duration` guard keeps single-clause leading
+    // durations load-bearing — they still overwrite via `with_clause_duration`,
+    // whose `Some(Permanent)` sentinel treatment is documented in `ast.rs` —
+    // and the flag preserves the emblem/perpetual-fallback shapes
+    // byte-identically until their follow-up lands.
+    let duration = if duration.is_none()
+        && ctx.stated_clause_duration.is_none()
+        && !names_deferred
+        && !modifications.is_empty()
+        && modifications
+            .iter()
+            .all(|m| matches!(m, ContinuousModification::GrantTrigger { .. }))
     {
         Some(Duration::Permanent)
     } else {
@@ -5285,7 +5363,12 @@ pub(super) fn try_parse_exiled_this_way_keyword_grant(
         inherits_parent: false,
         is_optional: false,
     };
-    build_continuous_clause(application, after_head.trim(), ctx)
+    build_continuous_clause(
+        application,
+        after_head.trim(),
+        ctx,
+        clause_names_deferred_parser(text),
+    )
 }
 
 /// Strip "for each [clause]" suffix from text so that duration extraction can find

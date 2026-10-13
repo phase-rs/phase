@@ -14515,6 +14515,7 @@ mod detect_condition_if_replacement_exemption_tests {
             alt_ability_cost: Some(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             }),
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
         };
@@ -14593,6 +14594,7 @@ mod detect_condition_if_replacement_exemption_tests {
             alt_ability_cost: Some(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             }),
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
         };

@@ -6,15 +6,18 @@
 //! on the granted trigger is checked at fire time and again at resolution
 //! (CR 603.4), with a false gate consuming the single occurrence (CR 603.7b).
 
+use engine::ai_support::legal_actions;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    DelayedTriggerCondition, DelayedTriggerLifetime, PerpetualModification, TargetRef,
+    CastingPermission, DelayedTriggerCondition, DelayedTriggerLifetime, Duration,
+    PerpetualModification, TargetRef,
 };
 use engine::types::actions::{DebugAction, GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::keywords::{Keyword, KeywordKind};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -2055,5 +2058,1070 @@ fn fractional_note_in_non_self_trigger_records_event_power() {
         runner.state().players[0].noted_number,
         Some(3),
         "half of the DIED creature's 5 power, rounded up — not half of the source's 2"
+    );
+}
+
+// ---------- B1: Swiftspear's Teachings (indefinite choice grant) ----------
+
+const SWIFT_TEACHINGS: &str = "You get a one-time boon with \"When you cast a creature spell, it gains your choice of prowess or haste.\"\nDraw a card.";
+
+/// Drain the stack, answering a `ChooseOneOfBranch` by branch-description
+/// substring when it appears (the choice is made at trigger resolution, not
+/// at cast time).
+///
+/// NOTE (run boon-blockers-20261010 fix round): boon-granted keyword choices
+/// bind to the triggering spell via the `affected: TriggeringSource`
+/// early-return (the `resolve_branch` push gate skips event-context-bound
+/// branches). The driver itself is unchanged.
+fn drain_answering_choice(runner: &mut GameRunner, needle: &str) {
+    for _ in 0..200 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player, branches, ..
+            } => {
+                assert_eq!(*player, P0, "the boon holder chooses");
+                let index = branches
+                    .iter()
+                    .position(|branch| {
+                        branch
+                            .description
+                            .as_deref()
+                            .is_some_and(|description| description.to_lowercase().contains(needle))
+                    })
+                    .unwrap_or_else(|| panic!("a {needle} branch must exist"));
+                runner
+                    .act(GameAction::ChooseBranch { index })
+                    .expect("choosing the branch must succeed");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            other => panic!("unexpected prompt while draining: {other:?}"),
+        }
+    }
+    panic!("drain loop did not settle");
+}
+
+/// Cross cleanup into the next turn's upkeep, declaring no attackers or
+/// blockers on the way. Panics on any other non-priority prompt.
+fn advance_to_next_upkeep(runner: &mut GameRunner) {
+    for _ in 0..64 {
+        runner.advance_to_phase(Phase::Upkeep);
+        if runner.state().phase == Phase::Upkeep && runner.state().active_player != P0 {
+            return;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("declare no blockers");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.pass_both_players();
+            }
+            other => panic!("unexpected prompt while crossing cleanup: {other:?}"),
+        }
+    }
+    panic!("did not reach the next upkeep");
+}
+
+/// Walk from the declare-attackers step to the postcombat main phase,
+/// declaring no blocks. For combat-trigger tests that must reach a
+/// sorcery-speed window past combat.
+fn advance_past_combat(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        if runner.state().phase == Phase::PostCombatMain {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("the defending player may always decline to block");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the combat-damage trigger");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is always legal");
+            }
+            other => panic!("combat stalled on an unexpected prompt: {other:?}"),
+        }
+        runner.advance_until_stack_empty();
+    }
+    panic!("combat did not reach the postcombat main phase");
+}
+
+/// V1: the undurated choice grant is indefinite — it survives cleanup and its
+/// prowess still fires on a later-turn noncreature cast.
+///
+/// DISCRIMINATING: with the end-of-turn stamp reverted, prowess is pruned at
+/// cleanup, so both the post-crossing presence assertion and the later pump
+/// assertion fail.
+///
+/// The installed grant binds to the triggering spell via the
+/// `affected: TriggeringSource` early-return (the `resolve_branch` push gate
+/// skips event-context-bound branches; run boon-blockers-20261010 fix round).
+#[test]
+fn swiftspear_choice_grant_survives_cleanup_and_fires_later() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw A", "Draw B"]);
+    scenario.with_library_top(P1, &["P1 A"]);
+    let teachings = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swiftspear's Teachings", false, SWIFT_TEACHINGS)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(teachings).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Fire the boon with a creature cast and take prowess.
+    runner.cast(bear).commit();
+    drain_answering_choice(&mut runner, "prowess");
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the fired boon must be consumed"
+    );
+    assert!(
+        runner.state().objects[&bear].has_keyword(&Keyword::Prowess),
+        "reach guard: prowess is granted the same turn"
+    );
+
+    // Cross cleanup: an indefinite grant survives.
+    advance_to_next_upkeep(&mut runner);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(
+        runner.state().objects[&bear].has_keyword(&Keyword::Prowess),
+        "CR 611.2a: the unstated choice grant must survive cleanup"
+    );
+
+    // Prowess still fires on a later-turn noncreature cast: P1 passes so P0
+    // (holding priority) can cast its instant.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to P0");
+    runner.cast(bolt).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(3),
+        "prowess must fire next turn: the 2/2 becomes 3/3"
+    );
+    assert_eq!(runner.state().objects[&bear].toughness, Some(3));
+}
+
+/// V1 sibling: the haste branch grants only haste.
+///
+/// Same event-context binding as the prowess branch above (the `resolve_branch`
+/// push gate skips `affected: TriggeringSource` branches; run
+/// boon-blockers-20261010 fix round).
+#[test]
+fn swiftspear_haste_branch_grants_haste_only() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw A"]);
+    let teachings = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swiftspear's Teachings", false, SWIFT_TEACHINGS)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(teachings).resolve();
+    drain_stack(&mut runner);
+    runner.cast(bear).commit();
+    drain_answering_choice(&mut runner, "haste");
+
+    let obj = &runner.state().objects[&bear];
+    assert!(
+        obj.has_keyword(&Keyword::Haste),
+        "the chosen haste must be granted"
+    );
+    assert!(
+        !obj.has_keyword(&Keyword::Prowess),
+        "the unchosen prowess must not be granted"
+    );
+}
+
+/// V9a: sequential boon firings bind each grant to its own triggering spell
+/// (per-firing capture isolation).
+///
+/// Two teachings boons are held; bear one fires boon one (prowess), then bear
+/// two fires boon two (prowess). Each bear carries exactly its own grant: a
+/// later bolt grows both to 3/3. If the second firing overwrote a shared slot,
+/// the first bear would never have been bound and would stay 2/2.
+#[test]
+fn swiftspear_sequential_boons_bind_each_grant_to_its_own_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C"]);
+    let teachings_one = scenario
+        .add_spell_to_hand_from_oracle(P0, "Teachings One", false, SWIFT_TEACHINGS)
+        .id();
+    let teachings_two = scenario
+        .add_spell_to_hand_from_oracle(P0, "Teachings Two", false, SWIFT_TEACHINGS)
+        .id();
+    let bear_one = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let bear_two = scenario
+        .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    // First boon fires on the first bear.
+    runner.cast(teachings_one).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    runner.cast(bear_one).commit();
+    drain_answering_choice(&mut runner, "prowess");
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the first fired boon must be consumed"
+    );
+    assert!(
+        runner.state().objects[&bear_one].has_keyword(&Keyword::Prowess),
+        "reach guard: the first bear is granted prowess the same turn"
+    );
+
+    // Second boon fires on the second bear.
+    runner.cast(teachings_two).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    runner.cast(bear_two).commit();
+    drain_answering_choice(&mut runner, "prowess");
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the second fired boon must be consumed"
+    );
+    assert!(
+        runner.state().objects[&bear_two].has_keyword(&Keyword::Prowess),
+        "reach guard: the second bear is granted prowess the same turn"
+    );
+
+    // One bolt fires both bears' own grants.
+    advance_to_next_upkeep(&mut runner);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to P0");
+    runner.cast(bolt).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    for (label, id) in [("first bear", bear_one), ("second bear", bear_two)] {
+        assert_eq!(
+            runner.state().objects[&id].power,
+            Some(3),
+            "{label} must fire its own bound prowess: 2/2 becomes 3/3"
+        );
+        assert_eq!(runner.state().objects[&id].toughness, Some(3));
+    }
+}
+
+/// Verbatim Oracle text (`client/public/card-data.json`, key `the valeyard`).
+const VALEYARD: &str = "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)\nWhile voting, you may vote an additional time.";
+
+/// V9c: a two-instance ChooseOneOf pause carries the stored trigger context
+/// through the pending frame into the second branch.
+///
+/// P1 controls The Valeyard, so P0 faces the boon choice twice: the base
+/// instance plus one additional instance back-to-back through
+/// `PendingChooseOneOf`. The first answer takes prowess, the second haste; the
+/// bear holds both, so the second branch is event-bound too. If
+/// `resume_pending` dropped the carry, the second branch's `TriggeringSource`
+/// would resolve to nothing, the haste grant would install nothing, and the
+/// bear would hold prowess only.
+///
+/// The doubling vehicle is incidental: on this path the Valeyard static doubles
+/// every ChooseOneOf its opponent faces, which is exactly the multi-chooser
+/// pause under test; the assertions target the trigger-context carry only. The
+/// villainous None-carry path is covered by the existing villainous tests.
+#[test]
+fn swiftspear_doubled_choice_binds_both_branches_to_triggering_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw A"]);
+    scenario.add_creature_from_oracle(P1, "The Valeyard", 4, 4, VALEYARD);
+    let teachings = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swiftspear's Teachings", false, SWIFT_TEACHINGS)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(teachings).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    runner.cast(bear).commit();
+    // Answer the two back-to-back instances DIFFERENTLY so each branch's
+    // binding is observable: prowess on the first, haste on the second. (Two
+    // prowess grants would not stack — keywords are a set — so same-answer
+    // assertions could not tell one binding from two.)
+    let mut instances = 0;
+    for _ in 0..200 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player, branches, ..
+            } => {
+                assert_eq!(*player, P0, "the boon holder chooses");
+                instances += 1;
+                let needle = if instances == 1 { "prowess" } else { "haste" };
+                let index = branches
+                    .iter()
+                    .position(|branch| {
+                        branch
+                            .description
+                            .as_deref()
+                            .is_some_and(|description| description.to_lowercase().contains(needle))
+                    })
+                    .unwrap_or_else(|| panic!("a {needle} branch must exist"));
+                runner
+                    .act(GameAction::ChooseBranch { index })
+                    .expect("choosing the branch must succeed");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            other => panic!("unexpected prompt while draining: {other:?}"),
+        }
+    }
+    assert_eq!(
+        instances, 2,
+        "the Valeyard must double the faced choice: exactly two branch prompts"
+    );
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the fired boon must be consumed"
+    );
+    assert!(
+        runner.state().objects[&bear].has_keyword(&Keyword::Prowess),
+        "reach guard: the first instance grants prowess the same turn"
+    );
+    assert!(
+        runner.state().objects[&bear].has_keyword(&Keyword::Haste),
+        "the second instance must bind the triggering spell too: haste is granted"
+    );
+
+    // The prowess half still fires on a later noncreature cast.
+    advance_to_next_upkeep(&mut runner);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to P0");
+    runner.cast(bolt).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(3),
+        "the bound prowess must fire next turn: the 2/2 becomes 3/3"
+    );
+    assert_eq!(runner.state().objects[&bear].toughness, Some(3));
+}
+
+// ---------- B1: Bloodrage Alpha (indefinite trigger grant) ----------
+
+const BLOODRAGE: &str = "When this creature enters, choose one —\n• Another target Wolf or Werewolf you control fights target creature you don't control.\n• You get a one-time boon with \"When you cast a Wolf or Werewolf spell, it gains 'When this creature enters, it fights up to one target creature you don't control.'\"";
+
+/// The granted ChangesZone triggers installed on an object (the wolf prints
+/// none, so every one found is the boon's grant).
+fn granted_entry_triggers(runner: &GameRunner, id: ObjectId) -> usize {
+    runner.state().objects[&id]
+        .trigger_definitions
+        .iter_unchecked()
+        .filter(|entry| entry.definition.mode == TriggerMode::ChangesZone)
+        .count()
+}
+
+/// V3: the undurated trigger grant is indefinite — still installed after a
+/// cleanup crossing. A blinked wolf loses it (zone-exit prune).
+///
+/// DISCRIMINATING: with the end-of-turn stamp reverted, cleanup prunes the
+/// grant, so the post-crossing count assertion fails.
+///
+/// DEVIATION (documented): the plan's "re-entering the Wolf fights again" is
+/// not taken literally — a re-entry is itself a zone exit, which prunes the
+/// grant by design (the plan's own blink hostile below). The discriminating
+/// post-cleanup check is structural (the trigger is still installed); the
+/// behavioral proof that an installed trigger fights is the pre-cleanup
+/// reach guard.
+#[test]
+fn bloodrage_granted_trigger_survives_cleanup() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bloodrage = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bloodrage Alpha", 4, 4, BLOODRAGE)
+        .with_subtypes(vec!["Wolf"])
+        .id();
+    let wolf = scenario
+        .add_creature_to_hand_from_oracle(P0, "Wolf Cub", 2, 2, "")
+        .with_subtypes(vec!["Wolf"])
+        .id();
+    let wall = scenario.add_creature(P1, "Wall", 0, 4).id();
+    let mut runner = scenario.build();
+
+    // ETB modal: take the boon branch (chosen at trigger resolution, when the
+    // modal trigger resolves — not at cast time).
+    runner.cast(bloodrage).commit();
+    let mut mode_chosen = false;
+    for _ in 0..200 {
+        if mode_chosen
+            && runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::AbilityModeChoice {
+                player,
+                mode_abilities,
+                ..
+            } => {
+                assert_eq!(*player, P0);
+                assert!(!mode_chosen, "the modal fires once");
+                let index = mode_abilities
+                    .iter()
+                    .position(|mode| format!("{mode:?}").contains("CreateBoon"))
+                    .expect("a boon branch must exist");
+                runner
+                    .act(GameAction::SelectModes {
+                        indices: vec![index],
+                    })
+                    .expect("selecting the boon mode must succeed");
+                mode_chosen = true;
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            other => panic!("unexpected prompt while resolving ETB: {other:?}"),
+        }
+    }
+    assert!(mode_chosen, "the modal branch must have been chosen");
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Fire the boon with a Wolf cast; the granted ETB trigger fights.
+    runner.cast(wolf).commit();
+    for _ in 0..100 {
+        if runner.state().stack.is_empty()
+            && !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OrderTriggers { .. }
+                    | WaitingFor::TriggerTargetSelection { .. }
+                    | WaitingFor::TargetSelection { .. }
+            )
+        {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(wall)),
+                    })
+                    .expect("choose the fight target");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the fired boon must be consumed"
+    );
+    assert_eq!(
+        runner.state().objects[&wall].damage_marked,
+        2,
+        "reach guard: the granted fight dealt 2 to the wall pre-cleanup"
+    );
+    assert_eq!(
+        granted_entry_triggers(&runner, wolf),
+        1,
+        "reach guard: the wolf carries the granted entry trigger"
+    );
+
+    // Cross cleanup: the indefinite grant stays installed.
+    advance_to_next_upkeep(&mut runner);
+    assert_eq!(
+        granted_entry_triggers(&runner, wolf),
+        1,
+        "CR 611.2a: the unstated trigger grant must survive cleanup"
+    );
+
+    // Hostile: a zone exit prunes the object-bound grant.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), wolf, Zone::Exile, &mut events);
+    assert_eq!(
+        granted_entry_triggers(&runner, wolf),
+        0,
+        "a blinked wolf must lose the object-bound grant"
+    );
+}
+
+// ---------- B2: Electrostatic Blast (shared single-use budget) ----------
+
+const ELECTROSTATIC: &str = "Electrostatic Blast deals 2 damage to any target. You get a one-time boon with \"When you cast an instant or sorcery spell, exile the top three cards of your library. You may play one of those cards until end of turn.\"";
+const RECKLESS: &str =
+    "Exile the top two cards of your library. Until the end of your next turn, you may play those cards.";
+const STAGED_BOLT: &str = "Staged Bolt deals 3 damage to any target.";
+
+fn can_cast(runner: &GameRunner, id: ObjectId) -> bool {
+    legal_actions(runner.state())
+        .iter()
+        .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id))
+}
+
+fn can_play_land(runner: &GameRunner, id: ObjectId) -> bool {
+    legal_actions(runner.state())
+        .iter()
+        .any(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == id))
+}
+
+/// The `single_use` `PlayFromExile` grants on `id` (Locke idiom: reading the
+/// permission distinguishes "never installed" from "installed but gated").
+fn single_use_grant_durations(runner: &GameRunner, id: ObjectId) -> Vec<Duration> {
+    runner.state().objects[&id]
+        .casting_permissions
+        .iter()
+        .filter_map(|permission| match permission {
+            CastingPermission::PlayFromExile {
+                duration,
+                single_use: true,
+                ..
+            } => Some(duration.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+struct BoonBatch {
+    runner: GameRunner,
+    spell_a: ObjectId,
+    land: ObjectId,
+    spell_b: ObjectId,
+}
+
+/// Fire one Electrostatic Blast boon over a staged {spell, land, spell} top
+/// three. Returns the runner with the batch exiled and granted.
+fn electrostatic_fires() -> BoonBatch {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Added bottom-first: each push lands above the previous, so spell A is
+    // on top and exiled first — order inside the batch is irrelevant.
+    let mut b = scenario.add_spell_to_library_top(P0, "Staged Bolt B", true);
+    b.from_oracle_text(STAGED_BOLT);
+    b.with_mana_cost(ManaCost::zero());
+    let spell_b = b.id();
+    let land = scenario.add_land_to_library_top(P0, "Staged Land").id();
+    let mut a = scenario.add_spell_to_library_top(P0, "Staged Bolt A", true);
+    a.from_oracle_text(STAGED_BOLT);
+    a.with_mana_cost(ManaCost::zero());
+    let spell_a = a.id();
+    let blast = scenario
+        .add_spell_to_hand_from_oracle(P0, "Electrostatic Blast", true, ELECTROSTATIC)
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(blast).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    runner.cast(bolt).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the bolt cast must fire the boon"
+    );
+    BoonBatch {
+        runner,
+        spell_a,
+        land,
+        spell_b,
+    }
+}
+
+fn assert_batch_granted(runner: &GameRunner, spell_a: ObjectId, land: ObjectId, spell_b: ObjectId) {
+    for (label, id) in [("spell A", spell_a), ("land", land), ("spell B", spell_b)] {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Exile,
+            "reach guard ({label}): the batch must be exiled"
+        );
+        assert_eq!(
+            single_use_grant_durations(runner, id),
+            vec![Duration::UntilEndOfTurn],
+            "reach guard ({label}): every batch member must hold the grant"
+        );
+    }
+    assert!(
+        can_cast(runner, spell_a),
+        "reach guard: spell A must be castable before the budget is spent"
+    );
+    assert!(
+        can_play_land(runner, land),
+        "reach guard: the land must be playable before the budget is spent"
+    );
+    assert!(
+        can_cast(runner, spell_b),
+        "reach guard: spell B must be castable before the budget is spent"
+    );
+}
+
+/// V5a: casting one batch spell spends the shared budget on the cast route —
+/// the sibling spell and the land reject on both routes.
+///
+/// DISCRIMINATING: with the uncapped `CastFromZone` reverted, every member
+/// stays playable and the rejection assertions fail.
+#[test]
+fn electrostatic_one_of_those_spends_shared_budget_on_cast() {
+    let BoonBatch {
+        mut runner,
+        spell_a,
+        land,
+        spell_b,
+    } = electrostatic_fires();
+    assert_batch_granted(&runner, spell_a, land, spell_b);
+
+    // Cast spell A through the production pipeline.
+    runner.cast(spell_a).target_player(P1).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&spell_a].zone,
+        Zone::Graveyard,
+        "reach guard: spell A resolved (CR 608.2n returns it to graveyard)"
+    );
+
+    // Both routes reject for the remainder of the batch.
+    assert!(
+        !can_cast(&runner, spell_b),
+        "the sibling spell must reject on the cast route once the budget is spent"
+    );
+    assert!(
+        !can_play_land(&runner, land),
+        "the land must reject on the land route once the budget is spent"
+    );
+    assert_eq!(
+        runner.state().objects[&spell_b].zone,
+        Zone::Exile,
+        "the sibling spell must not have moved"
+    );
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Exile,
+        "the land must not have moved"
+    );
+    assert!(
+        single_use_grant_durations(&runner, spell_b).is_empty()
+            && single_use_grant_durations(&runner, land).is_empty(),
+        "the spent budget must strip the grant from every sibling"
+    );
+}
+
+/// V5b: playing the batch land spends the shared budget on the land route —
+/// both spells reject on the cast route.
+#[test]
+fn electrostatic_one_of_those_spends_shared_budget_on_land_play() {
+    let BoonBatch {
+        mut runner,
+        spell_a,
+        land,
+        spell_b,
+    } = electrostatic_fires();
+    assert_batch_granted(&runner, spell_a, land, spell_b);
+
+    // Play the land through the production pipeline.
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect("the first granted land play must be accepted");
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Battlefield,
+        "reach guard: the land must actually have been played"
+    );
+
+    // Both spells reject; neither moved.
+    assert!(
+        !can_cast(&runner, spell_a) && !can_cast(&runner, spell_b),
+        "both spells must reject on the cast route once the land spent the budget"
+    );
+    for (label, id) in [("spell A", spell_a), ("spell B", spell_b)] {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Exile,
+            "{label} must not have moved"
+        );
+        assert!(
+            single_use_grant_durations(&runner, id).is_empty(),
+            "{label} must lose the spent grant"
+        );
+    }
+}
+
+/// V5-cancel: beginning a batch cast and cancelling leaves the group
+/// unconsumed — the sibling is still offered.
+#[test]
+fn electrostatic_cancelled_cast_leaves_shared_budget_intact() {
+    let BoonBatch {
+        mut runner,
+        spell_a,
+        land,
+        spell_b,
+    } = electrostatic_fires();
+    assert_batch_granted(&runner, spell_a, land, spell_b);
+
+    // Begin spell A's cast with a manual announce (parks at its target prompt
+    // without the driver's auto-answer), then cancel.
+    let card_id = runner.state().objects[&spell_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell_a,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("announcing the begun cast must be accepted");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the begun cast must park at target selection, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancelling the begun cast must succeed");
+
+    // Nothing spent: the card never left exile and the group is intact.
+    assert_eq!(
+        runner.state().objects[&spell_a].zone,
+        Zone::Exile,
+        "the cancelled cast must not move its card"
+    );
+    assert!(
+        can_cast(&runner, spell_a) && can_cast(&runner, spell_b),
+        "both batch spells must still be offered after the cancel"
+    );
+    assert_eq!(
+        single_use_grant_durations(&runner, spell_a).len(),
+        1,
+        "the cancelled cast must not consume the group"
+    );
+}
+
+/// V5-pools: two boons fired in sequence hold independent groups — spending
+/// the first batch leaves the second offered.
+#[test]
+fn electrostatic_sequential_boons_hold_independent_budgets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Two batches of two zero-mana spells, staged bottom-first per batch.
+    let mut b2 = scenario.add_spell_to_library_top(P0, "Batch2 B", true);
+    b2.from_oracle_text(STAGED_BOLT);
+    b2.with_mana_cost(ManaCost::zero());
+    let batch2_b = b2.id();
+    let mut a2 = scenario.add_spell_to_library_top(P0, "Batch2 A", true);
+    a2.from_oracle_text(STAGED_BOLT);
+    a2.with_mana_cost(ManaCost::zero());
+    let batch2_a = a2.id();
+    let mut b1 = scenario.add_spell_to_library_top(P0, "Batch1 B", true);
+    b1.from_oracle_text(STAGED_BOLT);
+    b1.with_mana_cost(ManaCost::zero());
+    let batch1_b = b1.id();
+    let mut a1 = scenario.add_spell_to_library_top(P0, "Batch1 A", true);
+    a1.from_oracle_text(STAGED_BOLT);
+    a1.with_mana_cost(ManaCost::zero());
+    let batch1_a = a1.id();
+    // A filler so the second blast's boon has a distinct top three.
+    let mut f = scenario.add_spell_to_library_top(P0, "Filler", true);
+    f.from_oracle_text(STAGED_BOLT);
+    f.with_mana_cost(ManaCost::zero());
+    let filler = f.id();
+    let blast_one = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blast One", true, ELECTROSTATIC)
+        .id();
+    let blast_two = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blast Two", true, ELECTROSTATIC)
+        .id();
+    let bolt_one = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt One", true, BOLT)
+        .id();
+    let bolt_two = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt Two", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    // First boon fires over {filler, batch1 A, batch1 B}.
+    runner.cast(blast_one).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    runner.cast(bolt_one).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the first boon must have fired"
+    );
+    for (label, id) in [
+        ("filler", filler),
+        ("batch1 A", batch1_a),
+        ("batch1 B", batch1_b),
+    ] {
+        assert_eq!(
+            single_use_grant_durations(&runner, id).len(),
+            1,
+            "reach guard ({label}): the first batch must hold the first grant"
+        );
+    }
+
+    // Second boon fires over the next top three.
+    runner.cast(blast_two).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    runner.cast(bolt_two).target_player(P1).resolve();
+    drain_stack(&mut runner);
+    assert!(
+        held_boons(&runner).is_empty(),
+        "the second boon must have fired"
+    );
+    for (label, id) in [("batch2 A", batch2_a), ("batch2 B", batch2_b)] {
+        assert_eq!(
+            single_use_grant_durations(&runner, id).len(),
+            1,
+            "reach guard ({label}): the second batch must hold the second grant"
+        );
+    }
+
+    // Spend the first batch; the second stays offered.
+    runner.cast(batch1_a).target_player(P1).commit();
+    runner.advance_until_stack_empty();
+    assert!(
+        can_cast(&runner, batch2_a) && can_cast(&runner, batch2_b),
+        "spending the first batch must not touch the independent second group"
+    );
+    assert!(
+        !can_cast(&runner, batch1_b),
+        "the first batch's own sibling must reject"
+    );
+}
+
+/// V5-control: the uncapped plural ("those cards", no cap) plays twice —
+/// the shared budget is a property of the printed "one of", not of every
+/// exile-then-play grant.
+#[test]
+fn reckless_impulse_uncapped_batch_plays_twice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut b = scenario.add_spell_to_library_top(P0, "Reckless B", true);
+    b.from_oracle_text(STAGED_BOLT);
+    b.with_mana_cost(ManaCost::zero());
+    let spell_b = b.id();
+    let land = scenario.add_land_to_library_top(P0, "Reckless Land").id();
+    let reckless = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reckless Impulse", false, RECKLESS)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(reckless).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&spell_b].zone,
+        Zone::Exile,
+        "reach guard: the batch must be exiled"
+    );
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Exile,
+        "reach guard: the land must be exiled"
+    );
+
+    // First play succeeds (the land, on the land route).
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect("the first uncapped play must be accepted");
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Battlefield,
+        "the land must actually have been played"
+    );
+
+    // Second play succeeds too — no shared budget of one here. The land drop
+    // is spent, so the second play goes through the cast route.
+    assert!(
+        can_cast(&runner, spell_b),
+        "the uncapped sibling must still be offered after the first play"
+    );
+    runner.cast(spell_b).target_player(P1).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&spell_b].zone,
+        Zone::Graveyard,
+        "the second uncapped play must resolve"
+    );
+}
+
+// ---------- B2/V6: Nashi, Moon Sage's Scion (rider + expiry) ----------
+
+const NASHI: &str = "Ninjutsu {3}{B} ({3}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever Nashi deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.";
+
+/// V6: Nashi's capped batch play promotes with its life-payment rider — one
+/// cast succeeds (paying life), the second rejects — and the printed
+/// end-of-turn window prunes the remainder at cleanup.
+///
+/// DISCRIMINATING: with the uncapped `CastFromZone` reverted, the second
+/// cast stays offered and the rejection assertion fails.
+///
+/// The leading window reaches the promotion via the pre-`YouMay` guard
+/// (`try_parse_one_of_batch_cast_preface`; run boon-blockers-20261010 fix round).
+#[test]
+fn nashi_promoted_grant_carries_life_rider_and_single_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nashi = scenario
+        .add_creature_from_oracle(P0, "Nashi, Moon Sage's Scion", 2, 2, NASHI)
+        .with_subtypes(vec!["Rat", "Ninja"])
+        .id();
+    // Staged tops: each library contributes one {1} instant.
+    let mut s0 = scenario.add_spell_to_library_top(P0, "Staged P0", true);
+    s0.from_oracle_text(STAGED_BOLT);
+    s0.with_mana_cost(ManaCost::generic(1));
+    let staged_p0 = s0.id();
+    let mut s1 = scenario.add_spell_to_library_top(P1, "Staged P1", true);
+    s1.from_oracle_text(STAGED_BOLT);
+    s1.with_mana_cost(ManaCost::generic(1));
+    let staged_p1 = s1.id();
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(nashi, AttackTarget::Player(P1))])
+        .expect("Nashi must be able to attack");
+    advance_past_combat(&mut runner);
+
+    // Reach guards: both tops exiled, both holding the end-of-turn grant.
+    for (label, id) in [("P0 staged", staged_p0), ("P1 staged", staged_p1)] {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Exile,
+            "reach guard ({label}): combat damage must exile both tops"
+        );
+        assert_eq!(
+            single_use_grant_durations(&runner, id),
+            vec![Duration::UntilEndOfTurn],
+            "reach guard ({label}): both exiled cards must hold the grant"
+        );
+        assert!(
+            can_cast(&runner, id),
+            "reach guard ({label}): both must be offered before the budget is spent"
+        );
+    }
+
+    // First cast succeeds through the life-payment rider: MV 1 costs 1 life.
+    let life_before = runner.state().players[0].life;
+    runner.cast(staged_p0).target_player(P1).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&staged_p0].zone,
+        Zone::Graveyard,
+        "reach guard: the first cast must resolve"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before - 1,
+        "the rider replaces mana with life equal to mana value"
+    );
+
+    // The second rejects on the shared budget; it never moved.
+    assert!(
+        !can_cast(&runner, staged_p1),
+        "the second batch spell must reject once the budget is spent"
+    );
+    assert_eq!(
+        runner.state().objects[&staged_p1].zone,
+        Zone::Exile,
+        "the rejected spell must not have moved"
+    );
+    assert!(
+        single_use_grant_durations(&runner, staged_p1).is_empty(),
+        "the spent budget must strip the sibling grant"
+    );
+
+    // The printed window still ends the remainder at cleanup.
+    advance_to_next_upkeep(&mut runner);
+    assert!(
+        single_use_grant_durations(&runner, staged_p1).is_empty(),
+        "the end-of-turn window must prune the remainder at cleanup"
     );
 }

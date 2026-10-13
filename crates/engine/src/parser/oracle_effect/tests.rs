@@ -56309,10 +56309,12 @@ fn cast_target_instant_or_sorcery_from_your_graveyard_keeps_target_filter() {
 
 /// CR 118.9 + CR 119.4: Nashi's "If you cast a spell this way, pay life
 /// equal to its mana value rather than paying its mana cost" must fold
-/// onto the previous `CastFromZone` clause as `alt_ability_cost`, NOT
+/// onto the previous play grant as `alt_ability_cost`, NOT
 /// emit as a sibling `Unimplemented{name:"pay"}`. Building-block test:
 /// exercises both `try_parse_alt_cost_rider` (rider recognition) and
-/// `attach_alt_cost_to_prior_cast_from_zone` (chain folding).
+/// `attach_alt_cost_to_prior_cast_from_zone` (chain folding). (Run
+/// boon-blockers-20261010 fix round: the grant is now the promoted
+/// SingleUseGrant, not `CastFromZone` — see the walk below.)
 #[test]
 fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
     let def = super::parse_effect_chain(
@@ -56334,20 +56336,35 @@ fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
         "expected all-player ExileTop to use player_scope + Controller, got {:?}",
         def.effect
     );
-    // Walk the chain looking for the CastFromZone with alt_ability_cost set.
+    // Walk the chain looking for the promoted single-use grant carrying the
+    // rider. (Run boon-blockers-20261010 fix round: Nashi's play clause now
+    // promotes to the shared-budget SingleUseGrant via the pre-`YouMay` guard,
+    // so the carrier is GrantCastingPermission, not CastFromZone. The
+    // discriminating intent is unchanged: the rider must fold onto the grant,
+    // not leak as a sibling gap.)
     fn find_cast(d: &AbilityDefinition) -> Option<&Effect> {
-        if matches!(*d.effect, Effect::CastFromZone { .. }) {
+        if matches!(
+            *d.effect,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile { .. },
+                ..
+            }
+        ) {
             return Some(&d.effect);
         }
         d.sub_ability.as_ref().and_then(|s| find_cast(s))
     }
-    let cast = find_cast(&def).expect("CastFromZone should be in chain");
-    let Effect::CastFromZone {
-        alt_ability_cost: Some(alt),
+    let cast = find_cast(&def).expect("promoted single-use grant should be in chain");
+    let Effect::GrantCastingPermission {
+        permission:
+            CastingPermission::PlayFromExile {
+                alt_ability_cost: Some(alt),
+                ..
+            },
         ..
     } = cast
     else {
-        panic!("expected CastFromZone with alt_ability_cost, got {cast:?}");
+        panic!("expected single-use Play grant with alt_ability_cost, got {cast:?}");
     };
     assert!(
         matches!(
@@ -81202,10 +81219,11 @@ fn each_other_card_exiled_this_way_after_an_exile_until_loop_is_the_rest() {
 }
 
 /// CR 608.2g + CR 608.2c: "cast one of those two cards" keeps its one-card
-/// bound only as the free cast during resolution (a one-cast window). A paid or
-/// Play form would fall back to a permission per card, so it fails closed; a
-/// durational form is already rejected by the duration seam. The unnumbered
-/// "one of those cards" keeps its earlier reading.
+/// bound only as the free cast during resolution (a one-cast window). A paid
+/// NUMBERED form, or a free form, fails closed; a durational form is already
+/// rejected by the duration seam. A paid, duration-stated UNNUMBERED Play form
+/// promotes to the shared single-use budget instead (run boon-blockers-20261010
+/// fix round: "stated duration + paid + Play ⇒ shared-budget SingleUseGrant").
 #[test]
 fn one_of_those_two_cards_is_bounded_only_as_a_free_immediate_cast() {
     let cast_step = |tail: &str| {
@@ -81268,18 +81286,28 @@ fn one_of_those_two_cards_is_bounded_only_as_a_free_immediate_cast() {
             "{tail}: got {effect:?}"
         );
     }
+    // Paid + stated + Play + unnumbered ⇒ shared-budget promotion (Nashi's
+    // shape; run boon-blockers-20261010 fix round). The numbered, free, and
+    // duration-seam rows above keep their refusals byte-identically. The
+    // chain's exile head widens the `ParentTarget` carrier to `TrackedSet{0}`
+    // via the `needs_tracked_set` pass, exactly as for Nashi.
     let unnumbered = cast_step("Until end of turn, you may play one of those cards.");
     assert!(
         matches!(
             &unnumbered,
-            Effect::CastFromZone {
-                target: TargetFilter::ParentTarget,
-                mode: CardPlayMode::Play,
-                driver: CastFromZoneDriver::LingeringPermission,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: CardPlayMode::Play,
+                    single_use: true,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
                 ..
             }
         ),
-        "got {unnumbered:?}"
+        "paid+stated unnumbered Play must promote to the shared budget, got {unnumbered:?}"
     );
 }
 
@@ -81710,6 +81738,644 @@ fn boon_bloodrage_alpha() {
         ),
         "the granted fight body must be complete: {parsed:#?}"
     );
+    // CR 611.2a: the pure quoted-trigger grant states no duration, so it is
+    // indefinite and binds the spell being cast.
+    assert_eq!(
+        body.duration,
+        Some(Duration::Permanent),
+        "the trigger-grant clause must be indefinite: {parsed:#?}"
+    );
+    let Effect::GenericEffect { duration, .. } = body.effect.as_ref() else {
+        unreachable!("matched as GenericEffect above");
+    };
+    assert_eq!(
+        *duration,
+        Some(Duration::Permanent),
+        "the trigger-grant embedded duration must be indefinite: {parsed:#?}"
+    );
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::TriggeringSource),
+        "the granted trigger binds the cast spell: {parsed:#?}"
+    );
+}
+
+/// CR 611.2a stated-duration half: Golem Artisan prints its window inline, so
+/// every choice branch keeps it.
+#[test]
+fn golem_artisan_choice_branches_keep_stated_end_of_turn() {
+    let parsed = parse_oracle_text(
+        "{2}: Target artifact creature gains your choice of flying, trample, or haste until end of turn.",
+        "Golem Artisan",
+        &[],
+        &boon_strings(&["Artifact", "Creature"]),
+        &boon_strings(&["Golem"]),
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Golem Artisan must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.effect.as_ref(), Effect::TargetOnly { .. }))
+        .expect("the choice grant: {parsed:#?}");
+    let branches = ability
+        .sub_ability
+        .as_deref()
+        .expect("choice sub-ability: {parsed:#?}");
+    let Effect::ChooseOneOf { branches, .. } = branches.effect.as_ref() else {
+        panic!("expected ChooseOneOf, got {:?}", branches.effect);
+    };
+    assert_eq!(branches.len(), 3, "{parsed:#?}");
+    for branch in branches {
+        assert_eq!(
+            branch.duration,
+            Some(Duration::UntilEndOfTurn),
+            "stated inline window must survive: {parsed:#?}"
+        );
+    }
+}
+
+/// CR 611.2a via the outer channel: Alchemist's Gift shares one trailing
+/// window across a pump compound, and the choice half keeps it.
+#[test]
+fn alchemists_gift_pump_compound_remainder_keeps_end_of_turn() {
+    let parsed = parse_oracle_text(
+        "Target creature gets +1/+1 and gains your choice of deathtouch or lifelink until end of turn.",
+        "Alchemist's Gift",
+        &[],
+        &boon_strings(&["Instant"]),
+        &[],
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Alchemist's Gift must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let ability = &parsed.abilities[0];
+    assert_eq!(
+        ability.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the pump half keeps the shared window: {parsed:#?}"
+    );
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("choice sub-ability: {parsed:#?}");
+    let Effect::ChooseOneOf { branches, .. } = choice.effect.as_ref() else {
+        panic!("expected ChooseOneOf, got {:?}", choice.effect);
+    };
+    assert_eq!(branches.len(), 2, "{parsed:#?}");
+    for branch in branches {
+        assert_eq!(
+            branch.duration,
+            Some(Duration::UntilEndOfTurn),
+            "the choice half keeps the shared window: {parsed:#?}"
+        );
+    }
+}
+
+/// The deferred-parser flag: Smogbelcher Chariot's `perpetually` is dropped by
+/// the subject arms today, so its choice grant keeps the legacy end-of-turn
+/// stamp byte-identically until that follow-up lands.
+#[test]
+fn smogbelcher_perpetual_choice_keeps_legacy_end_of_turn() {
+    let parsed = parse_oracle_text(
+        "Menace, deathtouch, lifelink\nWhenever Smogbelcher Chariot attacks, target creature that crewed it this turn perpetually gains your choice of menace, deathtouch, or lifelink.\nCrew 3",
+        "Smogbelcher Chariot",
+        &boon_strings(&["Menace", "Deathtouch", "Lifelink", "Crew"]),
+        &boon_strings(&["Artifact"]),
+        &boon_strings(&["Vehicle"]),
+    );
+    let triggers: Vec<_> = parsed
+        .triggers
+        .iter()
+        .filter(|trigger| trigger.mode == TriggerMode::Attacks)
+        .collect();
+    assert_eq!(triggers.len(), 1, "{parsed:#?}");
+    let body = triggers[0].execute.as_deref().expect("grant body");
+    let choice = match body.effect.as_ref() {
+        Effect::ChooseOneOf { .. } => body,
+        Effect::TargetOnly { .. } => body
+            .sub_ability
+            .as_deref()
+            .expect("choice sub-ability: {parsed:#?}"),
+        other => panic!("expected a choice grant, got {other:?}: {parsed:#?}"),
+    };
+    let Effect::ChooseOneOf { branches, .. } = choice.effect.as_ref() else {
+        panic!("expected ChooseOneOf, got {:?}", choice.effect);
+    };
+    assert_eq!(branches.len(), 3, "{parsed:#?}");
+    for branch in branches {
+        assert_eq!(
+            branch.duration,
+            Some(Duration::UntilEndOfTurn),
+            "the flag-held grant keeps its legacy stamp: {parsed:#?}"
+        );
+    }
+}
+
+/// Synthetic (no printed card): a LEADING window over a choice grant threads
+/// into the branches rather than defaulting.
+#[test]
+fn synthetic_leading_duration_choice_grant_is_end_of_turn() {
+    let mut ctx = ParseContext::default();
+    let clause = parse_effect_clause(
+        "Until end of turn, creatures you control gain your choice of flying or haste",
+        &mut ctx,
+    );
+    let Effect::ChooseOneOf { branches, .. } = &clause.effect else {
+        panic!("expected ChooseOneOf, got {:?}", clause.effect);
+    };
+    assert_eq!(branches.len(), 2, "{clause:#?}");
+    for branch in branches {
+        assert_eq!(
+            branch.duration,
+            Some(Duration::UntilEndOfTurn),
+            "the leading window must thread into every branch: {clause:#?}"
+        );
+    }
+}
+
+/// The deferred-parser flag: Ob Nixilis's emblem fallback keeps its current
+/// shape — a pure trigger grant with no stamped duration — byte-identically.
+#[test]
+fn ob_nixilis_emblem_fallback_grant_unchanged() {
+    let parsed = parse_oracle_text(
+        "[−8]: Target opponent gets an emblem with \"Whenever a player draws a card, you lose 2 life.\"",
+        "Ob Nixilis Reignited",
+        &[],
+        &boon_strings(&["Planeswalker"]),
+        &boon_strings(&["Nixilis"]),
+    );
+    let mut found = 0;
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = def.effect.as_ref()
+        {
+            if static_abilities.len() == 1
+                && static_abilities[0]
+                    .modifications
+                    .iter()
+                    .all(|modification| {
+                        matches!(modification, ContinuousModification::GrantTrigger { .. })
+                    })
+                && !static_abilities[0].modifications.is_empty()
+            {
+                found += 1;
+                assert_eq!(
+                    *duration, None,
+                    "the emblem-fallback grant keeps its legacy shape: {parsed:#?}"
+                );
+            }
+        }
+    }
+    assert_eq!(found, 1, "one pure trigger-grant node: {parsed:#?}");
+}
+
+/// The deferred-parser flag: Putrefying Rotboar's `perpetually` is dropped by
+/// the subject arms today, so its quoted-trigger grant keeps its legacy
+/// unstated shape byte-identically.
+#[test]
+fn rotboar_perpetual_trigger_grant_unchanged() {
+    let parsed = parse_oracle_text(
+        "Lifelink\nWhenever a Boar you control attacks, each nonland card in defending player's hand perpetually gains \"When you cast this spell, you lose 1 life.\"",
+        "Putrefying Rotboar",
+        &boon_strings(&["Lifelink"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Elemental", "Boar"]),
+    );
+    let mut found = 0;
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = def.effect.as_ref()
+        {
+            if static_abilities.len() == 1
+                && !static_abilities[0].modifications.is_empty()
+                && static_abilities[0]
+                    .modifications
+                    .iter()
+                    .all(|modification| {
+                        matches!(modification, ContinuousModification::GrantTrigger { .. })
+                    })
+            {
+                found += 1;
+                assert_eq!(
+                    *duration, None,
+                    "the perpetual-fallback grant keeps its legacy shape: {parsed:#?}"
+                );
+            }
+        }
+    }
+    assert_eq!(found, 1, "one pure trigger-grant node: {parsed:#?}");
+}
+
+/// Hostile mixed shape: Abnormal Endurance pairs a pump with its quoted
+/// trigger under a leading window, so the grant keeps the stated window.
+#[test]
+fn abnormal_endurance_mixed_grant_keeps_leading_end_of_turn() {
+    let parsed = parse_oracle_text(
+        "Until end of turn, target creature gets +2/+0 and gains \"When this creature dies, return it to the battlefield tapped under its owner's control.\"",
+        "Abnormal Endurance",
+        &[],
+        &boon_strings(&["Instant"]),
+        &[],
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Abnormal Endurance must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert_eq!(
+        parsed.abilities[0].duration,
+        Some(Duration::UntilEndOfTurn),
+        "the mixed grant keeps its leading window: {parsed:#?}"
+    );
+}
+
+/// B2: Electrostatic Blast's boon body promotes its capped batch play to the
+/// shared single-use budget.
+#[test]
+fn electrostatic_blast_promotes_to_single_use_grant() {
+    let parsed = parse_oracle_text(
+        "Electrostatic Blast deals 2 damage to any target. You get a one-time boon with \"When you cast an instant or sorcery spell, exile the top three cards of your library. You may play one of those cards until end of turn.\"",
+        "Electrostatic Blast",
+        &[],
+        &boon_strings(&["Instant"]),
+        &[],
+    );
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Electrostatic Blast");
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    let exile = inner.execute.as_deref().expect("exile leg");
+    assert!(
+        matches!(exile.effect.as_ref(), Effect::ExileTop { .. }),
+        "exile head: {parsed:#?}"
+    );
+    let grant = exile.sub_ability.as_deref().expect("play grant");
+    assert!(
+        matches!(
+            grant.effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::UntilEndOfTurn,
+                    single_use: true,
+                    card_filter: None,
+                    alt_ability_cost: None,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "expected a shared-budget single-use Play grant, got {:?}: {parsed:#?}",
+        grant.effect
+    );
+}
+
+/// B2: Flameskull's leading next-turn window promotes with the window intact.
+///
+/// The leading window reaches the promotion via the pre-`YouMay` guard
+/// (`try_parse_one_of_batch_cast_preface`, run boon-blockers-20261010 fix round).
+#[test]
+fn flameskull_promotes_to_single_use_grant() {
+    let parsed = parse_oracle_text(
+        "Flying\nThis creature can't block.\nRejuvenation — When this creature dies, exile it. If you do, exile the top card of your library. Until the end of your next turn, you may play one of those cards.",
+        "Flameskull",
+        &boon_strings(&["Flying"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Skeleton"]),
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Flameskull must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let mut grants = Vec::new();
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if matches!(def.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grants.push(def);
+        }
+    }
+    assert_eq!(grants.len(), 1, "{parsed:#?}");
+    assert!(
+        !grants[0].optional,
+        "optional parity with Locke's SingleUseGrant (Step 3.5a probe: Locke optional=false): {parsed:#?}"
+    );
+    assert!(
+        matches!(
+            grants[0].effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::UntilEndOfNextTurnOf { .. },
+                    single_use: true,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "expected a next-turn single-use Play grant, got {:?}: {parsed:#?}",
+        grants[0].effect
+    );
+}
+
+/// B2: Nashi promotes, and its "this way" life-payment rider folds onto the
+/// grant through the existing AltCost fallback.
+///
+/// The leading window reaches the promotion via the pre-`YouMay` guard
+/// (`try_parse_one_of_batch_cast_preface`, run boon-blockers-20261010 fix round).
+#[test]
+fn nashi_promotes_with_alt_cost_rider() {
+    let parsed = parse_oracle_text(
+        "Ninjutsu {3}{B} ({3}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever Nashi deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+        "Nashi, Moon Sage's Scion",
+        &boon_strings(&["Ninjutsu"]),
+        &boon_strings(&["Legendary", "Creature"]),
+        &boon_strings(&["Rat", "Ninja"]),
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Nashi must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let mut grants = Vec::new();
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if matches!(def.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grants.push(def);
+        }
+    }
+    assert_eq!(grants.len(), 1, "{parsed:#?}");
+    assert!(
+        !grants[0].optional,
+        "optional parity with Locke's SingleUseGrant (Step 3.5a probe: Locke optional=false): {parsed:#?}"
+    );
+    assert!(
+        matches!(
+            grants[0].effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::UntilEndOfTurn,
+                    single_use: true,
+                    alt_ability_cost: Some(_),
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "expected a single-use Play grant carrying the life-payment rider, got {:?}: {parsed:#?}",
+        grants[0].effect
+    );
+}
+
+/// B2: Unlucky Witness promotes with its next-end-step window intact.
+///
+/// The leading window reaches the promotion via the pre-`YouMay` guard
+/// (`try_parse_one_of_batch_cast_preface`, run boon-blockers-20261010 fix round).
+#[test]
+fn unlucky_witness_promotes_to_single_use_grant() {
+    let parsed = parse_oracle_text(
+        "When this creature dies, exile the top two cards of your library. Until your next end step, you may play one of those cards.",
+        "Unlucky Witness",
+        &[],
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Citizen"]),
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Unlucky Witness must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let mut grants = Vec::new();
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if matches!(def.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grants.push(def);
+        }
+    }
+    assert_eq!(grants.len(), 1, "{parsed:#?}");
+    assert!(
+        !grants[0].optional,
+        "optional parity with Locke's SingleUseGrant (Step 3.5a probe: Locke optional=false): {parsed:#?}"
+    );
+    assert!(
+        matches!(
+            grants[0].effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::UntilNextStepOf { .. },
+                    single_use: true,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "expected an end-step single-use Play grant, got {:?}: {parsed:#?}",
+        grants[0].effect
+    );
+}
+
+/// B2: Tezzeret's exile-lifetime window normalizes to the indefinite grant.
+///
+/// The leading window reaches the promotion via the pre-`YouMay` guard
+/// (`try_parse_one_of_batch_cast_preface`, run boon-blockers-20261010 fix round).
+#[test]
+fn tezzerets_reckoning_promotes_with_permanent_duration() {
+    let parsed = parse_oracle_text(
+        "Exile three random cards from your library face down and look at them. For as long as they remain exiled, you may play one of those cards.",
+        "Tezzeret's Reckoning",
+        &[],
+        &boon_strings(&["Instant"]),
+        &[],
+    );
+    let mut grants = Vec::new();
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if matches!(def.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grants.push(def);
+        }
+    }
+    assert_eq!(grants.len(), 1, "{parsed:#?}");
+    assert!(
+        !grants[0].optional,
+        "optional parity with Locke's SingleUseGrant (Step 3.5a probe: Locke optional=false): {parsed:#?}"
+    );
+    assert!(
+        matches!(
+            grants[0].effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::Permanent,
+                    single_use: true,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "expected an indefinite single-use Play grant, got {:?}: {parsed:#?}",
+        grants[0].effect
+    );
+}
+
+/// U3d (run boon-blockers-20261010): Fire Lord Ozai's free + stated batch play
+/// promotes to the shared-budget single-use grant with the free-cost channel
+/// stamped on it — cap-of-one + free + stated EOT + Play mode is one shared
+/// free budget over the exiled batch. The leading window reaches the
+/// promotion via the pre-`YouMay` guard (widened to free+stated shapes).
+#[test]
+fn fire_lord_ozai_promotes_to_free_single_use_grant() {
+    let text = "{6}: Exile the top card of each opponent's library. Until end of turn, you may play one of those cards without paying its mana cost.";
+    let parsed = parse_oracle_text(
+        text,
+        "Fire Lord Ozai",
+        &boon_strings(&[""]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Noble"]),
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Fire Lord Ozai must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let mut grants = Vec::new();
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if matches!(def.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grants.push(def);
+        }
+    }
+    assert_eq!(grants.len(), 1, "{parsed:#?}");
+    assert!(
+        !grants[0].optional,
+        "optional parity with Locke's SingleUseGrant (Step 3.5a probe: Locke optional=false): {parsed:#?}"
+    );
+    assert!(
+        matches!(
+            grants[0].effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::UntilEndOfTurn,
+                    single_use: true,
+                    without_paying_mana_cost: true,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "expected a free end-of-turn single-use Play grant, got {:?}: {parsed:#?}",
+        grants[0].effect
+    );
+}
+
+/// B2/U3d: a free batch play with NO stated duration (Vault 112) has no
+/// window to share, so it refuses honestly.
+#[test]
+fn free_one_of_batch_grants_refuse_honestly() {
+    // Vault 112 only (single shape — no loop: the Ozai free+stated sibling
+    // promotes per U3d, so it no longer belongs in this refusal pin).
+    let card = "Vault 112";
+    let text = "III — Pay any amount of {E}. If you paid one or more {E} this way, shuffle your library, then exile that many cards from the top. You may play one of those cards without paying its mana cost.";
+    let (keywords, types, subtypes): (&[&str], &[&str], &[&str]) =
+        (&[], &["Enchantment"], &["Saga"]);
+    let parsed = parse_oracle_text(
+        text,
+        card,
+        &boon_strings(keywords),
+        &boon_strings(types),
+        &boon_strings(subtypes),
+    );
+    let gaps = outer_gap_names(&parsed);
+    assert!(
+        gaps.iter().any(|gap| gap == "bounded_batch_cast"),
+        "{card}: the free batch play must refuse as bounded_batch_cast, got {gaps:?}: {parsed:#?}"
+    );
+    let face = CardFace {
+        name: card.to_string(),
+        oracle_text: Some(text.to_string()),
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        ..Default::default()
+    };
+    assert!(
+        card_face_has_unimplemented_parts(&face),
+        "{card}: must stay red: {face:#?}"
+    );
+}
+
+/// B2: Invasion of Alara's free immediate cast keeps its resolution window.
+#[test]
+fn invasion_of_alara_keeps_resolution_window() {
+    let parsed = parse_oracle_text(
+        "When this Siege enters, exile cards from the top of your library until you exile two nonland cards with mana value 4 or less. You may cast one of those two cards without paying its mana cost. Put one of them into your hand. Then put the other cards exiled this way on the bottom of your library in a random order.",
+        "Invasion of Alara",
+        &[],
+        &boon_strings(&["Battle"]),
+        &boon_strings(&["Siege"]),
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Invasion of Alara must stay gap-free, got {:?}: {parsed:#?}",
+        outer_gap_names(&parsed)
+    );
+    let mut windows = 0;
+    let mut defs = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut defs);
+    for def in defs {
+        if let Effect::CastFromZone {
+            driver: crate::types::ability::CastFromZoneDriver::ResolutionWindow { bounds },
+            ..
+        } = def.effect.as_ref()
+        {
+            assert_eq!(bounds.max_casts, Some(1), "one-cast window: {parsed:#?}");
+            windows += 1;
+        }
+    }
+    assert_eq!(windows, 1, "{parsed:#?}");
 }
 
 #[test]
@@ -82387,6 +83053,28 @@ fn boon_swiftspears_teachings() {
     );
     let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Swiftspear's Teachings");
     assert_eq!(inner.mode, TriggerMode::SpellCast);
+    // CR 611.2a: the choice grant states no duration, so every branch is
+    // indefinite — carrier and embedded alike.
+    let body = inner.execute.as_deref().expect("grant body");
+    let Effect::ChooseOneOf { branches, .. } = body.effect.as_ref() else {
+        panic!("expected a keyword-choice grant, got {:?}", body.effect);
+    };
+    assert_eq!(branches.len(), 2, "{parsed:#?}");
+    for branch in branches {
+        assert_eq!(
+            branch.duration,
+            Some(Duration::Permanent),
+            "choice branch carrier must be indefinite: {parsed:#?}"
+        );
+        let Effect::GenericEffect { duration, .. } = branch.effect.as_ref() else {
+            panic!("expected a GenericEffect branch, got {:?}", branch.effect);
+        };
+        assert_eq!(
+            *duration,
+            Some(Duration::Permanent),
+            "choice branch embedded duration must be indefinite: {parsed:#?}"
+        );
+    }
 }
 
 #[test]

@@ -242,6 +242,9 @@ fn resolve_put_sticker(
             replacement_applied: ability.replacement_applied.clone(),
             continuation: None,
             players: vec![ability.controller],
+            // CR 608.2 (run boon-blockers-20261010): synthetic sticker
+            // branches carry no trigger-event context — None is a no-op.
+            trigger_context: None,
         },
     );
     events.push(GameEvent::EffectResolved {
@@ -309,6 +312,9 @@ fn prompt_count_choice(
             replacement_applied: ability.replacement_applied.clone(),
             continuation: None,
             players: vec![ability.controller],
+            // CR 608.2 (run boon-blockers-20261010): synthetic sticker
+            // branches carry no trigger-event context — None is a no-op.
+            trigger_context: None,
         },
     );
 }

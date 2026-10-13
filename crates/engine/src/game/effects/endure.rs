@@ -133,6 +133,9 @@ pub fn resolve(
             replacement_applied: ability.replacement_applied.clone(),
             continuation: None,
             players: vec![enduring_controller],
+            // CR 608.2 (run boon-blockers-20261010): endure branches carry no
+            // trigger-event context — None is a no-op.
+            trigger_context: None,
         },
     );
 

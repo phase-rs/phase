@@ -3967,6 +3967,7 @@ mod tests {
             ))),
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
 
         for viewer in [PlayerId(0), PlayerId(1)] {

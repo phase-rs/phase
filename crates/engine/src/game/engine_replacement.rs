@@ -8433,6 +8433,7 @@ mod tests {
             continuation: None,
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
         state.priority_player = PlayerId(0);
         assert!(

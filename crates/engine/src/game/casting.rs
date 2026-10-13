@@ -9162,6 +9162,18 @@ fn prepare_spell_cast_announced(
                     granted_to,
                     ..
                 } if *granted_to == player => Some(crate::types::mana::ManaCost::zero()),
+                // CR 118.9 (run boon-blockers-20261010): Fire Lord Ozai class —
+                // a `PlayFromExile` grant stamped free ("without paying its
+                // mana cost") zeroes the spell's mana cost exactly like the
+                // Inside Information arm above. The grant's own election
+                // decides: the field rides the elected permission through
+                // prepared/finalized cast, so a second active permission for
+                // the same exiled spell keeps its own cost treatment.
+                crate::types::ability::CastingPermission::PlayFromExile {
+                    without_paying_mana_cost: true,
+                    granted_to,
+                    ..
+                } if *granted_to == player => Some(crate::types::mana::ManaCost::zero()),
                 _ => None,
             })
             .or_else(|| {
@@ -33486,6 +33498,7 @@ mod dandan_read_sweep_tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
         id

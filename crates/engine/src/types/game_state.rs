@@ -4633,6 +4633,12 @@ pub struct PendingChooseOneOf {
     )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
+    /// CR 608.2: prompt-time trigger-event context, carried across the
+    /// ChooseOneOfBranch pause so event-context-bound branches resolve as if
+    /// unpaused (Swiftspear loss, run boon-blockers-20261010). Mirrors
+    /// PendingContinuation.trigger_context; None = no live context = no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { zone_owner: EachPlayer }`
@@ -14996,6 +15002,12 @@ pub enum WaitingFor {
         /// Players still to face the same choice in APNAP order (CR 701.55d).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining_players: Vec<PlayerId>,
+        /// CR 608.2: prompt-time trigger-event context, carried across the
+        /// ChooseOneOfBranch pause so event-context-bound branches resolve as
+        /// if unpaused (Swiftspear loss, run boon-blockers-20261010). Mirrors
+        /// PendingContinuation.trigger_context; None = no live context = no-op.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_context: Option<ResolvingTriggerContext>,
     },
     /// CR 701.50a: Player chooses card(s) to discard for connive.
     /// After discarding, nonland discards add +1/+1 counters to the conniving creature.
@@ -42488,6 +42500,7 @@ mod tests {
             continuation: None,
             replacement_applied: Default::default(),
             remaining_players: vec![],
+            trigger_context: None,
         }));
         variants.push(Box::new(WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),

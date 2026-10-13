@@ -2545,6 +2545,7 @@ fn record_lingering_permissions(
                     // is the only carrier.
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: EtbTapState::Unspecified,
                 };
 

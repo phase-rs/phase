@@ -5075,6 +5075,18 @@ pub enum CastingPermission {
         /// mirroring the `ExileWithAltAbilityCost` consumption path exactly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alt_ability_cost: Option<AbilityCost>,
+        /// CR 118.9: Free-cast channel for the "you may play one of those
+        /// cards without paying its mana cost" class (Fire Lord Ozai). When
+        /// `true`, spells cast via this grant cost zero mana — wired into the
+        /// `alt_cost_from_exile` zeroing in `prepare_spell_cast_announced`,
+        /// mirroring the Inside Information `alt_ability_cost` arm. The zero
+        /// cost rides ON the shared single-use permission (never a second
+        /// permission: per `casting.rs`, alt-slot-elected casts do not consume
+        /// single-use grants, so a second permission would break the printed
+        /// cap-of-one). Land plays are unaffected (lands have no mana cost).
+        /// `false` (default) preserves every existing paid grant byte-identically.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        without_paying_mana_cost: bool,
         /// CR 614.1c: Lands played via this permission enter with this tap state
         /// ("Each land played this way enters tapped." — Lightstall Inquisitor).
         /// "enters tapped" is a CR 614.1c "[permanent] enters ..." replacement.

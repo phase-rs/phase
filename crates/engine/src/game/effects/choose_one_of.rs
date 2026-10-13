@@ -3,10 +3,12 @@ use std::collections::HashSet;
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::players;
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingChooseOneOf, ResolvingTriggerContext, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::AppliedReplacementKey;
@@ -42,6 +44,10 @@ pub fn resolve(
             "ChooseOneOf: no eligible player for chooser {chooser:?}"
         )));
     }
+    // CR 608.2 (run boon-blockers-20261010): capture the live trigger-event
+    // context ONCE at prompt time — the pause below destroys
+    // resolution-scoped context, and at branch time the event is already None.
+    let trigger_context = ResolvingTriggerContext::capture(state);
     prompt_next(
         state,
         PromptRequest {
@@ -53,6 +59,7 @@ pub fn resolve(
             continuation: ability.sub_ability.clone(),
             replacement_applied: ability.replacement_applied.clone(),
             players,
+            trigger_context,
         },
     );
 
@@ -73,6 +80,7 @@ pub(crate) struct PromptRequest {
     pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub players: Vec<PlayerId>,
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
@@ -85,6 +93,7 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         continuation,
         replacement_applied,
         mut players,
+        trigger_context,
     } = request;
     let Some(player) = players.first().copied() else {
         return;
@@ -102,6 +111,11 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         continuation,
         replacement_applied,
         remaining_players: players,
+        // CR 608.2: thread the STORED prompt-time context — never
+        // fresh-capture here (`prompt_next` is also reached from
+        // `resume_pending` at priority time, where a fresh capture returns
+        // None and would discard the carry).
+        trigger_context,
     };
     // `priority_player` routing to the chooser is owned by the centralized
     // post-apply sync (`public_state::sync_priority_player_from_waiting_for`),
@@ -132,6 +146,9 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
             continuation: pending.continuation,
             replacement_applied: pending.replacement_applied,
             players: pending.remaining_players,
+            // CR 608.2: thread the frame's STORED context (never recapture —
+            // at priority time a fresh capture returns None).
+            trigger_context: pending.trigger_context,
         },
     );
 }
@@ -146,6 +163,7 @@ pub(crate) struct BranchSelection {
     pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
+    pub trigger_context: Option<ResolvingTriggerContext>,
     pub index: usize,
 }
 
@@ -164,6 +182,7 @@ pub(crate) fn resolve_branch(
         continuation,
         replacement_applied,
         remaining_players,
+        trigger_context,
         index,
     } = selection;
     let Some(branch) = branches.get(index) else {
@@ -183,6 +202,9 @@ pub(crate) fn resolve_branch(
             continuation: continuation.clone(),
             replacement_applied: replacement_applied.clone(),
             remaining_players,
+            // CR 608.2: copy the STORED prompt-time context forward (never
+            // re-capture — the event is already None at branch time).
+            trigger_context: trigger_context.clone(),
         });
     }
 
@@ -191,10 +213,34 @@ pub(crate) fn resolve_branch(
     resolved.targets = parent_targets;
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
-    if !resolved
-        .targets
-        .iter()
-        .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
+    // CR 603.2 + CR 608.2c (run boon-blockers-20261010): skip the chooser-target
+    // push when the SELECTED branch is event-context-bound (`target: None` with
+    // an `affected: TriggeringSource` carrier — the boon-fired keyword-choice
+    // shape, e.g. Swiftspear's Teachings' "it gains your choice of prowess or
+    // haste"). The unconditional push fills `ability.targets`, which defeats
+    // the `affected: TriggeringSource` early-return in effect.rs (gated on
+    // `ability.targets.is_empty()`) and misbinds the grant to
+    // `SpecificPlayer(chooser)` instead of the triggering object. Every other
+    // branch keeps the push byte-identically — ordinary `target: Some`
+    // branches, `affected: None`/`Controller`/broadcast recipients (the push
+    // is their recipient), and non-context `affected` — including the
+    // villainous-choice branches the push was introduced for (de2e0db063),
+    // which never carry `TriggeringSource`.
+    let branch_is_event_context_bound = matches!(
+        branch.effect.as_ref(),
+        Effect::GenericEffect {
+            target: None,
+            static_abilities,
+            ..
+        } if static_abilities
+            .iter()
+            .any(|s| matches!(s.affected, Some(TargetFilter::TriggeringSource)))
+    );
+    if !branch_is_event_context_bound
+        && !resolved
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
     {
         resolved.targets.push(TargetRef::Player(player));
     }
@@ -209,7 +255,19 @@ pub(crate) fn resolve_branch(
         }
     }
 
-    super::resolve_ability_chain(state, &resolved, events, 1)?;
+    // CR 608.2: replay the carried prompt-time context around branch
+    // resolution (the ChooseZoneChoice mirror) so
+    // `resolve_event_context_target(TriggeringSource)` answers exactly what
+    // it would have answered without the pause; `None`-carry is a
+    // byte-identical no-op and the restore bounds the window to this branch.
+    let trigger_snapshot = trigger_context
+        .as_ref()
+        .map(|ctx| super::super::triggers::push_resolving_trigger_context(state, ctx));
+    let result = super::resolve_ability_chain(state, &resolved, events, 1);
+    if let Some(snapshot) = trigger_snapshot {
+        super::super::triggers::restore_trigger_event_context(state, snapshot);
+    }
+    result?;
     resume_pending(state, events);
     // NOTE: the token-choice applied seed is intentionally NOT cleared here.
     // A branch may stash a token-bearing sub-ability into `pending_continuation`

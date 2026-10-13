@@ -1034,6 +1034,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
