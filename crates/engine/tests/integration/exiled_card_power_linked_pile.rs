@@ -20,9 +20,10 @@
 //!    with it, it gets +X/+X until end of turn, where X is the power of the
 //!    exiled card."
 //!
-//! Every row drives the real pipeline: casts, the ETB exile, turn changes,
-//! declare-attackers, the attack trigger and stack resolution, then reads the
-//! effective (post-layer) power and toughness.
+//! Every Bishop row drives the real pipeline: casts, the ETB exile, turn
+//! changes, declare-attackers, the attack trigger and stack resolution, then
+//! reads the effective (post-layer) power and toughness. The Dreadnought rows
+//! start on the battlefield; R4 seeds its link (a labelled reader row).
 
 use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

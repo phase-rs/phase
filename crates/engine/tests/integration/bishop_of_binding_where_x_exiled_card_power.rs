@@ -1,4 +1,4 @@
-//! CR 107.3c — "where X is the power of the exiled card" must actually pump.
+//! CR 607.2a — "where X is the power of the exiled card" must actually pump.
 //!
 //! Bishop of Binding (RIX), Oracle text (read from the card export, not memory):
 //!   "When this creature enters, exile target creature an opponent controls
@@ -44,7 +44,7 @@ controls until this creature leaves the battlefield.\n\
 Whenever this creature attacks, target Vampire gets +X/+X until end of turn, where X is the power \
 of the exiled card.";
 
-/// CR 107.3c + CR 607.2a: X is DEFINED by the ability's text as the power of the
+/// CR 607.2a: X is DEFINED by the ability's text as the power of the
 /// card exiled with Bishop of Binding. With a 4/4 exiled, the targeted Vampire
 /// must become an effective 2/2 + 4/4 = 6/6.
 #[test]
@@ -136,7 +136,7 @@ fn bishop_of_binding_pumps_target_vampire_by_exiled_card_power() {
     assert_eq!(
         (pumped.power, pumped.toughness),
         (Some(6), Some(6)),
-        "CR 107.3c: X is DEFINED as the exiled card's power (4), so the targeted \
+        "CR 607.2a: X is DEFINED as the exiled card's power (4), so the targeted \
          Vampire must be 2/2 + 4/4 = 6/6. A 2/2 here means the where-X binding was \
          dropped and the pump silently resolved as a +0/+0 no-op."
     );
