@@ -25362,8 +25362,6 @@ fn connive_where_x_is_creatures_died_this_turn() {
 /// not receive that discarded parse's `TargetFallback` (Spymaster's Vault).
 #[test]
 fn connive_where_x_keeps_discarded_target_fallback_off_the_caller() {
-    use crate::types::zones::Zone;
-
     let mut ctx = ParseContext {
         relative_player_scope: Some(ControllerRef::TargetPlayer),
         ..ParseContext::default()
