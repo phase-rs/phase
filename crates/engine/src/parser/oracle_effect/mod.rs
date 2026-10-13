@@ -10395,10 +10395,11 @@ fn rebind_owned_scope(filter: &mut TargetFilter, to: ControllerRef) {
 /// scope rebinding; `rebind_owned_scope` above is the pre-existing
 /// `ScopedPlayer → <target>` specialization kept as-is per the #6505 review.
 ///
-/// CR 109.4 + CR 115.10a (issue #6505): used to lift a battlefield resolution-pick
-/// leg's default `You` scope (the anaphoric "they control" lowered without a
-/// parse-time relative-scope pin) to `ScopedPlayer`, so the resolution-time
-/// `scoped_player` stamp binds the chooser to the target player, not the caster.
+/// CR 109.4 + CR 115.10a + CR 608.2d (issue #6505): used to lift a resolution-pick
+/// leg's subject-seeded scope (the anaphoric "they control" bound to the
+/// subject's target player by `lower_subject_predicate_ast`'s seed) to
+/// `ScopedPlayer`, so the resolution-time `scoped_player` stamp binds the chooser
+/// to the target player, not the caster.
 fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: ControllerRef) {
     use crate::types::ability::FilterProp;
     match filter {
@@ -26876,11 +26877,58 @@ fn target_announcer_from_subject(
     }
 }
 
+/// CR 608.2c: Lower a subject-predicate clause with the subject seeded as the
+/// antecedent of the predicate's "that player" / "they". The seed only fills an
+/// empty relative scope: a scope an enclosing trigger, mode or for-each already
+/// pinned is the nearer antecedent and is kept.
+///
+/// A declared player subject (`TargetPlayer` / `TargetOpponent`) is carried in
+/// the binder's declared rungs (`declared_player_scope` +
+/// `prior_player_declaration`); every other seed (an object subject's
+/// controller) is carried in `relative_player_scope`. Both are restored before
+/// returning, so the seed never leaks past this clause.
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
     ctx: &mut ParseContext,
     original_clause: &str,
+) -> ParsedEffectClause {
+    let seed = if ctx.relative_player_scope.is_none() {
+        subject::subject_player_antecedent(&subject)
+    } else {
+        None
+    };
+    match seed {
+        Some(seed @ (ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)) => {
+            let prev_declared = ctx.declared_player_scope.replace(seed.clone());
+            let prev_prior = std::mem::replace(&mut ctx.prior_player_declaration, true);
+            let lowered = lower_subject_predicate_ast_body(
+                subject,
+                predicate,
+                ctx,
+                original_clause,
+                Some(&seed),
+            );
+            ctx.declared_player_scope = prev_declared;
+            ctx.prior_player_declaration = prev_prior;
+            lowered
+        }
+        Some(seed) => ctx.with_player_scope(seed.clone(), |ctx| {
+            lower_subject_predicate_ast_body(subject, predicate, ctx, original_clause, Some(&seed))
+        }),
+        None => lower_subject_predicate_ast_body(subject, predicate, ctx, original_clause, None),
+    }
+}
+
+/// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
+/// antecedent the entry wrote into the context (whichever field carries it), or
+/// `None` when the entry seeded nothing.
+fn lower_subject_predicate_ast_body(
+    subject: SubjectPhraseAst,
+    predicate: PredicateAst,
+    ctx: &mut ParseContext,
+    original_clause: &str,
+    seeded: Option<&ControllerRef>,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -27342,12 +27390,22 @@ fn lower_subject_predicate_ast(
                     let moved_object_is_resolution_pick = match &clause.effect {
                         Effect::ChangeZone { origin, target, .. }
                         | Effect::ChangeZoneAll { origin, target, .. } => {
-                            lower::change_zone_target_choice_timing(
-                                *origin,
-                                target,
-                                clause.multi_target.is_some(),
-                                &pred_lower,
-                            ) == crate::types::ability::TargetChoiceTiming::Resolution
+                            // CR 608.2d + CR 115.10a: a disjunctive moved object
+                            // ("a creature or planeswalker they control") is the
+                            // subject player's resolution pick exactly when each
+                            // disjunct is.
+                            let legs: &[TargetFilter] = match target {
+                                TargetFilter::Or { filters } if !filters.is_empty() => filters,
+                                other => std::slice::from_ref(other),
+                            };
+                            legs.iter().all(|leg| {
+                                lower::change_zone_target_choice_timing(
+                                    *origin,
+                                    leg,
+                                    clause.multi_target.is_some(),
+                                    &pred_lower,
+                                ) == crate::types::ability::TargetChoiceTiming::Resolution
+                            })
                         }
                         Effect::PutAtLibraryPosition { .. } => {
                             !nom_primitives::scan_contains(&pred_lower, "target ")
@@ -27365,26 +27423,24 @@ fn lower_subject_predicate_ast(
                     // slots: TargetOnly player + companion TargetPlayer slot +
                     // Stack ChangeZone card slot.
                     //
-                    // CR 115.10a (issue #6505, review follow-up): the battlefield
-                    // resolution-pick leg's anaphoric "they control" lowered to
-                    // the default `ControllerRef::You`
-                    // (oracle_target::parse_controller_suffix, no scope pinned),
-                    // so rewrite ONLY this moved-object leg's `You` scope to
-                    // `ScopedPlayer` here. The runtime `scoped_player` stamp then
-                    // binds the chooser to the target player. Gated on the "they
-                    // control" anaphor so a "you control" caster leg (also `You`)
-                    // is never mis-rebound; Relic's "their graveyard" leg is
-                    // already `Owned{ScopedPlayer}` and needs no rewrite.
-                    let moved_object_is_they_control_pick = moved_object_is_resolution_pick
-                        && scan_contains_phrase(&pred_lower, "they control");
-                    if moved_object_is_they_control_pick {
+                    // CR 115.10a + CR 608.2d (issue #6505): the entry seeded the
+                    // subject player as the antecedent of the predicate's "they
+                    // control" / "that player controls", so a resolution-pick
+                    // leg's controller reads that seed. Rewrite exactly the seed
+                    // to `ScopedPlayer` on this moved-object leg: the runtime
+                    // `scoped_player` stamp then binds both the chooser and the
+                    // candidates to the target player. An explicit "you control"
+                    // leg reads `You`, never the seed, so it is never rebound;
+                    // Relic's "their graveyard" leg is already
+                    // `Owned{ScopedPlayer}` and needs no rewrite.
+                    if let Some(seed) = seeded.filter(|_| moved_object_is_resolution_pick) {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. }
                             | Effect::PutAtLibraryPosition { target, .. } => {
                                 rebind_controller_scope(
                                     target,
-                                    ControllerRef::You,
+                                    seed.clone(),
                                     ControllerRef::ScopedPlayer,
                                 );
                             }
@@ -27862,17 +27918,28 @@ fn coordinated_player_member(second: &TargetFilter, ctx: &ParseContext) -> Optio
     }
 }
 
-/// CR 115.1: True for the two conjuncts that declare their own player target
-/// ("target player", "target opponent" — the grammar's exact values). Shared by
-/// the member mapping and the `TargetOnly` head rule so both read one decision.
-fn is_targeted_player_conjunct(second: &TargetFilter) -> bool {
-    match second {
-        TargetFilter::Player => true,
-        TargetFilter::Typed(filter) => {
-            *filter == TypedFilter::default().controller(ControllerRef::Opponent)
+/// CR 115.1: The `ControllerRef` naming the single player a "target player" /
+/// "target opponent" phrase declares (the grammar's exact values). `None` for
+/// every other filter. The one shape authority read by the coordinated-member
+/// mapping, the `TargetOnly` head rule, the declared damage recipient and the
+/// subject antecedent.
+pub(super) fn declared_player_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        TargetFilter::Typed(tf)
+            if *tf == TypedFilter::default().controller(ControllerRef::Opponent) =>
+        {
+            Some(ControllerRef::TargetOpponent)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// CR 115.1: True for the two conjuncts that declare their own player target
+/// ("target player", "target opponent"). Shared by the member mapping and the
+/// `TargetOnly` head rule so both read one decision.
+fn is_targeted_player_conjunct(second: &TargetFilter) -> bool {
+    declared_player_controller_ref(second).is_some()
 }
 
 /// CR 101.4 + CR 101.4a + CR 101.4b + CR 608.2e: True when a coordinated body may

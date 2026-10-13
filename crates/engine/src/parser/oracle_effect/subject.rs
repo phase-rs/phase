@@ -2637,6 +2637,48 @@ pub(super) fn chosen_player_anaphor_filter(scope: Option<&ControllerRef>) -> Opt
     }))
 }
 
+/// CR 115.1 + CR 109.4 + CR 608.2c: The single player a subject phrase
+/// introduces as the antecedent of a "that player" / "they" in its own
+/// predicate. A declared player subject ("target player", "target opponent")
+/// names itself; an object subject names its controller. A subject declaring
+/// several players ("any number of target opponents each …") names no single
+/// player: each member is the antecedent in turn, so no declared slot can stand
+/// for it.
+pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<ControllerRef> {
+    if subject.multi_target.is_some() {
+        return None;
+    }
+    let target = subject.target.as_ref()?;
+    if let Some(declared) = super::declared_player_controller_ref(target) {
+        return Some(declared);
+    }
+    match target {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => match tf.controller.as_ref()? {
+            // "target creature you control": the caster is not a third-person
+            // "that player" / "they" antecedent, so the subject seeds nothing.
+            ControllerRef::You => None,
+            // "target creature an opponent controls": the targeted object's
+            // controller.
+            ControllerRef::Opponent => Some(ControllerRef::ParentTargetController),
+            other @ (ControllerRef::ScopedPlayer
+            | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::ParentTargetController
+            | ControllerRef::EventTargetController
+            | ControllerRef::ParentTargetOwner
+            | ControllerRef::DefendingPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::DeclaredPlayer { .. }
+            | ControllerRef::SourceChosenPlayer
+            | ControllerRef::TriggeringPlayer
+            | ControllerRef::EnchantedPlayer
+            | ControllerRef::ActivePlayer
+            | ControllerRef::SpecificPlayer { .. }) => Some(other.clone()),
+        },
+        _ => None,
+    }
+}
+
 /// Which player-subject anaphor a standalone "that/the player" clause names.
 ///
 /// Both forms resolve to an event-context `TargetFilter` via

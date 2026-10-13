@@ -19,12 +19,14 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
-    parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
-    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
+    parse_for_each_clause_expr_with_context, parse_for_each_short_of_clause_expr,
+    parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
-    parse_that_clause_suffix, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -53,10 +55,10 @@ use crate::types::zones::{EtbTapState, Zone};
 // These are private to oracle_effect but accessible here as a descendant module.
 use super::subject;
 use super::{
-    each_target_filter_mut, has_typed_target, is_broadcast_population_filter, parse_effect_clause,
-    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
-    refine_damage_target_remainder, replace_player_anaphor, scan_contains_phrase,
-    target_filter_controller_ref, ParsedEffectClause,
+    declared_player_controller_ref, each_target_filter_mut, has_typed_target,
+    is_broadcast_population_filter, parse_effect_clause, parse_event_context_ref_with_ctx,
+    parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
+    scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
 use crate::game::effects::effect::generic_effect_population_filter;
 
@@ -9681,22 +9683,39 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             // Classify the recipient scope BEFORE parsing the amount so the
             // count's controller threads to `ScopedPlayer` (Acidic Soil).
             let each_player_scope = parse_damage_each_player_scope(target_phrase).is_some();
-            // Parse amount using existing helpers
-            let qty = crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-                .or_else(|| {
-                    if references_defending_player {
-                        ctx.with_player_scope(ControllerRef::DefendingPlayer, |amount_ctx| {
-                            parse_cda_quantity_with_context(amount_phrase, amount_ctx)
-                        })
-                    } else if each_player_scope {
-                        ctx.with_player_scope(ControllerRef::ScopedPlayer, |amount_ctx| {
-                            parse_cda_quantity_with_context(amount_phrase, amount_ctx)
-                        })
-                    } else {
-                        parse_cda_quantity_with_context(amount_phrase, ctx)
-                    }
-                })
-                .or_else(|| parse_contextual_bare_card_aggregate(amount_phrase, ctx));
+            // CR 115.1 + CR 608.2c: a declared player recipient ("target player",
+            // "target opponent") is the antecedent of a "that player" / "they" in
+            // the amount (Anathemancer). Classified by the target grammar on a
+            // throwaway context, so the classification parse writes nothing into
+            // `ctx`.
+            let declared_recipient_scope = {
+                let (filter, rest, syntax) =
+                    parse_target_with_syntax(target_phrase, &mut ctx.clone_throwaway());
+                (syntax == TargetSyntax::TargetKeyword && rest.trim().is_empty())
+                    .then(|| declared_player_controller_ref(&filter))
+                    .flatten()
+            };
+            // CR 508.5 / CR 115.1 + CR 608.2c: the amount's third-person anaphors
+            // bind to the recipient the scope chain names (the defending player,
+            // each player in turn, or the declared target player). The whole
+            // amount parses under that one scope, so a composite ("twice the
+            // number of … that player controls") reaches its inner count too.
+            let scope = if references_defending_player {
+                Some(ControllerRef::DefendingPlayer)
+            } else if each_player_scope {
+                Some(ControllerRef::ScopedPlayer)
+            } else {
+                declared_recipient_scope
+            };
+            let parse_amount = |amount_ctx: &mut ParseContext| {
+                parse_event_context_quantity_with_context(amount_phrase, amount_ctx)
+                    .or_else(|| parse_cda_quantity_with_context(amount_phrase, amount_ctx))
+            };
+            let qty = match scope {
+                Some(scope) => ctx.with_player_scope(scope, parse_amount),
+                None => parse_amount(ctx),
+            }
+            .or_else(|| parse_contextual_bare_card_aggregate(amount_phrase, ctx));
             if let Some(qty) = qty {
                 // Route based on target phrase
                 if target_phrase == "itself" {

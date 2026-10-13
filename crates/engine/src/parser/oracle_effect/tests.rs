@@ -85024,3 +85024,396 @@ fn count_slot_preserves_derived_readings() {
         "P10: {false_cure}"
     );
 }
+
+/// Phase-3 controller-anaphor writers: the declared damage recipient (D10), the
+/// subject antecedent (D11) and its resolution-pick rebind (D12).
+mod controller_anaphor_antecedent_writer_tests {
+    use super::*;
+    use crate::parser::oracle_quantity::parse_event_context_quantity;
+    use crate::parser::oracle_target::parse_target;
+    use crate::types::ability::{MultiTargetSpec, TargetChoiceTiming};
+
+    /// Every `controller` value in `value`, in document order of a depth-first
+    /// walk.
+    fn controllers(value: &serde_json::Value) -> Vec<serde_json::Value> {
+        let mut found = Vec::new();
+        let mut stack = vec![value];
+        while let Some(node) = stack.pop() {
+            match node {
+                serde_json::Value::Object(map) => {
+                    if let Some(controller) = map.get("controller") {
+                        found.push(controller.clone());
+                    }
+                    stack.extend(map.values());
+                }
+                serde_json::Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// The `amount` of the first damage effect of `effect_type` in `parsed`.
+    fn damage_amount(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        effect_type: &str,
+    ) -> serde_json::Value {
+        let json = to_json(parsed);
+        let effect = serialized_effects(&json, effect_type)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no {effect_type} in {json}"));
+        effect["amount"].clone()
+    }
+
+    /// The amount's type and every controller it carries.
+    fn amount_shape(amount: &serde_json::Value) -> (String, Vec<serde_json::Value>) {
+        (
+            amount["type"].as_str().unwrap_or_default().to_string(),
+            controllers(amount),
+        )
+    }
+
+    fn controller(name: &str) -> serde_json::Value {
+        serde_json::Value::String(name.to_string())
+    }
+
+    /// V2 (CR 115.1 + CR 608.2c): a declared player recipient is the
+    /// antecedent of the amount's "that player" / "they", inside a composite
+    /// amount too; the existing each-player and defending-player rungs reach a
+    /// composite through the same context-aware entry.
+    #[test]
+    fn damage_amount_anaphor_binds_the_recipient_scope() {
+        let anathemancer = parse_named_face(
+            "When this creature enters, it deals damage to target player equal to the number of nonbasic lands that player controls.\nUnearth {5}{B}{R} ({5}{B}{R}: Return this card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step or if it would leave the battlefield. Unearth only as a sorcery.)",
+            "Anathemancer",
+            &["Creature"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&anathemancer, "DealDamage")),
+            ("Ref".to_string(), vec![controller("TargetPlayer")]),
+            "Anathemancer counts the target player's nonbasic lands"
+        );
+
+        let opponent = parse_named_face(
+            "Test Card deals damage to target opponent equal to the number of creatures they control.",
+            "Test Card",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&opponent, "DealDamage")),
+            ("Ref".to_string(), vec![controller("TargetOpponent")]),
+        );
+
+        let chaotic_backlash = parse_named_face(
+            "Chaotic Backlash deals damage to target player equal to twice the number of white and/or blue permanents they control.",
+            "Chaotic Backlash",
+            &["Instant"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&chaotic_backlash, "DealDamage")),
+            (
+                "Multiply".to_string(),
+                vec![controller("TargetPlayer"), controller("TargetPlayer")]
+            ),
+            "the composite's inner count is the target player's"
+        );
+
+        let price_of_progress = parse_named_face(
+            "Price of Progress deals damage to each player equal to twice the number of nonbasic lands that player controls.",
+            "Price of Progress",
+            &["Instant"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&price_of_progress, "DamageEachPlayer")),
+            ("Multiply".to_string(), vec![controller("ScopedPlayer")]),
+            "the composite's inner count is each player's in turn"
+        );
+
+        // Unchanged siblings: the non-composite each-player rung, the
+        // defending-player rung, and an object recipient with no player scope.
+        let acidic_soil = parse_named_face(
+            "Acidic Soil deals damage to each player equal to the number of lands they control.",
+            "Acidic Soil",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&acidic_soil, "DamageEachPlayer")),
+            ("Ref".to_string(), vec![controller("ScopedPlayer")]),
+        );
+        let defending = parse_named_face(
+            "Whenever this creature attacks, it deals damage to defending player equal to the number of lands they control.",
+            "Test Card",
+            &["Creature"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&defending, "DealDamage")),
+            ("Ref".to_string(), vec![controller("DefendingPlayer")]),
+        );
+        let object_recipient = parse_named_face(
+            "Test Card deals damage to target creature equal to the number of creatures you control.",
+            "Test Card",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            amount_shape(&damage_amount(&object_recipient, "DealDamage")),
+            ("Ref".to_string(), vec![controller("You")]),
+        );
+
+        // The context-free entry keeps its reading: it passes a default context.
+        let unscoped = parse_event_context_quantity("twice the number of creatures they control")
+            .expect("the composite parses");
+        assert_eq!(
+            amount_shape(&to_json(&unscoped)),
+            ("Multiply".to_string(), vec![controller("You")]),
+        );
+    }
+
+    /// V2's object-pronoun sibling: the composite branch parses under an
+    /// antecedent-only context, so "it" in the amount has no subject to
+    /// resolve through and the amount stays an honest strict failure.
+    #[test]
+    fn damage_amount_object_pronoun_composite_stays_unimplemented() {
+        let parsed = parse_named_face(
+            "Flying\nDevour 1 (As this creature enters, you may sacrifice any number of creatures. It enters with that many +1/+1 counters on it.)\nWhen this creature enters, it deals damage to any target equal to twice the number of Goblins it devoured.",
+            "Voracious Dragon",
+            &["Creature"],
+        );
+        let json = to_json(&parsed);
+        assert!(
+            serialized_effects(&json, "Unimplemented")
+                .iter()
+                .any(|effect| effect["name"] == "unparsed_quantity"),
+            "the devoured-Goblins amount stays unparsed: {json}"
+        );
+    }
+
+    fn subject(
+        target: Option<TargetFilter>,
+        multi_target: Option<MultiTargetSpec>,
+    ) -> SubjectPhraseAst {
+        SubjectPhraseAst {
+            affected: target.clone(),
+            target,
+            multi_target,
+            inherits_parent: false,
+            is_optional: false,
+        }
+    }
+
+    fn parsed_target(phrase: &str) -> TargetFilter {
+        let (filter, rest) = parse_target(phrase);
+        assert!(rest.trim().is_empty(), "{phrase:?} left {rest:?}");
+        filter
+    }
+
+    /// V9 (CR 115.1 + CR 109.4 + CR 608.2c): the subject antecedent a
+    /// predicate's "that player" / "they" binds.
+    #[test]
+    fn subject_player_antecedent_names_the_single_declared_or_controlling_player() {
+        for (phrase, expected) in [
+            ("target player", Some(ControllerRef::TargetPlayer)),
+            ("target opponent", Some(ControllerRef::TargetOpponent)),
+            (
+                "target creature an opponent controls",
+                Some(ControllerRef::ParentTargetController),
+            ),
+            ("target creature you control", None),
+            ("target creature", None),
+        ] {
+            assert_eq!(
+                subject::subject_player_antecedent(&subject(Some(parsed_target(phrase)), None)),
+                expected,
+                "{phrase}"
+            );
+        }
+        assert_eq!(
+            subject::subject_player_antecedent(&subject(None, None)),
+            None,
+            "a pronoun subject (\"it\") declares no player"
+        );
+        assert_eq!(
+            subject::subject_player_antecedent(&subject(
+                Some(parsed_target("target opponent")),
+                Some(MultiTargetSpec::unlimited(0)),
+            )),
+            None,
+            "any number of target opponents names no single player"
+        );
+    }
+
+    /// V12 (addendum A2): a player seed rides the declared rungs, so Ashnod's
+    /// Cylix's "their library" keeps its reading and never becomes the
+    /// trigger-convention `TriggeringPlayer`.
+    #[test]
+    fn ashnods_cylix_library_player_keeps_its_reading() {
+        let parsed = parse_named_face(
+            "{3}, {T}: Target player looks at the top three cards of their library, puts one of them back on top of their library, then exiles the rest.",
+            "Ashnod's Cylix",
+            &["Artifact"],
+        );
+        let json = to_json(&parsed);
+        assert!(
+            has_effect_field(&json, "Dig", "player", &TargetFilter::ParentTarget),
+            "{json}"
+        );
+    }
+
+    /// V6: Debt to the Kami's second mode is a resolution pick of the target
+    /// opponent's own enchantment.
+    #[test]
+    fn debt_to_the_kami_second_mode_leg_is_scoped_player() {
+        let parsed = parse_named_face(
+            "Choose one —\n• Target opponent exiles a creature they control.\n• Target opponent exiles an enchantment they control.",
+            "Debt to the Kami",
+            &["Instant"],
+        );
+        let leg = parsed.abilities[1]
+            .sub_ability
+            .as_deref()
+            .expect("the moved-object leg");
+        assert_eq!(leg.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert!(
+            matches!(
+                &*leg.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::ScopedPlayer),
+                        ..
+                    }),
+                    ..
+                }
+            ),
+            "{:?}",
+            leg.effect
+        );
+    }
+
+    fn assert_no_unimplemented(def: &AbilityDefinition) {
+        assert!(
+            serialized_effects(&to_json(def), "Unimplemented").is_empty(),
+            "the parse must reach no strict failure: {def:?}"
+        );
+    }
+
+    /// The `TargetOnly` player root of a player-subject sentence and its
+    /// moved-object `ChangeZone` leg (the player-target wrapper's shape).
+    fn player_target_wrapper_leg(text: &str, name: &str) -> AbilityDefinition {
+        let parsed = parse_named_face(text, name, &["Instant"]);
+        let root = parsed.abilities[0].clone();
+        assert_no_unimplemented(&root);
+        assert!(
+            matches!(
+                &*root.effect,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    })
+                }
+            ),
+            "{text}: the root is the target-opponent declaration: {:?}",
+            root.effect
+        );
+        let leg = *root.sub_ability.expect("the moved-object leg");
+        assert!(
+            matches!(&*leg.effect, Effect::ChangeZone { .. }),
+            "{text}: {:?}",
+            leg.effect
+        );
+        leg
+    }
+
+    fn change_zone_target(leg: &AbilityDefinition) -> &TargetFilter {
+        match &*leg.effect {
+            Effect::ChangeZone { target, .. } => target,
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// The controller of every leg of an `Or` moved object.
+    fn or_leg_controllers(target: &TargetFilter) -> Vec<Option<ControllerRef>> {
+        match target {
+            TargetFilter::Or { filters } => filters
+                .iter()
+                .map(|leg| match leg {
+                    TargetFilter::Typed(tf) => tf.controller.clone(),
+                    other => panic!("expected a Typed leg, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected an Or moved object, got {other:?}"),
+        }
+    }
+
+    /// V20 (CR 608.2d + CR 115.10a): a disjunctive moved object with no word
+    /// "target" is the subject player's resolution pick, chosen among that
+    /// player's own objects; an explicit "target" keeps the stack slot.
+    #[test]
+    fn disjunctive_moved_object_is_the_subject_players_resolution_pick() {
+        let blot_out = player_target_wrapper_leg(
+            "Target opponent exiles a creature or planeswalker they control with the greatest mana value among creatures and planeswalkers they control.",
+            "Blot Out",
+        );
+        assert_eq!(
+            blot_out.target_choice_timing,
+            TargetChoiceTiming::Resolution
+        );
+        assert_eq!(
+            or_leg_controllers(change_zone_target(&blot_out)),
+            vec![
+                Some(ControllerRef::ScopedPlayer),
+                Some(ControllerRef::ScopedPlayer)
+            ]
+        );
+        // The greatest-mana-value aggregate is over the target opponent's
+        // creatures and planeswalkers.
+        let aggregate = controllers(&to_json(change_zone_target(&blot_out)));
+        assert!(
+            aggregate.contains(&controller("TargetOpponent"))
+                && !aggregate.contains(&controller("You")),
+            "{aggregate:?}"
+        );
+
+        let bare = player_target_wrapper_leg(
+            "Target opponent exiles a creature or planeswalker they control.",
+            "Test Card",
+        );
+        assert_eq!(bare.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert_eq!(
+            or_leg_controllers(change_zone_target(&bare)),
+            vec![
+                Some(ControllerRef::ScopedPlayer),
+                Some(ControllerRef::ScopedPlayer)
+            ]
+        );
+
+        // Negative sibling: an explicit "target" is a stack target (CR 115.1).
+        let targeted = player_target_wrapper_leg(
+            "Target opponent exiles target creature or planeswalker they control.",
+            "Test Card",
+        );
+        assert_eq!(or_leg_controllers(change_zone_target(&targeted)).len(), 2);
+        assert_eq!(targeted.target_choice_timing, TargetChoiceTiming::Stack);
+
+        // Preservation: Strategic Betrayal's single `Typed` creature leg.
+        let betrayal = player_target_wrapper_leg(
+            "Target opponent exiles a creature they control and their graveyard.",
+            "Strategic Betrayal",
+        );
+        assert!(
+            matches!(
+                change_zone_target(&betrayal),
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    ..
+                })
+            ),
+            "{:?}",
+            betrayal.effect
+        );
+        assert_eq!(
+            betrayal.target_choice_timing,
+            TargetChoiceTiming::Resolution
+        );
+    }
+}

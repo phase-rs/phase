@@ -1909,6 +1909,19 @@ fn parse_anaphoric_power_toughness_sum(
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
+    parse_event_context_quantity_with_context(text, &ParseContext::default())
+}
+
+/// `parse_event_context_quantity` under the caller's player antecedents. The
+/// composite branch and the named-quantity fallbacks each parse under an
+/// antecedent-only clone of `ctx` (`clone_player_antecedents`), so a "that
+/// player" / "they" inside the amount binds the player the caller's scope names
+/// (CR 608.2c) and nothing else of the caller's context reaches the sub-parse;
+/// the clone's diagnostics are dropped with it.
+pub(crate) fn parse_event_context_quantity_with_context(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
     if let Ok((_, expr)) =
@@ -2117,7 +2130,7 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // delegate to parse_cda_quantity — the single authority for offset/multiply grammar.
     // Limited to composite variants so atomic refs still flow through the
     // TargetPower/TargetLifeTotal exclusion in the fallback below.
-    match parse_cda_quantity(lower) {
+    match parse_cda_quantity_with_context(lower, &mut ctx.clone_player_antecedents()) {
         Some(qty @ (QuantityExpr::Offset { .. } | QuantityExpr::Multiply { .. })) => {
             return Some(qty);
         }
@@ -2149,7 +2162,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let stripped = tag::<_, _, OracleError<'_>>("the ")
         .parse(lower)
         .map_or(lower, |(r, _)| r);
-    if let Some(qty) = parse_quantity_ref(stripped) {
+    if let Some(qty) =
+        parse_quantity_ref_with_context(stripped, &mut ctx.clone_player_antecedents())
+    {
         if !matches!(
             qty,
             QuantityRef::Power {
@@ -2161,7 +2176,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
             return Some(QuantityExpr::Ref { qty });
         }
     }
-    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) = parse_quantity_ref(lower) {
+    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) =
+        parse_quantity_ref_with_context(lower, &mut ctx.clone_player_antecedents())
+    {
         return Some(QuantityExpr::Ref { qty });
     }
 

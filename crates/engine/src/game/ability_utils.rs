@@ -2994,7 +2994,8 @@ fn validate_targets_in_chain_inner(
     // CR 608.2b: the nearest DECLARING ancestor's own occurrences, every one
     // with the verdict its validation reached (an ancestor that declares
     // nothing — an inheriting rider, a paid-"instead" delegator — passes its
-    // own parent's block through). Read by the implicit-fight referent.
+    // own parent's block through). Read by the implicit-fight referent and by
+    // the generic arm's prior-object recheck (`target_filter_binds_prior_target`).
     parent_block: &[JudgedOccurrence],
 ) -> ResolvedAbility {
     // Classify provenance before pruning the parent's declaration.
@@ -3597,7 +3598,50 @@ fn validate_targets_in_chain_inner(
                 }
                 verdicts
             }
-            Some(filter) => against_filter(filter),
+            Some(filter) => {
+                // CR 608.2b + CR 601.2c: a slot whose legality reads the object
+                // announced for an EARLIER slot that a declaring ancestor holds
+                // ("another target creature that player controls") is judged
+                // against that ancestor's first object occurrence, bound as at
+                // announcement, never against this node's own first target. An
+                // illegal referent supplies no information, so the dependent
+                // occurrences are illegal too.
+                let ancestor_bound = || -> Option<Vec<OccurrenceVerdict>> {
+                    if validated.target_choice_timing != TargetChoiceTiming::Stack
+                        || !target_filter_binds_prior_target(filter)
+                    {
+                        return None;
+                    }
+                    let (referent, verdict) =
+                        parent_block
+                            .iter()
+                            .find_map(|((target, _), verdict)| match target {
+                                TargetRef::Object(id) => Some((*id, *verdict)),
+                                TargetRef::Player(_) => None,
+                            })?;
+                    if verdict != OccurrenceVerdict::Legal {
+                        return Some(vec![OccurrenceVerdict::Dropped; occurrence_count]);
+                    }
+                    let bound = resolved_ability_with_bound_object_target(&validated, referent);
+                    let legal = slot_legal_targets(
+                        view,
+                        state,
+                        AbilityTargetSlot::Unpositioned(filter),
+                        &bound,
+                    );
+                    Some(
+                        (0..occurrence_count)
+                            .map(|position| {
+                                legal_or_dropped(
+                                    legal.contains(&validated.targets[position])
+                                        && target_is_current_at(&validated, position, state),
+                                )
+                            })
+                            .collect(),
+                    )
+                };
+                ancestor_bound().unwrap_or_else(|| against_filter(filter))
+            }
             // CR 608.2b: A context-ref filter (`ParentTarget`,
             // `TriggeringSource`, etc.) carries a resolution-time *snapshot*,
             // not a player-chosen target. `extract_target_filter_from_effect`
@@ -5275,17 +5319,20 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
     }
 }
 
-/// CR 601.2c: does this slot filter reference an object chosen in an EARLIER
-/// slot of the same ability, in a form a `.targets`-prefilled ability actually
-/// resolves? Exactly two encodings, both measured in the corpus:
+/// CR 115.1 + CR 601.2c: does this slot filter reference an object chosen in an
+/// EARLIER slot of the same ability, in a form a `.targets`-prefilled ability
+/// actually resolves? Exactly three encodings:
 ///
 ///   * `ObjectScope::Target` inside a quantity threshold (Puca's Mischief `Cmc`,
 ///     Spawnbroker `PtComparison`) — resolved by `quantity::object_id_for_scope`.
 ///   * `FilterProp::SharesQuality { reference: Some(ParentTarget) }` (Daring
 ///     Thief) — resolved by `filter::parent_target_shared_quality_values`.
+///   * a `ParentTargetController` controller ("another target creature that
+///     player controls", Mutiny) — resolved by `filter::parent_target_controller_player`
+///     through `ability_utils::parent_target_controller`.
 ///
-/// Both read `ability.targets` with `.find_map(first Object)` and NEITHER
-/// consults `target_incarnations`.
+/// Each reads the first entry of `ability.targets`, and none consults
+/// `target_incarnations`.
 ///
 /// DELIBERATELY EXCLUDED — the object-IDENTITY arm (`filter::filter_inner_for_object` —
 /// the `TargetFilter::ParentTarget` and `ParentTargetSlot { index }` arms) and
@@ -5302,7 +5349,12 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
 /// behaviour and avoids rerouting 30 corpus slots. See deferral D1.
 fn target_filter_binds_prior_target(filter: &TargetFilter) -> bool {
     crate::game::filter::filter_contains(filter, &|inner| match inner {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(filter_prop_binds_prior_target),
+        TargetFilter::Typed(typed) => {
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            ) || typed.properties.iter().any(filter_prop_binds_prior_target)
+        }
         _ => false,
     })
 }
@@ -5428,8 +5480,10 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
 }
 
 /// Clone `ability` with `targets` replaced by exactly the single object
-/// `object_id`, so `ObjectScope::Target` / `SharesQuality{ParentTarget}`
-/// referents resolve against it during interactive enumeration.
+/// `object_id`, so the referent of every encoding
+/// `target_filter_binds_prior_target` admits resolves against it during
+/// interactive enumeration and at the CR 608.2b recheck
+/// (`validate_targets_in_chain_inner`).
 ///
 /// CR 400.7 + CR 603.7c: `target_incarnations` is CLEARED, not merely assumed
 /// empty. The object-IDENTITY arms (`filter::filter_inner`'s
@@ -5445,7 +5499,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
 /// `target_pin_is_current` returns `true` for any id absent from the pin list —
 /// and would also discard the creation-time snapshot a `ParentTarget` referent
 /// is supposed to read. Clearing keeps the clone's referent surface to exactly
-/// the two encodings the predicate admits.
+/// the encodings the predicate admits.
 fn resolved_ability_with_bound_object_target(
     ability: &ResolvedAbility,
     object_id: ObjectId,
@@ -5457,14 +5511,15 @@ fn resolved_ability_with_bound_object_target(
 }
 
 /// Clone `ability` with `targets` prefilled from the FIRST object selected in a
-/// prior slot, so `ObjectScope::Target` and `SharesQuality{ParentTarget}`
-/// referents resolve during the interactive walk. CR 603.3d is why this matters:
-/// mid-walk the real `ability.targets` is still empty, so both referents fail
+/// prior slot, so the referent of every encoding
+/// `target_filter_binds_prior_target` admits resolves during the interactive
+/// walk. CR 603.3d is why this matters:
+/// mid-walk the real `ability.targets` is still empty, so every referent fails
 /// closed and the dependent slot collapses, removing the ability from the stack.
 ///
 /// FILL SHAPE: exactly one element, the first prior object. NOT index-aligned,
-/// not padded — the two admitted consumers both read
-/// `targets.iter().find_map(first Object)`, and `ParentTargetSlot { index }` is
+/// not padded — the three admitted consumers read the first entry of
+/// `ability.targets`, and `ParentTargetSlot { index }` is
 /// excluded from `target_filter_binds_prior_target`, so no positional consumer
 /// is reachable. No `TargetRef::Player` is written, so every player-axis reader
 /// (`filter::target_player_from_ability_or_root`) sees exactly what it sees
@@ -5516,10 +5571,11 @@ fn first_prior_object_slot(existing_slots: &[TargetSelectionSlot]) -> Option<&Ta
 /// first prior OBJECT slot in turn. Dedup with the same
 /// `if !legal_targets.contains(&target)` idiom the player loop at :5196 uses.
 ///
-/// The union is EXACT for this class (a narrowed slot's legality depends only
-/// on the single prior object), so "union non-empty <=> some assignment
-/// exists" holds — the CR 603.3d removal decision at the `collect_target_slots`
-/// call site stays correct. Narrower per-assignment legality is enforced
+/// The union is exact for each encoding's prior-object criterion. A slot that
+/// also carries `FilterProp::Another` can have a non-empty union and no
+/// assignment, so the CR 603.3d decision is
+/// `has_legal_target_assignment_for_ability`'s completion check, not this
+/// union's emptiness. Narrower per-assignment legality is enforced
 /// separately at `legal_targets_for_selected_slot` (exact binding, not union).
 fn union_over_prior_object_candidates(
     state: &GameState,
@@ -26257,6 +26313,158 @@ mod tests {
         );
     }
 
+    /// Mutiny's two slots across two nodes, as parsed: the root `TargetOnly`
+    /// declares "target creature an opponent controls" (A), and the
+    /// `DealDamage` sub declares "another target creature that player
+    /// controls" (B), whose controller is A's.
+    fn mutiny_slot_b_node(b: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::ParentTargetController),
+                    properties: vec![FilterProp::Another],
+                }),
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            },
+            vec![TargetRef::Object(b)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn mutiny_chain(a: ObjectId, b: ObjectId) -> ResolvedAbility {
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::Opponent),
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Object(a)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        root.sub_ability = Some(Box::new(mutiny_slot_b_node(b)));
+        root
+    }
+
+    /// P1's two creatures A (3/3) and B (2/2); the spell's controller is P0.
+    fn mutiny_board() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "B".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, size) in [(a, 3), (b, 2)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(size);
+            obj.toughness = Some(size);
+        }
+        (state, a, b)
+    }
+
+    fn chain_targets(validated: &ResolvedAbility) -> (Vec<TargetRef>, Vec<TargetRef>) {
+        let sub = validated
+            .sub_ability
+            .as_deref()
+            .expect("the DealDamage node survives validation");
+        (validated.targets.clone(), sub.targets.clone())
+    }
+
+    /// V18 (CR 608.2b + CR 601.2c): a slot that reads a prior object slot held
+    /// by its declaring ancestor ("another target creature that player
+    /// controls") is rechecked against the ancestor's occurrence, not its own.
+    #[test]
+    fn validate_targets_in_chain_rechecks_slot_b_against_the_ancestors_slot_a() {
+        // Control: both targets legal.
+        let (state, a, b) = mutiny_board();
+        assert_eq!(
+            chain_targets(&validate_targets_in_chain(&state, &mutiny_chain(a, b))),
+            (vec![TargetRef::Object(a)], vec![TargetRef::Object(b)]),
+            "control: B is controlled by A's controller"
+        );
+
+        // B changes controller: "that player" (A's controller, P1) no longer
+        // controls B.
+        let (mut state, a, b) = mutiny_board();
+        state.objects.get_mut(&b).unwrap().controller = PlayerId(0);
+        assert_eq!(
+            chain_targets(&validate_targets_in_chain(&state, &mutiny_chain(a, b))),
+            (vec![TargetRef::Object(a)], vec![]),
+            "CR 608.2b: B is no longer controlled by A's controller and is dropped"
+        );
+
+        // A changes controller: A is no longer "a creature an opponent
+        // controls", so the information "that player" needs is unavailable.
+        let (mut state, a, b) = mutiny_board();
+        state.objects.get_mut(&a).unwrap().controller = PlayerId(0);
+        assert_eq!(
+            chain_targets(&validate_targets_in_chain(&state, &mutiny_chain(a, b))),
+            (vec![], vec![]),
+            "CR 608.2b: an illegal referent makes the dependent target illegal"
+        );
+
+        // A leaves the battlefield.
+        let (mut state, a, b) = mutiny_board();
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, a, Zone::Hand, &mut events);
+        assert_eq!(
+            chain_targets(&validate_targets_in_chain(&state, &mutiny_chain(a, b))),
+            (vec![], vec![]),
+            "CR 608.2b: A left the battlefield, so B cannot be judged against it"
+        );
+    }
+
+    /// V18 narrowness: the recheck reads only a DECLARING ANCESTOR's
+    /// occurrence of a Stack-timed slot. A chain root has no ancestor, and a
+    /// resolution-time choice is not a target, so both keep the old reading.
+    #[test]
+    fn validate_targets_in_chain_prior_object_recheck_is_narrow() {
+        // As a chain root the node judges B against its own first target (B):
+        // "that player" is B's own controller, so B stays legal.
+        let (mut state, _, b) = mutiny_board();
+        state.objects.get_mut(&b).unwrap().controller = PlayerId(0);
+        assert_eq!(
+            validate_targets_in_chain(&state, &mutiny_slot_b_node(b)).targets,
+            vec![TargetRef::Object(b)],
+            "a chain root has no declaring ancestor, so the old reading stands"
+        );
+
+        // A Resolution-timed sub is not rechecked against the ancestor.
+        let (mut state, a, b) = mutiny_board();
+        state.objects.get_mut(&b).unwrap().controller = PlayerId(0);
+        let mut chain = mutiny_chain(a, b);
+        chain
+            .sub_ability
+            .as_deref_mut()
+            .unwrap()
+            .target_choice_timing = TargetChoiceTiming::Resolution;
+        assert_eq!(
+            chain_targets(&validate_targets_in_chain(&state, &chain)),
+            (vec![TargetRef::Object(a)], vec![TargetRef::Object(b)]),
+            "the recheck applies only to a Stack-timed slot"
+        );
+    }
+
     /// CR 701.12a: "exchange control of target nonland permanent you control
     /// and target permanent an opponent controls that shares a card type with
     /// it" (Daring Thief, verbatim) — parses correctly at BASE_SHA already, so
@@ -26851,9 +27059,10 @@ mod tests {
     }
 
     /// T13: the narrowed predicate does NOT fire on the object-identity arm
-    /// (deferral D1) or a bare `DifferentNameFrom{ParentTarget}`, and DOES
-    /// fire on the two admitted encodings (quantity-Target, SharesQuality{
-    /// ParentTarget}).
+    /// (deferral D1), a bare `DifferentNameFrom{ParentTarget}`, or any player
+    /// reference other than a `ParentTargetController` controller, and DOES
+    /// fire on the three admitted encodings (quantity-Target, SharesQuality{
+    /// ParentTarget}, a `ParentTargetController` controller).
     #[test]
     fn target_filter_binds_prior_target_is_narrow() {
         let identity_and = TargetFilter::And {
@@ -26923,6 +27132,52 @@ mod tests {
             target_filter_binds_prior_target(&quantity),
             "Cmc{{Target}} must bind"
         );
+
+        // CR 115.1 + CR 601.2c: Mutiny's slot 2, "another target creature that
+        // player controls" — the controller of slot 1's object.
+        let parent_target_controller = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::ParentTargetController),
+            properties: vec![FilterProp::Another],
+        });
+        assert!(
+            target_filter_binds_prior_target(&parent_target_controller),
+            "a ParentTargetController controller must bind"
+        );
+        let parent_target_owner = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::ParentTargetOwner),
+            properties: vec![],
+        });
+        let owned_by_parent_target_controller = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            controller: None,
+            properties: vec![FilterProp::Owned {
+                controller: ControllerRef::ParentTargetController,
+            }],
+        });
+        let prior_player = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::TargetPlayer),
+            properties: vec![],
+        });
+        for (label, filter) in [
+            ("Typed{controller: ParentTargetOwner}", &parent_target_owner),
+            (
+                "Typed{Owned{ParentTargetController}}",
+                &owned_by_parent_target_controller,
+            ),
+            (
+                "TargetFilter::ParentTargetController",
+                &TargetFilter::ParentTargetController,
+            ),
+            ("Typed{controller: TargetPlayer}", &prior_player),
+        ] {
+            assert!(
+                !target_filter_binds_prior_target(filter),
+                "[{label}] only a ParentTargetController controller binds a prior object slot"
+            );
+        }
     }
 
     /// T9: the parameterized quantity-scope classifier is STRICTLY more
