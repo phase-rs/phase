@@ -2631,10 +2631,10 @@ impl Clone for CounterAddedRecord {
 }
 
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
-/// When the source leaves the battlefield, the exiled card returns (CR 610.3a).
+/// When the source leaves the battlefield, the exiled card returns (CR 610.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExileLinkKind {
-    /// CR 610.3a: Return the exiled object when the source leaves the battlefield.
+    /// CR 610.3: Return the exiled object when the source leaves the battlefield.
     UntilSourceLeaves { return_zone: Zone },
     /// CR 610.3: Return the exiled object immediately after an opponent of
     /// `controller` becomes the monarch.
