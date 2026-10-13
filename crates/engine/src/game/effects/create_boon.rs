@@ -4,6 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 /// Digital-only Alchemy (no CR entry): "you get a one-time boon with
@@ -87,6 +88,15 @@ pub fn resolve(
     // the granted body would read the creator when they differ (Loch
     // Larent, Valiant Batrider).
     delayed_ability.set_controller_recursive(holder);
+    // Digital-only Alchemy (no CR entry): the release note makes a one-time
+    // boon "a single-use triggered ability with no source", so its gameplay
+    // identity is source-less (CR 120.2b/CR 702.16 intent: protection from a
+    // color neither excludes nor prevents source-less damage). Re-stamp
+    // `source_id` to the `ObjectId(0)` no-source sentinel AFTER the
+    // source-context sync above (which must keep stamping creator provenance
+    // into `trigger_source`/incarnation for matchers and display) — the walk
+    // is recursive so chained inners are covered per-node.
+    delayed_ability.set_gameplay_source_recursive(ObjectId(0));
 
     // Digital-only Alchemy (no CR entry): per-grant note capture. A boon
     // whose body reads "the noted number" sees what its OWN resolution

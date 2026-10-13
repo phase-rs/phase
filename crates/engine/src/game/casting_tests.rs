@@ -47634,6 +47634,31 @@ fn play_from_exile_grant(
     }
 }
 
+/// Fire Lord Ozai-shape `PlayFromExile`: impulse provenance with the free
+/// channel ("you may play one of those cards without paying its mana cost") —
+/// an alternative-cost grant, never rider authority (CR 118.9a). Paid fields
+/// mirror `play_from_exile_grant`; only the free flag is set.
+fn free_play_from_exile_grant(player: PlayerId) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::PlayFromExile {
+        mode: CardPlayMode::Play,
+        duration: crate::types::ability::Duration::Permanent,
+        granted_to: player,
+        frequency: CastFrequency::Unlimited,
+        source_id: None,
+        invalidation: None,
+        exiled_by_ability_controller: None,
+        mana_spend_permission: None,
+        card_filter: None,
+        single_use_group: None,
+        single_use: false,
+        cast_cost_modifier: None,
+        alt_ability_cost: None,
+        without_paying_mana_cost: true,
+        land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+    }
+}
+
 /// CR 118.9a (#7948 review): elected-authority provenance — a genuine
 /// impulse `PlayFromExile` coexisting with an unrelated free-cast grant on
 /// the same exiled card remains a normal-cost route: the face-down cast
@@ -47870,6 +47895,317 @@ fn a_free_grant_keeps_the_prototype_election_from_exile() {
         Some(CastingVariant::Prototype),
     )
     .expect("a free grant plus the prototype election is one alternative cost (CR 718.2)");
+    assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
+}
+
+/// CR 118.9a + CR 601.2b (run boon-followup-20261013, R1): a FREE
+/// `PlayFromExile` grant (Fire Lord Ozai shape) is itself an alternative cost
+/// — it lends NO zone authority to an Evoke election, which would be a second
+/// alternative cost on the same cast. Ozai-shape sibling of
+/// `an_alternative_grant_lends_no_zone_authority_to_an_evoke_election`.
+#[test]
+fn free_play_from_exile_grant_lends_no_zone_authority_to_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(player));
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    );
+    assert!(
+        result.is_err(),
+        "a free play-from-exile grant must not authorize the evoke election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+
+    // Guard: the granted free cast itself stays intact (ordinary free cast).
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_eq!(prepared.casting_variant, CastingVariant::Normal);
+    assert_eq!(prepared.mana_cost, ManaCost::NoCost);
+
+    // Hostile: a free grant bound to ANOTHER player lends no authority either.
+    let mut foreign = setup_game_at_main_phase();
+    let foreign_exiled = exiled_evoker(&mut foreign, player);
+    foreign
+        .objects
+        .get_mut(&foreign_exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(PlayerId(1)));
+    add_mana(&mut foreign, player, ManaType::Colorless, 4);
+    let foreign_result = prepare_spell_cast_with_variant_override(
+        &foreign,
+        player,
+        foreign_exiled,
+        Some(CastingVariant::Evoke),
+    );
+    assert!(
+        foreign_result.is_err(),
+        "a foreign free grant must not authorize the evoke election, got {:?}",
+        foreign_result.map(|p| p.casting_variant)
+    );
+}
+
+/// CR 118.9a + CR 601.2b + CR 702.103a (R2): the same Ozai-shape denial for
+/// a Bestow election riding a free grant's zone authority.
+#[test]
+fn free_play_from_exile_grant_lends_no_zone_authority_to_a_bestow_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // A legal creature target for the would-be Aura.
+    add_creature_with_mv(&mut state, CardId(45_901), PlayerId(1), "Bear", 2);
+    let exiled = exiled_evoker(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.keywords.push(crate::types::keywords::Keyword::Bestow(
+            crate::types::keywords::BestowCost::Mana(ManaCost::generic(2)),
+        ));
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions
+            .push(free_play_from_exile_grant(player));
+    }
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Bestow),
+    );
+    assert!(
+        result.is_err(),
+        "a free play-from-exile grant must not authorize the bestow election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+
+    // Guard: the plain granted cast stays available.
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_ne!(prepared.casting_variant, CastingVariant::Bestow);
+}
+
+/// CR 118.9a + CR 601.2b (R3): the same Ozai-shape denial for the fixed
+/// face-down {3} through a free impulse grant (not just the companion-only
+/// shape the existing tests pin).
+#[test]
+fn free_play_from_exile_grant_lends_no_face_down_authority() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.casting_permissions
+        .push(free_play_from_exile_grant(player));
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        !has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "a free impulse grant is an alternative cost, not face-down zone authority (CR 118.9a)"
+    );
+    assert!(
+        !face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare must reject the free-grant route"
+    );
+    assert!(
+        has_exile_cast_permission(&state, &obj, player, state.turn_number, None),
+        "the granted free cast itself must stay available"
+    );
+}
+
+/// CR 702.96a + CR 118.9a (R4): the same Ozai-shape denial for an Overload
+/// election — an exiled sorcery with a printed Overload cost.
+fn exiled_overload_sorcery(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let exiled = add_exiled_card(state, player, "Exiled Overload Sorcery");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.card_types.core_types = vec![CoreType::Sorcery];
+    // Printed cost {2}{R}; overload cost {3}{R}{R}.
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 2,
+    };
+    obj.base_mana_cost = obj.mana_cost.clone();
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }),
+            cant_regenerate: true,
+        },
+    ));
+    obj.keywords.push(Keyword::Overload(ManaCost::Cost {
+        shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+        generic: 3,
+    }));
+    obj.base_keywords = obj.keywords.clone();
+    exiled
+}
+
+#[test]
+fn free_play_from_exile_grant_lends_no_zone_authority_to_an_overload_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_overload_sorcery(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(player));
+    add_mana(&mut state, player, ManaType::Red, 4);
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Overload),
+    );
+    assert!(
+        result.is_err(),
+        "a free play-from-exile grant must not authorize the overload election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+
+    // Guard: the plain granted cast stays available.
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_ne!(prepared.casting_variant, CastingVariant::Overload);
+}
+
+/// CR 118.9a + CR 601.2b (R5): an INDEPENDENT paid `PlayFromExile` on the
+/// same card keeps its authority — the Evoke election takes the paid slot at
+/// the evoke's own price, never the free slot's zero. Both vector orders
+/// (first-*satisfying*-wins search semantics, the `:5434` lesson).
+#[test]
+fn paid_play_from_exile_grant_keeps_the_evoke_election_at_its_own_price() {
+    for (label, free_first) in [("free-first", true), ("paid-first", false)] {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let exiled = exiled_evoker(&mut state, player);
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            let free = free_play_from_exile_grant(player);
+            let paid = play_from_exile_grant(player, false);
+            if free_first {
+                obj.casting_permissions.push(free);
+                obj.casting_permissions.push(paid);
+            } else {
+                obj.casting_permissions.push(paid);
+                obj.casting_permissions.push(free);
+            }
+        }
+        add_mana(&mut state, player, ManaType::Colorless, 4);
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            player,
+            exiled,
+            Some(CastingVariant::Evoke),
+        )
+        .expect("the paid grant must keep the evoke election");
+        assert_eq!(prepared.casting_variant, CastingVariant::Evoke);
+        assert_eq!(
+            prepared.mana_cost,
+            ManaCost::generic(1),
+            "{label}: the evoke election must pay its own {{1}} price, never the free slot's zero"
+        );
+        assert_eq!(
+            prepared.casting_permission_index,
+            Some(CastingPermissionIndex(if free_first { 1 } else { 0 })),
+            "{label}: the election must pin the paid slot"
+        );
+    }
+}
+
+/// CR 118.9 (R6): ordinary Ozai-shape free casts are unchanged — with a paid
+/// sibling present, the variant-less election still picks the free grant and
+/// pays nothing. Extends `a_free_grant_still_casts_the_evoker…` to the
+/// `PlayFromExile` shape.
+#[test]
+fn free_play_from_exile_grant_still_casts_the_evoker_without_the_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(player));
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(play_from_exile_grant(player, false));
+
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_eq!(prepared.casting_variant, CastingVariant::Normal);
+    assert_eq!(prepared.mana_cost, ManaCost::NoCost);
+    assert_eq!(
+        prepared.casting_permission_index,
+        Some(CastingPermissionIndex(0)),
+        "the variant-less election must still pick the free grant first"
+    );
+}
+
+/// CR 718.2 + CR 718.3b (R7, extension per plan review): prototyped casting
+/// swaps alternative CHARACTERISTICS, not cost — so the Ozai-shape free
+/// grant stacks with the Prototype election exactly like the
+/// `ExileWithAltCost`-free shape pinned by
+/// `a_free_grant_keeps_the_prototype_election_from_exile`.
+#[test]
+fn free_play_from_exile_grant_keeps_the_prototype_election_from_exile() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Prototype");
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.mana_cost = ManaCost::generic(7);
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.keywords
+            .push(crate::types::keywords::Keyword::Prototype {
+                cost: ManaCost::generic(2),
+                power: Some(1),
+                toughness: Some(1),
+            });
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions
+            .push(free_play_from_exile_grant(player));
+    }
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Prototype),
+    )
+    .expect(
+        "an Ozai-shape free grant plus the prototype election is one alternative cost (CR 718.2)",
+    );
     assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
 }
 

@@ -3567,32 +3567,30 @@ fn has_exile_cast_permission(
     // alternative-cost grant underneath it would be a second alternative cost
     // on the same cast.
     let alt_rider = variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
-    // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — the
-    // land/look companion installed alongside an alt-cost grant
-    // (`PlayFromExileProvenance::LandLookCompanion`, see `cast_from_zone.rs`) is not cast authority,
-    // so a rider cast accepts only a genuine impulse-class grant as its
-    // normal-cost route. Every other variant keeps the plain scan: where a
-    // companion exists, its alt-cost sibling authorizes those casts anyway.
+    // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — a
+    // rider cast accepts only a normal-cost authority as its route
+    // (`CastingPermission::is_normal_cost_authority_for_rider`: a paid,
+    // rider-free impulse grant). That predicate subsumes the land/look
+    // companion exclusion (`PlayFromExileProvenance::LandLookCompanion`, see
+    // `cast_from_zone.rs` — provenance, not cast authority) and extends it to
+    // the free channel (`without_paying_mana_cost`) and the alt-ability-cost
+    // rider, which are likewise alternative costs. Every other variant keeps
+    // the plain scan: where a companion exists, its alt-cost sibling
+    // authorizes those casts anyway.
     let play_from_exile_route = if alt_rider {
         obj.casting_permissions
             .iter()
             .enumerate()
             .any(|(index, p)| {
-                !matches!(
-                    p,
-                    crate::types::ability::CastingPermission::PlayFromExile {
-                        provenance:
-                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
-                        ..
-                    }
-                ) && play_from_exile_permission_source_at_index(
-                    state,
-                    obj,
-                    player,
-                    CastingPermissionIndex(index),
-                    Some(CardPlayMode::Cast),
-                )
-                .is_some()
+                p.is_normal_cost_authority_for_rider()
+                    && play_from_exile_permission_source_at_index(
+                        state,
+                        obj,
+                        player,
+                        CastingPermissionIndex(index),
+                        Some(CardPlayMode::Cast),
+                    )
+                    .is_some()
             })
     } else {
         play_from_exile_permission_source(state, obj, player, turn_number, Some(CardPlayMode::Cast))
@@ -4561,6 +4559,12 @@ fn selected_object_cast_permission_index(
         Some(_) => obj.zone == Zone::Exile,
     };
 
+    // CR 118.9a: whether the elected variant brings its own independent
+    // alternative cost (Evoke, Bestow, Overload, the face-down {3}, …). Only
+    // such a rider must skip non-normal-cost `PlayFromExile` slots below;
+    // every other variant keeps electing the first functioning grant.
+    let alt_rider =
+        selected_variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     selected_alt_cost.or_else(|| {
         if !play_from_exile_can_authorize_variant {
             return None;
@@ -4569,18 +4573,23 @@ fn selected_object_cast_permission_index(
         // of an alt-cost grant (`PlayFromExileProvenance::LandLookCompanion`) is never elected as a
         // cast authority; the sibling alt-cost grant is that sentence's cast
         // route. A genuine impulse grant further down the vector still wins.
+        // A rider variant additionally skips any `PlayFromExile` slot that is
+        // not a normal-cost authority (free channel or alt-ability-cost
+        // rider): first *satisfying* grant wins — the `:5434` lesson, not a
+        // filter on a first match.
         obj.casting_permissions
             .iter()
             .enumerate()
             .filter(|(_, p)| {
-                !matches!(
-                    p,
-                    CastingPermission::PlayFromExile {
-                        provenance:
-                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
-                        ..
-                    }
-                )
+                (!alt_rider || p.is_normal_cost_authority_for_rider())
+                    && !matches!(
+                        p,
+                        CastingPermission::PlayFromExile {
+                            provenance:
+                                crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+                            ..
+                        }
+                    )
             })
             .find_map(|(index, _)| {
                 play_from_exile_permission_source_at_index(

@@ -16,8 +16,8 @@ use engine::types::ability::{
 use engine::types::actions::{DebugAction, GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
-use engine::types::keywords::{Keyword, KeywordKind};
-use engine::types::mana::ManaCost;
+use engine::types::keywords::{Keyword, KeywordKind, ProtectionTarget};
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -3123,5 +3123,321 @@ fn nashi_promoted_grant_carries_life_rider_and_single_budget() {
     assert!(
         single_use_grant_durations(&runner, staged_p1).is_empty(),
         "the end-of-turn window must prune the remainder at cleanup"
+    );
+}
+
+// ---------- F2 fixture + source-less boon rows (run boon-followup-20261013) ----------
+
+/// Verbatim Oracle texts (card-data.json `silver knight` / `prodigal
+/// pyromancer`, corroborated this run): Silver Knight is 2/2 with first
+/// strike + protection from red; Prodigal Pyromancer is 1/1 with the tap
+/// ability.
+const SILVER_KNIGHT: &str = "First strike, protection from red";
+const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+
+/// T1 SHAPE gate: the T2/T3 fixture parses to live protection from red with
+/// zero unimplemented mechanics. Every negative below (knight excluded /
+/// protected) is vacuous without this row.
+#[test]
+fn silver_knight_parses_to_protection_from_red() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Multi-keyword comma line: pass the MTGJSON-style keyword hints (the
+    // card-test recipe for foot-gun #4 — Oracle text stays verbatim).
+    let knight = scenario
+        .add_creature(P1, "Silver Knight", 2, 2)
+        .from_oracle_text_with_keywords(&["first strike", "protection"], SILVER_KNIGHT)
+        .id();
+    let runner = scenario.build();
+
+    let obj = &runner.state().objects[&knight];
+    assert!(
+        obj.keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Red
+            ))),
+        "verbatim Silver Knight text must yield live protection from red, got {:?}",
+        obj.keywords
+    );
+    assert!(
+        obj.keywords.contains(&Keyword::FirstStrike),
+        "reach guard: first strike must parse alongside protection, got {:?}",
+        obj.keywords
+    );
+    assert!(
+        !obj.has_unimplemented_mechanics(),
+        "gate: zero unimplemented mechanics (no Unknown keyword / Unimplemented effect)"
+    );
+}
+
+/// T2: a Molten Impact boon is source-less at gameplay — protection from red
+/// neither excludes the knight at targeting nor prevents the damage.
+/// Pre-fix this fails twice: no `TriggerTargetSelection` prompt appears (the
+/// boon auto-targets the sole legal wall) and the knight survives.
+#[test]
+fn molten_boon_ignores_protection_from_red() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wall_one = scenario
+        .add_creature_from_oracle(P1, "Wall One", 0, 2, "")
+        .id();
+    let knight = scenario
+        .add_creature(P1, "Silver Knight", 2, 2)
+        .from_oracle_text_with_keywords(&["first strike", "protection"], SILVER_KNIGHT)
+        .id();
+    let wall_two = scenario
+        .add_creature_from_oracle(P1, "Wall Two", 0, 2, "")
+        .id();
+    // Molten Impact is a red sorcery; the staged card carries no color until
+    // stamped, so stamp it (mirrors the plan probe — without red the
+    // pre-fix exclusion cannot reproduce and the test is vacuous).
+    let mut molten_builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Molten Impact", false, MOLTEN);
+    molten_builder.with_color(vec![ManaColor::Red]);
+    let molten = molten_builder.id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    // Reach guard (T1 shape, live): the knight must carry live protection,
+    // or the prompt assertion below passes for the wrong reason.
+    assert!(
+        runner.state().objects[&knight]
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Red
+            ))),
+        "reach guard: the staged knight must hold live protection from red"
+    );
+
+    // Grant: Molten → Wall One (4 damage, 2 excess noted).
+    runner.cast(molten).target_object(wall_one).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().players[0].noted_number, Some(2));
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Fire: Bolt → P1 (life-17 control). The boon trigger needs its target.
+    // Drive the cast manually rather than via `commit()`: post-fix the boon
+    // offers BOTH walls, so the commit driver's required-slot picker would
+    // panic on its empty trigger-intent pool (`scenario.rs:3158`) — and
+    // declaring the knight as commit intent would auto-answer the very
+    // prompt this test must observe. Manual driving surfaces the
+    // `TriggerTargetSelection` prompt to the loop below; every assertion
+    // below is unchanged.
+    let bolt_card = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id: bolt_card,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("announce Bolt");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => {
+            let legal: Vec<TargetRef> = target_slots
+                .iter()
+                .flat_map(|slot| slot.legal_targets.clone())
+                .collect();
+            assert!(
+                legal.contains(&TargetRef::Player(P1)),
+                "reach guard: Bolt (\"any target\") must offer P1, got {legal:?}"
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                })
+                .expect("bolt P1");
+        }
+        other => panic!("expected TargetSelection for Bolt, got {other:?}"),
+    }
+    let mut prompt_seen = false;
+    for _ in 0..100 {
+        if runner.state().stack.is_empty()
+            && !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OrderTriggers { .. }
+                    | WaitingFor::TriggerTargetSelection { .. }
+                    | WaitingFor::TargetSelection { .. }
+            )
+        {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                prompt_seen = true;
+                let legal: Vec<TargetRef> = target_slots
+                    .iter()
+                    .flat_map(|slot| slot.legal_targets.clone())
+                    .collect();
+                assert!(
+                    legal.contains(&TargetRef::Object(knight)),
+                    "the source-less boon must offer the pro-red knight, got {legal:?}"
+                );
+                assert!(
+                    legal.contains(&TargetRef::Object(wall_two)),
+                    "the boon must still offer the unprotected wall, got {legal:?}"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(knight)),
+                    })
+                    .expect("choose the boon target");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    // The boon dealt the noted 2 to the knight (lethal to the 2/2 — damage
+    // NOT prevented); Bolt dealt 3 to P1; the spare wall stands untouched.
+    assert!(
+        prompt_seen,
+        "the boon must prompt for its target: pre-fix it auto-targets the sole legal wall"
+    );
+    assert_eq!(
+        runner.state().objects[&knight].zone,
+        Zone::Graveyard,
+        "source-less boon damage must ignore protection from red"
+    );
+    assert_eq!(
+        runner.state().objects[&wall_two].zone,
+        Zone::Battlefield,
+        "hostile: the unchosen wall must stand untouched"
+    );
+    assert_eq!(runner.state().players[1].life, 17);
+    assert!(held_boons(&runner).is_empty());
+}
+
+/// T3 over-correction guard: ordinary SOURCED abilities still respect
+/// protection from red — the Pyromancer's tap ability and a red Bolt both
+/// exclude the knight, while the unprotected wall stays legal. Passes
+/// identically with and without the F2 fix (no consumer changes); it flips
+/// only if someone "fixes" F2 in the consumers.
+#[test]
+fn sourced_ability_still_respects_protection_from_red() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let knight = scenario
+        .add_creature(P1, "Silver Knight", 2, 2)
+        .from_oracle_text_with_keywords(&["first strike", "protection"], SILVER_KNIGHT)
+        .id();
+    let wall = scenario.add_creature_from_oracle(P1, "Wall", 0, 2, "").id();
+    // Prodigal Pyromancer is a red 1/1; stamp the color so the protection
+    // has something to read (same honesty rule as the Molten stamp in T2).
+    let mut pyro_builder =
+        scenario.add_creature_from_oracle(P0, "Prodigal Pyromancer", 1, 1, PRODIGAL_PYROMANCER);
+    pyro_builder.with_color(vec![ManaColor::Red]);
+    let pyro = pyro_builder.id();
+    let mut bolt_builder = scenario.add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT);
+    bolt_builder.with_color(vec![ManaColor::Red]);
+    let bolt = bolt_builder.id();
+    let mut runner = scenario.build();
+
+    // Reach guards: both fixtures parse (tap ability present; knight protected).
+    assert!(
+        !runner.state().objects[&pyro].abilities.is_empty(),
+        "reach guard: the staged Pyromancer must carry its tap ability"
+    );
+    assert!(
+        runner.state().objects[&knight]
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Red
+            ))),
+        "reach guard: the staged knight must hold live protection from red"
+    );
+
+    // Tap → knight rejected (excluded from the sourced ability's legal set);
+    // tap → wall succeeds (reach guard: 1 damage marked, wall survives).
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: pyro,
+            ability_index: 0,
+        })
+        .expect("announce the Pyromancer activation");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => {
+            let legal: Vec<TargetRef> = target_slots
+                .iter()
+                .flat_map(|slot| slot.legal_targets.clone())
+                .collect();
+            assert!(
+                !legal.contains(&TargetRef::Object(knight)),
+                "the sourced red ability must still exclude the pro-red knight, got {legal:?}"
+            );
+            assert!(
+                legal.contains(&TargetRef::Object(wall)),
+                "reach guard: the unprotected wall must stay legal, got {legal:?}"
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(wall)),
+                })
+                .expect("tap the Pyromancer at the wall");
+        }
+        other => panic!("expected TargetSelection for the tap ability, got {other:?}"),
+    }
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&wall].damage_marked,
+        1,
+        "reach guard: the tapped Pyromancer must deal its 1 to the wall"
+    );
+    assert_eq!(
+        runner.state().objects[&wall].zone,
+        Zone::Battlefield,
+        "the 0/2 wall survives 1 damage"
+    );
+
+    // Hostile: a red SPELL still excludes the knight too — Bolt's prompt must
+    // list the wall but not the knight; the wall takes the 3 and dies.
+    let bolt_card = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id: bolt_card,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("announce Bolt");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => {
+            let legal: Vec<TargetRef> = target_slots
+                .iter()
+                .flat_map(|slot| slot.legal_targets.clone())
+                .collect();
+            assert!(
+                !legal.contains(&TargetRef::Object(knight)),
+                "the red spell must still exclude the pro-red knight, got {legal:?}"
+            );
+            assert!(
+                legal.contains(&TargetRef::Object(wall)),
+                "reach guard: the wall must stay a legal spell target, got {legal:?}"
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(wall)),
+                })
+                .expect("bolt the wall");
+        }
+        other => panic!("expected TargetSelection for Bolt, got {other:?}"),
+    }
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&wall].zone,
+        Zone::Graveyard,
+        "reach guard: Bolt must deal its 3 to the wall"
+    );
+    assert_eq!(
+        runner.state().objects[&knight].zone,
+        Zone::Battlefield,
+        "the knight stands untouched throughout"
     );
 }

@@ -5365,6 +5365,52 @@ impl CastingPermission {
             | Self::Foretold { .. } => None,
         }
     }
+
+    /// CR 118.9a: is this object-attached permission a NORMAL-COST route for
+    /// a cast that brings its own independent alternative cost (Evoke,
+    /// Bestow, Overload, the face-down {3}, … —
+    /// `CastingVariant::is_independent_alternative_cost_rider`)? Such a rider
+    /// may only ride a normal-cost route: an alternative-cost grant
+    /// underneath it would be a second alternative cost on the same cast.
+    ///
+    /// `true` for an `ExileWithAltCost` grant of `NormalCost` provenance (it
+    /// restates the printed cost) and for a paid, rider-free `PlayFromExile`
+    /// impulse grant (no `without_paying_mana_cost` channel, no
+    /// `alt_ability_cost` rider); `false` for every other shape. Consulted
+    /// only on the object-grant election path (`has_exile_cast_permission`
+    /// admission + `selected_object_cast_permission_index` election), where
+    /// non-`PlayFromExile` variants never authorize through the scanned slot
+    /// anyway.
+    ///
+    /// The match is wildcard-free, so a new permission variant is a COMPILE
+    /// ERROR here and must state its rider authority, exactly as
+    /// [`Self::lifetime`] and [`Self::cast_cost_modifier`] do.
+    pub fn is_normal_cost_authority_for_rider(&self) -> bool {
+        match self {
+            // CR 702.168b: a `NormalCost` grant restates the card's own
+            // printed cost — a normal cast route that admits an
+            // alternative-cost rider; an `Alternative` grant does not.
+            Self::ExileWithAltCost {
+                cost_provenance, ..
+            } => matches!(cost_provenance, ExileGrantCostProvenance::NormalCost),
+            Self::PlayFromExile {
+                provenance,
+                without_paying_mana_cost,
+                alt_ability_cost,
+                ..
+            } => {
+                matches!(provenance, PlayFromExileProvenance::Impulse)
+                    && !without_paying_mana_cost
+                    && alt_ability_cost.is_none()
+            }
+            Self::AdventureCreature
+            | Self::ExileWithEnergyCost
+            | Self::ExileWithAltAbilityCost { .. }
+            | Self::WarpExile { .. }
+            | Self::Plotted { .. }
+            | Self::Foretold { .. } => false,
+        }
+    }
 }
 
 /// CR 611.2a: Non-time condition that invalidates a per-card play permission.
@@ -34820,6 +34866,24 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_trigger_source_recursive(source);
+        }
+    }
+
+    /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity
+    /// over this entire ability chain. Writes `source_id` ONLY — controller,
+    /// `original_controller`, `trigger_source`, incarnation pins untouched, so
+    /// creation provenance (matchers, display) survives. Single call site:
+    /// boon install (`create_boon.rs`), whose release note ("a one-time boon
+    /// is a single-use triggered ability with no source") makes the built
+    /// ability gameplay-source-less while the `DelayedTrigger` entry keeps the
+    /// creator. Walk mirrors `set_trigger_source_recursive` exactly.
+    pub fn set_gameplay_source_recursive(&mut self, source: ObjectId) {
+        self.source_id = source;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_gameplay_source_recursive(source);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_gameplay_source_recursive(source);
         }
     }
 
