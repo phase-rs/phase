@@ -261,9 +261,9 @@ impl fmt::Display for CostPaymentProhibition {
 /// - `Unlimited` — any number of casts per turn from this source (Conduit of Worlds,
 ///   Crucible of Worlds, Omniscience).
 /// - `OncePerTurn` — at most one cast per turn from this source, tracked by the
-///   source's `ObjectId` in the corresponding per-turn used-set. CR 400.7: zone
-///   change creates a new `ObjectId`, so the permission naturally resets when the
-///   source leaves and returns.
+///   source's `ObjectId` in the corresponding per-turn used-set. CR 400.7: the
+///   source's entry ends when it leaves the battlefield
+///   (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
 /// - `OncePerTurnPerPermanentType` — at most one cast/play per turn from this
 ///   source **for each permanent type** the consumed card has (CR 110.4 lists
 ///   the six permanent types). Tracked by the source's `ObjectId` plus the

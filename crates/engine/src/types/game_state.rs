@@ -19510,7 +19510,8 @@ pub enum CastingVariant {
     Disturb,
     /// CR 601.2a: Cast from graveyard via a static permission source (e.g. Lurrus).
     /// Stores the granting permanent's ObjectId for per-turn tracking.
-    /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
+    /// CR 400.7: the source's per-turn entry ends when it leaves the battlefield
+    /// (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
     GraveyardPermission {
         source: ObjectId,
         /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot in
@@ -19536,7 +19537,8 @@ pub enum CastingVariant {
     /// per-turn tracking. Omniscience's unconditional silent path does not use
     /// this variant — it short-circuits the mana cost to NoCost while leaving
     /// `casting_variant = Normal`.
-    /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
+    /// CR 400.7: the source's per-turn entry ends when it leaves the battlefield
+    /// (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
     HandPermission {
         source: ObjectId,
         /// CR 601.2b: When `OncePerTurn`, casting consumes this source's slot in
@@ -19551,8 +19553,8 @@ pub enum CastingVariant {
     /// resolution-time routing matches a normal cast — no on-resolve exile
     /// behavior — so this is treated as a casting-context tag, not as an
     /// alternative cost.
-    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
-    /// resetting the per-turn slot when the source leaves and re-enters play.
+    /// CR 400.7: the source's per-turn slot ends when it leaves the battlefield
+    /// (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
     ExilePermission {
         source: ObjectId,
         /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot
