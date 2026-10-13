@@ -395,6 +395,7 @@ mod excess_damage_quantity_channel;
 mod exchange_life_totals_cards;
 mod exhibition_tidecaller_target_player_mill;
 mod exile_dynamic_from_top;
+mod exiled_card_power_linked_pile;
 mod exocrine_compound_damage_subject;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;

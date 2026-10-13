@@ -16,9 +16,10 @@
 //! all. The Vampire silently got +0/+0 — while the raw text still rendered as a
 //! supported dynamic quantity in the coverage report (a fabricated green).
 //!
-//! The fix binds the clause to `QuantityRef::ExiledCardPower { index: 0 }`
-//! (CR 607.2a — the card exiled by this source), which `game/quantity.rs`
-//! resolves against `cards_exiled_with_source_this_turn`.
+//! The fix binds the clause to
+//! `QuantityRef::PropertyAggregate(Sum, Power, CardTypeSetSource::ExiledBySource)`
+//! (CR 607.2a + CR 607.3 — the summed power of the cards in exile linked to this
+//! source), which `game/quantity.rs` resolves against the linked-exile authority.
 //!
 //! This is a RUNTIME test, not an AST-shape test: it drives declare-attackers →
 //! the `Attacks` trigger → target selection → stack resolution → the layer
@@ -30,7 +31,10 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
+use engine::types::keywords::Keyword;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
 
@@ -48,9 +52,19 @@ fn bishop_of_binding_pumps_target_vampire_by_exiled_card_power() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let bishop = scenario
-        .add_creature_from_oracle(P0, "Bishop of Binding", 2, 2, BISHOP_OF_BINDING)
-        .id();
+    // Haste: the attack below happens on the turn Bishop is cast.
+    let bishop = {
+        let mut builder = scenario.add_creature_to_hand_from_oracle(
+            P0,
+            "Bishop of Binding",
+            2,
+            2,
+            BISHOP_OF_BINDING,
+        );
+        builder.with_mana_cost(ManaCost::zero());
+        builder.with_keyword(Keyword::Haste);
+        builder.id()
+    };
 
     // The pump recipient: a Vampire P0 controls (the trigger targets "target
     // Vampire"). Base 2/2 so the +X/+X delta is unambiguous.
@@ -60,11 +74,9 @@ fn bishop_of_binding_pumps_target_vampire_by_exiled_card_power() {
         builder.id()
     };
 
-    // The card whose power DEFINES X: a 4/4. Created on P1's battlefield, then
-    // moved to exile and linked to Bishop below — the state Bishop's own ETB
-    // ("exile target creature an opponent controls until this leaves") would
-    // have established. Seeding it directly keeps this test focused on the
-    // where-X binding rather than re-testing the exile machinery.
+    // The card whose power DEFINES X: a 4/4 on P1's battlefield, exiled by
+    // Bishop's own ETB ("exile target creature an opponent controls until this
+    // creature leaves the battlefield") below.
     let exiled = scenario.add_creature(P1, "Exiled Brute", 4, 4).id();
 
     // Idle defender so the DeclareBlockers prompt appears (it declares no blocks).
@@ -72,16 +84,13 @@ fn bishop_of_binding_pumps_target_vampire_by_exiled_card_power() {
 
     let mut runner = scenario.build();
 
-    // CR 607.2a: link the exiled card to its exiling source. `ExiledCardPower`
-    // resolves against `cards_exiled_with_source_this_turn`.
-    {
-        let state = runner.state_mut();
-        state.battlefield.retain(|&id| id != exiled);
-        state.exile.push_back(exiled);
-        state
-            .cards_exiled_with_source_this_turn
-            .insert(bishop, vec![exiled]);
-    }
+    // CR 607.2a: cast Bishop; its ETB exiles the 4/4 and links it to Bishop.
+    runner.cast(bishop).target_object(exiled).resolve();
+    assert_eq!(
+        runner.state().objects[&exiled].zone,
+        Zone::Exile,
+        "setup: Bishop's ETB must exile the 4/4"
+    );
 
     // CR 508.1: declare Bishop as an attacker — this fires the `Attacks` trigger.
     runner.pass_both_players();

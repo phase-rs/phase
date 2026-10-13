@@ -165,13 +165,31 @@ fn source_object_for_context<'a>(
 /// Reads source-owned exile links from the same authority as all other
 /// triggered source facts. The live exile store is correct only when there is
 /// no exact trigger source context to preserve.
+///
+/// Both linked-pile readers — `QuantityRef::CardsExiledBySource` ("if a card is
+/// exiled with it") and the `CardTypeSetSource::ExiledBySource` population ("the
+/// power of the exiled card") — answer from this one filtered pile, so a
+/// condition and the X it guards cannot disagree.
 fn linked_exile_for_context(
     state: &GameState,
     ctx: &QuantityContext,
 ) -> Vec<crate::types::game_state::LinkedExileSnapshot> {
     ctx.trigger_source
         .as_ref()
-        .map(|source| source.linked_exile_snapshot.clone())
+        .map(|source| {
+            // CR 607.2a: the linked pile is the cards still in the exile zone; a
+            // card that left exile after the trigger latched its pile is not
+            // "the exiled card" (CR 610.3 return, CR 608.2h).
+            source
+                .linked_exile_snapshot
+                .iter()
+                .filter(|linked| {
+                    crate::game::exile_links::exiled_card_snapshot(state, linked.exiled_id)
+                        .is_some()
+                })
+                .cloned()
+                .collect()
+        })
         .unwrap_or_else(|| crate::game::players::linked_exile_cards_for_source(state, ctx.source))
 }
 
@@ -5436,6 +5454,9 @@ fn resolve_ref(
             usize_to_i32_saturating(linked_exile_for_context(state, &ctx).len())
         }
         // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
+        // Its only producer is The Mimeoplasm's entry replacement: the ordinal
+        // "this way" reading over the per-turn ledger. "The exiled card" readers
+        // use `PropertyAggregate(.., ExiledBySource)` instead.
         // ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
         QuantityRef::ExiledCardPower { index } => {
             let exiled_cards = cards_exiled_this_turn_for_context(state, &ctx);

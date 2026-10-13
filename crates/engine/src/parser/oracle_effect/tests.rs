@@ -39585,7 +39585,8 @@ fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
 /// Regression pin: the binding previously degraded to the lossy
 /// `PtValue::Variable("<raw oracle text>")` fallback, which `resolve_variable_pt`
 /// (game/effects/pump.rs) resolves to `None` — so the pump silently applied
-/// NOTHING. `QuantityRef::ExiledCardPower` is the typed home for this quantity.
+/// NOTHING. CR 607.2a + CR 607.3: X is the summed power of the cards in exile
+/// linked to this object, the `ExiledBySource` population aggregate.
 #[test]
 fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
     let def = parse_effect_chain(
@@ -39599,14 +39600,22 @@ fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
         panic!("expected Pump, got {:?}", def.effect);
     };
     let expected = QuantityExpr::Ref {
-        qty: QuantityRef::ExiledCardPower { index: 0 },
+        qty: QuantityRef::PropertyAggregate(
+            PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                CardTypeSetSource::ExiledBySource,
+            )
+            .expect("statically valid property aggregate"),
+        ),
     };
     for (stat, value) in [("power", power), ("toughness", toughness)] {
         assert_eq!(
             value,
             &PtValue::Quantity(expected.clone()),
-            "X must bind to ExiledCardPower in {stat}; an unbound PtValue::Variable \
-             resolves to no modification at all (silent no-op), got {value:?}"
+            "X must bind to the linked-exile power sum in {stat}; an unbound \
+             PtValue::Variable resolves to no modification at all (silent no-op), \
+             got {value:?}"
         );
     }
 }

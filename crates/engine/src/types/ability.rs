@@ -9585,7 +9585,10 @@ pub enum QuantityRef {
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
-    /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
+    /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
+    /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
+    /// "the power of the exiled card" use
+    /// `PropertyAggregate(Sum, Power, CardTypeSetSource::ExiledBySource)` instead.
     ExiledCardPower { index: u32 },
     /// CR 400.1: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).

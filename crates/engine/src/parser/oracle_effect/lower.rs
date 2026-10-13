@@ -33,14 +33,15 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-    AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
-    CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    MultiTargetSpec, NameStickerSet, ObjectScope, PermissionGrantee, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
+    CastPermissionConstraint, CastingPermission, CombatHistoryScope, Comparator, ConjureSource,
+    ContinuousModification, ControllerRef, CountBinding, DamageChannel, DamageSource,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider, FilterProp,
+    GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
+    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -11056,18 +11057,26 @@ fn parse_where_x_quantity_with(
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
 }
 
-/// CR 107.3c + CR 608.2h: "where X is the power of the exiled card" DEFINES X as
-/// the power of the card exiled by this ability's source — Bishop of Binding
-/// ("Whenever this creature attacks, target Vampire gets +X/+X until end of
-/// turn, where X is the power of the exiled card") and Redemptor Dreadnought.
-/// CR 608.2h: the exiled card is read via last known information, which is what
-/// `QuantityRef::ExiledCardPower` resolves against (game/quantity.rs).
+/// CR 607.2a + CR 607.3 + CR 608.2h: "where X is the power of the exiled card"
+/// is the power of the card(s) in exile linked to this object; with several
+/// linked cards X is their sum. Bishop of Binding ("Whenever this creature
+/// attacks, target Vampire gets +X/+X until end of turn, where X is the power of
+/// the exiled card") and Redemptor Dreadnought print it.
 ///
-/// `index: 0` is the first (and, for this class, only) card the source exiled.
+/// The `CardTypeSetSource::ExiledBySource` population reads the linked-exile
+/// authority (`linked_exile_for_context` in game/quantity.rs), the same pile
+/// "if a card is exiled with it" (`QuantityRef::CardsExiledBySource`) counts.
 fn parse_where_x_exiled_card_power(expression_lower: &str) -> Option<QuantityExpr> {
     all_consuming(value(
         QuantityExpr::Ref {
-            qty: QuantityRef::ExiledCardPower { index: 0 },
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::ExiledBySource,
+                )
+                .expect("statically valid property aggregate"),
+            ),
         },
         tag::<_, _, OracleError<'_>>("the power of the exiled card"),
     ))
