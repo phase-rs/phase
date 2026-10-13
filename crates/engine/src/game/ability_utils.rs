@@ -4,11 +4,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject,
     ContinuousModification, ControllerRef, CountBinding, CounterMoveSelection, DamageSource,
-    EachDamageRecipient, Effect, EffectKind, EffectScope, FilterProp, GameRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
-    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
-    TypeFilter, TypedFilter,
+    EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope, FilterProp, GameRestriction,
+    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
@@ -17,7 +17,7 @@ use crate::types::ability::mana_multi_role;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    ChainStep, GameState, PtDirection, RetargetSlotAddress, TargetEffectDetail,
+    ChainStep, DistributionUnit, GameState, PtDirection, RetargetSlotAddress, TargetEffectDetail,
     TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -2723,6 +2723,108 @@ pub fn distribution_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
     } else {
         node.targets.clone()
     }
+}
+
+/// CR 601.2d vs CR 608.2d + CR 115.10a: the single authority for whether this
+/// node's division is chosen while its effect is applied. A division among a
+/// population bound earlier in this resolution ("any number of those Wolves" —
+/// a tracked set, [`TargetFilter::is_tracked_set_population`]) is untargeted and
+/// chosen on resolution. Every other division — including one whose recipient
+/// is `ParentTarget` after an "instead" swap or on a reflexive "when you do"
+/// node (Shatterskull Smashing, Fight with Fire, Death to Our Enemies) — is
+/// among targets and was announced when the spell/ability was put on the stack
+/// (CR 601.2d; CR 603.12). An even split has no choice.
+pub(crate) fn resolution_time_division(
+    ability: &ResolvedAbility,
+) -> Option<&crate::types::game_state::DistributionUnit> {
+    let unit = ability.distribute.as_ref()?;
+    if !ability
+        .effect
+        .target_filter()
+        .is_some_and(TargetFilter::is_tracked_set_population)
+    {
+        return None;
+    }
+    // Only the damage resolver pauses for a resolution-time division; a counters
+    // or life division among a tracked set has no resolver that offers the
+    // choice, so it is not classified as one (fail closed, not silently).
+    match unit {
+        DistributionUnit::Damage => Some(unit),
+        DistributionUnit::Counters(_)
+        | DistributionUnit::Life
+        | DistributionUnit::EvenSplitDamage => None,
+    }
+}
+
+/// Which of the legal recipients a submitted division must name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DistributionCoverage {
+    /// CR 601.2d: "Each of these targets must receive at least one of whatever
+    /// is being divided" — an announce-time division names every target.
+    EveryRecipient,
+    /// CR 608.2d: a resolution-time division among candidates the chooser may
+    /// leave unchosen, so any subset of the legal recipients is a division.
+    AnySubset,
+}
+
+impl DistributionCoverage {
+    pub(crate) fn of(scope: &crate::types::game_state::DistributionScope) -> Self {
+        use crate::types::game_state::DistributionScope;
+        match scope {
+            DistributionScope::AnnouncedTargets => Self::EveryRecipient,
+            DistributionScope::ResolutionCandidates { .. } => Self::AnySubset,
+        }
+    }
+}
+
+/// CR 601.2d + CR 608.2d + CR 115.7f: the single validator for a submitted
+/// division, shared by both `DistributionScope`s. Each entry names a distinct
+/// legal recipient and receives at least one, the portions sum to the whole
+/// amount, and `coverage` says whether every legal recipient must be named.
+/// An empty submission for a positive total fails the sum check. The sum is
+/// checked so a submitted budget cannot wrap past the required total.
+pub(crate) fn validate_distribution(
+    distribution: &[(TargetRef, u32)],
+    total: u32,
+    legal: &[TargetRef],
+    coverage: DistributionCoverage,
+) -> Result<(), crate::types::ability::EffectError> {
+    let actual_total = distribution
+        .iter()
+        .try_fold(0u32, |sum, (_, amount)| sum.checked_add(*amount))
+        .ok_or_else(|| EffectError::InvalidParam("Distribution total overflows".to_string()))?;
+    if actual_total != total {
+        return Err(EffectError::InvalidParam(format!(
+            "Distribution total {actual_total} != required {total}"
+        )));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(distribution.len());
+    for (recipient, amount) in distribution {
+        if *amount == 0 {
+            return Err(EffectError::InvalidParam(
+                "Each target must receive at least 1".to_string(),
+            ));
+        }
+        if !legal.contains(recipient) {
+            return Err(EffectError::InvalidParam(
+                "Distribution target not in legal set".to_string(),
+            ));
+        }
+        // CR 601.2d + CR 608.2d: each recipient's portion is announced once.
+        if !seen.insert(recipient) {
+            return Err(EffectError::InvalidParam(
+                "Distribution names a recipient more than once".to_string(),
+            ));
+        }
+    }
+    if coverage == DistributionCoverage::EveryRecipient
+        && !legal.iter().all(|target| seen.contains(target))
+    {
+        return Err(EffectError::InvalidParam(
+            "Each announced target must receive at least 1".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// CR 608.2b + CR 400.7: whether the occurrence at `position` of `ability`
@@ -12815,6 +12917,7 @@ mod tests {
         PreventionAmount, PreventionScope,
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
+    use crate::types::game_state::DistributionUnit;
 
     #[test]
     fn node_declaration_query_matches_production_role_boundaries() {
@@ -27589,6 +27692,200 @@ mod tests {
             slots[0].legal_targets.contains(&TargetRef::Object(land)),
             "Non-damage Any target slot must include land"
         );
+    }
+    fn division_node(target: TargetFilter, unit: Option<DistributionUnit>) -> ResolvedAbility {
+        let mut node = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        node.distribute = unit;
+        node
+    }
+
+    fn tracked_wolves() -> TargetFilter {
+        TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                "Wolf".to_string(),
+            )))),
+            caused_by: None,
+        }
+    }
+
+    /// CR 601.2d vs CR 608.2d + CR 115.10a: only a division among a tracked-set
+    /// population is chosen at resolution; a targeted or even-split division is
+    /// not.
+    #[test]
+    fn resolution_time_division_is_tracked_set_only() {
+        assert_eq!(
+            resolution_time_division(&division_node(
+                tracked_wolves(),
+                Some(DistributionUnit::Damage)
+            )),
+            Some(&DistributionUnit::Damage)
+        );
+        assert_eq!(
+            resolution_time_division(&division_node(
+                TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0)
+                },
+                Some(DistributionUnit::Damage)
+            )),
+            Some(&DistributionUnit::Damage)
+        );
+        assert_eq!(
+            resolution_time_division(&division_node(
+                TargetFilter::Typed(TypedFilter::creature()),
+                Some(DistributionUnit::Damage)
+            )),
+            None,
+            "a targeted division is announced (CR 601.2d)"
+        );
+        assert_eq!(
+            resolution_time_division(&division_node(tracked_wolves(), None)),
+            None,
+            "no distribute marker, no division"
+        );
+        assert_eq!(
+            resolution_time_division(&division_node(
+                tracked_wolves(),
+                Some(DistributionUnit::EvenSplitDamage)
+            )),
+            None,
+            "an even split offers no choice"
+        );
+        assert_eq!(
+            resolution_time_division(&division_node(
+                tracked_wolves(),
+                Some(DistributionUnit::Counters("P1P1".to_string()))
+            )),
+            None,
+            "no counters resolver pauses for a resolution-time division"
+        );
+    }
+
+    /// V5n (R2-F1): announced-target divisions whose recipient is a context ref
+    /// (`ParentTarget` after an "instead" swap, `ParentTargetSlot`, a reflexive
+    /// counters division, `SelfRef`) are NOT resolution-time divisions.
+    #[test]
+    fn resolution_time_division_rejects_announced_target_context_refs() {
+        // (a) The post-`apply_instead_swap` Shatterskull Smashing X >= 6 shape.
+        let mut parent = division_node(
+            TargetFilter::Typed(TypedFilter::creature()),
+            Some(DistributionUnit::Damage),
+        );
+        parent.targets = vec![TargetRef::Object(ObjectId(7))];
+        parent.distribution = Some(vec![(TargetRef::Object(ObjectId(7)), 6)]);
+        let mut sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 12 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        sub.distribute = Some(DistributionUnit::Damage);
+        let swapped = apply_instead_swap(&parent, &sub);
+        assert!(
+            swapped.distribute.is_some() && swapped.distribution.is_none(),
+            "premise: the swap keeps `distribute` and drops the announced split"
+        );
+        assert_eq!(resolution_time_division(&swapped), None);
+
+        // (b) ParentTargetSlot recipient.
+        assert_eq!(
+            resolution_time_division(&division_node(
+                TargetFilter::ParentTargetSlot { index: 0 },
+                Some(DistributionUnit::Damage)
+            )),
+            None
+        );
+        // (c) Stumpsquall-shaped counters division on ParentTarget.
+        let mut counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        counters.distribute = Some(DistributionUnit::Counters("P1P1".to_string()));
+        assert_eq!(resolution_time_division(&counters), None);
+        // (d) SelfRef recipient.
+        assert_eq!(
+            resolution_time_division(&division_node(
+                TargetFilter::SelfRef,
+                Some(DistributionUnit::Damage)
+            )),
+            None
+        );
+    }
+
+    /// CR 601.2d + CR 608.2d + CR 115.7f: the shared division validator.
+    #[test]
+    fn validate_distribution_enforces_sum_minimum_membership_and_distinctness() {
+        use DistributionCoverage::{AnySubset, EveryRecipient};
+        let a = TargetRef::Object(ObjectId(21));
+        let b = TargetRef::Object(ObjectId(22));
+        let outsider = TargetRef::Object(ObjectId(99));
+        let legal = vec![a.clone(), b.clone()];
+        assert!(
+            validate_distribution(&[(a.clone(), 2), (b.clone(), 1)], 3, &legal, AnySubset).is_ok()
+        );
+        assert!(
+            validate_distribution(&[(a.clone(), 3)], 3, &legal, AnySubset).is_ok(),
+            "a subset of the legal recipients is a valid division"
+        );
+        assert!(
+            validate_distribution(&[(a.clone(), 1), (b.clone(), 1)], 3, &legal, AnySubset).is_err()
+        );
+        assert!(
+            validate_distribution(&[(a.clone(), 3), (b.clone(), 0)], 3, &legal, AnySubset).is_err()
+        );
+        assert!(validate_distribution(&[(outsider, 3)], 3, &legal, AnySubset).is_err());
+        assert!(
+            validate_distribution(&[(a.clone(), 1), (a.clone(), 2)], 3, &legal, AnySubset).is_err()
+        );
+        assert!(validate_distribution(&[], 3, &legal, AnySubset).is_err());
+
+        // Raw-ingress overflow: u32::MAX + 2 wraps to 1 without a checked add.
+        assert!(validate_distribution(
+            &[(a.clone(), u32::MAX), (b.clone(), 2)],
+            1,
+            &legal,
+            AnySubset
+        )
+        .is_err());
+        assert!(validate_distribution(
+            &[(a.clone(), u32::MAX), (b.clone(), 2)],
+            1,
+            &legal,
+            EveryRecipient
+        )
+        .is_err());
+        // CR 601.2d: announced targets must all receive something; a
+        // resolution-time division may leave candidates out.
+        assert!(validate_distribution(&[(a.clone(), 3)], 3, &legal, EveryRecipient).is_err());
+        assert!(validate_distribution(
+            &[(a.clone(), 2), (b.clone(), 1)],
+            3,
+            &legal,
+            EveryRecipient
+        )
+        .is_ok());
+        assert!(validate_distribution(&[(a, 3)], 3, &legal, AnySubset).is_ok());
     }
 
     thread_local! {

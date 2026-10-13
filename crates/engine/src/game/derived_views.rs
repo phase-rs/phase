@@ -979,7 +979,8 @@ impl Serialize for ClientGameStateRef<'_> {
 /// allocators authorize replay/transition handling; clients receive neither
 /// those private capabilities nor the resolved journal that contains them.
 fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    crate::game::visibility::redact_waiting_for_iteration_members(&mut projected_state.waiting_for);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);

@@ -210,6 +210,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 141 — Resolution-time division (CR 608.2d): WaitingFor.DistributeAmong
+ *      gains scope { type: "ResolutionCandidates" }, under which the modal
+ *      lets unchosen candidates receive nothing, and serialized abilities can
+ *      carry ThisWayCause "Tapped" — see PROTOCOL_VERSION's own `/// 141` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v140 client would ignore
+ *      scope and demand at least one for every candidate, leaving valid
+ *      subset divisions unconfirmable; the exact-match version check at
+ *      connect refuses the pairing.
+ *
  * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
  *      event's attackers attacked), carried in an ability's player_scope
  *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
@@ -854,7 +863,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 140;
+export const PROTOCOL_VERSION = 141;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

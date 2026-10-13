@@ -1317,6 +1317,7 @@
   },
   "distributeAmong": {
     "subtitle": "每个目标至少分配1{{unit}}。剩余：{{remaining}}",
+    "subtitleAnyNumber": "可选择任意数量，每个选中的对象至少分配1{{unit}}。剩余：{{remaining}}",
     "title": "分配{{total}}{{unit}}",
     "unitCounter": "个{{counter}}指示物",
     "unitDamage": "点伤害",

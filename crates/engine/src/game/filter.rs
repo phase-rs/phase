@@ -11072,7 +11072,7 @@ mod tests {
         CombatHistoryScope, Comparator, ControllerRef, CostPaidObjectSnapshot, DamageKindFilter,
         Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
         QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter,
-        TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
+        TargetRef, ThisWayCause, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -15852,6 +15852,62 @@ mod tests {
             !matches_target_filter(&state, exiled, &sacrificed_this_way, sacrificed),
             "a member whose recorded producer action differs (Exiled) must not match Sacrificed"
         );
+    }
+
+    /// CR 608.2c + CR 701.26a: a merged chain set holding a destroyed member and
+    /// a tapped member serves "tapped this way" and "destroyed this way"
+    /// disjointly; the cause-agnostic read sees both.
+    #[test]
+    fn tracked_set_filtered_tapped_cause_discriminates_merged_set() {
+        let mut state = setup();
+        let destroyed = add_creature(&mut state, PlayerId(0), "Destroyed Member");
+        let tapped = add_creature(&mut state, PlayerId(0), "Tapped Member");
+        let set = crate::types::identifiers::TrackedSetId(4);
+        state
+            .tracked_object_sets
+            .insert(set, vec![destroyed, tapped]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(destroyed, ThisWayCause::Destroyed);
+        causes.insert(tapped, ThisWayCause::Tapped);
+        state
+            .tracked_set_member_causes
+            .insert(set, causes.into_iter().collect());
+        state.chain_tracked_set_id = Some(set);
+
+        let tapped_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Tapped));
+        assert!(matches_target_filter(
+            &state,
+            tapped,
+            &tapped_this_way,
+            tapped
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            destroyed,
+            &tapped_this_way,
+            tapped
+        ));
+        let destroyed_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Destroyed));
+        assert!(matches_target_filter(
+            &state,
+            destroyed,
+            &destroyed_this_way,
+            destroyed
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            tapped,
+            &destroyed_this_way,
+            destroyed
+        ));
+        let any_member = sentinel_tracked_set_filtered(None);
+        assert!(matches_target_filter(&state, tapped, &any_member, tapped));
+        assert!(matches_target_filter(
+            &state,
+            destroyed,
+            &any_member,
+            destroyed
+        ));
     }
 
     /// Concrete (non-sentinel) `TrackedSetFiltered` ids bypass the ladder
