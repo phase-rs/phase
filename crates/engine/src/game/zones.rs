@@ -2183,10 +2183,11 @@ fn record_linked_exile_departure(
     }
     // CR 113.7a + CR 400.7 + CR 607.2q: only an ability of the departed
     // permanent reads its cast-cost pile; the object it became is a new object
-    // that no spell became. KNOWN LIMITATION (CR 113.7a): an activation that
-    // sacrifices or exiles this permanent as its cost is stamped with the
-    // successor and so does not read this pile; no printed card pairs such an
-    // activation with a cast-cost pile (`LinkedExileLki::admits` over-admission, P6).
+    // that no spell became, and an entry admitting the successor would let that
+    // object's own reads see the pile (`LinkedExileLki::admits`). KNOWN
+    // LIMITATION (CR 113.7a): an activation that sacrifices or exiles this
+    // permanent as its cost is stamped with the successor and so does not read
+    // this pile; no printed card pairs such an activation with a cast-cost pile.
     let (cast_cost, rest): (Vec<_>, Vec<_>) = snapshot
         .iter()
         .cloned()

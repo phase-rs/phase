@@ -1,8 +1,10 @@
 //! CR 607.2q: a card exiled to pay a cost of casting a permanent spell is linked
 //! to that spell and to the permanent it becomes, and to no other object
 //! (CR 400.7). Each test drives the real cast, combat, activation and cancel
-//! pipelines with verbatim Oracle text. Builder settings that are not Oracle
-//! text are named in a comment where a test uses them.
+//! pipelines. Printed cards use their verbatim Oracle text; the Keeper tests use
+//! the synthetic `KEEPER` building block, and the kept-pile test seeds one link
+//! directly (named in its doc). Builder settings that are not Oracle text are
+//! named in a comment where a test uses them.
 
 use engine::game::combat::AttackTarget;
 use engine::game::players::linked_exile_cards_for_source;
