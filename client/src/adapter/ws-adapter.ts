@@ -210,6 +210,8 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 141 — GameEvent.Attached reaches Full StateUpdate.events; an older peer
+ *       cannot decode its new tag. Wire 123 moves with it.
  * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
  *      event's attackers attacked), carried in an ability's player_scope
  *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
@@ -854,7 +856,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 140;
+export const PROTOCOL_VERSION = 141;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

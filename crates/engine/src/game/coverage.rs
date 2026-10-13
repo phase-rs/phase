@@ -88,6 +88,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
+            | StaticMode::CantBeTargeted { .. }
             | StaticMode::CantBeCast { .. }
             // CR 601.3 + CR 109.5: CantCastFrom carries `who`; the prohibited-zone
             // list rides `affected`. Runtime enforcement is in

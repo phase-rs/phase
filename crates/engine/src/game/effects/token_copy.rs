@@ -1013,7 +1013,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             remaining_count: final_count.saturating_sub(index + 1),
         };
 
-        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts) {
+        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts, events)
+        {
             // `NoLegalHost` is unreachable here — the empty-host arm above `continue`d.
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
             | crate::game::zone_pipeline::EnteringAuraAttachment::Attached

@@ -835,6 +835,36 @@ fn intrinsic_equip_abilities_from_token_statics(
         .collect()
 }
 
+/// CR 111.3 + CR 702.5a: Extract the unconditional intrinsic `Enchant`
+/// restrictions from token `static_abilities`. "The token has enchant player"
+/// is parsed as an unconditional `SelfRef` `AddKeyword(Enchant(..))` static; the
+/// creating effect's text IS the token's characteristics (CR 111.3), so the
+/// restriction is part of the entrant when it is created rather than a grant the
+/// layer pass has yet to apply. Conditional or non-`SelfRef` grants stay
+/// layer-only.
+fn intrinsic_enchant_keywords_from_token_statics(
+    static_abilities: &[StaticDefinition],
+) -> Vec<Keyword> {
+    static_abilities
+        .iter()
+        .filter(|static_def| {
+            static_def.condition.is_none()
+                && matches!(static_def.affected, None | Some(TargetFilter::SelfRef))
+        })
+        .flat_map(|static_def| {
+            static_def
+                .modifications
+                .iter()
+                .filter_map(|modification| match modification {
+                    ContinuousModification::AddKeyword {
+                        keyword: keyword @ Keyword::Enchant(_),
+                    } => Some(keyword.clone()),
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
 /// CR 111.1 + CR 614.1a: Apply an accepted `CreateToken` proposed event.
 ///
 /// Extracted from `resolve` so `handle_replacement_choice` can deliver tokens
@@ -856,14 +886,17 @@ fn intrinsic_equip_abilities_from_token_statics(
 /// Both halves are answered by the authority that already owns them —
 /// [`attach::authority_is_aura`] for Aura-ness (CR 205.1a: a copy exception can
 /// add or remove the subtype, so it reads characteristics, not the effect's
-/// `types`), and [`attach::can_attach_to_object`] / [`attach::can_attach_to_player`]
-/// for "can't legally enchant". That second pair is the SAME verdict
-/// `attach::attach_to` consumes a few lines later, so the gate and the
-/// attachment can never disagree about one host.
+/// `types`), and [`attach::can_attach_to_object`] /
+/// [`attach::can_enchant_player_with_authority`] for "can't legally enchant".
+/// That pair is the SAME verdict the attachment action consumes a few lines
+/// later, so the gate and the attachment can never disagree about one host. The
+/// token's intrinsic `Enchant` is already part of its characteristics here
+/// (see [`intrinsic_enchant_keywords_from_token_statics`]), which is what lets
+/// a player-enchanting token's own restriction be judged before it is attached.
 ///
 /// [`attach::authority_is_aura`]: super::attach::authority_is_aura
 /// [`attach::can_attach_to_object`]: super::attach::can_attach_to_object
-/// [`attach::can_attach_to_player`]: super::attach::can_attach_to_player
+/// [`attach::can_enchant_player_with_authority`]: super::attach::can_enchant_player_with_authority
 fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHostRequest) -> bool {
     // CR 303.4h: "If an effect attempts to put a permanent that isn't an Aura,
     // Equipment, or Fortification onto the battlefield attached to an object or
@@ -891,7 +924,12 @@ fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHost
             !super::attach::can_attach_to_object(state, entrant, host_id)
         }
         TokenHostRequest::Bound(AttachTarget::Player(host_player)) => {
-            !super::attach::can_attach_to_player(state, entrant, host_player)
+            !super::attach::can_enchant_player_with_authority(
+                state,
+                entrant,
+                host_player,
+                super::attach::AttachmentAuthority::Stored,
+            )
         }
     }
 }
@@ -1126,10 +1164,10 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         if let Some(host) = spec.attach_to.bound() {
             match host {
                 AttachTarget::Object(id) => {
-                    super::attach::attach_to(state, obj_id, id);
+                    super::attach::attach_to_with_events(state, obj_id, id, events);
                 }
                 AttachTarget::Player(pid) => {
-                    super::attach::attach_to_player(state, obj_id, pid);
+                    super::attach::attach_to_player_with_events(state, obj_id, pid, events);
                 }
             }
         }
@@ -1427,6 +1465,19 @@ pub(crate) fn materialize_token_spec_body(
         if !equip_abilities.is_empty() {
             Arc::make_mut(&mut object.abilities).extend(equip_abilities.iter().cloned());
             Arc::make_mut(&mut object.base_abilities).extend(equip_abilities);
+        }
+        // CR 111.3 + CR 702.5a: Likewise an intrinsic `Enchant` restriction is
+        // part of the entrant's characteristics from creation, so CR 303.4i's
+        // legality decision and the attachment action read the same restriction
+        // before any layer pass has run. The static stays for the layer path;
+        // Layer 6 deduplicates the identical keyword.
+        for keyword in intrinsic_enchant_keywords_from_token_statics(&spec.static_abilities) {
+            if !object.base_keywords.contains(&keyword) {
+                object.base_keywords.push(keyword.clone());
+            }
+            if !object.keywords.contains(&keyword) {
+                object.keywords.push(keyword);
+            }
         }
     }
 }
@@ -1926,7 +1977,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
             .expect("resolved copy-token creation must have a live journal cause");
     }
 
-    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts, events) {
         // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
         // returned for every entrant, card-backed included.
         crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
@@ -2097,10 +2148,10 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     if let Some(host) = attach_to {
         match host {
             AttachTarget::Object(id) => {
-                super::attach::attach_to(state, object_id, id);
+                super::attach::attach_to_with_events(state, object_id, id, events);
             }
             AttachTarget::Player(pid) => {
-                super::attach::attach_to_player(state, object_id, pid);
+                super::attach::attach_to_player_with_events(state, object_id, pid, events);
             }
         };
     }
@@ -7709,6 +7760,149 @@ mod tests {
                 .iter()
                 .any(|a| matches!(*a.effect, Effect::Attach { .. })),
             "intrinsic equip must mirror onto base_abilities"
+        );
+    }
+
+    /// Builds a `CreateToken` event for a one-off Curse Aura token named for
+    /// `host`, carrying `statics` as its creating effect's static abilities.
+    fn curse_aura_token_event(
+        statics: Vec<StaticDefinition>,
+        host: TokenHostRequest,
+    ) -> ProposedEvent {
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Probe Curse".to_string(),
+                power: Some(0),
+                toughness: Some(0),
+                loyalty: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Curse".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Probe Curse".to_string(),
+            static_abilities: statics,
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            attach_to: host,
+        };
+        ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        }
+    }
+
+    fn enchant_grant_static(filter: TargetFilter) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(filter),
+            }])
+    }
+
+    /// CR 111.3 + CR 702.5a + CR 303.4: "The token has enchant player" is part of
+    /// the entrant's characteristics from creation, so a Curse token created
+    /// attached to a player is judged — and attached — against that restriction
+    /// before any layer pass has run.
+    #[test]
+    fn aura_token_with_intrinsic_enchant_player_attaches_to_player_host() {
+        let mut state = GameState::new_two_player(42);
+        let event = curse_aura_token_event(
+            vec![enchant_grant_static(TargetFilter::Player)],
+            TokenHostRequest::Bound(AttachTarget::Player(PlayerId(1))),
+        );
+
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let id = *state
+            .last_created_token_ids
+            .first()
+            .expect("a legal player-enchanting Aura token must be created");
+        let obj = &state.objects[&id];
+        assert!(
+            obj.base_keywords
+                .contains(&Keyword::Enchant(TargetFilter::Player)),
+            "the intrinsic Enchant must be a base characteristic of the entrant"
+        );
+        assert_eq!(obj.attached_to, Some(AttachTarget::Player(PlayerId(1))));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Player(PlayerId(1)),
+            } if *attachment_id == id
+        )));
+    }
+
+    /// CR 303.4i + CR 702.5a: an Aura token with no enchant restriction has no
+    /// stated player host, and one whose restriction the player fails cannot
+    /// legally enchant that player — either way the token is not created.
+    #[test]
+    fn aura_token_without_a_matching_enchant_restriction_is_not_created_for_a_player_host() {
+        for statics in [
+            Vec::new(),
+            vec![enchant_grant_static(TargetFilter::Typed(
+                TypedFilter::creature(),
+            ))],
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let event = curse_aura_token_event(
+                statics,
+                TokenHostRequest::Bound(AttachTarget::Player(PlayerId(1))),
+            );
+
+            let mut events = vec![];
+            apply_create_token_after_replacement(&mut state, event, &mut events);
+
+            assert!(
+                state.last_created_token_ids.is_empty(),
+                "the Aura token must not be created"
+            );
+            assert!(
+                !state.objects.values().any(|obj| obj.is_token),
+                "and nothing may be left behind"
+            );
+            assert!(
+                !events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::TokenCreated { .. } | GameEvent::Attached { .. }
+                )),
+                "and nothing may be observed"
+            );
+        }
+    }
+
+    /// CR 111.3: only an UNCONDITIONAL self-grant is intrinsic; a conditional or
+    /// other-object grant stays in the layer path and is not materialized.
+    #[test]
+    fn intrinsic_enchant_extraction_is_limited_to_unconditional_self_grants() {
+        use crate::types::ability::StaticCondition;
+
+        let unconditional = enchant_grant_static(TargetFilter::Player);
+        let conditional = enchant_grant_static(TargetFilter::Player)
+            .condition(StaticCondition::IsPresent { filter: None });
+        let other_object = enchant_grant_static(TargetFilter::Player)
+            .affected(TargetFilter::Typed(TypedFilter::creature()));
+
+        assert_eq!(
+            intrinsic_enchant_keywords_from_token_statics(&[
+                unconditional,
+                conditional,
+                other_object,
+            ]),
+            vec![Keyword::Enchant(TargetFilter::Player)]
         );
     }
 

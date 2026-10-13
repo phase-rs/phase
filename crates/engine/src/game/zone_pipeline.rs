@@ -2426,9 +2426,10 @@ pub(crate) enum EnteringAuraAttachment {
 pub(crate) fn resolve_entering_aura_attachment(
     state: &mut GameState,
     object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
 ) -> EnteringAuraAttachment {
     let hosts = entering_aura_hosts(state, object_id);
-    apply_entering_aura_hosts(state, object_id, hosts)
+    apply_entering_aura_hosts(state, object_id, hosts, events)
 }
 
 /// The legal hosts an entering Aura may be attached to, decided but NOT applied.
@@ -2600,6 +2601,7 @@ pub(crate) fn apply_entering_aura_hosts(
     state: &mut GameState,
     object_id: ObjectId,
     hosts: EnteringAuraHosts,
+    events: &mut Vec<GameEvent>,
 ) -> EnteringAuraAttachment {
     // Any authority parked by an earlier entering-Aura decision is spent or
     // stale by the time another one is being ACTED on: the only way to reach
@@ -2620,22 +2622,30 @@ pub(crate) fn apply_entering_aura_hosts(
         // caller decide the entrant's fate.
         [] => EnteringAuraAttachment::NoLegalHost,
         [TargetRef::Object(id)] => {
-            crate::game::effects::attach::attach_to_with_authority(
+            if crate::game::effects::attach::attach_to_with_authority_and_events(
                 state,
                 object_id,
                 *id,
                 entrant.authority(),
-            );
-            EnteringAuraAttachment::Attached
+                events,
+            ) {
+                EnteringAuraAttachment::Attached
+            } else {
+                EnteringAuraAttachment::NoLegalHost
+            }
         }
         [TargetRef::Player(id)] => {
-            crate::game::effects::attach::attach_to_player_with_authority(
+            if crate::game::effects::attach::attach_to_player_with_authority_and_events(
                 state,
                 object_id,
                 *id,
                 entrant.authority(),
-            );
-            EnteringAuraAttachment::Attached
+                events,
+            ) {
+                EnteringAuraAttachment::Attached
+            } else {
+                EnteringAuraAttachment::NoLegalHost
+            }
         }
         _ => {
             // CR 303.4f: the choice returns to the event loop, so the entrant has
@@ -2660,20 +2670,16 @@ pub(crate) fn apply_entering_aura_hosts(
 }
 
 /// CR 303.4f + CR 701.3b: attach an entering Aura to the host its controller
-/// chose, judged against the entrant the choice was offered for.
+/// chose, judged against the entrant the choice was offered for, recording
+/// `GameEvent::Unattached` and `GameEvent::Attached` into `events`.
 ///
-/// The single authority behind the `WaitingFor::ReturnAsAuraTarget` resume arm's
-/// attach. That arm is shared by seams that park no
-/// [`EnteringAuraAuthority`] — `ReturnAsAura` (Old-Growth Troll), the plain
-/// non-spell Aura ZoneChange entry, and the on-battlefield `BecomeCopy`
-/// realization — and for all of those the absent authority selects
-/// [`EnteringAuraEntrant::Stored`], i.e. byte-for-byte the `attach_to` /
-/// `attach_to_player` behaviour they had before.
+/// Returns `true` if the attachment succeeded.
 pub(crate) fn attach_chosen_entering_aura_host(
     state: &mut GameState,
     aura_id: ObjectId,
     chosen: &TargetRef,
-) -> Option<TargetRef> {
+    events: &mut Vec<GameEvent>,
+) -> bool {
     // Taken unconditionally: a parked authority belongs to exactly one pause, so
     // whichever pause is resuming, it must not survive into a later one. It is
     // then honoured only for the Aura it was parked for.
@@ -2683,22 +2689,13 @@ pub(crate) fn attach_chosen_entering_aura_host(
         .filter(|authority| authority.aura_id == aura_id)
         .map(|authority| EnteringAuraEntrant::Projected(authority.entrant));
     let entrant = parked.unwrap_or(EnteringAuraEntrant::Stored);
-    match chosen {
-        TargetRef::Object(host_id) => crate::game::effects::attach::attach_to_with_authority(
-            state,
-            aura_id,
-            *host_id,
-            entrant.authority(),
-        ),
-        TargetRef::Player(host_player) => {
-            crate::game::effects::attach::attach_to_player_with_authority(
-                state,
-                aura_id,
-                *host_player,
-                entrant.authority(),
-            )
-        }
-    }
+    crate::game::effects::attach::attach_target_with_authority_and_events(
+        state,
+        aura_id,
+        chosen,
+        entrant.authority(),
+        events,
+    )
 }
 
 #[cfg(test)]
@@ -2770,7 +2767,7 @@ mod entering_aura_attachment_tests {
             .push(CoreType::Creature);
 
         assert!(matches!(
-            resolve_entering_aura_attachment(&mut state, id),
+            resolve_entering_aura_attachment(&mut state, id, &mut Vec::new()),
             EnteringAuraAttachment::NotApplicable
         ));
     }
@@ -2784,7 +2781,7 @@ mod entering_aura_attachment_tests {
         let id = aura(&mut state, P0, enchant_creature());
 
         assert!(matches!(
-            resolve_entering_aura_attachment(&mut state, id),
+            resolve_entering_aura_attachment(&mut state, id, &mut Vec::new()),
             EnteringAuraAttachment::NoLegalHost
         ));
         assert!(
@@ -2804,15 +2801,23 @@ mod entering_aura_attachment_tests {
         let mut state = GameState::new_two_player(1);
         let host = creature(&mut state, P0, "Host");
         let id = aura(&mut state, P0, enchant_creature());
+        let mut events = Vec::new();
 
         assert!(matches!(
-            resolve_entering_aura_attachment(&mut state, id),
+            resolve_entering_aura_attachment(&mut state, id, &mut events),
             EnteringAuraAttachment::Attached
         ));
         assert_eq!(
             state.objects[&id].attached_to,
             Some(crate::game::game_object::AttachTarget::Object(host))
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Object(h)
+            } if *attachment_id == id && *h == host
+        )));
     }
 
     /// CR 303.4f: more than one legal host IS a choice.
@@ -2826,7 +2831,7 @@ mod entering_aura_attachment_tests {
         let EnteringAuraAttachment::NeedsChoice {
             controller,
             legal_targets,
-        } = resolve_entering_aura_attachment(&mut state, id)
+        } = resolve_entering_aura_attachment(&mut state, id, &mut Vec::new())
         else {
             panic!("two legal hosts must produce a choice");
         };
@@ -3415,8 +3420,9 @@ mod entering_aura_attachment_tests {
              host (P0 is protected from enchantments either way)"
         );
 
+        let mut events = Vec::new();
         assert!(matches!(
-            apply_entering_aura_hosts(&mut state, id, hosts),
+            apply_entering_aura_hosts(&mut state, id, hosts, &mut events),
             EnteringAuraAttachment::Attached
         ));
         assert_eq!(
@@ -3425,6 +3431,13 @@ mod entering_aura_attachment_tests {
             "CR 303.4i: the player gate must read the ENTRANT — the stored body's \
              artifact type is not the Aura that is entering"
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Player(p)
+            } if *attachment_id == id && *p == P1
+        )));
     }
 
     /// CR 303.4f: the multi-host pause parks the entrant, and only a real
@@ -3443,7 +3456,7 @@ mod entering_aura_attachment_tests {
 
         let stored_hosts = entering_aura_hosts(&state, id);
         assert!(matches!(
-            apply_entering_aura_hosts(&mut state, id, stored_hosts),
+            apply_entering_aura_hosts(&mut state, id, stored_hosts, &mut Vec::new()),
             EnteringAuraAttachment::NeedsChoice { .. }
         ));
         assert!(
@@ -3454,7 +3467,7 @@ mod entering_aura_attachment_tests {
         let entrant = state.objects[&id].clone();
         let projected_hosts = entering_aura_hosts_projected(&state, id, &entrant);
         assert!(matches!(
-            apply_entering_aura_hosts(&mut state, id, projected_hosts),
+            apply_entering_aura_hosts(&mut state, id, projected_hosts, &mut Vec::new()),
             EnteringAuraAttachment::NeedsChoice { .. }
         ));
         let parked = state
@@ -3465,9 +3478,14 @@ mod entering_aura_attachment_tests {
 
         // Spent by the resume, and honoured only for its own Aura.
         let other = aura(&mut state, P0, enchant_creature());
+        let mut events = Vec::new();
         assert!(
-            attach_chosen_entering_aura_host(&mut state, other, &TargetRef::Object(id)).is_none()
-                || state.entering_aura_authority.is_none(),
+            !attach_chosen_entering_aura_host(
+                &mut state,
+                other,
+                &TargetRef::Object(id),
+                &mut events
+            ) || state.entering_aura_authority.is_none(),
             "a resume for a different Aura must not consume the parked entrant as its own"
         );
         assert!(
@@ -4193,12 +4211,13 @@ pub(crate) fn deliver_replaced_zone_change(
             if let Some(target) = attach_to {
                 match target {
                     crate::game::game_object::AttachTarget::Object(target_id) => {
-                        let _ =
-                            crate::game::effects::attach::attach_to(state, object_id, target_id);
+                        crate::game::effects::attach::attach_to_with_events(
+                            state, object_id, target_id, events,
+                        );
                     }
                     crate::game::game_object::AttachTarget::Player(player_id) => {
-                        let _ = crate::game::effects::attach::attach_to_player(
-                            state, object_id, player_id,
+                        crate::game::effects::attach::attach_to_player_with_events(
+                            state, object_id, player_id, events,
                         );
                     }
                 }

@@ -1764,25 +1764,17 @@ pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDef
     }
 
     let affected = defs[0].affected.clone()?;
-    let companion = match scope {
-        // CR 702.11a: "… your opponents control" grants Hexproof so the
-        // permanent's own controller can still target it.
+    let who = match scope {
         crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddKeyword {
-                    keyword: crate::types::keywords::Keyword::Hexproof,
-                }])
-                .description(text.to_string())
+            crate::types::statics::ProhibitionScope::Opponents
         }
-        // CR 702.18a: blanket — can't be targeted by any player. Enforced in
-        // `targeting.rs::can_target` via the object's active static definitions.
         crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-            StaticDefinition::new(StaticMode::CantBeTargeted)
-                .affected(affected)
-                .description(text.to_string())
+            crate::types::statics::ProhibitionScope::AllPlayers
         }
     };
+    let companion = StaticDefinition::new(StaticMode::CantBeTargeted { who })
+        .affected(affected)
+        .description(text.to_string());
     defs.push(companion);
     Some(defs)
 }

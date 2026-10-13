@@ -762,7 +762,8 @@ fn player_matches_filter(
         // reason as the arm above — the fallback below is fail-OPEN, and
         // without them a dead slot would match every player (PR #8881).
         TargetFilter::SpecificPlayer { id } => *id == player_id,
-        TargetFilter::None => false,
+        // CR 603.2e + CR 201.5: An object-source SelfRef can never match a player.
+        TargetFilter::SelfRef | TargetFilter::None => false,
         // The binder leaves those leaves under the boolean shape the condition
         // was written in (`Not { slot }`, `Or { slot, slot }`, `And { … }`), so
         // the shape has to be evaluated here rather than fall through to the
@@ -1083,6 +1084,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: carries a group key and a player, no object subject to
         // count for a "one or more <FILTER> …" trigger filter.
@@ -3249,7 +3251,7 @@ pub(super) fn match_exiled(
     }
 }
 
-/// CR 701.3a: Attached triggers compare the object that became attached
+/// CR 701.3a + CR 603.2e: Attached triggers compare the object that became attached
 /// (`valid_card`) with the host it is attached to (`valid_target`).
 pub(super) fn match_attached(
     event: &GameEvent,
@@ -3258,61 +3260,25 @@ pub(super) fn match_attached(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    match event {
-        GameEvent::EffectResolved {
-            kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
-            source_id: eventsource_id,
-            ..
-        } => {
-            let attachment_id = if matches!(
-                event,
-                GameEvent::EffectResolved {
-                    kind: EffectKind::AttachAll,
-                    ..
-                }
-            ) {
-                source_id
-            } else {
-                *eventsource_id
-            };
-
-            if attachment_id != source_id
-                && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef))
-            {
-                return false;
-            }
-
-            valid_card_matches(trigger, state, attachment_id, source_context)
-                && attached_host_matches(trigger, state, attachment_id, source_context)
-        }
-        _ => false,
-    }
-}
-
-fn attached_host_matches(
-    trigger: &TriggerDefinition,
-    state: &GameState,
-    attachment_id: ObjectId,
-    source_context: &TriggerSourceContext,
-) -> bool {
-    let Some(host) = state
-        .objects
-        .get(&attachment_id)
-        .and_then(|obj| obj.attached_to)
+    let GameEvent::Attached {
+        attachment_id,
+        target,
+    } = event
     else {
         return false;
     };
-    let Some(filter) = trigger.valid_target.as_ref() else {
-        return true;
-    };
-    match host {
-        crate::game::game_object::AttachTarget::Object(object_id) => {
-            target_filter_matches_object(state, object_id, filter, source_context)
-        }
-        crate::game::game_object::AttachTarget::Player(player_id) => {
-            player_matches_filter(filter, state, player_id, source_context)
-        }
+    let attachment_id = *attachment_id;
+
+    if attachment_id != source_id && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef)) {
+        return false;
     }
+
+    valid_card_matches(trigger, state, attachment_id, source_context)
+        && trigger
+            .valid_target
+            .as_ref()
+            .map(|filter| target_ref_matches_filter(target, filter, state, source_context))
+            .unwrap_or(true)
 }
 
 fn target_ref_matches_filter(
@@ -3326,6 +3292,11 @@ fn target_ref_matches_filter(
             target_filter_matches_object(state, *object_id, filter, source_context)
         }
         TargetRef::Player(player_id) => {
+            // CR 603.2e + CR 201.5: An object-source SelfRef ("this creature", "this permanent")
+            // requires an object host and can never match a player host.
+            if matches!(filter, TargetFilter::SelfRef) {
+                return false;
+            }
             player_matches_filter(filter, state, *player_id, source_context)
         }
     }
@@ -6740,10 +6711,9 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Attached);
         trigger.valid_card = Some(TargetFilter::SelfRef);
         trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: equipment,
+            target: TargetRef::Object(creature),
         };
 
         assert!(match_attached(
@@ -6783,10 +6753,9 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Attached);
         trigger.valid_card = Some(TargetFilter::SelfRef);
         trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: equipment,
+            target: TargetRef::Object(land),
         };
 
         assert!(!match_attached(
@@ -6831,10 +6800,9 @@ mod tests {
         state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
 
         let trigger = make_trigger(TriggerMode::Attached);
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: other_equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: other_equipment,
+            target: TargetRef::Object(creature),
         };
 
         assert!(!match_attached(
@@ -6846,7 +6814,7 @@ mod tests {
     }
 
     /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" fires when
-    /// an Aura (eventsource_id) attaches to the trigger source (source_id).
+    /// an Aura (attachment_id) attaches to the trigger source (source_id).
     /// Cards: Bramble Elemental, Brood Keeper.
     #[test]
     fn attached_pattern2_fires_when_aura_attaches_to_host() {
@@ -6882,11 +6850,10 @@ mod tests {
         ));
         trigger.valid_target = Some(TargetFilter::SelfRef);
 
-        // Event: Attach resolved with the Aura as source
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Attach,
-            source_id: aura,
-            subject: None,
+        // Event: Attached event with the Aura as attachment and host as target
+        let event = GameEvent::Attached {
+            attachment_id: aura,
+            target: TargetRef::Object(host),
         };
         assert!(
             match_attached(
@@ -6907,9 +6874,13 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&aura).unwrap().attached_to = Some(other_host.into());
+        let event_other = GameEvent::Attached {
+            attachment_id: aura,
+            target: TargetRef::Object(other_host),
+        };
         assert!(
             !match_attached(
-                &event,
+                &event_other,
                 &trigger,
                 &test_trigger_source_context(&state, host),
                 &state

@@ -155,7 +155,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +68: v139 adds the CR 702.122c per-turn crew relation.
 // +69: v140 adds `AttackSubject::EventAttackers` to ability player scopes in GameState.
 // +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 69;
+// +70: v141 adds the GameEvent::Attached event tag.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 70;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -248,7 +249,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +67: wire 121 moves with full-game v139 for the per-turn crew relation.
 // +68: wire 122 moves with full-game v140 for `AttackSubject::EventAttackers`.
 // +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 68;
+// +69: wire 123 moves with full-game v141 for the Attached event tag.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 69;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

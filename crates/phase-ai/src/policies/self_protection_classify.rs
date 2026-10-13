@@ -145,7 +145,7 @@ fn static_definition_is_self_protection(
 fn static_mode_is_defensive(mode: &StaticMode) -> bool {
     matches!(
         mode,
-        StaticMode::CantBeTargeted
+        StaticMode::CantBeTargeted { .. }
             | StaticMode::CantBeBlocked
             | StaticMode::CantLoseLife
             | StaticMode::Protection
@@ -327,7 +327,7 @@ fn static_definition_affects_self_grant(
 
 fn grant_from_static_mode(mode: &StaticMode) -> Vec<DefensiveGrant> {
     match mode {
-        StaticMode::CantBeTargeted | StaticMode::Shroud | StaticMode::Hexproof => {
+        StaticMode::CantBeTargeted { .. } | StaticMode::Shroud | StaticMode::Hexproof => {
             vec![DefensiveGrant::CantBeTargeted]
         }
         StaticMode::Protection => Vec::new(),
@@ -602,7 +602,7 @@ fn defensive_opportunities(
         if !matches!(
             &static_def.mode,
             StaticMode::Continuous
-                | StaticMode::CantBeTargeted
+                | StaticMode::CantBeTargeted { .. }
                 | StaticMode::Shroud
                 | StaticMode::Hexproof
         ) && static_mode_is_defensive(&static_def.mode)
@@ -966,7 +966,7 @@ fn grant_already_effective(
             object.has_keyword(&Keyword::Shroud)
                 || object.has_keyword(&Keyword::Hexproof)
                 || active_static_definitions(state, object)
-                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted))
+                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted { .. }))
         }
         DefensiveGrant::HexproofFrom(filter) => {
             object.has_keyword(&Keyword::Shroud)
@@ -975,7 +975,7 @@ fn grant_already_effective(
                     .keywords
                     .contains(&Keyword::HexproofFrom(filter.clone()))
                 || active_static_definitions(state, object)
-                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted))
+                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted { .. }))
         }
         DefensiveGrant::Protection(protection) => object.keywords.iter().any(|keyword| {
             matches!(

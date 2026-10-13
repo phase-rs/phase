@@ -263,7 +263,8 @@ pub(crate) fn finalize_attach(
     // a silent no-op if the target carries `CantBeEnchanted` / `CantBeAttached`
     // (CR 701.3 / CR 702.5 / CR 702.6) — the next SBA pass will then move the
     // newly-orphaned Aura to its owner's graveyard per CR 704.5n.
-    let _ = crate::game::effects::attach::attach_to(state, returned_id, target_id);
+    let _ =
+        crate::game::effects::attach::attach_to_with_events(state, returned_id, target_id, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ReturnAsAura,

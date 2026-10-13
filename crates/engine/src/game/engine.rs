@@ -14295,18 +14295,10 @@ fn apply_non_priority_pass_action(
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
                     // CR 303.4f + CR 701.3b: attach through the entering-Aura
-                    // authority, so the CR 701.3a gate judges the same entrant
-                    // the host list was offered for. Seams that park none get
-                    // the stored object, i.e. their prior behaviour exactly.
-                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
-                        state, returned, &chosen,
+                    // authority, recording canonical Unattached and Attached events.
+                    super::zone_pipeline::attach_chosen_entering_aura_host(
+                        state, returned, &chosen, &mut events,
                     );
-                    if let Some(old_target) = old_target {
-                        events.push(crate::types::events::GameEvent::Unattached {
-                            attachment_id: returned,
-                            old_target,
-                        });
-                    }
                     let resumes_change_zone_iteration = state
                         .active_change_zone_frame()
                         .is_some_and(|frame| frame.pending.is_some());
@@ -14330,7 +14322,15 @@ fn apply_non_priority_pass_action(
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
-                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                    let current_wf = state.waiting_for.clone();
+                    let wf = engine_priority::run_post_action_pipeline(
+                        state,
+                        &mut events,
+                        &current_wf,
+                        false,
+                        false,
+                    )?;
+                    return Ok(ActionResult::applied(events, wf));
                 }
             };
             let chosen = match chosen {

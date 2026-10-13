@@ -7009,11 +7009,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // bypass in replacement.rs::destroy_applier observes it via
             // active_static_definitions.
             | StaticMode::CantBeRegenerated
-            // CR 702.18a: CantBeTargeted (the descriptive Shroud form) is granted to
+            // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is granted to
             // a subject/target creature and must propagate onto its
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
             // observes it via active_static_definitions.
-            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeTargeted { .. }
     )
 }
 
@@ -7180,17 +7180,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
         }
     }
-    // CR 702.18a: "can't be the target of spells or abilities" is blanket Shroud,
-    // modeled as `CantBeTargeted` (propagated onto the subject via `AddStaticMode`
-    // and enforced in `can_target`). CR 702.11a: the opponent-scoped variant is
-    // Hexproof — a keyword grant this rule-mode parser can't express, so it is
-    // handled by the keyword-grant path and deliberately not produced here, lest a
-    // bare `CantBeTargeted` over-block the controller.
-    if matches!(
-        crate::parser::oracle_keyword::classify_cant_be_targeted(lower),
-        Some(crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer)
-    ) {
-        return Some(vec![StaticMode::CantBeTargeted]);
+    // CR 702.18a / CR 702.11b / CR 109.5: "can't be the target of spells or abilities [your opponents control]"
+    // is modeled as `CantBeTargeted { who }` (propagated onto the subject via `AddStaticMode`
+    // and enforced in `can_target`).
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(lower) {
+        let who = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::statics::ProhibitionScope::AllPlayers
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::statics::ProhibitionScope::Opponents
+            }
+        };
+        return Some(vec![StaticMode::CantBeTargeted { who }]);
     }
     // CR 119.7: "can't gain life" — a player can't make their life total increase.
     if all_consuming(alt((
