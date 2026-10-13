@@ -2129,8 +2129,9 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
 /// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
 /// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
 /// comments say so explicitly) and the LIVE lookup
-/// (`players::linked_exile_cards_for_source`) reads the same
-/// `exile_links::live_links_for_source` accessor —
+/// (`players::linked_exile_cards_for_source`) reads
+/// `exile_links::links_for_reader`, which for the live object is this
+/// `live_links_for_source` surface —
 /// this snapshot must match that surface exactly, or a card whose "play the
 /// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
 /// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
