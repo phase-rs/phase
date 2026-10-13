@@ -375,8 +375,7 @@ fn resolve_counter_placement_target<'a>(
         let on_offset = lower.len() - after_target.len();
         (&text[on_offset..], Some(MultiTargetSpec::exact(count)))
     } else if let Some((spec, after_bounded)) = nom_on_lower(on_rest, on_rest, |i| {
-        // CR 115.1a (MagicCompRules.txt:842) + CR 601.2c (:2467) + CR 122.1
-        // (:1180): "[each of ]one or two target …" / "[each of ]one, two, or
+        // CR 115.1a + CR 601.2c + CR 122.1: "[each of ]one or two target …" / "[each of ]one, two, or
         // three target …" announce a bounded target set (Predictive
         // Preparations). The stem vocabulary is the shared
         // `BOUNDED_TARGET_CARDINALITIES` table; the trailing `space1` +

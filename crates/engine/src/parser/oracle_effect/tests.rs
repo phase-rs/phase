@@ -20012,7 +20012,7 @@ fn put_counter_each_of_exact_count_target_is_exactly_multi_targeted() {
 /// Predictive Preparations (FRA): "put … counter(s) on [each of ]one or two
 /// target …" and "[each of ]one, two, or three target …" announce a bounded
 /// target set, stamped `fixed(1, 2)` / `fixed(1, 3)`.
-/// CR 115.1a (MagicCompRules.txt:842) + CR 601.2c (:2467) + CR 122.1 (:1180):
+/// CR 115.1a + CR 601.2c + CR 122.1:
 /// the stem vocabulary is the shared `BOUNDED_TARGET_CARDINALITIES` table; min
 /// is 1, so CR 115.6 (zero-target legality) does not apply.
 /// Parity row: the chain, the counter parser, and the counter-placement

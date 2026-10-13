@@ -7664,7 +7664,7 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
             .parse(input)?;
         match strip_optional_target_prefix(after_on) {
             (rest, Some(spec)) => Ok((rest, spec)),
-            // CR 115.1a (MagicCompRules.txt:842) + CR 601.2c (:2467):
+            // CR 115.1a + CR 601.2c:
             // "[each of ]one or two target …" / "[each of ]one, two, or three
             // target …" announce a bounded target set (Predictive
             // Preparations). The stem vocabulary is the shared
