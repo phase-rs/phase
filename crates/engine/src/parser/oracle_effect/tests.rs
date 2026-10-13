@@ -20110,18 +20110,18 @@ fn put_counter_bounded_count_without_space_or_article_is_not_multi_targeted() {
             "{text}"
         );
         // Unconditional: intentional rejection may decline inside placement
-        // (Some with no spec) or upstream of it (None); both are pinned
-        // explicitly, and the reach-guard above proves the recognizer runs.
-        match counter::try_parse_put_counter(
+        // (Some with no spec) or upstream of it (None). Both outcomes are
+        // named explicitly here; the reach-guard above proves the recognizer
+        // runs, and the chain/extractor pins below carry the rejection.
+        let direct = counter::try_parse_put_counter(
             &text.to_lowercase(),
             text,
             &mut ParseContext::default(),
-        ) {
-            Some((_, _, parser_spec)) => {
-                assert_eq!(parser_spec, None, "{text}: counter parser's count")
-            }
-            None => {}
-        }
+        );
+        assert!(
+            matches!(direct, Some((_, _, None)) | None),
+            "{text}: placement must decline the bounded spec"
+        );
         assert_eq!(
             extract_put_counter_multi_target(text),
             None,
