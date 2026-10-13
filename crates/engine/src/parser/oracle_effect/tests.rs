@@ -94988,8 +94988,13 @@ fn stitcher_geralf_exile_sentence_with_put_participle_is_refused() {
         "reach guard: the same exile without the participle must still lower, got {control:?}"
     );
     let refused = parse_effect("Exile up to two creature cards put into graveyards this way.");
+    // Rebase taxonomy note: main's evolved row-body vocabulary names this
+    // `unparsed_verb_arguments` (verb recognized, arguments not modeled) where
+    // our tree said `exile` — equally red, with the full sentence kept.
     assert!(
-        matches!(&refused, Effect::Unimplemented { name, .. } if name == "exile"),
+        matches!(&refused, Effect::Unimplemented { name, description, .. }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref().is_some_and(|d| d.contains("put into graveyards this way"))),
         "Stitcher's exile must refuse the unhandled put-participle, got {refused:?}"
     );
 }
@@ -95007,8 +95012,13 @@ fn harsh_mercy_destroy_sentence_with_chosen_type_anaphor_is_refused() {
         "reach guard: the same destroy-all without the anaphor must still lower, got {control:?}"
     );
     let refused = parse_effect("Destroy all creatures that aren't of a type chosen this way.");
+    // Rebase taxonomy note: main's evolved row-body vocabulary names this
+    // `unparsed_verb_arguments` where our tree said `destroy` — equally red,
+    // with the full sentence kept (Entry 39: Harsh Mercy rides MED-1 red-ward).
     assert!(
-        matches!(&refused, Effect::Unimplemented { name, .. } if name == "destroy"),
+        matches!(&refused, Effect::Unimplemented { name, description, .. }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref().is_some_and(|d| d.contains("of a type chosen this way"))),
         "Harsh Mercy's destroy must refuse the unhandled chosen-type anaphor, got {refused:?}"
     );
 }

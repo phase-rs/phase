@@ -580,6 +580,9 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         running_total: 0,
         rolled_any: false,
         forced_ignored: vec![],
+        // No creating ability: a directly pushed frame has no chain-root
+        // target list for counter-gated branch readers.
+        chain_root_targets: vec![],
     });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,

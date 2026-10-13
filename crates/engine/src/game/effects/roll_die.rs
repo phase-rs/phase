@@ -2,7 +2,7 @@ use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::HashSet;
 
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,

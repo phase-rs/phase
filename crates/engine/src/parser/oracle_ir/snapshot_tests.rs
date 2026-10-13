@@ -3494,9 +3494,9 @@ fn collect_unimplemented_names(lowered: &ParsedAbilities) -> Vec<String> {
 /// unrecognized tail REFUSES the whole header instead of being silently
 /// dropped. Pre-PR-A the line-initial authority accepted both fixtures below
 /// and emitted `RollDie { sides: 20, modifier: None }` with the tail gone; the
-/// consolidated authority refuses, leaving the honest `roll` failure marker
-/// (the first production branch reached after the die-table dispatch refuses)
-/// and no `RollDie` node.
+/// consolidated authority refuses, leaving the honest refusal marker
+/// (rebase taxonomy: `unparsed_verb_arguments`; the first production branch
+/// reached after the die-table dispatch refuses) and no `RollDie` node.
 ///
 /// The two hostile tails exercise the deleted
 /// `parse_optional_modifier_suffix`'s two distinct failure paths: one tail
@@ -3504,9 +3504,20 @@ fn collect_unimplemented_names(lowered: &ParsedAbilities) -> Vec<String> {
 /// `and ` tag itself.
 #[test]
 fn header_with_unrecognized_tail_refuses_instead_of_dropping_it() {
-    for (label, header) in [
-        ("and-tail", "Roll a d20 and ignore the lower roll."),
-        ("non-and-tail", "Roll a d20 for each player."),
+    // Per-fixture honest markers (rebase taxonomy): the `and` tail refuses on
+    // the verb arguments, the distributive `for each player` tail on the
+    // quantity — both red, neither a RollDie.
+    for (label, header, marker) in [
+        (
+            "and-tail",
+            "Roll a d20 and ignore the lower roll.",
+            "unparsed_verb_arguments",
+        ),
+        (
+            "non-and-tail",
+            "Roll a d20 for each player.",
+            "unparsed_quantity",
+        ),
     ] {
         let text = format!("{header}\n1\u{2014}14 | Draw a card.\n15\u{2014}20 | Draw two cards.");
         let (_, lowered) = parse_two_layer(&text, "Unrecognized Tail Fixture", &["Sorcery"], &[]);
@@ -3518,10 +3529,9 @@ fn header_with_unrecognized_tail_refuses_instead_of_dropping_it() {
         );
         let names = collect_unimplemented_names(&lowered);
         assert!(
-            names.iter().any(|name| name == "roll"),
-            "{label}: the refused header must leave the honest `roll` failure \
-             marker (the first production branch reached after the die-table \
-             dispatch refuses); got {names:?}",
+            names.iter().any(|name| name == marker),
+            "{label}: the refused header must leave its honest refusal \
+             marker; got {names:?}",
         );
     }
 
@@ -3617,7 +3627,10 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
             "Goblin Tutor",
             "Roll a six-sided die. If you roll a 1, Goblin Tutor has no effect. Otherwise, search your library for the indicated card, reveal it, put it into your hand, then shuffle.\n2 \u{2014} A card named Goblin Tutor\n3 \u{2014} An enchantment\n4 \u{2014} An artifact\n5 \u{2014} A creature\n6 \u{2014} An instant or sorcery",
             &["Instant"],
-            "have",
+            // Rebase taxonomy note: main's evolved row-body vocabulary names
+            // this `unparsed_verb_arguments` where our tree said `have` —
+            // equally red; the roll header and sub-link asserts above are unchanged.
+            "unparsed_verb_arguments",
         ),
         (
             "Growth Spurt",
@@ -3635,13 +3648,17 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
             "Strategy, Schmategy",
             "Roll a six-sided die. Strategy, Schmategy has the indicated effect.\n1 \u{2014} Do nothing.\n2 \u{2014} Destroy all artifacts.\n3 \u{2014} Destroy all lands.\n4 \u{2014} Strategy, Schmategy deals 3 damage to each creature and each player.\n5 \u{2014} Each player discards their hand and draws seven cards.\n6 \u{2014} Repeat this process two more times.",
             &["Sorcery"],
-            "have",
+            // Rebase taxonomy note: same `unparsed_verb_arguments`
+            // vocabulary as the Goblin Tutor row above.
+            "unparsed_verb_arguments",
         ),
         (
             "Time Out",
             "Roll a six-sided die. Put target nonland permanent into its owner's library just beneath the top X cards of that library, where X is the result.",
             &["Instant"],
-            "put",
+            // Rebase taxonomy note: same `unparsed_verb_arguments`
+            // vocabulary as the rows above.
+            "unparsed_verb_arguments",
         ),
     ];
     for (card, text, types, sibling) in cases {
@@ -3742,9 +3759,10 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
 /// Row D-2 — CR 706.1: the roll-and-choose header (Reckless Endeavor, Phase 6's
 /// shape) still refuses honestly through the consolidated authority. Verbatim
 /// card text, taken from `card-data.json` at the base. The first production
-/// branch reached is the honest `roll` marker on ability[0]; the paired
-/// reach-guard is the rest of the chain (`deal`, `create`), proving the
-/// fixture reaches dispatch rather than going inert.
+/// branch reached is the honest refusal marker on ability[0] (rebase taxonomy:
+/// `unparsed_verb_arguments`); the paired reach-guard is the rest of the
+/// chain (`deal`, `create`), proving the fixture reaches dispatch rather
+/// than going inert.
 #[test]
 fn roll_and_choose_header_refuses_honestly() {
     let (_, lowered) = parse_two_layer(
@@ -3760,24 +3778,28 @@ fn roll_and_choose_header_refuses_honestly() {
     );
     let Effect::Unimplemented { name, description } = lowered.abilities[0].effect.as_ref() else {
         panic!(
-            "ability[0] must be the honest `roll` marker, got {:?}",
+            "ability[0] must be the honest refusal marker, got {:?}",
             lowered.abilities[0].effect
         );
     };
-    assert_eq!(name, "roll");
+    // Rebase taxonomy note: main's evolved header vocabulary names this
+    // `unparsed_verb_arguments` where our tree said `roll` — equally red; the
+    // no-RollDie assert above and the trailing-clause description below are unchanged.
+    assert_eq!(name, "unparsed_verb_arguments");
     assert!(
         description
             .as_deref()
             .is_some_and(|d| d.contains("choose one result")),
         "the marker must carry the trailing choice clause (the shape Phase 6 will lower), got {description:?}"
     );
+    // Rebase taxonomy note: both clauses refuse on their unbound result
+    // quantities ("equal to that/other result" — the roll result Phase 6 will
+    // park) rather than on the `deal`/`create` verbs our tree named. Still
+    // honestly red per clause; the chain still reaches dispatch per clause.
     let names = collect_unimplemented_names(&lowered);
-    assert!(
-        names.iter().any(|n| n == "deal"),
-        "the damage clause must still reach its honest marker, got {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n == "create"),
-        "the Treasure clause must still reach its honest marker, got {names:?}"
+    assert_eq!(
+        names.iter().filter(|n| *n == "unparsed_quantity").count(),
+        2,
+        "both the damage and the Treasure clause must refuse on their result quantity, got {names:?}"
     );
 }

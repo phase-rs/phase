@@ -19,7 +19,9 @@ use super::oracle_cost::{
     parse_colored_mana_only_clause, parse_or_separated_mana_costs, parse_single_cost,
     ColoredManaOnlyScope,
 };
-use super::oracle_effect::imperative::{try_parse_die_result_line, try_parse_roll_die_with_modifier};
+use super::oracle_effect::imperative::{
+    try_parse_die_result_line, try_parse_roll_die_with_modifier,
+};
 use super::oracle_effect::{capitalize, lower_ability_ir, parse_ability_ir_standalone};
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::effect_chain::{AbilityIr, AbilityShellIr, DieResultBranchIr, EffectChainIr};

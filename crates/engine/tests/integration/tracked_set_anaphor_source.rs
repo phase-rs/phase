@@ -759,13 +759,22 @@ fn agent_interposed_anaphor_binds_chain_set_with_member_filter_at_card_level() {
     );
 
     // Grand Ossuary's "the total power of the creatures they exiled this way"
-    // is the `they` leaf's measured corpus fragment, but the card itself stays
-    // red: its enclosing "creates X ... tokens, where X is ..." clause is
-    // Unimplemented for the unrelated token-creation reason (verified by dump —
-    // the chaos trigger's sub-ability is `Unimplemented { name: "creates" }`),
-    // so no aggregate reaches the census. Token-clause support is out of scope
-    // for unit 8c; B-1 pins the `they` combinator shape and B-5 pins its
-    // runtime scoping directly.
+    // is the `they` leaf's measured corpus fragment, but no aggregate reaches
+    // the census (observed: the empty-census assertion below passes on the
+    // rebased head). Two red nodes remain, both honest: the dies trigger's
+    // distribute sentence — "a number of +1/+1 counters equal to its power"
+    // is not a count grammar either tree accepts (`parse_number` excludes
+    // the "a/an" article in both; verified by source comparison) — pinned
+    // below as `unparsed_quantity`; and the chaos trigger's token sub-ability
+    // ("creates X 1/1 green Saproling ... where X is ..."), pinned below with
+    // its full-sentence description. Note the rebase delta is taxonomy-only:
+    // on our tree that node was `Unimplemented { name: "creates" }`; main's
+    // evolved row-body vocabulary renamed it to `unparsed_verb_arguments`
+    // (same vocabulary as the Danse rows above) while the clause stays red —
+    // verified by the full-tree dump, which shows the chaos trigger's own
+    // `ChangeZoneAll` green with the token red as its sequential sub-ability.
+    // B-1 pins the `they` combinator shape and B-5 pins its runtime scoping
+    // directly.
     let plane = vec!["Plane".to_string()];
     assert_eq!(
         filtered_aggregates("Grand Ossuary", OSSUARY, &plane),
@@ -773,8 +782,9 @@ fn agent_interposed_anaphor_binds_chain_set_with_member_filter_at_card_level() {
         "Ossuary contributes no supported aggregate while its token clause is red"
     );
     // Reach-guards so the empty census above is not vacuous: the exile
-    // preamble parses supported and the red node is specifically the token
-    // clause — not a total parse collapse.
+    // preamble parses supported and exactly two red nodes remain — the
+    // distribute sentence's quantity and the token sub-ability — not a total
+    // parse collapse.
     let ossuary_json = serde_json::to_string(&parse_oracle_text(
         OSSUARY,
         "Grand Ossuary",
@@ -788,8 +798,19 @@ fn agent_interposed_anaphor_binds_chain_set_with_member_filter_at_card_level() {
         "the exile preamble must stay supported, got {ossuary_json}"
     );
     assert!(
-        ossuary_json.contains("\"name\":\"creates\""),
-        "the red node must be specifically the token clause, got {ossuary_json}"
+        ossuary_json.contains("\"name\":\"unparsed_quantity\"")
+            && ossuary_json.contains("distributes a number of"),
+        "the remaining red node must be the distribute sentence's quantity, \
+         got {ossuary_json}"
+    );
+    assert!(
+        ossuary_json.contains("creates X 1/1 green Saproling"),
+        "the token sub-ability must stay red keeping its full sentence, got {ossuary_json}"
+    );
+    assert_eq!(
+        ossuary_json.matches("\"type\":\"Unimplemented\"").count(),
+        2,
+        "exactly two red nodes must remain, got {ossuary_json}"
     );
 }
 
@@ -933,7 +954,9 @@ fn scoped_player_member_filter_follows_the_resolution_scope() {
         recipient: None,
         scoped_player,
         damage_source: None,
+        spell: None,
         event_amount: None,
+        granting_object: None,
     };
 
     assert_eq!(
@@ -1002,9 +1025,13 @@ fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
     );
 
     // The results table itself: both rows keep their printed ranges and both
-    // bodies refuse as `Unimplemented { name: "return" }`. The participle
-    // axis that would bind them (unit 8e) is DEFERRED(phase 7), so refusal
-    // — not an over-broad reanimation — is the honest shape.
+    // bodies refuse as honest-red `Unimplemented`. Main's evolved row-body
+    // taxonomy names the marker "unparsed_verb_arguments" (verb recognized,
+    // arguments not modeled) where our tree said "return" — equally red, so
+    // the pin follows main's vocabulary while keeping the full-sentence
+    // description assertion. The participle axis that would bind them
+    // (unit 8e) is DEFERRED(phase 7), so refusal — not an over-broad
+    // reanimation — is the honest shape.
     fn roll_results(def: &AbilityDefinition) -> Option<&Vec<DieResultBranch>> {
         if let Effect::RollDie { results, .. } = &*def.effect {
             return Some(results);
@@ -1026,8 +1053,16 @@ fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
     );
     for (index, row) in results.iter().enumerate() {
         assert!(
-            matches!(&*row.effect.effect, Effect::Unimplemented { name, .. } if name == "return"),
-            "row {index} body must refuse as Unimplemented(return), got {:?}",
+            matches!(&*row.effect.effect, Effect::Unimplemented { name, description, .. }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref().is_some_and(|d| {
+                    d.contains("Return")
+                        && d.contains("put into")
+                        && d.contains("graveyard")
+                        && d.contains("battlefield under your control")
+                })),
+            "row {index} body must refuse as honest-red Unimplemented keeping \
+             the full return sentence, got {:?}",
             row.effect.effect
         );
     }

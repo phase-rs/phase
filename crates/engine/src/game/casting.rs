@@ -30972,6 +30972,14 @@ fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource, read: Ta
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,
+        // CR 608.2c + CR 115.1: a targeted-objects population reads the
+        // ability's chosen targets, so it reads a chosen target by
+        // definition — routed through the single `targeted_objects_filter`
+        // authority rather than answered as a constant.
+        CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_chosen_target(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            read,
+        ),
     }
 }
 

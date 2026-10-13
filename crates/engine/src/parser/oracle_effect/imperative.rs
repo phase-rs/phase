@@ -919,85 +919,6 @@ fn parse_life_verb_remainder<'a>(
     .map(|(_, rest)| rest)
 }
 
-/// CR 119.3 + CR 115.1: "the amount of life [they|that player] [lost|gained]
-/// this turn" in a *targeted* life-change context ("Target opponent loses life
-/// equal to the amount of life they lost this turn" — Astarion, the Decadent's
-/// Feed/Friends modes). The third-person "they"/"that player" anaphor refers to
-/// the effect's player target, so it resolves through `PlayerScope::Target`
-/// (read from `ability.targets` by `resolve_quantity_with_targets`) — the same
-/// player the surrounding LoseLife/GainLife affects, so a target opponent loses
-/// life equal to *their own* life lost this turn.
-///
-/// The shared `parse_life_lost_ref` "they lost"/"that player lost" arms now also
-/// emit `PlayerScope::Target` (not `Controller`), so the bare article-only
-/// each-opponent phrasing ("the life they lost this turn", Archfiend of Despair /
-/// Wound Reflection) is `Target`-scoped at the leaf and then rebound to
-/// `ScopedPlayer` by `rewrite_player_scope_refs` under the per-opponent
-/// `player_scope` loop. This recognizer still runs first for the "amount of"
-/// gloss (Astarion), yielding the identical `Target` mapping, so both phrasings
-/// resolve to the affected player's own life lost this turn.
-fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<QuantityExpr> {
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("the "))
-        .parse(qty_text)
-        .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("amount of life ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they "), tag("that player ")))
-        .parse(rest)
-        .ok()?;
-    let (rest, gained) = alt((
-        value(false, tag::<_, _, OracleError<'_>>("lost")),
-        value(true, tag("gained")),
-    ))
-    .parse(rest)
-    .ok()?;
-    // "this turn" is the canonical duration; tolerate its absence for callers
-    // that strip trailing durations before this point.
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn"))
-        .parse(rest)
-        .ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-    let qty = if gained {
-        QuantityRef::LifeGainedThisTurn {
-            player: PlayerScope::Target,
-        }
-    } else {
-        QuantityRef::LifeLostThisTurn {
-            player: PlayerScope::Target,
-        }
-    };
-    Some(QuantityExpr::Ref { qty })
-}
-
-fn parse_life_equal_quantity(
-    after_verb_lower: &str,
-    bare_card_source: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
-) -> Option<QuantityExpr> {
-    let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
-        .parse(after_verb_lower)
-        .ok()?;
-    let qty_text = qty_text.trim_end_matches('.').trim();
-    // CR 115.1: target-relative "they/that player lost/gained this turn" → Target
-    // scope. Tried before the generic delegation, which would otherwise map the
-    // third-person anaphor to the controller (see helper doc).
-    if let Some(qty) = parse_target_relative_life_change_this_turn(qty_text) {
-        return Some(qty);
-    }
-    if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
-        return Some(qty);
-    }
-    if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
-        return Some(QuantityExpr::Ref { qty });
-    }
-    let source = bare_card_source?;
-    let (rest, qty) =
-        nom_quantity::parse_contextual_bare_card_aggregate_ref(qty_text, source).ok()?;
-    rest.trim().is_empty().then_some(QuantityExpr::Ref { qty })
-}
-
 /// CR 119.3 + CR 102.1: "gain 1 life for each player" (a/an/1) → the count of
 /// every player in the game (`PlayerFilter::All`). Narrow to the one-life-per
 /// form, the only shape that occurs (Benediction of Moons); other multipliers
@@ -1065,14 +986,17 @@ fn parse_numeric_imperative_ast_with_context(
     // `bare_card_aggregate_source` leaf, so the wider parameter is free.
     ctx: &mut ParseContext,
 ) -> Option<NumericImperativeAst> {
-    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx.bare_card_aggregate_source)
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx)
 }
 
 fn parse_numeric_imperative_ast_with_bare_card_source(
     text: &str,
     lower: &str,
-    bare_card_source: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
->>>>>>> 5bbe052e3 (fix(engine): aggregate over chosen targets via TargetedObjects, Song of Inspiration + Command the Dreadhorde (Phase 2 PR C))
+    // Upstream evolution (true-upstream rebase): numeric count positions —
+    // including the bare-card aggregate fallback — now run through the shared
+    // ctx-threaded count grammar (`parse_verb_count_slot`), so this layer
+    // carries no separate binding parameter.
+    ctx: &mut ParseContext,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
         .or_else(|| {
@@ -2503,17 +2427,12 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             target
         };
-        // CR 608.2c: Fail closed on a dropped "this way" back-reference. When
-        // the target text still carries "this way" but the parsed filter does
-        // not reference the tracked set, the anaphor was silently dropped and
-        // the filter would enumerate the whole origin zone instead of the
-        // instruction's own moved set (Danse Macabre's "a creature card put
-        // into a graveyard this way"). Returning None surfaces the line as
-        // Unimplemented rather than claiming support. Mirrors the sibling
-        // guard in `try_parse_verb_and_target` (`mod.rs`).
-        if nom_primitives::scan_contains(&target_text.to_ascii_lowercase(), "this way")
-            && !target.references_tracked_set()
-        {
+        // CR 608.2c: Fail closed on a dropped "this way" back-reference
+        // (Danse Macabre's "a creature card put into a graveyard this way"):
+        // the single authority in `mod.rs` (`target_span_dropped_this_way_anaphor`)
+        // owns the bound-anaphor exemptions (payment amounts, reveal choices),
+        // so this call site never duplicates the predicate.
+        if super::target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
 

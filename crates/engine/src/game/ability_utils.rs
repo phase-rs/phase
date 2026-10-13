@@ -7485,9 +7485,10 @@ fn characteristic_source_target_slot_filter(
             // slot, so it wires the canonical filter for its own slot axis
             // via the single `targeted_objects_filter` authority rather than
             // re-deriving the mapping here.
-            CardTypeSetSource::TargetedObjects { slot } => {
-                Some(CardTypeSetSource::targeted_objects_filter(slot))
-            }
+            CardTypeSetSource::TargetedObjects { slot } => Some(QuantitySlotDerivation {
+                filter: CardTypeSetSource::targeted_objects_filter(slot),
+                binding: None,
+            }),
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::AnyOf { .. } => None,

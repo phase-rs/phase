@@ -181,7 +181,8 @@ use self::search::{
 };
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
-    parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
+    parse_followup_continuation_ast, parse_intrinsic_continuation_ast,
+    parse_revealed_this_way_card_filter, split_clause_sequence,
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
@@ -2144,18 +2145,28 @@ fn strip_bound_payment_amount_anaphors(span_lower: &str) -> String {
 ///
 /// "Unbound" is structural, not textual: a "this way" the quantity grammar
 /// consumed as a payment-amount threshold ([`strip_bound_payment_amount_anaphors`])
-/// is bound and never trips this, while a target-identity participle the
+/// is bound and never trips this, and neither is the reveal-choice anaphor
+/// ("a creature card they revealed this way") — owned by the reveal-choice
+/// binder ([`bind_revealed_this_way_consumer`], claimed through
+/// `parse_revealed_this_way_card_filter` in `sequence.rs`), which rebinds the
+/// consumer to the parked choice downstream. A target-identity participle the
 /// target grammar dropped ("put into graveyards this way", "of a type chosen
-/// this way") always does.
+/// this way") always trips it.
 ///
-/// Single authority for the fail-closed check the Entry-35 return-verb guards
-/// perform inline; the exile/destroy-verb dispatchers call this rather than
-/// duplicating the predicate.
+/// Single authority for the fail-closed check; every verb dispatcher
+/// (return, exile, destroy) calls this rather than duplicating the predicate.
 fn target_span_dropped_this_way_anaphor(span: &str, target: &TargetFilter) -> bool {
     if target.references_tracked_set() {
         return false;
     }
-    let unbound = strip_bound_payment_amount_anaphors(&span.to_ascii_lowercase());
+    let span_lower = span.to_ascii_lowercase();
+    // The reveal-choice authority claims this span: its "this way" is bound
+    // to the parked choice, never dropped. Exempt before the payment
+    // excision so the binder — not this guard — owns the sentence.
+    if parse_revealed_this_way_card_filter(&span_lower).is_some() {
+        return false;
+    }
+    let unbound = strip_bound_payment_amount_anaphors(&span_lower);
     scan_contains_phrase(&unbound, "this way")
 }
 

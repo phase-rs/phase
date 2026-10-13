@@ -244,6 +244,7 @@ impl TriggerZoneChangeProvenance {
     pub(crate) fn as_pair(&self) -> Option<(Zone, Zone)> {
         self.0
     }
+}
 
 /// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
 /// demonstrative "those cards" shape) binds to in this chunk — either a
