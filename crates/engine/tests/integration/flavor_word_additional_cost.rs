@@ -214,7 +214,7 @@ fn fallen_warrior_offers_only_creature_cards_from_your_graveyard() {
     );
 }
 
-/// D1. CR 607.2q + CR 400.7d + CR 603.4 + CR 607.2a: the card exiled for
+/// D1. CR 607.2q + CR 400.7d + CR 603.4: the card exiled for
 /// Fallen Warrior is exiled with the Dreadnought, so a later turn's attack
 /// gives +5/+5.
 #[test]
@@ -247,7 +247,7 @@ fn card_exiled_for_fallen_warrior_pumps_a_later_turn_attack() {
     assert_eq!(
         power_toughness(&runner, dreadnought),
         (Some(9), Some(9)),
-        "CR 607.2a: X is the power of the card exiled with it (5), so 4/4 + 5/5"
+        "CR 607.2q: X is the power of the card exiled with it (5), so 4/4 + 5/5"
     );
 }
 
