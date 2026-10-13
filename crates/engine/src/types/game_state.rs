@@ -22407,6 +22407,9 @@ declare_game_state! {
         Box<HashMap<PlayerId, im::Vector<AbilityActivationRecord>>>,
     /// CR 601.2a: Tracks once-per-turn `PlayFromExile` permission sources
     /// consumed this turn. Keyed by the granting source's ObjectId.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub exile_play_permissions_used: HashSet<ObjectId>,

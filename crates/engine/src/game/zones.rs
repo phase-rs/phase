@@ -736,9 +736,10 @@ pub(crate) fn apply_zone_exit_cleanup(
                     ))
         });
         // CR 400.7 + CR 607.2a: the cards exiled with this object this turn are the
-        // departed object's; a later object under the same id starts with none. Each
-        // zone-change record has already synced this list (`sync_trigger_source_exiled_cards`),
-        // so leaves-the-battlefield readers keep it.
+        // departed object's; a later object under the same id starts with none. Both
+        // leaves-the-battlefield records (`move_to_zone_with_entry_flags`,
+        // `move_to_library_at_index`) have already synced this list
+        // (`sync_trigger_source_exiled_cards`), so their readers keep it.
         state.cards_exiled_with_source_this_turn.remove(&object_id);
         // CR 400.7: a permission source's "once each turn" belongs to the
         // departed object; a later object under the same id has its own.
@@ -6244,8 +6245,9 @@ mod tests {
         );
     }
 
-    /// CR 400.7: every per-source per-turn store drops the departing source's
-    /// entries on its battlefield exit and keeps every other source's.
+    /// CR 400.7: the per-turn exile list and the seven once-each-turn usage sets
+    /// drop the departing source's entries on its battlefield exit and keep
+    /// every other source's.
     #[test]
     fn battlefield_departure_ends_the_sources_per_turn_entries() {
         let mut state = setup();
