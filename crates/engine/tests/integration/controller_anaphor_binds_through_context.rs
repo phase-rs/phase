@@ -301,16 +301,18 @@ fn watcher_response_to_opponent_counter(
     (firings, outcome.life_delta(P0))
 }
 
-/// CR 608.2c + CR 603.2c: in "whenever an opponent puts one or more counters
+/// CR 608.2c + CR 603.2: in "whenever an opponent puts one or more counters
 /// on another creature they control" and "… on one or more creatures they
 /// control", "they" is the opponent who placed the counters (the trigger's
-/// actor), not the watcher's controller. The two forms reach the "another " and
-/// "one or more " subject arms, which must read the actor scope like the
-/// "a "/"an " arm (Bold Plagiarist).
+/// actor), not the watcher's controller, so only a placement on that
+/// opponent's creature matches the trigger event. The two forms reach the
+/// "another " and "one or more " subject arms, which must read the actor scope
+/// like the "a "/"an " arm (Bold Plagiarist).
 ///
-/// Per form: a counter on the placing opponent's creature fires (1 firing, +1
-/// life); a counter on the watcher controller's creature does not (the actor
-/// gate still passes, so only the "they control" recipient gate suppresses it).
+/// Per form: a counter on the placing opponent's creature fires once (CR
+/// 603.2c: 1 firing, +1 life); a counter on the watcher controller's creature
+/// does not (the actor gate still passes, so only the "they control" recipient
+/// gate suppresses it).
 #[test]
 fn counter_placement_subject_binds_they_control_to_the_placing_opponent() {
     let forms = [
