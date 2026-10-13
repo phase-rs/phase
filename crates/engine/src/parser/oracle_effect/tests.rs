@@ -25356,6 +25356,54 @@ fn connive_where_x_is_creatures_died_this_turn() {
     );
 }
 
+/// CR 701.50d + CR 608.2c: the connive arm's target sub-parse is speculative —
+/// the bound where-X clause it reads is not a target phrase, and the subject
+/// replaces its `Any`. So a caller context carrying a player antecedent must
+/// not receive that discarded parse's `TargetFallback` (Spymaster's Vault).
+#[test]
+fn connive_where_x_keeps_discarded_target_fallback_off_the_caller() {
+    use crate::types::zones::Zone;
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TargetPlayer),
+        ..ParseContext::default()
+    };
+    let def = parse_effect_chain_with_context(
+        "Target creature you control connives X, where X is the number of creatures that died this turn.",
+        AbilityKind::Activated,
+        &mut ctx,
+    );
+    // Reach guard: the connive arm produced the card's effect — subject target,
+    // where-X bound count.
+    let Effect::Connive { target, count } = &*def.effect else {
+        panic!("expected Connive, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    );
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    ..
+                },
+            }
+        ),
+        "connive count should be the bound X, got {count:?}"
+    );
+    assert!(
+        !ctx.diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, OracleDiagnostic::TargetFallback { .. })),
+        "the discarded connive target parse must not leak a TargetFallback: {:?}",
+        ctx.diagnostics
+    );
+}
+
 #[test]
 fn phase_out_targeted() {
     let e = parse_effect("Target creature phases out");

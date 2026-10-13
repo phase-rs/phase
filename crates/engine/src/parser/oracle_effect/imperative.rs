@@ -12957,7 +12957,7 @@ pub(super) fn parse_imperative_family_ast(
         "explore" if lower == "explore" || lower == "explore again" => {
             Some(ImperativeFamilyAst::Explore)
         }
-        // CR 702.162a + CR 701.50d: "connive" / "connives" — extract optional
+        // CR 701.50a + CR 701.50d: "connive" / "connives" — extract optional
         // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
             let after_verb_lower = &lower[first_word.len()..];
@@ -12966,7 +12966,7 @@ pub(super) fn parse_imperative_family_ast(
             let rest_orig = text.get(prefix_len..).unwrap_or("");
             let (count, rest_orig) = parse_connive_count_expr(rest_orig, rest_lower);
             if !rest_orig.trim().is_empty() {
-                let (target, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_orig.trim(), scoped));
+                let (target, _) = parse_target_with_ctx(rest_orig.trim(), &mut ctx.clone_player_antecedents());
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive { target, count }))
             } else if count != (QuantityExpr::Fixed { value: 1 }) {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive {
