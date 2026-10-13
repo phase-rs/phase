@@ -4240,6 +4240,7 @@ export type ExileLinkKind =
   | "Haunt"
   | { HideawayLookable: { grant: LookGrant; lookers: PlayerId[]; source_incarnation: number } }
   | "CraftMaterial"
+  | "CastCost"
   | { UntilSourceLeaves: { return_zone: Zone } }
   | { UntilOpponentBecomesMonarch: { return_zone: Zone; controller: PlayerId } }
   | { ParadigmSource: { player: PlayerId } };

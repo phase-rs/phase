@@ -69,6 +69,42 @@ pub(crate) fn source_is_linked_exile_consumer(state: &GameState, source_id: Obje
         .is_some_and(source_contains_linked_exile_consumer)
 }
 
+/// CR 601.2h + CR 607.2q: The kind of a tracked exile made by `source_id`. A
+/// spell being cast (announced and not yet moved onto the stack) is paying its
+/// costs, so a card it exiles now was exiled to pay a cost of casting it
+/// (`CastCost`); any other source's tracked exile is `TrackedBySource`.
+pub(crate) fn tracked_link_kind(state: &GameState, source_id: ObjectId) -> ExileLinkKind {
+    if state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| obj.spell_announcement.is_some() && obj.zone != Zone::Stack)
+    {
+        ExileLinkKind::CastCost
+    } else {
+        ExileLinkKind::TrackedBySource
+    }
+}
+
+/// CR 400.7 + CR 733.1: End `source_id`'s cast-cost links. The single authority
+/// for ending a `CastCost` link: the object the cost was paid for no longer
+/// exists, or its cast was undone.
+pub(crate) fn end_cast_cost_links(state: &mut GameState, source_id: ObjectId) {
+    state
+        .exile_links
+        .retain(|link| link.source_id != source_id || link.kind != ExileLinkKind::CastCost);
+}
+
+/// CR 607.2q: The cards exiled to pay the cost of casting the spell that became
+/// `source_id`.
+pub(crate) fn cast_cost_pile(state: &GameState, source_id: ObjectId) -> Vec<ObjectId> {
+    state
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == source_id && link.kind == ExileLinkKind::CastCost)
+        .map(|link| link.exiled_id)
+        .collect()
+}
+
 pub(crate) fn push_tracked_by_source(
     state: &mut GameState,
     exiled_id: ObjectId,
@@ -190,8 +226,10 @@ pub(crate) fn links_for_reader(
                 // CR 400.7 + CR 607.2a: a tracked link belongs to the object that
                 // now holds it (kept for its in-exile successor, Mechtitan Core);
                 // an older incarnation's ability reads its own pile from the
-                // linked-exile LKI.
-                ExileLinkKind::TrackedBySource => reader == live,
+                // linked-exile LKI. CR 607.2q: a cast-cost link belongs to the
+                // spell and the permanent it became, the live object while the
+                // link exists.
+                ExileLinkKind::TrackedBySource | ExileLinkKind::CastCost => reader == live,
                 // CR 400.7d + CR 400.7j: the object these links were made for may
                 // be a later incarnation of the one that made them.
                 ExileLinkKind::UntilSourceLeaves { .. }
@@ -381,7 +419,8 @@ pub(crate) fn push_with_kind_as(
         ) => record_departed_linked_exile(state, exiled_id, source_id, creator),
         // The live object's own exile, or a kind that is never diverted: a
         // look link carries its creator (`push_look_link`); a craft material is
-        // linked at cost time; cipher, haunt and paradigm links are keyed to
+        // linked at cost time; a cast-cost link is made while the spell is the
+        // live object (CR 601.2h); cipher, haunt and paradigm links are keyed to
         // the object they belong to; and a monarch-bounded exile returns on an
         // event that is not about its source (CR 610.3).
         (ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. }, None)
@@ -391,7 +430,8 @@ pub(crate) fn push_with_kind_as(
             | ExileLinkKind::ParadigmSource { .. }
             | ExileLinkKind::Cipher
             | ExileLinkKind::Haunt
-            | ExileLinkKind::CraftMaterial,
+            | ExileLinkKind::CraftMaterial
+            | ExileLinkKind::CastCost,
             _,
         ) => record_link(state, exiled_id, source_id, kind),
     };

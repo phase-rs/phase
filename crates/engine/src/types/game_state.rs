@@ -2694,8 +2694,8 @@ pub enum ExileLinkKind {
     /// CR 702.167c: Craft material — the card (`exiled_id`) was exiled to pay the
     /// craft activation cost of the permanent (`source_id`) that returns to the
     /// battlefield transformed. "An ability of a permanent may refer to the
-    /// exiled cards used to craft it." Unlike `TrackedBySource`, this link is
-    /// **preserved** when the craft source leaves the battlefield — the source
+    /// exiled cards used to craft it." Unlike `TrackedBySource` and `CastCost`,
+    /// this link is **preserved** when the craft source leaves the battlefield — the source
     /// self-exiles mid-activation (CR 702.167a) and returns with the SAME
     /// ObjectId, so the link must survive its battlefield exit for the returned
     /// permanent to read it. Unlike `UntilSourceLeaves` it triggers NO automatic
@@ -2703,6 +2703,14 @@ pub enum ExileLinkKind {
     /// `ExiledBySource` / `CardsExiledBySource` consumers; pruned only when a
     /// material itself leaves exile (`zones.rs` exile-exit).
     CraftMaterial,
+    /// CR 607.2q: the card (`exiled_id`) was exiled to pay a cost of casting the
+    /// permanent spell (`source_id`). Linked to that spell and to the permanent it
+    /// becomes (CR 400.7d) and to nothing after: it survives only the move onto the
+    /// stack and the stack→battlefield move (CR 608.3a); every other zone exit and a
+    /// cancelled cast (CR 733.1) end it (CR 400.7). Read live like `TrackedBySource`;
+    /// after a battlefield departure only the departed incarnation reads it
+    /// (`zones::record_linked_exile_departure`).
+    CastCost,
 }
 
 /// CR 406.3 + CR 702.75a: whom a face-down exile look link's live rule admits.

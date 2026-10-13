@@ -3346,6 +3346,10 @@ mod tests {
         }
     }
 
+    /// v141: `ExileLinkKind` gains `CastCost` (CR 607.2q cast-cost exile links),
+    /// carried in `GameState::exile_links`; a v140 peer cannot parse the tag, so
+    /// it must be refused before it receives v141 state.
+    ///
     /// v140: `AttackSubject` gains `EventAttackers` (the players a trigger's
     /// attack event's attackers attacked), carried in a resolving or pending
     /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
@@ -3544,8 +3548,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_140_for_event_attackers() {
-        assert_eq!(PROTOCOL_VERSION, 140);
+    fn protocol_version_is_141_for_cast_cost_exile_links() {
+        assert_eq!(PROTOCOL_VERSION, 141);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3556,7 +3560,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_140_for_event_attackers` stays
+    /// `protocol_version_is_141_for_cast_cost_exile_links` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -218,6 +218,12 @@ pub(crate) fn apply_zone_exit_cleanup(
             obj.spell_announcement = None;
         }
     }
+    // CR 607.2q + CR 400.7 + CR 400.7d + CR 608.3a: a cast-cost link follows the spell
+    // onto the stack and onto the battlefield as the permanent it becomes; any other
+    // move makes a new object the cost was not paid for.
+    if !(to == Zone::Stack || (from == Zone::Stack && to == Zone::Battlefield)) {
+        crate::game::exile_links::end_cast_cost_links(state, object_id);
+    }
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
     // object. `ObjectId` is storage identity here, so clear per-object counts
     // at the zone-change boundary before the same id can represent a new object.
@@ -707,6 +713,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // returned permanent to still read what it was crafted with.
         // CR 406.3: `HideawayLookable` links are preserved because a look outlives
         // its source; their live rule stops admitting once the source is gone.
+        // CR 607.2q + CR 400.7: `CastCost` links are already gone on any
+        // battlefield exit (the exit prune above).
         // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
         // source leaves the battlefield TO EXILE. A source that self-exiles
         // (typically as its own activation cost — Mechtitan Core: "Exile this
@@ -1521,6 +1529,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    let cast_cost_pile = crate::game::exile_links::cast_cost_pile(state, object_id);
     zone_change_record.sync_trigger_source_exiled_cards(
         state
             .cards_exiled_with_source_this_turn
@@ -1628,6 +1637,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
         pre_bump_incarnation,
         new_incarnation,
         &zone_change_record.linked_exile_snapshot,
+        &cast_cost_pile,
     );
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
@@ -2157,26 +2167,40 @@ pub(crate) fn capture_linked_exile_snapshot(
 /// source (Rod of Absorption sacrificing itself) still finds the cards exiled
 /// with it. CR 400.7: bound it to this departure's incarnations so a later
 /// object under the same id cannot read it. Shared by every departure path
-/// (`move_to_zone_with_entry_flags`, `move_to_library_at_index`).
+/// (`move_to_zone_with_entry_flags`, `move_to_library_at_index`). The cards in
+/// `cast_cost_pile` (the departed permanent's `CastCost` links) get an entry of
+/// their own that admits only the departed incarnation.
 fn record_linked_exile_departure(
     state: &mut GameState,
     object_id: ObjectId,
     departed: u64,
     successor: u64,
     snapshot: &[LinkedExileSnapshot],
+    cast_cost_pile: &[ObjectId],
 ) {
     if snapshot.is_empty() {
         return;
     }
-    state
-        .linked_exile_lki
-        .entry(object_id)
-        .or_default()
-        .push(LinkedExileLki {
-            departed,
-            successor,
-            snapshot: snapshot.to_vec(),
-        });
+    // CR 113.7a + CR 400.7 + CR 607.2q: only an ability of the departed
+    // permanent reads its cast-cost pile; the object it became is a new object
+    // that no spell became. KNOWN LIMITATION (CR 113.7a): an activation that
+    // sacrifices or exiles this permanent as its cost is stamped with the
+    // successor and so does not read this pile; no printed card pairs such an
+    // activation with a cast-cost pile (`LinkedExileLki::admits` over-admission, P6).
+    let (cast_cost, rest): (Vec<_>, Vec<_>) = snapshot
+        .iter()
+        .cloned()
+        .partition(|snap| cast_cost_pile.contains(&snap.exiled_id));
+    let entries = state.linked_exile_lki.entry(object_id).or_default();
+    for (admitted, pile) in [(successor, rest), (departed, cast_cost)] {
+        if !pile.is_empty() {
+            entries.push(LinkedExileLki {
+                departed,
+                successor: admitted,
+                snapshot: pile,
+            });
+        }
+    }
 }
 
 /// After leave-time snapshots are captured on the zone-change record, sever
@@ -2424,6 +2448,7 @@ pub fn move_to_library_at_index(
     // the linked "exiled with" cards before CR 400.7 cleanup prunes them.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    let cast_cost_pile = crate::game::exile_links::cast_cost_pile(state, object_id);
     zone_change_record.sync_trigger_source_exiled_cards(
         state
             .cards_exiled_with_source_this_turn
@@ -2484,6 +2509,7 @@ pub fn move_to_library_at_index(
             pre,
             new,
             &zone_change_record.linked_exile_snapshot,
+            &cast_cost_pile,
         );
     }
 

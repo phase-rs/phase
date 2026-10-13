@@ -27936,6 +27936,8 @@ pub fn handle_cancel_cast(
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
             obj.spell_announcement = None;
         }
+        // CR 733.1 + CR 400.7: the undone cast's cost links end with its announcement.
+        super::exile_links::end_cast_cost_links(state, pending.object_id);
         // CR 601.2i: Remove the placeholder stack entry pushed at announcement.
         // No other player can interject between announce and cancel, so the
         // entry is still the topmost object for this cast.

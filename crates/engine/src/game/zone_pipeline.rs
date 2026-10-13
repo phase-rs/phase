@@ -2095,13 +2095,17 @@ pub(crate) fn apply_zone_delivery_tail(
                 // death, `Effect::Destroy`, `Effect::Sacrifice`, none of which
                 // resolve through an ability chain) needs, since those callers
                 // have no `ResolvedAbility` to run the ability-level half of
-                // that check against.
+                // that check against. CR 607.2q: a tracked exile made while its
+                // source is a spell being cast pays that cast's cost, so its kind
+                // is `CastCost` (`exile_links::tracked_link_kind`).
                 _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource)
                     || crate::game::exile_links::source_is_linked_exile_consumer(
                         state, source_id,
                     ) =>
                 {
-                    Some(ExileLinkKind::TrackedBySource)
+                    Some(crate::game::exile_links::tracked_link_kind(
+                        state, source_id,
+                    ))
                 }
                 _ => None,
             };
