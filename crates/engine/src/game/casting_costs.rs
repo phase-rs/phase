@@ -530,6 +530,7 @@ fn make_optional_cost_choice(
     let origin = pending
         .additional_cost_queue
         .first()
+        .filter(|instance| instance.cost == cost)
         .map(|instance| instance.origin)
         .unwrap_or(AdditionalCostOrigin::Other);
     let gift_kind = if origin == AdditionalCostOrigin::Gift {
@@ -575,6 +576,42 @@ fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellCo
     }
 }
 
+/// CR 118.6a + CR 601.2b + CR 601.2h: apply a spell's alternative cost
+/// without asking, because the printed cost it would replace doesn't exist.
+/// Records it as an accepted alternative would be (its once-per-turn grant is
+/// spent at finalize).
+fn apply_only_payable_alternative_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    alt_cost: PayableSpellAlternativeCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pending.ability.context.alternative_mana_cost_paid = true;
+    pending.ability.context.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    match alt_cost.cost {
+        AbilityCost::Mana { cost: alt_mana } => {
+            pending.base_cost = Some(alt_mana);
+            pending.cost = super::casting::recompute_pending_mana_total(
+                state,
+                player,
+                &pending,
+                pending.ability.chosen_x,
+            );
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+        cost => pay_additional_cost_with_source(
+            state,
+            player,
+            cost,
+            SpellCostSource::Other,
+            pending,
+            events,
+        ),
+    }
+}
+
 pub(crate) fn handle_decide_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -583,18 +620,23 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if pending
-        .additional_cost_queue
-        .first()
-        .is_some_and(|instance| {
-            matches!(
-                instance.cost,
-                AdditionalCost::Optional {
-                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
-                    ..
-                }
-            )
-        })
+    // CR 118.9d: an alternative-cost choice made with additional costs still
+    // queued or in flow is answered here, not by their handlers.
+    let answers_alternative_cost = matches!(additional_cost, AdditionalCost::Choice(_, _));
+    if !answers_alternative_cost
+        && pending
+            .additional_cost_queue
+            .first()
+            .is_some_and(|instance| {
+                matches!(
+                    instance.cost,
+                    AdditionalCost::Optional {
+                        repeatability:
+                            crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                        ..
+                    }
+                )
+            })
     {
         return handle_decide_repeatable_additional_cost(
             state,
@@ -607,6 +649,7 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
+        (_, AdditionalCost::Choice(_, _)) => {}
         (Some(AdditionalCost::Kicker { .. }), _) => {
             return handle_decide_kicker_cost(state, player, pending, pay, events);
         }
@@ -654,7 +697,14 @@ pub(crate) fn handle_decide_additional_cost(
 
     let pending_before = pending.clone();
     let cost_source = pending.additional_cost_source;
-    let current_instance = pending.additional_cost_queue.first().cloned();
+    // CR 601.2b: only the queue's own prompt answers its first instance. An
+    // alternative-cost choice made with additional costs still queued
+    // (CR 118.9d) leaves them for the additional-cost authority.
+    let current_instance = pending
+        .additional_cost_queue
+        .first()
+        .filter(|instance| instance.cost == *additional_cost)
+        .cloned();
     let mut ability = pending.ability;
 
     // CR 702.166a: Track whether this decision paid an optional additional cost
@@ -673,11 +723,7 @@ pub(crate) fn handle_decide_additional_cost(
         } => {
             if pay {
                 if let Some(instance) = current_instance.as_ref() {
-                    ability.context.record_additional_cost_instance_payment(
-                        instance.origin,
-                        instance.origin_ordinal,
-                        1,
-                    );
+                    ability.context.record_payment_for_instance(instance, 1);
                 } else {
                     ability
                         .context
@@ -754,11 +800,7 @@ pub(crate) fn handle_decide_additional_cost(
             // Required costs are always paid — the choice prompt should not be reached,
             // but handle defensively by always paying.
             if let Some(instance) = current_instance.as_ref() {
-                ability.context.record_additional_cost_instance_payment(
-                    instance.origin,
-                    instance.origin_ordinal,
-                    1,
-                );
+                ability.context.record_payment_for_instance(instance, 1);
             } else {
                 ability
                     .context
@@ -944,12 +986,17 @@ pub(crate) fn payable_spell_alternative_cost_details(
     object_id: ObjectId,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.controller != player {
-        return None;
-    }
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
     let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
+    // CR 601.2a: the caster becomes the spell's controller. A card is not
+    // controlled before then (CR 108.4a reads its owner), so another player's
+    // card cast from exile or a graveyard under a permission granted to
+    // `player` still gets `player`'s alternative costs (Warped Space). Casting
+    // from another player's hand is outside this offer's scope.
+    if obj.controller != player && origin_zone == Zone::Hand {
+        return None;
+    }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
@@ -1274,12 +1321,12 @@ fn handle_decide_repeatable_additional_cost(
     let pending_before = pending.clone();
     let queued_instance = pending.additional_cost_queue.first().cloned();
     let queued_origin = queued_instance.as_ref().map(|instance| instance.origin);
-    let queued_origin_ordinal = queued_instance
-        .as_ref()
-        .map(|instance| instance.origin_ordinal);
     let Some(cost) = next_repeatable_additional_cost(state, player, &pending) else {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
+            // CR 601.2b: as for a once-only instance, an emptied queue is
+            // decided, so the post-target re-detection does not re-offer it.
+            pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
         } else {
             pending.additional_cost_flow = None;
         }
@@ -1289,17 +1336,20 @@ fn handle_decide_repeatable_additional_cost(
     if !pay {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
+            // CR 601.2b: as for a once-only instance, an emptied queue is
+            // decided, so the post-target re-detection does not re-offer it.
+            pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
         } else {
             pending.additional_cost_flow = None;
         }
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
-    if let (Some(origin), Some(origin_ordinal)) = (queued_origin, queued_origin_ordinal) {
+    if let Some(instance) = queued_instance.as_ref() {
         pending
             .ability
             .context
-            .record_additional_cost_instance_payment(origin, origin_ordinal, 1);
+            .record_payment_for_instance(instance, 1);
     } else {
         pending
             .ability
@@ -7331,6 +7381,34 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         || !pending.additional_cost_queue.is_empty()
         || pending.additional_cost_decided
     {
+        // CR 118.6a + CR 601.2b: skipping the re-detection must not skip the
+        // alternative cost of a card with no mana cost (an additional cost
+        // decided before targets, as a granted casualty): its printed cost
+        // can't be paid, so the alternative is applied here, as below.
+        if !pending.ability.context.alternative_mana_cost_paid
+            && state.objects.get(&pending.object_id).is_some_and(|obj| {
+                super::casting::cast_pays_nonexistent_printed_cost(
+                    state,
+                    player,
+                    obj,
+                    pending.casting_permission_index,
+                    pending.casting_variant,
+                )
+            })
+        {
+            let Some(alt_cost) = (pending.casting_variant == CastingVariant::Normal)
+                .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
+                .flatten()
+            else {
+                // Admission saw a payable alternative; one that stopped being
+                // payable since (a sacrificed permanent) cancels the cast.
+                super::casting::handle_cancel_cast(state, &pending, events);
+                return Err(EngineError::ActionNotAllowed(
+                    "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+                ));
+            };
+            return apply_only_payable_alternative_cost(state, player, pending, alt_cost, events);
+        }
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     // CR 601.2b + CR 601.2f: an Emerge or Offering sacrifice chosen before the
@@ -7527,6 +7605,41 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
             finish_pending_cost_or_cast(state, player, pending, events)
         }
     }
+}
+
+/// CR 601.2b + CR 702.153b: casualty is declared before targets, one queued
+/// instance at a time, so each answer is recorded against its own instance
+/// (printed instances first, then granted ones) for the copy trigger to read.
+/// The rest of the effective queue (replicate, offspring, …) follows it, as
+/// the post-target re-detection is skipped once the queue is decided.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_casualty_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    base_cost: Option<ManaCost>,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.base_cost = base_cost;
+    pending.casting_variant = casting_variant;
+    pending.casting_permission_index = casting_permission_index;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.payment_mode = payment_mode;
+    pending.deferred_target_selection = true;
+    pending.additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// CR 601.2b: Present an optional additional cost (e.g. Casualty) to the player
@@ -8133,8 +8246,16 @@ fn check_additional_cost_or_pay_with_kept_cost(
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
             pending.alt_cost_grant_source = alt_cost_grant_source;
-            pending.additional_cost_flow =
-                imposed_required_cost.clone().map(AdditionalCost::Required);
+            // CR 118.9d: additional costs that affect the spell apply to
+            // the alternative cost. Hand the additional-cost authority the
+            // queued keyword costs and the required cost.
+            pending.additional_cost_queue = additional_cost_queue;
+            if let Some(AdditionalCost::Required(_)) = additional {
+                pending.additional_cost_flow = additional.clone();
+                pending.additional_cost_source = additional_cost_source;
+            } else {
+                pending.additional_cost_flow = deferred_required.clone();
+            }
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
                 && alt_cost.timing_permission == cast_timing_permission;
             if alt_cost_required_for_timing {
@@ -8165,6 +8286,22 @@ fn check_additional_cost_or_pay_with_kept_cost(
                         );
                     }
                 }
+            }
+            // CR 601.2h: "Unpayable costs can't be paid." With no printed mana
+            // cost the alternative is the only way to cast the card, so there
+            // is nothing to choose.
+            if state.objects.get(&object_id).is_some_and(|obj| {
+                super::casting::cast_pays_nonexistent_printed_cost(
+                    state,
+                    player,
+                    obj,
+                    casting_permission_index,
+                    casting_variant,
+                )
+            }) {
+                return apply_only_payable_alternative_cost(
+                    state, player, pending, alt_cost, events,
+                );
             }
             return Ok(make_optional_cost_choice(
                 state,
@@ -10732,7 +10869,10 @@ pub(super) fn effective_casualty_additional_cost_instances(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Vec<AdditionalCostInstance> {
-    super::casting::effective_spell_keyword_instances(state, player, object_id)
+    let keywords = super::casting::effective_spell_keyword_instances(state, player, object_id);
+    let grant_sources =
+        super::casting::effective_casualty_grant_sources(state, player, object_id, &keywords);
+    keywords
         .into_iter()
         .filter_map(|keyword| match keyword {
             Keyword::Casualty(threshold) => Some(threshold),
@@ -10760,6 +10900,7 @@ pub(super) fn effective_casualty_additional_cost_instances(
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 },
             )
+            .with_grant_source(grant_sources.get(ordinal).copied().flatten())
         })
         .collect()
 }
@@ -12760,11 +12901,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // read this snapshot instead of re-querying the now-incremented grant. Uses
     // `effective_spell_keyword_instances` so multi-instance keywords (Cascade x2,
     // Ripple) are preserved, matching what the seams' instance counting expects.
-    let cast_spell_keywords =
-        super::casting::effective_spell_keyword_instances(state, player, object_id);
-    if let Some(obj_mut) = state.objects.get_mut(&object_id) {
-        obj_mut.cast_spell_keywords = cast_spell_keywords;
-    }
+    // CR 611.3b: a casualty grant whose permanent left while costs were paid
+    // (Silverquill sacrificed for its own casualty) is not in the snapshot.
+    super::casting::snapshot_cast_spell_keywords(state, player, object_id);
 
     let obj = state
         .objects

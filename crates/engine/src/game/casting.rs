@@ -2749,26 +2749,8 @@ fn granted_spell_keyword_instances_for(
     let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
-    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
-        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
-            continue;
-        };
-
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
-        if matches {
-            merge_spell_keyword(&mut keywords, keyword.clone(), true);
-        }
+    for (_, keyword) in static_spell_keyword_grants(state, caster, spell_obj, origin_zone, fused) {
+        merge_spell_keyword(&mut keywords, keyword.clone(), true);
     }
 
     transient_granted_spell_keywords_for(
@@ -2794,6 +2776,98 @@ fn granted_spell_keyword_instances_for(
     }
 
     keywords
+}
+
+/// CR 611.3b: each functioning `CastWithKeyword` static that grants its keyword
+/// to this spell, with the permanent generating it, in scan order.
+fn static_spell_keyword_grants<'a>(
+    state: &'a GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    fused: bool,
+) -> Vec<(ObjectId, &'a Keyword)> {
+    super::functioning_abilities::game_active_statics(state)
+        .filter_map(|(source_obj, def)| {
+            let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+                return None;
+            };
+            def.affected
+                .as_ref()
+                .is_none_or(|filter| {
+                    super::filter::spell_object_matches_filter_from_state_for(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        filter,
+                        source_obj.id,
+                        &state.all_creature_types,
+                        fused,
+                    )
+                })
+                .then_some((source_obj.id, keyword))
+        })
+        .collect()
+}
+
+/// CR 601.2i + CR 611.3b: stamp the cast-time snapshot read by the SpellCast
+/// trigger seams: the spell's effective keyword instances, and which
+/// permanents' casualty grants still apply. Taken before the spell is recorded
+/// in the turn's history, so "first spell each turn" grants still attach.
+pub(crate) fn snapshot_cast_spell_keywords(
+    state: &mut GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) {
+    let cast_spell_keywords = effective_spell_keyword_instances(state, caster, object_id);
+    let cast_casualty_grant_sources =
+        effective_casualty_grant_sources(state, caster, object_id, &cast_spell_keywords)
+            .into_iter()
+            .flatten()
+            .collect();
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_spell_keywords = cast_spell_keywords;
+        obj.cast_casualty_grant_sources = cast_casualty_grant_sources;
+    }
+}
+
+/// CR 611.3b + CR 702.153b: the permanent whose static grants each casualty
+/// instance of this spell, aligned with the casualty ordinals of
+/// [`effective_spell_keyword_instances`], passed in as `keywords`. A printed
+/// instance, and a grant no permanent generates (a resolved effect, a
+/// next-spell modifier), is `None`.
+pub(crate) fn effective_casualty_grant_sources(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    keywords: &[Keyword],
+) -> Vec<Option<ObjectId>> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    let is_casualty = |keyword: &Keyword| matches!(keyword, Keyword::Casualty(_));
+    let mut sources = vec![None; obj.keywords.iter().filter(|k| is_casualty(k)).count()];
+    sources.extend(
+        static_spell_keyword_grants(
+            state,
+            caster,
+            obj,
+            spell_cast_origin_zone(state, obj),
+            false,
+        )
+        .into_iter()
+        .filter(|(_, keyword)| is_casualty(keyword))
+        .map(|(source, _)| Some(source)),
+    );
+    // Player-scoped and next-spell grants follow the statics.
+    let total = keywords.iter().filter(|k| is_casualty(k)).count();
+    debug_assert!(
+        sources.len() <= total,
+        "a static casualty grant is a keyword instance"
+    );
+    sources.resize(total, None);
+    sources
 }
 
 /// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,
@@ -4020,6 +4094,67 @@ fn exile_alt_cost_permission_uses_casting_cards_mana_cost(
                 .is_some_and(|bf| *cost == bf.mana_cost)
         }
     }
+}
+
+/// CR 601.2f + CR 118.9a: whether a pending "the next spell … without paying
+/// its mana cost" applies to this cast.
+fn next_spell_without_paying_applies(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> bool {
+    !casting_variant.uses_alternative_cost()
+        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
+            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
+        })
+        .is_some()
+}
+
+/// CR 118.6 + CR 601.2h: whether this cast would pay a mana cost the card
+/// doesn't have. A normal-cost grant (`NormalCost` provenance, or a stored
+/// `SelfManaCost`) restates the card's printed cost, which for a card with no
+/// mana cost is an unpayable cost. A printed {0} is payable. A free
+/// alternative cost may be paid instead (CR 118.6a): a "without paying its
+/// mana cost" grant never has this provenance, and a pending next-spell one is
+/// excluded here. Methods with their own alternative cost never elect this
+/// slot (`selected_object_cast_permission_index`).
+pub(super) fn cast_pays_nonexistent_printed_cost(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    casting_variant: CastingVariant,
+) -> bool {
+    casting_permission_index
+        .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
+        .is_some_and(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost,
+                cost_provenance,
+                ..
+            } => {
+                (matches!(
+                    cost_provenance,
+                    crate::types::ability::ExileGrantCostProvenance::NormalCost
+                ) || matches!(cost, ManaCost::SelfManaCost))
+                    && matches!(
+                        resolve_exile_with_alt_cost_permission_mana_cost(cost, obj),
+                        ManaCost::NoCost
+                    )
+            }
+            // A face-based cast, an impulse permission, a non-mana alternative
+            // cost, or an exile mechanic with its own cost: none stores the
+            // normal-cost grant this predicate reads.
+            crate::types::ability::CastingPermission::AdventureCreature
+            | crate::types::ability::CastingPermission::PlayFromExile { .. }
+            | crate::types::ability::CastingPermission::ExileWithEnergyCost
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+            | crate::types::ability::CastingPermission::WarpExile { .. }
+            | crate::types::ability::CastingPermission::Plotted { .. }
+            | crate::types::ability::CastingPermission::Foretold { .. } => false,
+        })
+        && !next_spell_without_paying_applies(state, player, obj.id, casting_variant)
 }
 
 /// CR 709.3 + CR 712.11b + CR 601.2a: `CastFromZone` and similar grants stamp
@@ -9230,7 +9365,6 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
-
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
     //
     // CR 118.9a: this scan reads every attached permission, not the elected
@@ -9713,11 +9847,27 @@ fn prepare_spell_cast_announced(
         .then(|| crate::types::mana::ManaCost::generic(3));
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2f + CR 118.9a: One-shot "the next spell … without paying its mana cost".
-    let next_spell_without_paying = !casting_variant.uses_alternative_cost()
-        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
-            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
-        })
-        .is_some();
+    let next_spell_without_paying =
+        next_spell_without_paying_applies(state, player, object_id, casting_variant);
+    // CR 118.6 + CR 118.6a + CR 601.2h: a cast that would pay a nonexistent
+    // printed mana cost is refused, unless a payable alternative cost will be
+    // applied for it. `check_additional_cost_or_pay` (a `Normal` cast) and the
+    // skipped-election branch of `finish_pending_cast_cost_or_pay` apply it
+    // without a choice.
+    if cast_pays_nonexistent_printed_cost(
+        state,
+        player,
+        obj,
+        casting_permission_index,
+        casting_variant,
+    ) && !(casting_variant == CastingVariant::Normal
+        && casting_costs::payable_spell_alternative_cost_details(state, player, object_id)
+            .is_some())
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+        ));
+    }
 
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from the origin scope carried by the static. Auto-application is
@@ -19083,10 +19233,10 @@ fn continue_with_prepared(
         // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
         // chosen. Detect an effective Casualty cost and route through the deferred target
         // selection path so the sacrifice prompt appears first.
-        if let Some(casualty_cost) =
-            casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+        if casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+            .is_some()
         {
-            return casting_costs::begin_optional_cost_before_targets(
+            return casting_costs::begin_casualty_before_targets(
                 state,
                 player,
                 prepared.object_id,
@@ -19094,8 +19244,6 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
-                casualty_cost,
-                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.casting_permission_index,
                 prepared.cast_timing_permission,

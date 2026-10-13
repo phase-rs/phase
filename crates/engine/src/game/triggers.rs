@@ -5955,73 +5955,45 @@ fn collect_pending_triggers_with_collection(
             // only fires on SpellCast, which is only emitted for an actual
             // cast — so the cast-ness is already implied by the trigger event
             // itself and a redundant WasCast condition would add nothing.
+            // CR 702.153b: each instance "triggers based on the payments made
+            // for it". Keyword instances list printed ones first, so a recorded
+            // casualty payment past them was made for a granted one at cast.
+            // The grant is read from the cast-time snapshot, not re-evaluated
+            // now: "the first instant or sorcery spell you cast each turn"
+            // (Anhelo, the Painter) no longer counts zero spells once this one
+            // is cast. CR 611.3b: a grant whose permanent left before the spell
+            // became cast (Silverquill, the Disputant sacrificed for its own
+            // casualty) is not in the snapshot, so its payment makes no copy.
+            // Only casualty payments count; another paid additional cost
+            // (kicker, replicate) is not one.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
                 .and_then(|obj| {
-                    let paid_ordinals: Vec<u32> = state
-                        .stack
-                        .iter()
-                        .find(|entry| entry.id == *cast_obj_id)
-                        .and_then(|entry| {
-                            entry.ability().map(|ability| {
-                                let ordinals: Vec<_> = ability
-                                    .context
-                                    .additional_cost_payments
-                                    .iter()
-                                    .filter(|payment| {
-                                        payment.origin == AdditionalCostOrigin::Casualty
-                                            && payment.count > 0
-                                    })
-                                    .map(|payment| payment.origin_ordinal)
-                                    .collect();
-                                if ordinals.is_empty() && ability.context.additional_cost_paid {
-                                    vec![0]
-                                } else {
-                                    ordinals
-                                }
-                            })
-                        })
-                        .unwrap_or_else(|| {
-                            let ordinals: Vec<_> = obj
-                                .additional_cost_payments
-                                .iter()
-                                .filter(|payment| {
-                                    payment.origin == AdditionalCostOrigin::Casualty
-                                        && payment.count > 0
-                                })
-                                .map(|payment| payment.origin_ordinal)
-                                .collect();
-                            if ordinals.is_empty() && obj.additional_cost_payment_count > 0 {
-                                vec![0]
-                            } else {
-                                ordinals
-                            }
-                        });
-                    if paid_ordinals.is_empty() {
-                        return None;
-                    }
                     let printed_count = obj
                         .keywords
                         .iter()
                         .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
                         .count();
-                    let effective_count = super::casting::effective_spell_keyword_instances(
-                        state,
-                        obj.controller,
-                        *cast_obj_id,
-                    )
-                    .iter()
-                    .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
-                    .count();
-                    let granted_count = effective_count.saturating_sub(printed_count);
                     let granted_start = u32::try_from(printed_count).unwrap_or(u32::MAX);
-                    let granted_end = u32::try_from(effective_count).unwrap_or(u32::MAX);
-                    let paid_granted_count = paid_ordinals
-                        .into_iter()
-                        .filter(|ordinal| *ordinal >= granted_start && *ordinal < granted_end)
+                    let n = state
+                        .stack
+                        .iter()
+                        .find(|entry| entry.id == *cast_obj_id)
+                        .and_then(|entry| entry.ability())
+                        .map_or(&obj.additional_cost_payments, |ability| {
+                            &ability.context.additional_cost_payments
+                        })
+                        .iter()
+                        .filter(|payment| {
+                            payment.origin == AdditionalCostOrigin::Casualty
+                                && payment.count > 0
+                                && payment.origin_ordinal >= granted_start
+                                && payment.grant_source.is_none_or(|source| {
+                                    obj.cast_casualty_grant_sources.contains(&source)
+                                })
+                        })
                         .count();
-                    let n = granted_count.min(paid_granted_count);
                     (n > 0).then_some((n, obj.controller))
                 })
                 .unwrap_or((0, PlayerId(0)));
@@ -39111,6 +39083,7 @@ pub mod tests {
                     origin: AdditionalCostOrigin::Replicate,
                     origin_ordinal: 0,
                     count: 1,
+                    grant_source: None,
                 },
             );
         }
@@ -39314,7 +39287,13 @@ pub mod tests {
             spell,
             caster,
         );
-        ability.context.additional_cost_paid = true;
+        // CR 702.153b: the cast records the payment against the granted
+        // instance (ordinal 0: the spell has no printed casualty).
+        ability.context.record_additional_cost_instance_payment(
+            AdditionalCostOrigin::Casualty,
+            0,
+            1,
+        );
         state.stack.push_back(StackEntry {
             id: spell,
             source_id: spell,

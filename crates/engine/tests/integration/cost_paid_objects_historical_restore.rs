@@ -185,6 +185,11 @@ fn finish_resolution(runner: &mut GameRunner, prefer: &[ObjectId]) {
                     return;
                 }
             }
+            WaitingFor::CopyRetarget { .. } => {
+                if runner.act(GameAction::KeepAllCopyTargets).is_err() {
+                    return;
+                }
+            }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
                     return;

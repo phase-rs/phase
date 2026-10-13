@@ -247,11 +247,7 @@ fn cast_one_copy(
     // a printed-Cascade card would carry an empty snapshot and silently drop its
     // Cascade trigger. `effective_spell_keyword_instances` preserves multi-instance
     // keywords (Cascade x2, Ripple) exactly as the seams' instance counting expects.
-    let cast_spell_keywords =
-        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
-    if let Some(copy_mut) = state.objects.get_mut(&copy_id) {
-        copy_mut.cast_spell_keywords = cast_spell_keywords;
-    }
+    crate::game::casting::snapshot_cast_spell_keywords(state, ability.controller, copy_id);
 
     let mut resolved =
         ability_def.map(|def| build_resolved_from_def(&def, copy_id, ability.controller));

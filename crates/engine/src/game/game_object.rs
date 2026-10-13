@@ -1569,6 +1569,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cast_spell_keywords: Vec<Keyword>,
 
+    /// CR 611.3b + CR 702.153b: the permanents whose casualty grant still
+    /// applied to this spell at the `cast_spell_keywords` snapshot. A granted
+    /// casualty payment triggers only while its `grant_source` is listed here.
+    /// Transient like `cast_spell_keywords`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast_casualty_grant_sources: Vec<ObjectId>,
+
     /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
     /// is exiled instead of being put into its owner's graveyard as it resolves,
     /// and the resulting exile is recorded as "exiled with" the stored source
@@ -1865,6 +1872,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         spell_announcement: _,
         cast_controller: _,
         cast_spell_keywords: _,
+        cast_casualty_grant_sources: _,
         exile_from_stack_linked_source: _,
         exile_from_stack_rider: _,
         played_from_zone: _,
@@ -2768,6 +2776,8 @@ impl GameObject {
                 cast_timing_permission: self.cast_timing_permission,
                 cost_x_paid: self.cost_x_paid,
                 cast_spell_keywords: self.cast_spell_keywords.clone(),
+                // `cast_casualty_grant_sources` is not carried: the casualty
+                // copy trigger reads the live spell on the stack.
                 mana_spent_to_cast: self.mana_spent_to_cast,
                 colors_spent_to_cast: self.colors_spent_to_cast.clone(),
                 mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
@@ -3090,6 +3100,7 @@ impl GameObject {
             spell_announcement: None,
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
+            cast_casualty_grant_sources: Vec::new(),
             exile_from_stack_linked_source: None,
             exile_from_stack_rider: None,
             played_from_zone: None,
@@ -3246,6 +3257,7 @@ impl GameObject {
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on zone change for the same reason.
         self.cast_spell_keywords.clear();
+        self.cast_casualty_grant_sources.clear();
         self.kickers_paid.clear();
         // CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance (who was
         // promised the gift when this permanent was cast). A re-entering object
@@ -3537,6 +3549,7 @@ impl GameObject {
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on the same zone-change boundary.
         self.cast_spell_keywords.clear();
+        self.cast_casualty_grant_sources.clear();
         // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
         // scoped — a permanent that leaves the battlefield is a new object on any
         // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.
