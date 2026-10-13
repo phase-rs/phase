@@ -2477,7 +2477,7 @@ pub(super) fn strip_ability_word_with_name(line: &str) -> Option<(String, String
 /// branch re-validates via `has_trigger_prefix`. The 6-word ceiling bounds how
 /// far an em-dash sentence may be treated as a label on that path.
 ///
-/// The activated-ability cost-label path uses the wider
+/// The activated-ability cost-label path and the additional-cost line use the wider
 /// `FLAVOR_WORD_COST_LABEL_MAX_WORDS` instead — see that constant for why a word
 /// count is the wrong guard there.
 ///
@@ -2494,6 +2494,10 @@ pub(super) const FLAVOR_WORD_MAX_WORDS: usize = 6;
 /// arbitrarily long ("I've Come Up with a New Recipe!", 7 words — Ignis
 /// Scientia; "The Most Important Punch in History", 6 words — Duggan), so this
 /// path is uncapped and leans entirely on `cost_prefix_is_activated`.
+///
+/// The additional-cost line (`oracle_casting::additional_cost_line_text`) uses
+/// the same uncapped split for the same reason: its remainder is re-validated
+/// by the "as an additional cost" opener.
 pub(super) const FLAVOR_WORD_COST_LABEL_MAX_WORDS: usize = usize::MAX;
 
 pub(super) fn strip_flavor_word_with_name(line: &str) -> Option<(String, String)> {

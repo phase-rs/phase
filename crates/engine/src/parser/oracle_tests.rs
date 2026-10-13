@@ -5613,6 +5613,168 @@ fn rottenmouth_viper_parses_optional_sacrifice_and_cost_reduction() {
     );
 }
 
+/// Redemptor Dreadnought's printed Oracle text.
+const REDEMPTOR_DREADNOUGHT: &str = "Fallen Warrior — As an additional cost to cast this spell, \
+you may exile a creature card from your graveyard.\n\
+Trample\n\
+Plasma Incinerator — Whenever this creature attacks, if a card is exiled with it, it gets +X/+X \
+until end of turn, where X is the power of the exiled card.";
+
+/// Hierophant Bio-Titan's printed Oracle text.
+const HIEROPHANT_BIO_TITAN: &str = "Frenzied Metabolism — As an additional cost to cast this \
+spell, you may remove any number of +1/+1 counters from among creatures you control. This spell \
+costs {2} less to cast for each counter removed this way.\n\
+Reach, vigilance, ward {2}\n\
+Titanic — This creature can't be blocked by creatures with power 2 or less.";
+
+/// K2. CR 118.8b + CR 207.2d: the flavor word "Fallen Warrior" has no rules
+/// meaning, so the line is the spell's optional additional cost.
+#[test]
+fn redemptor_dreadnought_flavor_word_line_is_its_additional_cost() {
+    let r = parse(
+        REDEMPTOR_DREADNOUGHT,
+        "Redemptor Dreadnought",
+        &[Keyword::Trample],
+        &["Artifact", "Creature"],
+        &["Astartes", "Dreadnought"],
+    );
+    assert_eq!(
+        r.additional_cost,
+        Some(AdditionalCost::Optional {
+            cost: AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        }]),
+                )),
+            },
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+        })
+    );
+    assert!(
+        !r.abilities
+            .iter()
+            .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+        "no line is left unparsed, got abilities: {:?}",
+        r.abilities
+    );
+}
+
+/// K3. CR 601.2f + CR 608.2c: Hierophant Bio-Titan's flavor-word line is its
+/// optional counter-removal cost, and its "for each counter removed this way"
+/// reduction is surfaced as unsupported instead of lowered to a static that
+/// reads a resolution look-back.
+#[test]
+fn hierophant_bio_titan_flavor_word_cost_is_typed_and_its_reduction_is_honest() {
+    let r = parse(
+        HIEROPHANT_BIO_TITAN,
+        "Hierophant Bio-Titan",
+        &[
+            Keyword::Reach,
+            Keyword::Vigilance,
+            Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+        ],
+        &["Creature"],
+        &["Tyranid"],
+    );
+    assert!(
+        matches!(
+            r.additional_cost,
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::RemoveCounter {
+                    selection: crate::types::ability::CounterCostSelection::AmongObjects,
+                    target: Some(_),
+                    ..
+                },
+                ..
+            })
+        ),
+        "the cost is an optional counter removal from among creatures, got {:?}",
+        r.additional_cost
+    );
+    assert!(
+        !r.statics.iter().any(|s| matches!(
+            s.mode,
+            StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::PreviousEffectAmount { .. }),
+                ..
+            }
+        )),
+        "no static reduction reads the resolution look-back, got statics: {:?}",
+        r.statics
+    );
+    assert!(
+        r.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::Unimplemented { name, description }
+                if name == "static_structure"
+                    && description.as_deref()
+                        == Some("This spell costs {2} less to cast for each counter removed this way.")
+        )),
+        "the reduction is an honest gap, got abilities: {:?}",
+        r.abilities
+    );
+    assert!(
+        r.statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::CantBeBlockedBy { .. })),
+        "sibling guard: Titanic's evasion static still parses, got statics: {:?}",
+        r.statics
+    );
+}
+
+/// K4b. CR 207.2d: a flavor word of five words is still a label; the line
+/// after it is the spell's additional cost.
+#[test]
+fn five_word_label_before_additional_cost_is_read_as_the_cost() {
+    let r = parse(
+        "One Two Three Four Five — As an additional cost to cast this spell, discard a card.\n\
+         Draw two cards.",
+        "Test Sorcery",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        matches!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::Discard { .. }))
+        ),
+        "got {:?}",
+        r.additional_cost
+    );
+    assert_eq!(r.abilities.len(), 1, "got abilities: {:?}", r.abilities);
+    assert!(matches!(*r.abilities[0].effect, Effect::Draw { .. }));
+}
+
+/// K5. CR 207.2d: a labeled additional-cost line after the spell body ends
+/// the body exactly as an unlabeled one does.
+#[test]
+fn labeled_additional_cost_line_after_a_spell_body_is_the_cost() {
+    let r = parse(
+        "Draw two cards.\n\
+         One Two Three Four Five — As an additional cost to cast this spell, discard a card.",
+        "Test Sorcery",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        matches!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::Discard { .. }))
+        ),
+        "got {:?}",
+        r.additional_cost
+    );
+    assert_eq!(r.abilities.len(), 1, "got abilities: {:?}", r.abilities);
+    assert!(matches!(*r.abilities[0].effect, Effect::Draw { .. }));
+}
+
 #[test]
 fn harrow_parses_required_sacrifice_land_additional_cost() {
     let r = parse(

@@ -7,7 +7,9 @@ use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::oracle_classifier::lower_starts_with;
 use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_modal::{split_short_label_prefix, FLAVOR_WORD_COST_LABEL_MAX_WORDS};
 use super::oracle_nom::condition::parse_you_cast_another_spell_filter_this_turn;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
@@ -17,6 +19,23 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
 };
 use crate::types::mana::ManaColor;
+
+/// CR 118.8 + CR 207.2c + CR 207.2d: The text of an "As an additional cost …"
+/// line, or `None` when the line is not one. An ability word or flavor word
+/// before the cost ("Fallen Warrior — As an additional cost to cast this
+/// spell, …") has no rules meaning, so the text after the label is returned.
+/// The label is not word-capped: the remainder is re-validated by the
+/// additional-cost opener itself, which is what tells a label from an
+/// ordinary em-dash sentence (see `FLAVOR_WORD_COST_LABEL_MAX_WORDS`).
+pub(crate) fn additional_cost_line_text(line: &str) -> Option<&str> {
+    let opens_additional_cost =
+        |text: &str| lower_starts_with(&text.to_lowercase(), "as an additional cost");
+    if opens_additional_cost(line) {
+        return Some(line);
+    }
+    let (_, rest) = split_short_label_prefix(line, FLAVOR_WORD_COST_LABEL_MAX_WORDS)?;
+    opens_additional_cost(rest).then_some(rest)
+}
 
 /// Split a combined additional-cost line from its trailing self-spell cost
 /// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
@@ -1799,6 +1818,34 @@ Trample";
             trailing,
             "This spell costs {1} less to cast for each permanent sacrificed this way."
         );
+    }
+
+    /// CR 207.2c + CR 207.2d: the additional-cost recognizer reads the text
+    /// after a label of any length, and nothing that is not an additional cost.
+    #[test]
+    fn additional_cost_line_text_reads_the_cost_after_a_label() {
+        const COST: &str = "As an additional cost to cast this spell, discard a card.";
+        assert_eq!(
+            additional_cost_line_text(
+                "One Two Three Four Five — As an additional cost to cast this spell, discard a card."
+            ),
+            Some(COST)
+        );
+        assert_eq!(additional_cost_line_text(COST), Some(COST));
+        assert_eq!(
+            additional_cost_line_text(
+                "Raid — If you attacked this turn, you may pay {U} rather than pay this spell's mana cost."
+            ),
+            None
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "+ {1} — As an additional cost to cast this spell, discard a card."
+            ),
+            None,
+            "a prefix with a mana symbol is not a label"
+        );
+        assert_eq!(additional_cost_line_text("Trample"), None);
     }
 
     #[test]
