@@ -9733,7 +9733,9 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                         ecr_rem,
                     ));
                 } else {
-                    let (target, remainder) = parse_target(target_phrase);
+                    let (target, remainder) = ctx.with_player_antecedents(|scoped| {
+                        parse_target_with_ctx(target_phrase, scoped)
+                    });
                     let (target, remainder) = refine_damage_target_remainder(target, remainder);
                     if !remainder.trim().is_empty() {
                         ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {

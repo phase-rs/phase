@@ -498,7 +498,8 @@ pub(crate) fn parse_quantity_ref_with_context(
         if let Ok((after_head_tag, head_text)) =
             take_until::<_, _, OracleError<'_>>(" you controlled ").parse(rest)
         {
-            let (head_filter, head_rem) = parse_type_phrase_folding(head_text);
+            let (head_filter, head_rem) =
+                parse_type_phrase_folding_with_ctx(head_text, &mut ctx.clone_player_antecedents());
             if head_rem.trim().is_empty()
                 && !matches!(head_filter, TargetFilter::Any)
                 && !is_empty_typed_filter(&head_filter)
@@ -3422,7 +3423,10 @@ fn parse_for_each_clause_with_they_controller(
         .parse(clause)
         {
             if after.trim().is_empty() {
-                let (type_filter, type_rest) = parse_type_phrase_folding(prefix);
+                let (type_filter, type_rest) = parse_type_phrase_folding_with_ctx(
+                    prefix,
+                    &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+                );
                 if type_rest.trim().is_empty() && !matches!(type_filter, TargetFilter::Any) {
                     return Some(QuantityRef::ObjectCount {
                         filter: TargetFilter::And {
@@ -3619,7 +3623,10 @@ fn parse_for_each_clause_with_they_controller(
     // "[counter type] counter(s) on that creature/permanent" — anaphoric, must check
     // before the wildcard "counter on" guard below which would misroute to CountersOnSelf.
     if clause.contains("counter on that") {
-        if let Some(qty) = parse_quantity_ref(clause) {
+        if let Some(qty) = parse_quantity_ref_with_context(
+            clause,
+            &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+        ) {
             return Some(qty);
         }
     }
@@ -3640,7 +3647,10 @@ fn parse_for_each_clause_with_they_controller(
             // The counter suffix must consume the rest of the clause (possibly with
             // trailing whitespace / punctuation already stripped by trim_end_matches).
             if suffix_part[consumed..].trim().is_empty() {
-                let (filter, type_rest) = parse_type_phrase_folding(type_part);
+                let (filter, type_rest) = parse_type_phrase_folding_with_ctx(
+                    type_part,
+                    &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+                );
                 if type_rest.trim().is_empty() {
                     // Compose: attach the counter property onto the typed filter.
                     // parse_type_phrase_folding always emits TargetFilter::Typed for non-Any
@@ -3679,13 +3689,19 @@ fn parse_for_each_clause_with_they_controller(
     // "card in your hand" (→ HandSize), "life you gained this turn", etc.
     // "for each" strips the quantifier, so the clause may be singular or have
     // slightly different phrasing. Try both as-is and with "s" appended.
-    if let Some(qty) = parse_quantity_ref(clause) {
+    if let Some(qty) = parse_quantity_ref_with_context(
+        clause,
+        &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+    ) {
         return Some(qty);
     }
     // Handle singular → plural: "card in your hand" → "cards in your hand"
     if let Some((first_word, rest)) = clause.split_once(' ') {
         let pluralized = format!("{first_word}s {rest}");
-        if let Some(qty) = parse_quantity_ref(&pluralized) {
+        if let Some(qty) = parse_quantity_ref_with_context(
+            &pluralized,
+            &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+        ) {
             return Some(qty);
         }
     }

@@ -7824,7 +7824,8 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     let (target_filter, after_subject) = if let Ok((after_prefix, _)) =
         crate::parser::oracle_nom::target::parse_declared_target_prefix(subject)
     {
-        let (filter, rest) = parse_target(after_prefix);
+        let (filter, rest) =
+            parse_target_with_ctx(after_prefix, &mut ctx.clone_player_antecedents());
         if rest.trim().is_empty() {
             (filter, None)
         } else {
@@ -7834,7 +7835,8 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
         // CR 608.2c: "that creature" in a NON-trigger context is an anaphor
         // to the chosen target creature (Dazzling Reflection). The typed
         // `Typed(creature)` leaf is emitted DIRECTLY rather than routed
-        // through `parse_target`: a ctx-free `parse_target` call resolves the
+        // through `parse_target`: a `parse_target` call, whose context carries
+        // no object antecedent, resolves the
         // demonstrative via `resolve_pronoun_target`'s default branch to
         // `ParentTarget`, which would drop the CR 609.7b recheck leaf and
         // break the exact-shape contract of

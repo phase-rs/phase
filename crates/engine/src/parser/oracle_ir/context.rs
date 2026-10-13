@@ -953,6 +953,32 @@ impl ParseContext {
         self.diagnostics.push(d);
     }
 
+    /// CR 608.2c: a context carrying only the caller's player
+    /// antecedents — the fields `player_antecedents` reads for "that player" /
+    /// "they" — for a sub-parse that must bind an anaphoric controller phrase the
+    /// way its caller would, without re-reading object anaphors (`subject`,
+    /// `object_pronoun_ref`, …) or inheriting any other caller state.
+    pub(crate) fn clone_player_antecedents(&self) -> Self {
+        Self {
+            relative_player_scope: self.relative_player_scope.clone(),
+            declared_player_scope: self.declared_player_scope.clone(),
+            prior_player_declaration: self.prior_player_declaration,
+            ..Self::default()
+        }
+    }
+
+    /// Run `f` on `clone_player_antecedents()` and keep its diagnostics: a
+    /// committed sub-parse's `TargetFallback` / `IgnoredRemainder` land on this
+    /// context (deduplicated by `push_diagnostic`); every other write is dropped.
+    pub(crate) fn with_player_antecedents<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mut scoped = self.clone_player_antecedents();
+        let result = f(&mut scoped);
+        for diagnostic in scoped.diagnostics {
+            self.push_diagnostic(diagnostic);
+        }
+        result
+    }
+
     /// CR 105.4: clone this context for a sub-parse whose CONTEXT is DISCARDED —
     /// the parsed value is kept, but `*ctx = <derived>` never runs.
     ///
@@ -1017,6 +1043,63 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::target::{ControllerForm, ControllerTense};
     use crate::types::ability::TypedFilter;
+
+    fn fallback(text: &str) -> OracleDiagnostic {
+        OracleDiagnostic::TargetFallback {
+            context: "parse_target could not classify".into(),
+            text: text.into(),
+            line_index: 0,
+        }
+    }
+
+    /// CR 608.2c: a player-antecedent clone carries exactly the three fields
+    /// `player_antecedents` reads, and none of the caller's object anaphors or
+    /// other state.
+    #[test]
+    fn clone_player_antecedents_keeps_only_the_player_antecedents() {
+        let declared = ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        };
+        let source = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            declared_player_scope: Some(declared.clone()),
+            prior_player_declaration: true,
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            target_chooser: Some(TargetFilter::Any),
+            card_name: Some("Source Card".into()),
+            diagnostics: vec![fallback("caller")],
+            ..ParseContext::default()
+        };
+        let scoped = source.clone_player_antecedents();
+        assert_eq!(
+            scoped.relative_player_scope,
+            Some(ControllerRef::TargetPlayer)
+        );
+        assert_eq!(scoped.declared_player_scope, Some(declared));
+        assert!(scoped.prior_player_declaration);
+        assert_eq!(scoped.subject, None);
+        assert_eq!(scoped.target_chooser, None);
+        assert_eq!(scoped.card_name, None);
+        assert!(scoped.diagnostics.is_empty());
+    }
+
+    /// A committed sub-parse keeps its diagnostics on the caller's context;
+    /// every other write it makes is dropped.
+    #[test]
+    fn with_player_antecedents_merges_only_diagnostics() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let seen = ctx.with_player_antecedents(|scoped| {
+            scoped.target_selection_mode = TargetSelectionMode::Random;
+            scoped.push_diagnostic(fallback("sub-parse"));
+            scoped.relative_player_scope.clone()
+        });
+        assert_eq!(seen, Some(ControllerRef::TargetPlayer));
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
+        assert_eq!(ctx.diagnostics, vec![fallback("sub-parse")]);
+    }
 
     #[test]
     fn target_fallback_diagnostics_are_idempotent() {

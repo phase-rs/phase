@@ -6,7 +6,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_quantity::parse_cda_quantity;
+use super::oracle_quantity::{parse_cda_quantity, parse_cda_quantity_with_context};
 use crate::types::ability::{
     Comparator, ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
 };
@@ -1010,7 +1010,9 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
                 return None;
             };
             let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
-                .or_else(|| parse_cda_quantity(quantity))?;
+                .or_else(|| {
+                    parse_cda_quantity_with_context(quantity, &mut ctx.clone_player_antecedents())
+                })?;
             let bare_x = matches!(
                 &count,
                 QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X"

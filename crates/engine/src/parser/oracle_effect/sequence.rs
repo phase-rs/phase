@@ -8108,7 +8108,10 @@ fn parse_change_zone_enters_tapped_attacking(
     // tail — RevealedHasCardType carries no TargetFilter, so reuse the canonical
     // materializer rather than reconstructing from the recognized condition.
     let type_tail = strip_moved_object_subject(condition_clause)?;
-    let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase_folding(type_tail);
+    let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase_folding_with_ctx(
+        type_tail,
+        &mut ctx.clone_player_antecedents(),
+    );
     if matches!(filter, TargetFilter::Any | TargetFilter::None) || !leftover.trim().is_empty() {
         return None;
     }

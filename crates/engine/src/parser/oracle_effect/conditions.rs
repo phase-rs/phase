@@ -20,8 +20,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{
-    parse_target, parse_type_phrase_folding, parse_zone_word, peek_zone_boundary,
-    slot_matches_anaphor, slot_zone_class, AnaphorNoun, AnaphorZoneClass,
+    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_zone_word,
+    peek_zone_boundary, slot_matches_anaphor, slot_zone_class, AnaphorNoun, AnaphorZoneClass,
 };
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 #[cfg(test)]
@@ -1885,7 +1885,10 @@ fn parse_its_a_card_type_gate_body<'a>(
     // with TargetMatchesFilter (the same condition variant the sibling MV arms use).
     if type_word == "permanent" {
         let (mut filter, leftover) =
-            crate::parser::oracle_target::parse_type_phrase_folding("permanent card");
+            crate::parser::oracle_target::parse_type_phrase_folding_with_ctx(
+                "permanent card",
+                &mut ctx.clone_player_antecedents(),
+            );
         if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
             let (after_type, chosen_type) = if let Ok((rest_after_chosen, _)) =
                 tag::<_, _, OracleError<'_>>(" of the chosen type").parse(after_type)
@@ -3102,7 +3105,8 @@ pub(super) fn strip_property_conditional(
     ] {
         if let Some((before, after)) = tp.rsplit_around(pattern) {
             let type_text = after.lower.trim_end_matches('.').trim();
-            let (filter, leftover) = parse_type_phrase_folding(type_text);
+            let (filter, leftover) =
+                parse_type_phrase_folding_with_ctx(type_text, &mut ctx.clone_player_antecedents());
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return (
                     Some(AbilityCondition::TargetMatchesFilter {
@@ -7362,7 +7366,10 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 .trim_end_matches(" card")
                 .trim();
             let (filter, leftover) =
-                crate::parser::oracle_target::parse_type_phrase_folding(type_text);
+                crate::parser::oracle_target::parse_type_phrase_folding_with_ctx(
+                    type_text,
+                    &mut ctx.clone_player_antecedents(),
+                );
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
                     AbilityCondition::TargetMatchesFilter {
@@ -7449,7 +7456,10 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         // in lockstep with strip_card_type_conditional's "permanent" arm.
         if rest == "permanent" {
             let (filter, leftover) =
-                crate::parser::oracle_target::parse_type_phrase_folding("permanent card");
+                crate::parser::oracle_target::parse_type_phrase_folding_with_ctx(
+                    "permanent card",
+                    &mut ctx.clone_player_antecedents(),
+                );
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
                     AbilityCondition::TargetMatchesFilter {
@@ -7534,7 +7544,10 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         // with empty leftover). Those belong to RevealedHasCardType, not the
         // present-target TargetMatchesFilter, so this arm fires only when the parsed
         // filter genuinely references a CR 205.3 subtype.
-        let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase_folding(rest);
+        let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase_folding_with_ctx(
+            rest,
+            &mut ctx.clone_player_antecedents(),
+        );
         if let TargetFilter::Typed(typed) = &filter {
             if leftover.trim().is_empty()
                 && typed
@@ -8438,7 +8451,10 @@ fn parse_objects_share_quality_reference<'a>(
             &text[offset..],
         ));
     }
-    let (filter, rest) = crate::parser::oracle_target::parse_target(text);
+    let (filter, rest) = crate::parser::oracle_target::parse_target_with_ctx(
+        text,
+        &mut ctx.clone_player_antecedents(),
+    );
     if matches!(filter, TargetFilter::Any) {
         return None;
     }

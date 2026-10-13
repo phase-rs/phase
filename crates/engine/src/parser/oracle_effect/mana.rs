@@ -23,7 +23,7 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_quantity::{
-    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+    parse_cda_quantity_with_context, parse_event_context_quantity,
 };
 use super::super::oracle_target::parse_type_phrase_folding;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
@@ -269,9 +269,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     {
         if let Some(color_options) = parse_mana_color_set(before.trim()) {
             if color_options.len() > 1 {
-                if let Some(qty) =
-                    super::super::oracle_quantity::parse_for_each_clause(for_each_rest.trim())
-                {
+                if let Some(qty) = super::super::oracle_quantity::parse_for_each_clause_with_context(
+                    for_each_rest.trim(),
+                    &ctx.clone_player_antecedents(),
+                ) {
                     return Some(Effect::Mana {
                         produced: ManaProduction::AnyCombination {
                             count: QuantityExpr::Ref { qty },
@@ -2985,8 +2986,9 @@ fn try_parse_amount_equal_to_with_context(
     })?;
     let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
 
-    let count = parse_event_context_quantity(quantity_text)
-        .or_else(|| parse_cda_quantity(quantity_text))?;
+    let count = parse_event_context_quantity(quantity_text).or_else(|| {
+        parse_cda_quantity_with_context(quantity_text, &mut ctx.clone_player_antecedents())
+    })?;
 
     let color_options: Vec<ManaColor> = colors;
     Some(Effect::Mana {
@@ -3751,6 +3753,96 @@ mod tests {
             matches!(count, QuantityExpr::Ref { .. }),
             "count must be a dynamic for-each ref, got {count:?}"
         );
+    }
+
+    /// The controller of a `Ref(ObjectCount { Typed(Creature) })` count.
+    fn creature_count_controller(count: &QuantityExpr) -> Option<ControllerRef> {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(typed),
+                },
+        } = count
+        else {
+            panic!("expected an object-count ref, got {count:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        typed.controller.clone()
+    }
+
+    /// CR 608.2c: the mana for-each clause binds "that player" to the
+    /// caller's player antecedent. With no antecedent it keeps the permanent
+    /// for-each seed, `ScopedPlayer`.
+    #[test]
+    fn color_set_for_each_clause_binds_that_player_to_relative_scope() {
+        for (relative_player_scope, expected) in [
+            (
+                Some(ControllerRef::TargetPlayer),
+                ControllerRef::TargetPlayer,
+            ),
+            (None, ControllerRef::ScopedPlayer),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope,
+                ..ParseContext::default()
+            };
+            let effect = try_parse_add_mana_effect_with_context(
+                "Add {B} or {G} for each creature that player controls",
+                &mut ctx,
+            )
+            .expect("must parse");
+            let Effect::Mana { produced, .. } = effect else {
+                panic!("expected Effect::Mana, got {effect:?}");
+            };
+            let ManaProduction::AnyCombination {
+                count,
+                color_options,
+            } = produced
+            else {
+                panic!("expected AnyCombination, got {produced:?}");
+            };
+            assert!(color_options.contains(&ManaColor::Black));
+            assert!(color_options.contains(&ManaColor::Green));
+            assert_eq!(creature_count_controller(&count), Some(expected));
+        }
+    }
+
+    /// CR 608.2c: the "an amount of {C} equal to" CDA reader binds "that
+    /// player" to the caller's player antecedent; a literal "you" stays the
+    /// controller (CR 109.5).
+    #[test]
+    fn amount_equal_to_cda_binds_that_player_to_relative_scope() {
+        for (text, expected) in [
+            (
+                "an amount of {G} equal to the number of creatures that player controls",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "an amount of {G} equal to the number of creatures you control",
+                ControllerRef::You,
+            ),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..ParseContext::default()
+            };
+            let effect =
+                try_parse_amount_equal_to_with_context(text, ManaContribution::Base, &mut ctx)
+                    .expect(text);
+            let Effect::Mana { produced, .. } = effect else {
+                panic!("{text}: expected Effect::Mana, got {effect:?}");
+            };
+            let ManaProduction::AnyOneColor {
+                count,
+                color_options,
+                ..
+            } = produced
+            else {
+                panic!("{text}: expected AnyOneColor, got {produced:?}");
+            };
+            assert_eq!(color_options, vec![ManaColor::Green], "{text}");
+            assert_eq!(creature_count_controller(&count), Some(expected), "{text}");
+        }
     }
 
     #[test]

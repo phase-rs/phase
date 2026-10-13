@@ -1457,7 +1457,8 @@ pub(super) fn parse_one_or_more_sacrifice(
     let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(
         strip_article(filter_text.trim_start()).trim_end_matches('.'),
     ));
-    let (mut target, remainder) = parse_type_phrase_folding(target_text.trim());
+    let (mut target, remainder) =
+        parse_type_phrase_folding_with_ctx(target_text.trim(), &mut ctx.clone_player_antecedents());
     if !remainder.trim().is_empty() || matches!(target, TargetFilter::Any) {
         return None;
     }
@@ -3225,7 +3226,8 @@ fn try_parse_heterogeneous_chosen_exile(input: &str, ctx: &ParseContext) -> Opti
     )
     .parse(input)
     .ok()?;
-    let (mut hand_filter, hand_rem) = parse_type_phrase_folding(hand_head.trim());
+    let (mut hand_filter, hand_rem) =
+        parse_type_phrase_folding_with_ctx(hand_head.trim(), &mut ctx.clone_player_antecedents());
     if !hand_rem.trim().is_empty() || !matches!(hand_filter, TargetFilter::Typed(_)) {
         return None;
     }
@@ -3943,7 +3945,8 @@ pub(super) fn parse_hand_reveal_ast(
 
         let (_, after_look_at) =
             nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input))?;
-        let (target, _) = parse_target(after_look_at);
+        let (target, _) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(after_look_at, scoped));
         return Some(HandRevealImperativeAst::LookAt {
             target,
             count: None,
@@ -4003,7 +4006,7 @@ pub(super) fn parse_hand_reveal_ast(
             .parse(after_reveal_lower)
             .is_ok()
     {
-        let (target, _) = parse_target(after_reveal);
+        let (target, _) = parse_target_with_ctx(after_reveal, &mut ctx.clone_player_antecedents());
         if !matches!(target, TargetFilter::None) {
             return Some(HandRevealImperativeAst::RevealObject { target });
         }
@@ -4146,7 +4149,8 @@ fn parse_hand_reveal_target_and_card_filter(
             return (target, TargetFilter::Any);
         }
         let singular = format!("{} card", descriptor.trim());
-        let (filter, rem) = parse_type_phrase_folding(&singular);
+        let (filter, rem) =
+            parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
         if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
             return (target, filter);
         }
@@ -4176,7 +4180,8 @@ fn parse_hand_reveal_target_and_card_filter(
         .map(|(_, target)| target)
         .unwrap_or(TargetFilter::Any);
     let singular = format!("{} card", descriptor.trim());
-    let (filter, rem) = parse_type_phrase_folding(&singular);
+    let (filter, rem) =
+        parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
         (target, filter)
     } else {
@@ -6694,7 +6699,10 @@ pub(super) fn parse_utility_imperative_ast(
         let (input, attachment) = terminated(take_until(" from "), tag(" from ")).parse(input)?;
         Ok((input, attachment.to_string()))
     }) {
-        let (attachment, attachment_rem) = parse_type_phrase_folding(attachment_text.trim());
+        let (attachment, attachment_rem) = parse_type_phrase_folding_with_ctx(
+            attachment_text.trim(),
+            &mut ctx.clone_player_antecedents(),
+        );
         let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
         if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
             return Some(UtilityImperativeAst::UnattachAll { attachment, target });
@@ -6903,7 +6911,7 @@ pub(super) fn parse_utility_imperative_ast(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("switch ")).parse(input))
     {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, &mut ctx.clone_player_antecedents());
         // Consume "'s power and toughness" or " power and toughness" suffix
         let rem_lower = rem.to_lowercase();
         if tag::<_, _, OracleError<'_>>("'s power and toughness")
@@ -7388,7 +7396,7 @@ fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFil
             return (TargetFilter::SelfRef, &text[text.len()..]);
         }
     }
-    parse_target(text)
+    parse_target_with_ctx(text, &mut ctx.clone_player_antecedents())
 }
 
 /// CR 608.2c (rules of English — number agreement): Recognize an attachment
@@ -8923,7 +8931,8 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
             // CR 608.2k: Bare pronoun — context-dependent
             resolve_it_pronoun(ctx)
         } else {
-            let (t, _) = parse_target(on_rest);
+            let (t, _) =
+                ctx.with_player_antecedents(|scoped| parse_target_with_ctx(on_rest, scoped));
             t
         }
     } else {
@@ -9044,7 +9053,7 @@ fn parse_remove_from_combat_ast(lower: &str, ctx: &mut ParseContext) -> Option<T
         "" => TargetFilter::SelfRef,
         _ => {
             // Try parsing as a target phrase (e.g., "target attacking creature you control")
-            let (tf, _rest) = parse_target(subject);
+            let (tf, _rest) = parse_target_with_ctx(subject, &mut ctx.clone_player_antecedents());
             if matches!(tf, TargetFilter::Any) && !subject.starts_with("target") {
                 // parse_target returns Any when it doesn't recognize the phrase —
                 // bail out to avoid false matches.
@@ -10978,7 +10987,8 @@ pub(super) fn parse_exile_ast(
         || starts_with_possessive(rest_lower, "", "hand")
         || starts_with_target_possessive_zone(rest_lower);
     if mass_zone {
-        let (target, _rem) = parse_target(rest_text);
+        let (target, _rem) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_text, scoped));
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
@@ -11011,7 +11021,10 @@ pub(super) fn parse_exile_ast(
     )
         .parse(rest_lower)
     {
-        let (mut target, rem) = parse_type_phrase_folding(filter_text.trim());
+        let (mut target, rem) = parse_type_phrase_folding_with_ctx(
+            filter_text.trim(),
+            &mut ctx.clone_player_antecedents(),
+        );
         // `after_hand` is the parser remainder AFTER "from your hand": empty/"."
         // (no-tail case) or " with a number of … counters on it equal to …".
         let enter_with_counters = super::parse_with_counters_suffix(after_hand);
@@ -11050,7 +11063,10 @@ pub(super) fn parse_exile_ast(
     )
         .parse(rest_lower)
     {
-        let (target, rem) = parse_type_phrase_folding(filter_text.trim());
+        let (target, rem) = parse_type_phrase_folding_with_ctx(
+            filter_text.trim(),
+            &mut ctx.clone_player_antecedents(),
+        );
         let tail_clean = after_among.trim().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_clean.is_empty() {
             return Some(ZoneCounterImperativeAst::Exile {
@@ -12784,7 +12800,7 @@ pub(super) fn parse_imperative_family_ast(
             })();
             match parsed {
                 Ok(mid_orig) if !mid_orig.trim().is_empty() => {
-                    let (target, _) = parse_target(mid_orig);
+                    let (target, _) = parse_target_with_ctx(mid_orig, &mut ctx.clone_player_antecedents());
                     if matches!(target, TargetFilter::None) {
                         None
                     } else {
@@ -12846,7 +12862,7 @@ pub(super) fn parse_imperative_family_ast(
                     // subject (Illithid Harvester) surfaces a `MultiTargetSpec`
                     // instead of collapsing to one slot; single subjects (Cyber
                     // Conversion, self-references) yield `None`.
-                    let (target, remainder) = parse_target(mid_orig);
+                    let (target, remainder) = parse_target_with_ctx(mid_orig, &mut ctx.clone_player_antecedents());
                     // The count quantifier is derived purely from the subject's
                     // count phrase, not from enclosing context, so a throwaway
                     // context (mirroring the `parse_target` wrapper above) keeps
@@ -12951,7 +12967,7 @@ pub(super) fn parse_imperative_family_ast(
             let rest_orig = text.get(prefix_len..).unwrap_or("");
             let (count, rest_orig) = parse_connive_count_expr(rest_orig, rest_lower);
             if !rest_orig.trim().is_empty() {
-                let (target, _) = parse_target(rest_orig.trim());
+                let (target, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_orig.trim(), scoped));
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive { target, count }))
             } else if count != (QuantityExpr::Fixed { value: 1 }) {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive {
@@ -13156,7 +13172,7 @@ pub(super) fn parse_imperative_family_ast(
         "suspect" | "suspects" => {
             let rest = lower[first_word.len()..].trim();
             let target = if !rest.is_empty() {
-                let (t, _) = parse_target(rest);
+                let (t, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest, scoped));
                 t
             } else {
                 crate::types::ability::TargetFilter::ParentTarget
@@ -13170,7 +13186,7 @@ pub(super) fn parse_imperative_family_ast(
         "detain" | "detains" => {
             let rest = lower[first_word.len()..].trim();
             let target = if !rest.is_empty() {
-                let (t, _) = parse_target(rest);
+                let (t, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest, scoped));
                 t
             } else {
                 crate::types::ability::TargetFilter::ParentTarget
@@ -13476,7 +13492,7 @@ pub(super) fn parse_imperative_family_ast(
                 let target = if tail.is_empty() {
                     TargetFilter::Any
                 } else {
-                    let (t, _) = parse_target(tail);
+                    let (t, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(tail, scoped));
                     t
                 };
                 match dir {

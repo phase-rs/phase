@@ -23,7 +23,7 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
-use super::super::oracle_target::{parse_target, parse_target_with_ctx};
+use super::super::oracle_target::parse_target_with_ctx;
 use super::super::oracle_util::{
     comma_short_self_name, normalize_card_name_refs, parse_count_expr, parse_count_head,
     parse_count_slot, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
@@ -534,7 +534,8 @@ fn parse_token_description_with_context(
     let (text, attach_to) = first_token_attachment_connector(&lower)
         .and_then(|connector| tp.split_around(connector))
         .map_or((text, None), |(before, after)| {
-            let (target, _) = parse_target(after.original);
+            let (target, _) =
+                parse_target_with_ctx(after.original, &mut ctx.clone_player_antecedents());
             (before.original, Some(target))
         });
 
@@ -796,7 +797,10 @@ fn parse_token_description_with_context(
             (Some(bound), _) => Some(bound),
             (None, Some(where_expression)) => Some(
                 super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
-                    crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                    crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+                        &where_expression,
+                        &mut ctx.clone_player_antecedents(),
+                    )
                 })?,
             ),
             (None, None) => None,
@@ -826,7 +830,10 @@ fn parse_token_description_with_context(
             // expression to a typed quantity. If it is not representable the
             // token clause does not lower — a raw-text `PtValue::Variable` is a
             // dead node that silently produces a 0/0 token.
-            let parsed = crate::parser::oracle_quantity::parse_cda_quantity(&pt_expression)?;
+            let parsed = crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+                &pt_expression,
+                &mut ctx.clone_player_antecedents(),
+            )?;
             power = Some(PtValue::Quantity(parsed.clone()));
             toughness = Some(PtValue::Quantity(parsed));
         }
