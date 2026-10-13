@@ -747,6 +747,15 @@ fn cancelled_gorex_cast_pile_does_not_reach_the_next_cast() {
     runner.cast(gorex).decline_optional().resolve();
     // Reach guard: the recast resolved into a permanent that attacks.
     assert_eq!(zone(&runner, gorex), Zone::Battlefield);
+    // Reach guard for the pile check: A is still in exile, so an empty pile
+    // means the link ended. Today the cancel leaves A in exile, a known CR 733.1
+    // gap (this PR's Known gaps); the phase that returns cancelled cost
+    // payments changes this line.
+    assert_eq!(zone(&runner, a), Zone::Exile);
+    assert!(
+        linked_pile(&runner, gorex).is_empty(),
+        "CR 733.1: the cancelled cast's cost link does not reach the recast permanent"
+    );
 
     attack_with(&mut runner, gorex);
     assert_eq!(runner.state().stack.len(), 1);
