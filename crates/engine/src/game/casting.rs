@@ -7092,10 +7092,11 @@ pub(super) fn exile_land_play_authorization(
     // purpose — a milled land carries its `PlayFromExile` grant into the
     // graveyard. A static `ExileCastPermission` source is different: its printed
     // scope is cards EXILED with it. Its this-turn pool
-    // (`cards_exiled_with_source_this_turn`) is keyed by `ObjectId`, which is
-    // stable across zone changes and is cleared only at turn end, never on zone
-    // exit — so a land exiled with such a source and then moved to a graveyard in
-    // the same turn is STILL in that pool. When the play-land capture was widened
+    // (`cards_exiled_with_source_this_turn`) lists exiled cards by `ObjectId`,
+    // which is stable across zone changes; an entry ends at the turn's start or
+    // when the source itself leaves the battlefield, never when a listed card
+    // leaves exile — so a land exiled with such a source and then moved to a
+    // graveyard in the same turn is STILL in that pool. When the play-land capture was widened
     // to graveyards, that land became playable from the graveyard through a
     // permission that only covers exile, and CR 116.2a would then put it onto the
     // battlefield "from the zone it was in" under an `Exile` origin it no longer
