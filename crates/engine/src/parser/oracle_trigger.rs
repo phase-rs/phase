@@ -13233,7 +13233,9 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
     // "another <type phrase>" — compose with FilterProp::Another
     if let Ok((after_another, ())) = value((), tag::<_, _, OracleError<'_>>("another ")).parse(text)
     {
-        let (filter, rest) = parse_type_phrase_folding(after_another);
+        let (filter, rest) = ctx.with_player_antecedents(|scoped| {
+            parse_type_phrase_folding_with_ctx(after_another, scoped)
+        });
         let with_another = add_another_prop(filter);
         return (with_another, rest);
     }
@@ -13280,7 +13282,10 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
             return (filter, trimmed);
         }
 
-        let (filter, rest) = parse_type_phrase_folding(after_quantifier);
+        let (filter, rest) = parse_type_phrase_folding_with_ctx(
+            after_quantifier,
+            &mut ctx.clone_player_antecedents(),
+        );
         if rest.len() < after_quantifier.len() {
             return (filter, rest);
         }
@@ -13342,7 +13347,10 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         .parse(rest)
         {
             if let Some((clause_text, verb_rest)) = find_clause_verb_boundary(after_who) {
-                let (clause_filter, clause_remainder) = parse_type_phrase_folding(clause_text);
+                let (clause_filter, clause_remainder) = parse_type_phrase_folding_with_ctx(
+                    clause_text,
+                    &mut ctx.clone_player_antecedents(),
+                );
                 // Only treat this as a control-relative clause when the clause
                 // text parsed cleanly into a typed filter.
                 if clause_remainder.trim().is_empty() && !matches!(clause_filter, TargetFilter::Any)
@@ -13375,7 +13383,8 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         return (filter, rest.trim_start());
     }
 
-    let (filter, rest) = parse_type_phrase_folding(text);
+    let (filter, rest) =
+        parse_type_phrase_folding_with_ctx(text, &mut ctx.clone_player_antecedents());
     if rest.len() < text.len() {
         return (filter, rest);
     }
@@ -15871,7 +15880,10 @@ fn try_parse_event(
                 if matches!(subject, TargetFilter::SelfRef) {
                     // Pattern 1: "Whenever ~ becomes attached to [host]"
                     if !remaining.is_empty() {
-                        let (filter, rest) = parse_type_phrase_folding(remaining);
+                        let (filter, rest) = parse_type_phrase_folding_with_ctx(
+                            remaining,
+                            &mut ctx.clone_player_antecedents(),
+                        );
                         if !rest.trim().is_empty() {
                             return None;
                         }

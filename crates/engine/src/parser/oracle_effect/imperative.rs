@@ -12865,8 +12865,7 @@ pub(super) fn parse_imperative_family_ast(
                     let (target, remainder) = parse_target_with_ctx(mid_orig, &mut ctx.clone_player_antecedents());
                     // The count quantifier is derived purely from the subject's
                     // count phrase, not from enclosing context, so a throwaway
-                    // context (mirroring the `parse_target` wrapper above) keeps
-                    // the caller's `ctx` diagnostics untouched.
+                    // context keeps the caller's `ctx` diagnostics untouched.
                     let multi_target = super::subject::parse_subject_application(
                         mid_orig,
                         &mut ParseContext::default(),

@@ -6,6 +6,9 @@
 //!   opponent set evaluated from the accepting player's frame.
 //! - Temporal Distortion: "that player" is the upkeep player, bound through
 //!   the counter-target fallback that reads the caller's player antecedents.
+//! - Counter-placement watchers: "they" in "another creature they control" /
+//!   "one or more creatures they control" is the opponent who placed the
+//!   counters, bound through every subject arm that reads the actor scope.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{EffectKind, TargetRef};
@@ -14,6 +17,7 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
@@ -22,7 +26,7 @@ const BALEFIRE_DRAGON: &str = "Flying\nWhenever this creature deals combat damag
 
 const TEMPORAL_DISTORTION: &str = "Whenever a creature or land becomes tapped, put an hourglass counter on it.\nEach permanent with an hourglass counter on it doesn't untap during its controller's untap step.\nAt the beginning of each player's upkeep, remove all hourglass counters from permanents that player controls.";
 
-const RESERVOIR_KRAKEN: &str ="Trample, ward {2}\nAt the beginning of each combat, if this creature is untapped, any opponent may tap an untapped creature they control. If they do, tap this creature and create a 1/1 blue Fish creature token with \"This token can't be blocked.\"";
+const RESERVOIR_KRAKEN: &str = "Trample, ward {2}\nAt the beginning of each combat, if this creature is untapped, any opponent may tap an untapped creature they control. If they do, tap this creature and create a 1/1 blue Fish creature token with \"This token can't be blocked.\"";
 
 /// Pass the declare-attackers priority window and declare no blockers, leaving
 /// the runner ready for `combat_damage`.
@@ -246,5 +250,86 @@ fn temporal_distortion_removes_counters_from_the_upkeep_players_permanents() {
             .iter()
             .all(|target| *target == TargetRef::Object(c1a) || *target == TargetRef::Object(c1b)),
         "every offered target is the upkeep player's; offered={offered:?}"
+    );
+}
+
+/// An opponent (P1) casts "Put a +1/+1 counter on target creature" at a
+/// creature controlled by `recipient_controller` while P0's watcher, built from
+/// `watcher_oracle`, looks on. Returns how many of the watcher's effects
+/// resolved and P0's life change.
+fn watcher_response_to_opponent_counter(
+    watcher_oracle: &str,
+    recipient_controller: PlayerId,
+) -> (usize, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Counter Watcher", 2, 2, watcher_oracle)
+        .id();
+    let recipient = scenario
+        .add_creature(recipient_controller, "Recipient Bear", 2, 2)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Opp Bolster",
+            true,
+            "Put a +1/+1 counter on target creature.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let outcome = runner.cast(spell).target_objects(&[recipient]).resolve();
+
+    // Reach guard: the opponent's counter landed.
+    outcome.assert_counters(recipient, CounterType::Plus1Plus1, 1);
+    let firings = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == watcher
+            )
+        })
+        .count();
+    (firings, outcome.life_delta(P0))
+}
+
+/// CR 608.2c + CR 603.2c: in "whenever an opponent puts one or more counters
+/// on another creature they control" and "… on one or more creatures they
+/// control", "they" is the opponent who placed the counters (the trigger's
+/// actor), not the watcher's controller. The two forms reach the "another " and
+/// "one or more " subject arms, which must read the actor scope like the
+/// "a "/"an " arm (Bold Plagiarist).
+///
+/// Per form: a counter on the placing opponent's creature fires (1 firing, +1
+/// life); a counter on the watcher controller's creature does not (the actor
+/// gate still passes, so only the "they control" recipient gate suppresses it).
+#[test]
+fn counter_placement_subject_binds_they_control_to_the_placing_opponent() {
+    let forms = [
+        "Whenever an opponent puts one or more counters on another creature they control, you gain 1 life.",
+        "Whenever an opponent puts one or more counters on one or more creatures they control, you gain 1 life.",
+    ];
+    let observed: Vec<_> = forms
+        .iter()
+        .map(|form| {
+            (
+                *form,
+                watcher_response_to_opponent_counter(form, P1),
+                watcher_response_to_opponent_counter(form, P0),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = forms.iter().map(|form| (*form, (1, 1), (0, 0))).collect();
+    assert_eq!(
+        observed, expected,
+        "(form, on the opponent's creature, on your creature) as (firings, P0 life change)"
     );
 }
