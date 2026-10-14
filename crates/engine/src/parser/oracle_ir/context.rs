@@ -898,16 +898,6 @@ impl ParseContext {
             .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
     }
 
-    /// The nearest player referent a third-person pronoun could name, counting
-    /// the "you may" / "any opponent may" `actor`. Read only by detectors;
-    /// controller phrases bind through `bind_controller_phrase`, which does not
-    /// read `actor`.
-    pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {
-        self.relative_player_scope
-            .clone()
-            .or_else(|| self.actor.clone())
-    }
-
     /// The antecedents `bind_controller_phrase` reads for an anaphoric
     /// controller phrase. `actor` is not one: an "any opponent may" actor is the
     /// accepting player only in that player's own frame.
@@ -1024,7 +1014,6 @@ impl ParseContext {
 
     /// Execute `f` with a temporary relative-player scope, restoring the prior
     /// value on return. Replaces thread-local ScopeGuard RAII pattern.
-    #[allow(dead_code)] // Available for nested-scope uses (e.g., nested triggers).
     pub fn with_player_scope<R>(
         &mut self,
         scope: ControllerRef,

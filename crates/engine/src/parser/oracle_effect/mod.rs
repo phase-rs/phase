@@ -3121,16 +3121,20 @@ fn try_parse_copy_next_spell_when_cast(tp: TextPair) -> Option<ParsedEffectClaus
     ))
 }
 
+/// `antecedents` carries the document's player antecedents into the
+/// at-next-phase body (Siren's Call's "that player"); see
+/// `try_parse_at_next_phase_delayed_trigger`.
 pub(crate) fn try_parse_temporal_delayed_trigger_ability(
     text: &str,
     kind: AbilityKind,
+    antecedents: &ParseContext,
 ) -> Option<AbilityIr> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let clause = try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine)
         .or_else(|| try_parse_when_next_event(tp))
         .or_else(|| try_parse_copy_next_spell_when_cast(tp))
-        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind))?;
+        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind, antecedents))?;
     Some(AbilityIr {
         source_text: text.to_string(),
         body: EffectChainIr::single_clause(text, kind, clause, None, None, false),
@@ -3144,13 +3148,16 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
 /// CR 603.7a: Pact-cycle instants ("At the beginning of your next upkeep, pay
 /// {2}{G}{G}. If you don't, you lose the game.") install a one-shot delayed
 /// trigger when the spell resolves — not a printed battlefield Phase trigger.
+/// CR 113.3a + CR 608.2c: the body is part of the same spell ability as the
+/// paragraphs before it, so it parses on their player antecedents.
 fn try_parse_at_next_phase_delayed_trigger(
     text: &str,
     kind: AbilityKind,
+    antecedents: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let (effect_text, condition) = strip_temporal_prefix(text);
     let condition = condition?;
-    let mut ctx = ParseContext::default();
+    let mut ctx = antecedents.clone_player_antecedents();
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
         unlowered_guard: None,
@@ -19242,7 +19249,7 @@ fn for_each_quantity_context(original: &str, ctx: &ParseContext) -> ParseContext
     // merges either back.
     let mut quantity_ctx = ctx.clone_throwaway();
     let mut subject_ctx = ctx.clone_throwaway();
-    if quantity_ctx.third_person_player_controller_ref().is_none()
+    if quantity_ctx.player_antecedents().third_person.is_none()
         && for_each_subject_application(original, &mut subject_ctx)
             .is_some_and(|app| app.target.is_some() && is_player_filter(&app.affected))
     {
@@ -26156,7 +26163,8 @@ fn chain_declared_slot_registry(clauses: &[ClauseIr]) -> DeclaredSlotRegistry {
                 &def.effect,
                 def.multi_target.as_ref(),
                 def.optional_targeting,
-                def.target_choice_timing,
+                // CR 115.10a + CR 608.2d: the sub node's assembled timing.
+                lower::target_choice_timing_for_clause_sub(clause, def),
             ));
             sub = def.sub_ability.as_deref();
         }
@@ -28277,27 +28285,6 @@ pub(crate) fn target_filter_controller_ref(filter: &TargetFilter) -> Option<Cont
         }
         TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
-    }
-}
-
-/// Mutating sibling of [`target_filter_controller_ref`]: recursively rewrite the
-/// `controller` of every `Typed` node reachable through `And`/`Or`/`Not` to
-/// `controller`. Used by the Siren's Call card-assembly pass to bind the delayed
-/// punisher's "that player controls" anaphor to the active player named by the
-/// sibling coerce clause.
-pub(crate) fn set_target_filter_controller_ref(
-    filter: &mut TargetFilter,
-    controller: ControllerRef,
-) {
-    match filter {
-        TargetFilter::Typed(tf) => tf.controller = Some(controller),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            for inner in filters.iter_mut() {
-                set_target_filter_controller_ref(inner, controller.clone());
-            }
-        }
-        TargetFilter::Not { filter } => set_target_filter_controller_ref(filter, controller),
-        _ => {}
     }
 }
 
@@ -44107,6 +44094,18 @@ fn parse_effect_chain_ir_body(
                 None
             }
         });
+        // CR 608.2c + CR 608.2d + CR 118.12: an "any opponent / any player / any other
+        // player may" body is performed by the player who accepts, so its third-person
+        // anaphors name that player. Only when no rung above supplied a scope, the seed
+        // is applied to a counterfactual parse of the body and recorded as operand
+        // bindings (`lower::accepting_player_bindings`), emitted under
+        // `lower_effect_chain_ir`'s confinement check. It never enters the chunk context.
+        let accepting_player_bindings = match opponent_may_scope {
+            Some(_) if ctx.relative_player_scope.is_none() => {
+                lower::accepting_player_bindings(&text_no_qty, ctx)
+            }
+            _ => Vec::new(),
+        };
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
             (retained_type_clause.lower(duration_binding), repeat_for)
@@ -45675,6 +45674,7 @@ fn parse_effect_chain_ir_body(
             .condition(condition)
             .is_optional(is_optional)
             .opponent_may_scope(opponent_may_scope)
+            .accepting_player_bindings(accepting_player_bindings)
             .repeat_for(repeat_for)
             .player_scope(player_scope)
             .starting_with(starting_with.clone())
@@ -47741,7 +47741,7 @@ fn compose_exile_graveyard_origin_and_target(
     });
     if (scope == EffectScope::All && owner.is_none())
         || (owner == Some(&ControllerRef::ScopedPlayer)
-            && ctx.third_person_player_controller_ref() != Some(ControllerRef::ScopedPlayer))
+            && ctx.player_antecedents().third_person != Some(ControllerRef::ScopedPlayer))
     {
         return (origin, target);
     }

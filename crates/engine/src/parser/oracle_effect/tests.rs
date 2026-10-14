@@ -14864,8 +14864,12 @@ fn temporal_copy_next_helper_emits_native_ir() {
     // `parse_effect_chain` splits the following retarget sentence before this
     // helper sees its all-consuming copy-next grammar.
     let text = "Copy the next instant or sorcery spell you cast this turn when you cast it";
-    let ir = try_parse_temporal_delayed_trigger_ability(text, AbilityKind::Spell)
-        .expect("Tzaangor Shaman copy-next grammar must parse");
+    let ir = try_parse_temporal_delayed_trigger_ability(
+        text,
+        AbilityKind::Spell,
+        &ParseContext::default(),
+    )
+    .expect("Tzaangor Shaman copy-next grammar must parse");
 
     assert_eq!(ir.source_text, text);
     assert_eq!(ir.body.clauses.len(), 1);
@@ -14873,6 +14877,50 @@ fn temporal_copy_next_helper_emits_native_ir() {
         &ir.body.clauses[0].parsed.effect,
         Effect::CreateDelayedTrigger { .. }
     ));
+}
+
+/// CR 113.3a + CR 608.2c: an at-next-phase delayed body parses on the document
+/// antecedents it is handed, so its "that player" binds to the antecedent's
+/// value (the writer keys on the value, not on `ActivePlayer`), and to the
+/// line-local default with no antecedent.
+#[test]
+fn temporal_delayed_body_binds_that_player_to_the_document_antecedent() {
+    // Siren's Call, third paragraph (verbatim Oracle text).
+    let text = "At the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn. Ignore this effect for each creature the player didn't control continuously since the beginning of the turn.";
+    let punisher_controller = |antecedents: &ParseContext| {
+        let ir = try_parse_temporal_delayed_trigger_ability(text, AbilityKind::Spell, antecedents)
+            .expect("the at-next-phase delayed grammar must parse");
+        let Effect::CreateDelayedTrigger { effect, .. } = &ir.body.clauses[0].parsed.effect else {
+            panic!(
+                "expected CreateDelayedTrigger, got {:?}",
+                ir.body.clauses[0].parsed.effect
+            );
+        };
+        let Effect::DestroyAll { target, .. } = effect.effect.as_ref() else {
+            panic!(
+                "expected the delayed body's DestroyAll, got {:?}",
+                effect.effect
+            );
+        };
+        target_filter_controller_ref(target)
+    };
+    let with_antecedent = |scope: ControllerRef| ParseContext {
+        relative_player_scope: Some(scope),
+        ..ParseContext::default()
+    };
+
+    assert_eq!(
+        punisher_controller(&with_antecedent(ControllerRef::ActivePlayer)),
+        Some(ControllerRef::ActivePlayer)
+    );
+    assert_eq!(
+        punisher_controller(&with_antecedent(ControllerRef::TargetPlayer)),
+        Some(ControllerRef::TargetPlayer)
+    );
+    assert_eq!(
+        punisher_controller(&ParseContext::default()),
+        Some(ControllerRef::You)
+    );
 }
 
 #[test]

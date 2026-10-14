@@ -15,9 +15,18 @@
 //!   target player (Imperial Edict and its family, Shadrix Silverquill, Break
 //!   Under Pressure, Consume) or the controller of the subject's target object
 //!   (Alpha Brawl, Dong Zhou).
+//! - Siren's Call: "that player" in the delayed paragraph is the active player
+//!   the coerce paragraph names (one spell ability, CR 113.3a).
+//! - Accepting-player bodies ("any opponent may …"): "they" binds to the
+//!   accepting player only in a direct operand chosen on resolution; anaphors
+//!   anywhere else keep their unseeded reading.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{EffectKind, TargetRef};
+use engine::parser::parse_oracle_text;
+use engine::types::ability::{
+    AbilityDefinition, ControllerRef, Effect, EffectKind, OpponentMayScope, TargetChoiceTiming,
+    TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -133,15 +142,12 @@ fn reservoir_kraken_accepting_opponent_taps_their_own_creature() {
                     })
                     .expect("pick P1's creature");
             }
-            // Pre-existing spurious target prompt for the trigger's controller;
-            // answered so the trigger proceeds, not asserted.
-            WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(own_bear)],
-                    })
-                    .expect("answer trigger target prompt");
-            }
+            // CR 115.10a + CR 608.2d: the accepting body calls its creature no
+            // "target", so the accepting player chooses it on resolution.
+            WaitingFor::TriggerTargetSelection { .. } => panic!(
+                "the accepting body declares no target, so no stack-time target prompt: {:?}",
+                runner.state().waiting_for
+            ),
             WaitingFor::Priority { .. } if runner.state().phase == Phase::BeginCombat => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
@@ -925,4 +931,524 @@ fn consume_sacrifices_the_target_players_greatest_power() {
     for id in [board.y, board.z, board.z2] {
         assert_eq!(outcome.zone_of(id), Zone::Battlefield);
     }
+}
+
+// ---- Phase-4 frames: the punisher document antecedent, the accepting player ----
+
+const SIRENS_CALL: &str = "Cast this spell only during an opponent's turn, before attackers are declared.\nCreatures the active player controls attack this turn if able.\nAt the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn. Ignore this effect for each creature the player didn't control continuously since the beginning of the turn.";
+
+const BROWBEAT: &str = "Any player may have Browbeat deal 5 damage to them. If no one does, target player draws three cards.";
+
+const DESECRATION_DEMON: &str = "Flying\nAt the beginning of each combat, any opponent may sacrifice a creature of their choice. If a player does, tap this creature and put a +1/+1 counter on it.";
+
+/// Drive priority until the stack is empty, answering no other prompt.
+fn pass_until_stack_empty(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => return,
+        }
+    }
+}
+
+/// CR 113.3a + CR 608.2c + CR 302.6: Siren's Call's third paragraph is part of
+/// the same spell ability as its coerce paragraph, so "that player" is the
+/// active player. At the end step the active player's non-attacking creatures
+/// are destroyed; an attacker, another opponent's creature and the caster's
+/// creature survive.
+#[test]
+fn sirens_call_destroys_only_the_active_players_creatures_that_did_not_attack() {
+    let mut scenario = main_phase_scenario(3);
+    let attacker = scenario.add_creature(P1, "P1 Attacker A", 2, 2).id();
+    let tapped = scenario.add_creature(P1, "P1 Tapped B", 2, 2).id();
+    let bystander = scenario.add_creature(P2, "P2 Bystander C", 2, 2).id();
+    let casters = scenario.add_creature(P0, "P0 Bystander D", 2, 2).id();
+    let sirens_call = scenario
+        .add_spell_to_hand_from_oracle(P0, "Siren's Call", true, SIRENS_CALL)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.objects.get_mut(&tapped).expect("B").tapped = true;
+    }
+    cast_free(&mut runner, sirens_call);
+    pass_until_stack_empty(&mut runner);
+    assert_eq!(
+        runner.state().objects[&sirens_call].zone,
+        Zone::Graveyard,
+        "reach-guard: Siren's Call resolved"
+    );
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .expect("P1 declares its untapped creature, which must attack");
+    declare_no_blockers(&mut runner);
+    runner.combat_damage();
+    runner.advance_to_end_step();
+    pass_until_stack_empty(&mut runner);
+
+    let zone = |id: ObjectId| runner.state().objects[&id].zone;
+    assert_eq!(
+        zone(tapped),
+        Zone::Graveyard,
+        "the active player's creature that didn't attack is destroyed"
+    );
+    assert_eq!(zone(attacker), Zone::Battlefield, "the attacker survives");
+    assert_eq!(
+        zone(bystander),
+        Zone::Battlefield,
+        "a non-active opponent's creature is not the active player's"
+    );
+    assert_eq!(
+        zone(casters),
+        Zone::Battlefield,
+        "the caster's creature is not the active player's"
+    );
+}
+
+/// Reservoir Kraken with one 2/2 per player; P1's may be tapped or hexproof.
+struct KrakenBoard {
+    kraken: ObjectId,
+    p0_bear: ObjectId,
+    p1_bear: ObjectId,
+    p2_bear: Option<ObjectId>,
+}
+
+/// What the accepting-player frame asked during one beginning-of-combat
+/// trigger: the players offered, in order, and each resolution-time creature
+/// choice with its selector and legal set.
+struct KrakenDrive {
+    offered: Vec<PlayerId>,
+    choices: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+fn kraken_board(
+    players: u8,
+    active: PlayerId,
+    p1_bear_tapped: bool,
+    p1_bear_hexproof: bool,
+) -> (GameRunner, KrakenBoard) {
+    let mut scenario = GameScenario::new_n_player(players, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let kraken = scenario
+        .add_creature_from_oracle(P0, "Reservoir Kraken", 6, 6, RESERVOIR_KRAKEN)
+        .id();
+    let p0_bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let p1_bear = if p1_bear_hexproof {
+        scenario.add_creature(P1, "P1 Bear", 2, 2).hexproof().id()
+    } else {
+        scenario.add_creature(P1, "P1 Bear", 2, 2).id()
+    };
+    let p2_bear = (players > 2).then(|| scenario.add_creature(P2, "P2 Bear", 2, 2).id());
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = active;
+        state.priority_player = active;
+        state.waiting_for = WaitingFor::Priority { player: active };
+        state.objects.get_mut(&p1_bear).expect("P1 Bear").tapped = p1_bear_tapped;
+    }
+    (
+        runner,
+        KrakenBoard {
+            kraken,
+            p0_bear,
+            p1_bear,
+            p2_bear,
+        },
+    )
+}
+
+/// Advance once to the beginning of combat and drive Reservoir Kraken's
+/// trigger: every offer is accepted and each choice takes its first legal
+/// creature.
+fn drive_kraken_trigger(runner: &mut GameRunner) -> KrakenDrive {
+    // Advance once: re-calling `advance_to_phase` mid-step re-fires the
+    // beginning-of-combat trigger.
+    runner.advance_to_phase(Phase::BeginCombat);
+    let mut drive = KrakenDrive {
+        offered: Vec::new(),
+        choices: Vec::new(),
+    };
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OpponentMayChoice { player, .. } => {
+                drive.offered.push(player);
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept");
+            }
+            WaitingFor::MultiTargetSelection {
+                player,
+                legal_targets,
+                ..
+            } => {
+                let cards = legal_targets.first().copied().into_iter().collect();
+                drive.choices.push((player, legal_targets));
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("choose a creature");
+            }
+            // CR 115.10a + CR 608.2d: the accepting body calls its creature no
+            // "target", so the accepting player chooses it on resolution.
+            WaitingFor::TriggerTargetSelection { .. } => panic!(
+                "the accepting body declares no target, so no stack-time target prompt: {:?}",
+                runner.state().waiting_for
+            ),
+            WaitingFor::Priority { .. } if runner.state().phase == Phase::BeginCombat => {
+                if runner.state().stack.is_empty() {
+                    return drive;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => return drive,
+        }
+    }
+    panic!("the beginning-of-combat trigger did not settle");
+}
+
+fn fish_tokens(runner: &GameRunner) -> usize {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[id].name.contains("Fish"))
+        .count()
+}
+
+/// CR 608.2c + CR 608.2d: on the opponent's own combat, the opponent who
+/// accepts still chooses among their own creatures, on resolution.
+#[test]
+fn reservoir_kraken_on_the_opponents_combat_offers_the_opponents_creatures() {
+    let (mut runner, board) = kraken_board(2, P1, false, false);
+    let drive = drive_kraken_trigger(&mut runner);
+
+    assert_eq!(drive.offered, vec![P1], "reach-guard: P1 is offered");
+    assert_eq!(drive.choices, vec![(P1, vec![board.p1_bear])]);
+    let state = runner.state();
+    assert!(state.objects[&board.p1_bear].tapped);
+    assert!(state.objects[&board.kraken].tapped);
+    assert!(!state.objects[&board.p0_bear].tapped);
+    assert_eq!(fish_tokens(&runner), 1);
+}
+
+/// CR 608.2c + CR 608.2d + CR 101.4, hostile multi-authority board: three
+/// players, P1's combat, P1's only creature already tapped. The offers run in
+/// APNAP order; the accepting player each time chooses among their own
+/// untapped creatures, so P2, who can, taps P2's creature.
+#[test]
+fn reservoir_kraken_three_players_each_acceptor_chooses_among_their_own_creatures() {
+    let (mut runner, board) = kraken_board(3, P1, true, false);
+    let p2_bear = board.p2_bear.expect("P2 Bear");
+    let drive = drive_kraken_trigger(&mut runner);
+
+    assert_eq!(drive.offered, vec![P1, P2], "reach-guard: APNAP offers");
+    assert!(
+        drive.choices.contains(&(P2, vec![p2_bear])),
+        "P2 chooses among P2's untapped creatures; choices={:?}",
+        drive.choices
+    );
+    assert!(
+        drive
+            .choices
+            .iter()
+            .all(|(_, legal)| !legal.contains(&board.p0_bear)),
+        "the Kraken's controller's creature is never an acceptor's choice; choices={:?}",
+        drive.choices
+    );
+    let state = runner.state();
+    assert!(state.objects[&p2_bear].tapped);
+    assert!(state.objects[&board.kraken].tapped);
+    assert!(!state.objects[&board.p0_bear].tapped);
+    assert_eq!(fish_tokens(&runner), 1);
+}
+
+/// CR 608.2c + CR 608.2d: three players on the Kraken controller's own combat,
+/// so the accepting player is not the active player.
+#[test]
+fn reservoir_kraken_three_players_on_its_controllers_combat() {
+    let (mut runner, board) = kraken_board(3, P0, true, false);
+    let p2_bear = board.p2_bear.expect("P2 Bear");
+    let drive = drive_kraken_trigger(&mut runner);
+
+    assert!(
+        drive.offered.contains(&P2),
+        "reach-guard: P2 is offered; offered={:?}",
+        drive.offered
+    );
+    assert!(
+        drive.choices.contains(&(P2, vec![p2_bear])),
+        "P2 chooses among P2's untapped creatures; choices={:?}",
+        drive.choices
+    );
+    let state = runner.state();
+    assert!(state.objects[&p2_bear].tapped);
+    assert!(state.objects[&board.kraken].tapped);
+    assert!(!state.objects[&board.p0_bear].tapped);
+    assert_eq!(fish_tokens(&runner), 1);
+}
+
+/// CR 115.10a + CR 702.11b: the accepting player's creature is chosen, not
+/// targeted, so hexproof does not stop its own controller from tapping it.
+#[test]
+fn reservoir_kraken_acceptor_may_choose_their_hexproof_creature() {
+    let (mut runner, board) = kraken_board(2, P1, false, true);
+    let drive = drive_kraken_trigger(&mut runner);
+
+    assert_eq!(drive.offered, vec![P1], "reach-guard: P1 is offered");
+    assert_eq!(drive.choices, vec![(P1, vec![board.p1_bear])]);
+    let state = runner.state();
+    assert!(state.objects[&board.p1_bear].tapped);
+    assert!(state.objects[&board.kraken].tapped);
+    assert_eq!(fish_tokens(&runner), 1);
+}
+
+/// The trigger body whose head carries an "any opponent / any player may"
+/// scope.
+fn accepting_trigger_body(name: &str, text: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+    parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| execute.optional_for.is_some())
+        .cloned()
+        .unwrap_or_else(|| panic!("{name}: no accepting-player trigger body in {parsed:?}"))
+}
+
+/// Every `ScopedPlayer` player reference anywhere in a definition (filters,
+/// amounts, conditions, nested chains and branches), read from its serialized
+/// form.
+fn scoped_player_refs(definition: &AbilityDefinition) -> usize {
+    serde_json::to_string(definition)
+        .expect("a definition serializes")
+        .matches("\"ScopedPlayer\"")
+        .count()
+}
+
+fn typed_controller(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller.clone(),
+        other => panic!("expected a typed filter, got {other:?}"),
+    }
+}
+
+/// The accepting head and its sub node, each with its operand's controller and
+/// its timing.
+fn head_and_sub(
+    body: &AbilityDefinition,
+) -> (
+    (Option<ControllerRef>, TargetChoiceTiming),
+    (Option<ControllerRef>, TargetChoiceTiming),
+) {
+    let sub = body.sub_ability.as_deref().expect("a sub node");
+    let operand = |def: &AbilityDefinition| {
+        typed_controller(def.effect.target_filter().expect("a direct operand"))
+    };
+    (
+        (operand(body), body.target_choice_timing),
+        (operand(sub), sub.target_choice_timing),
+    )
+}
+
+/// CR 608.2c + CR 608.2d + CR 115.10a: Reservoir Kraken's accepting body binds
+/// "they" to the accepting player and chooses its creature on resolution. A
+/// player recipient (Browbeat) is neither re-timed nor seeded; a body with no
+/// anaphor (Desecration Demon) is re-timed only.
+#[test]
+fn accepting_player_body_binds_they_and_resolves_its_described_object() {
+    let kraken = accepting_trigger_body("Reservoir Kraken", RESERVOIR_KRAKEN);
+    assert_eq!(kraken.optional_for, Some(OpponentMayScope::AnyOpponent));
+    let Effect::SetTapState { target, .. } = kraken.effect.as_ref() else {
+        panic!("expected the SetTapState head, got {:?}", kraken.effect);
+    };
+    assert_eq!(typed_controller(target), Some(ControllerRef::ScopedPlayer));
+    assert_eq!(kraken.target_choice_timing, TargetChoiceTiming::Resolution);
+
+    let browbeat = parse_oracle_text(BROWBEAT, "Browbeat", &[], &["Sorcery".to_string()], &[]);
+    let head = &browbeat.abilities[0];
+    assert_eq!(head.optional_for, Some(OpponentMayScope::AnyPlayer));
+    assert!(
+        matches!(
+            head.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::Player,
+                ..
+            }
+        ),
+        "{:?}",
+        head.effect
+    );
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Stack);
+    assert_eq!(scoped_player_refs(head), 0);
+
+    let demon = accepting_trigger_body("Desecration Demon", DESECRATION_DEMON);
+    let Effect::Sacrifice { target, .. } = demon.effect.as_ref() else {
+        panic!("expected the Sacrifice head, got {:?}", demon.effect);
+    };
+    assert_eq!(typed_controller(target), Some(ControllerRef::Opponent));
+    assert_eq!(demon.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
+/// CR 608.2c + CR 608.2d + CR 115.10a: a `try_split_targeted_compound`
+/// continuation of an accepting body binds "they" and resolves its described
+/// object, like the head.
+#[test]
+fn accepting_body_continuation_binds_and_resolves_with_its_head() {
+    let body = accepting_trigger_body(
+        "Probe",
+        "At the beginning of each combat, any opponent may tap an untapped creature they control and goad an untapped creature they control.",
+    );
+    assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert!(matches!(body.effect.as_ref(), Effect::SetTapState { .. }));
+    assert!(matches!(
+        body.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+        Some(Effect::Goad { .. })
+    ));
+    let resolved = (
+        Some(ControllerRef::ScopedPlayer),
+        TargetChoiceTiming::Resolution,
+    );
+    assert_eq!(head_and_sub(&body), (resolved.clone(), resolved));
+}
+
+/// CR 608.2c + CR 608.2d + CR 115.10a: "tap and goad <one object>" shares one
+/// described object between the head and its `Goad` sub node; both bind
+/// "they" and resolve.
+#[test]
+fn accepting_body_tap_and_goad_binds_and_resolves_both_nodes() {
+    let body = accepting_trigger_body(
+        "Probe",
+        "At the beginning of each combat, any opponent may tap and goad an untapped creature they control.",
+    );
+    assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert!(matches!(body.effect.as_ref(), Effect::SetTapState { .. }));
+    assert!(matches!(
+        body.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+        Some(Effect::Goad { .. })
+    ));
+    let resolved = (
+        Some(ControllerRef::ScopedPlayer),
+        TargetChoiceTiming::Resolution,
+    );
+    assert_eq!(head_and_sub(&body), (resolved.clone(), resolved));
+}
+
+/// CR 115.10a: an accepting body that prints "target" keeps its stack-time
+/// targets, so the accepting-player binding is withheld from every node.
+#[test]
+fn accepting_body_that_prints_target_is_not_seeded() {
+    let body = accepting_trigger_body(
+        "Probe",
+        "At the beginning of each combat, any opponent may tap target creature and goad an untapped creature they control.",
+    );
+    assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert!(matches!(body.effect.as_ref(), Effect::SetTapState { .. }));
+    assert!(matches!(
+        body.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+        Some(Effect::Goad {
+            target: TargetFilter::Typed(_)
+        })
+    ));
+    assert_eq!(scoped_player_refs(&body), 0, "{body:?}");
+}
+
+/// CR 608.2c: a relative scope the trigger supplies ("that player", the damaged
+/// player) is the continuation's antecedent; the accepting-player seed does not
+/// replace it.
+#[test]
+fn accepting_body_keeps_a_trigger_supplied_that_player() {
+    let body = accepting_trigger_body(
+        "Probe",
+        "Whenever this creature deals combat damage to a player, any opponent may tap target creature and goad a creature that player controls.",
+    );
+    assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert!(matches!(body.effect.as_ref(), Effect::SetTapState { .. }));
+    let Some(Effect::Goad { target }) = body.sub_ability.as_deref().map(|sub| sub.effect.as_ref())
+    else {
+        panic!("expected the Goad continuation, got {:?}", body.sub_ability);
+    };
+    assert_eq!(
+        typed_controller(target),
+        Some(ControllerRef::TriggeringPlayer)
+    );
+    assert_eq!(scoped_player_refs(&body), 0, "{body:?}");
+}
+
+/// The accepting-player seed reaches the emitted definition only in a direct
+/// operand of a resolution-timed node of the accepting body's own chain. Each
+/// of these bodies has its anaphor elsewhere (a delayed payload, a
+/// `ChooseOneOf` branch, an amount), so none carries `ScopedPlayer`.
+#[test]
+fn accepting_body_anaphors_outside_its_own_operands_are_not_seeded() {
+    // A delayed payload: the accepting body is wrapped by its trailing delayed
+    // condition, so the accepting frame sits inside the payload, not on the
+    // chain the seed was probed for.
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, any opponent may tap an untapped creature they control at the beginning of the next end step.",
+        "Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|trigger| trigger.execute.as_deref())
+        .expect("reach-guard: the combat trigger has a body");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!(
+            "reach-guard: expected a delayed trigger, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(effect.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert!(
+        matches!(
+            effect.effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "reach-guard: {:?}",
+        effect.effect
+    );
+    assert_eq!(scoped_player_refs(execute), 0, "{execute:?}");
+
+    // `ChooseOneOf` branches: a put-counter choice, an inline "A or B" choice
+    // and "have <subject> <keyword choice>".
+    for text in [
+        "At the beginning of each combat, any opponent may put your choice of a +1/+1 counter or a -1/-1 counter on a creature they control.",
+        "At the beginning of each combat, any opponent may sacrifice a creature they control or discard a card.",
+        "At the beginning of each combat, any opponent may have creatures they control gain your choice of flying or haste until end of turn.",
+    ] {
+        let body = accepting_trigger_body("Probe", text);
+        assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent), "{text}");
+        let Effect::ChooseOneOf { branches, .. } = body.effect.as_ref() else {
+            panic!("reach-guard: expected a ChooseOneOf head for {text:?}, got {:?}", body.effect);
+        };
+        assert_eq!(branches.len(), 2, "reach-guard: {text}");
+        assert_eq!(scoped_player_refs(&body), 0, "{text}: {body:?}");
+    }
+
+    // The head's amount.
+    let body = accepting_trigger_body(
+        "Probe",
+        "At the beginning of each combat, any opponent may lose life equal to the number of creatures they control.",
+    );
+    assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert!(
+        matches!(body.effect.as_ref(), Effect::LoseLife { .. }),
+        "reach-guard: {:?}",
+        body.effect
+    );
+    assert_eq!(scoped_player_refs(&body), 0, "{body:?}");
 }

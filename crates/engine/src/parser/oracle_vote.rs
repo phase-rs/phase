@@ -191,15 +191,21 @@ pub(crate) fn parse_vote_block_ir(
         let (rest, idx, mut parsed, voted_for) = if is_controller_labels {
             let (rest, (choice, effect_text, who_chose)) = parse_each_class_clause(walk, &choices)?;
             let idx = choices.iter().position(|c| c == &choice)?;
-            let parsed =
-                parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+            let parsed = parse_per_choice_body(
+                effect_text,
+                kind,
+                who_chose.then_some(ControllerRef::ScopedPlayer),
+            );
             (rest, idx, parsed, who_chose)
         } else if let Some((rest, (choice, effect_text, who_chose))) =
             parse_for_each_vote_clause(walk, &choices)
         {
             let idx = choices.iter().position(|c| c == &choice)?;
-            let parsed =
-                parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+            let parsed = parse_per_choice_body(
+                effect_text,
+                kind,
+                who_chose.then_some(ControllerRef::ScopedPlayer),
+            );
             (rest, idx, parsed, who_chose)
         } else if let Some((rest, idx, parsed_def, setup)) =
             parse_vote_for_each_suffix_clause(walk, &choices, kind)
@@ -1084,6 +1090,25 @@ fn read_effect_until_each_class<'a>(input: &'a str, choices: &[String]) -> (&'a 
     // allow-noncombinator: structural period strip on pre-extracted sentence clause
     let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
     (head_no_period.trim(), tail.trim_start())
+}
+
+/// CR 608.2c: a per-choice body that fans out over the players who chose its
+/// option (`PlayerFilter::VotedFor`, run once per such player by the
+/// `player_scope` driver) is parsed with the iterated player as its
+/// third-person antecedent, so "they" / "that player" name that player. A body
+/// that does not fan out (`None`) parses on a default context.
+fn parse_per_choice_body(
+    text: &str,
+    kind: AbilityKind,
+    scope: Option<ControllerRef>,
+) -> AbilityDefinition {
+    let mut ctx = ParseContext::default();
+    match scope {
+        Some(scope) => ctx.with_player_scope(scope, |ctx| {
+            parse_effect_chain_with_context(text, kind, ctx)
+        }),
+        None => parse_effect_chain_with_context(text, kind, &mut ctx),
+    }
 }
 
 /// Parse the "who chose" sub-shape of a `for each ...` clause:
@@ -2051,6 +2076,71 @@ mod tests {
             }
             other => panic!("expected Vote, got {:?}", other),
         }
+    }
+
+    /// CR 608.2c: a fan-out per-choice body runs once per player who chose its
+    /// option, so its "they" names that player (`ScopedPlayer`). Regna's
+    /// Sanction, verbatim: both bodies' "creature(s) they control" bind to the
+    /// iterated player. A classic per-ballot body ("For each <choice> vote, …")
+    /// does not fan out over voters and is not seeded.
+    #[test]
+    fn fan_out_vote_bodies_bind_they_to_the_iterated_player() {
+        let text = "For each player, choose friend or foe. Each friend puts a +1/+1 counter on each creature they control. Each foe chooses one untapped creature they control, then taps the rest.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        let Effect::Vote {
+            ref per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        let Effect::PutCounterAll {
+            target: TargetFilter::Typed(ref friend),
+            ..
+        } = *per_choice_effect[0].effect
+        else {
+            panic!(
+                "expected the friend body's PutCounterAll, got {:?}",
+                per_choice_effect[0].effect
+            );
+        };
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(ref foe),
+        } = *per_choice_effect[1].effect
+        else {
+            panic!(
+                "expected the foe body's chosen-creature TargetOnly, got {:?}",
+                per_choice_effect[1].effect
+            );
+        };
+        assert_eq!(friend.controller, Some(ControllerRef::ScopedPlayer));
+        assert_eq!(foe.controller, Some(ControllerRef::ScopedPlayer));
+
+        let classic = "starting with you, each player votes for grace or guilt. For each grace vote, put a +1/+1 counter on each creature they control. For each guilt vote, investigate.";
+        let def = parse_vote_block(classic, AbilityKind::Spell).expect("vote block parses");
+        let Effect::Vote {
+            ref per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        assert!(per_choice_effect[0].player_scope.is_none());
+        let Effect::PutCounterAll {
+            target: TargetFilter::Typed(ref grace),
+            ..
+        } = *per_choice_effect[0].effect
+        else {
+            panic!(
+                "reach-guard: expected the grace body's PutCounterAll, got {:?}",
+                per_choice_effect[0].effect
+            );
+        };
+        assert!(
+            grace.controller.is_some(),
+            "reach-guard: the classic body's \"they control\" must bind a controller, got {grace:?}"
+        );
+        assert_ne!(grace.controller, Some(ControllerRef::ScopedPlayer));
     }
 
     /// Rejects single-class openers — every friend-or-foe card prints two

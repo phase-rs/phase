@@ -78,7 +78,8 @@ use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
     parse_effect_chain, parse_effect_chain_with_context, parse_windowed_replacement_install_ir,
-    rewrite_condition_keyword, try_parse_temporal_delayed_trigger_ability,
+    rewrite_condition_keyword, target_filter_controller_ref,
+    try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
@@ -4358,7 +4359,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
 
     // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
     // Nowhere, Oblivion Ring — see `DocumentRelationIr::EtbExileLtbReturn`).
-    // CR 102.1 + CR 608.2c: active-player punisher rebinding (Siren's
+    // CR 102.1 + CR 608.2c: active-player punisher continuity fold (Siren's
     // Call — see `DocumentRelationIr::ActivePlayerPunisher`). Applied here, after
     // the swallow audit, to preserve the pre-relocation order in which the two
     // former `synthesize`/`bind` passes ran (the audit reads `result` first).
@@ -4441,27 +4442,33 @@ fn convert_terminal_attachment_host_references(
 
 // --- CR 102.1 + CR 608.2c: active-player coerce → delayed punisher --
 
-/// Whether an ability is the mass-`MustAttack` coerce clause over an
-/// `ActivePlayer` subject (Siren's Call, first line).
-fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
-    use crate::parser::oracle_effect::target_filter_controller_ref;
+/// CR 102.1 + CR 608.2c: the player whose creatures a mass-`MustAttack` coerce
+/// clause names ("Creatures the active player controls attack this turn if
+/// able"): the antecedent of a later paragraph's "that player". The relation
+/// detector and the delayed-trigger antecedent writer read this one predicate.
+fn coerce_subject_controller(def: &AbilityDefinition) -> Option<ControllerRef> {
     let Effect::GenericEffect {
         static_abilities, ..
     } = def.effect.as_ref()
     else {
-        return false;
+        return None;
     };
-    static_abilities.iter().any(|st| {
-        matches!(st.mode, StaticMode::MustAttack)
-            && st.affected.as_ref().and_then(target_filter_controller_ref)
-                == Some(ControllerRef::ActivePlayer)
-    })
+    static_abilities
+        .iter()
+        .filter(|st| matches!(st.mode, StaticMode::MustAttack))
+        .find_map(|st| st.affected.as_ref().and_then(target_filter_controller_ref))
+}
+
+/// Whether an ability is the mass-`MustAttack` coerce clause over an
+/// `ActivePlayer` subject (Siren's Call, first line).
+fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
+    coerce_subject_controller(def) == Some(ControllerRef::ActivePlayer)
 }
 
 /// Whether an ability is the sibling delayed `DestroyAll` punisher whose
-/// "that player controls" anaphor defaulted to `You` (Siren's Call, second line).
+/// "that player controls" anaphor is bound to `ActivePlayer` by the coerce
+/// clause's document antecedent (Siren's Call, second line).
 fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
-    use crate::parser::oracle_effect::target_filter_controller_ref;
     let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() else {
         return false;
     };
@@ -4469,7 +4476,7 @@ fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
         return false;
     };
     target_filter_has_not_attacked_this_turn(target)
-        && target_filter_controller_ref(target) == Some(ControllerRef::You)
+        && target_filter_controller_ref(target) == Some(ControllerRef::ActivePlayer)
 }
 
 /// CR 102.1 + CR 608.2c: Pair the mass-attack coerce clause
@@ -4491,15 +4498,15 @@ fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<Doc
     }
 }
 
-/// Rebind the punisher's destroyed-set controller from `You` to `ActivePlayer`
-/// and fold the CR 302.6 / CR 508.1a continuous-control exemption sibling into
-/// the set predicate. Applied to the punisher ability resolved by id.
+/// Fold the CR 302.6 / CR 508.1a continuous-control exemption sibling into the
+/// punisher's destroyed-set predicate. The set's controller is already
+/// `ActivePlayer`, bound by the document antecedent at parse time. Applied to
+/// the punisher ability resolved by id.
 fn apply_active_player_punisher(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
     ability_ids: &[OracleItemId],
 ) {
-    use crate::parser::oracle_effect::set_target_filter_controller_ref;
     for relation in relations {
         let DocumentRelationIr::ActivePlayerPunisher { punisher, .. } = relation else {
             continue;
@@ -4515,7 +4522,6 @@ fn apply_active_player_punisher(
         let Effect::DestroyAll { target, .. } = inner.effect.as_mut() else {
             continue;
         };
-        set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
         // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this effect for
         // each creature the player didn't control continuously since the
         // beginning of the turn." Attach the continuity predicate to the
@@ -6604,9 +6610,24 @@ fn parse_normalized_oracle_ir(
         // trigger-shaped temporal text through the effect parser before generic
         // trigger dispatch.
         if is_spell && has_trigger_prefix(&lower) {
-            if let Some(ability) =
-                try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
-            {
+            // CR 113.3a + CR 608.2c: every paragraph of an instant or sorcery is
+            // one spell ability, so a later paragraph's "that player" names the
+            // player an earlier paragraph's coerce clause made its subject
+            // (Siren's Call). The antecedent is the immediately preceding spell
+            // item's coerce subject, carried on the context rung the body's
+            // chunk ladder inherits.
+            let document_antecedents = ParseContext {
+                relative_player_scope: emitter
+                    .last_ability_definition()
+                    .as_ref()
+                    .and_then(coerce_subject_controller),
+                ..ParseContext::default()
+            };
+            if let Some(ability) = try_parse_temporal_delayed_trigger_ability(
+                &line,
+                AbilityKind::Spell,
+                &document_antecedents,
+            ) {
                 emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;

@@ -32,7 +32,7 @@ use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
+use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
@@ -1566,8 +1566,189 @@ pub(super) fn fold_search_choose_type_conditional_destination(def: &mut AbilityD
 /// Plan 01 §6: the assembly traversal itself now lives in
 /// [`super::assembly::assemble_effect_chain`]; this keeps the existing signature
 /// and pure `&EffectChainIr -> AbilityDefinition` contract for all callers.
+///
+/// A chain whose clauses carry accepting-player bindings is assembled a second time
+/// with each binding's seeded operand transplanted into its node. The seeded assembly
+/// is returned only if every difference from the unseeded one is confined to the
+/// positions the bindings may occupy (`accepting_bindings_confined`).
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
-    super::assembly::assemble_effect_chain(ir)
+    let unseeded = super::assembly::assemble_effect_chain(ir);
+    if ir
+        .clauses
+        .iter()
+        .all(|clause| clause.accepting_player_bindings.is_empty())
+    {
+        return unseeded;
+    }
+    let mut seeded_ir = ir.clone();
+    seeded_ir
+        .clauses
+        .iter_mut()
+        .for_each(transplant_accepting_player_bindings);
+    let seeded = super::assembly::assemble_effect_chain(&seeded_ir);
+    if accepting_bindings_confined(&unseeded, &seeded) {
+        seeded
+    } else {
+        unseeded
+    }
+}
+
+/// CR 608.2c + CR 608.2d + CR 118.12: the accepting-player seed's bindings for one
+/// "any opponent / any player / any other player may" body. The player who accepts
+/// performs the body, so its third-person anaphors name that player. The body is
+/// parsed twice on throwaway contexts (`ChosenColorQualifierScope` rule 1), once under
+/// `with_player_scope(ScopedPlayer)`, so every difference between the two parses, in
+/// the returned clauses or in the contexts they leave behind, is the seed's. A
+/// difference is recorded only where it sits in the direct operand
+/// (`Effect::target_filter`) of a node of the clause's own chain; any other
+/// difference (a condition, an amount, a nested chain, a `ChooseOneOf` branch, a
+/// delayed payload, a context side channel) withholds the whole seed. The live chunk
+/// context never carries the seed.
+pub(super) fn accepting_player_bindings(
+    text: &str,
+    ctx: &ParseContext,
+) -> Vec<AcceptingPlayerBinding> {
+    let mut unseeded_ctx = ctx.clone_throwaway();
+    let unseeded = parse_effect_clause(text, &mut unseeded_ctx);
+    let mut seeded_ctx = ctx.clone_throwaway();
+    let seeded = seeded_ctx.with_player_scope(ControllerRef::ScopedPlayer, |seeded_ctx| {
+        parse_effect_clause(text, seeded_ctx)
+    });
+    if seeded_ctx != unseeded_ctx {
+        return Vec::new();
+    }
+    operand_bindings(&unseeded, seeded).unwrap_or_default()
+}
+
+/// The seed's operand bindings between two parses of one clause: `Some` (possibly
+/// empty) when the parses differ only in the direct operands of the clause's own
+/// chain (node 0 = the head, node n = the n-th `sub_ability` node), `None` when they
+/// differ anywhere else.
+fn operand_bindings(
+    unseeded: &ParsedEffectClause,
+    mut seeded: ParsedEffectClause,
+) -> Option<Vec<AcceptingPlayerBinding>> {
+    let unseeded_nodes: Vec<&Effect> = std::iter::once(&unseeded.effect)
+        .chain(
+            std::iter::successors(unseeded.sub_ability.as_deref(), |def| {
+                def.sub_ability.as_deref()
+            })
+            .map(|def| def.effect.as_ref()),
+        )
+        .collect();
+    let mut bindings = Vec::new();
+    restore_unseeded_operand(
+        &mut seeded.effect,
+        unseeded_nodes.first().copied(),
+        0,
+        &mut bindings,
+    );
+    let mut node = seeded.sub_ability.as_deref_mut();
+    let mut index = 0;
+    while let Some(def) = node {
+        index += 1;
+        restore_unseeded_operand(
+            def.effect.as_mut(),
+            unseeded_nodes.get(index).copied(),
+            index,
+            &mut bindings,
+        );
+        node = def.sub_ability.as_deref_mut();
+    }
+    (seeded == *unseeded).then_some(bindings)
+}
+
+/// Records a node's seeded operand when it differs from the unseeded one, and writes
+/// the unseeded operand back so that only differences elsewhere remain to be compared.
+/// Where the twin addresses no field (`target_filter`'s constant arms) nothing is
+/// written, and the full comparison withholds.
+fn restore_unseeded_operand(
+    seeded: &mut Effect,
+    unseeded: Option<&Effect>,
+    node: usize,
+    bindings: &mut Vec<AcceptingPlayerBinding>,
+) {
+    let (Some(seeded_operand), Some(unseeded_operand)) = (
+        seeded.target_filter(),
+        unseeded.and_then(Effect::target_filter),
+    ) else {
+        return;
+    };
+    if seeded_operand == unseeded_operand {
+        return;
+    }
+    let binding = AcceptingPlayerBinding {
+        node,
+        unseeded: unseeded_operand.clone(),
+        seeded: seeded_operand.clone(),
+    };
+    if let Some(operand) = seeded.target_filter_mut() {
+        *operand = binding.unseeded.clone();
+    }
+    bindings.push(binding);
+}
+
+/// Writes each binding's seeded operand into the node it was recorded for, when that
+/// node still carries the operand the unseeded parse gave it.
+fn transplant_accepting_player_bindings(clause: &mut ClauseIr) {
+    for binding in &clause.accepting_player_bindings {
+        let Some(effect) = clause_node_effect_mut(&mut clause.parsed, binding.node) else {
+            continue;
+        };
+        if let Some(operand) = effect
+            .target_filter_mut()
+            .filter(|operand| **operand == binding.unseeded)
+        {
+            *operand = binding.seeded.clone();
+        }
+    }
+}
+
+/// The effect of node `node` of a parsed clause's own chain (0 = the head).
+fn clause_node_effect_mut(parsed: &mut ParsedEffectClause, node: usize) -> Option<&mut Effect> {
+    let Some(depth) = node.checked_sub(1) else {
+        return Some(&mut parsed.effect);
+    };
+    let mut def = parsed.sub_ability.as_deref_mut()?;
+    for _ in 0..depth {
+        def = def.sub_ability.as_deref_mut()?;
+    }
+    Some(def.effect.as_mut())
+}
+
+/// CR 608.2c + CR 608.2d + CR 115.10a: the seed and its timing land together. Every
+/// difference between the seeded and unseeded assemblies must sit in the direct
+/// operand of a `Resolution`-timed node of an accepting frame (a node with
+/// `optional_for` and its `sub_ability` chain): such a node mints no stack-time slot,
+/// and it resolves with the accepting player as `scoped_player`.
+fn accepting_bindings_confined(unseeded: &AbilityDefinition, seeded: &AbilityDefinition) -> bool {
+    let mut restored = seeded.clone();
+    restore_accepting_frame_operands(&mut restored, unseeded, false);
+    restored == *unseeded
+}
+
+/// Writes the unseeded node's direct operand back into every `Resolution`-timed node
+/// of an accepting frame, walking the root chain through `sub_ability` links.
+fn restore_accepting_frame_operands(
+    seeded: &mut AbilityDefinition,
+    unseeded: &AbilityDefinition,
+    in_frame: bool,
+) {
+    let in_frame = in_frame || seeded.optional_for.is_some();
+    if in_frame && matches!(seeded.target_choice_timing, TargetChoiceTiming::Resolution) {
+        if let (Some(slot), Some(operand)) = (
+            seeded.effect.target_filter_mut(),
+            unseeded.effect.target_filter(),
+        ) {
+            *slot = operand.clone();
+        }
+    }
+    if let (Some(seeded_sub), Some(unseeded_sub)) = (
+        seeded.sub_ability.as_deref_mut(),
+        unseeded.sub_ability.as_deref(),
+    ) {
+        restore_accepting_frame_operands(seeded_sub, unseeded_sub, in_frame);
+    }
 }
 
 /// CR 608.2c: The anaphor `ObjectScope::OtherRevealedCard` ("the card revealed by
@@ -1977,7 +2158,9 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     target_choice_timing_for_parsed(
         &clause_ir.parsed,
         clause_ir.source.fragment().unwrap_or_default(),
-        clause_ir.declared_target_choice_timing,
+        clause_ir
+            .declared_target_choice_timing
+            .or_else(|| accepting_player_object_timing(clause_ir, &clause_ir.parsed.effect)),
         clause_ir.multi_target.is_some(),
     )
 }
@@ -2049,6 +2232,51 @@ pub(crate) fn convert_terminal_attachment_host_reference(
     {
         def.target_choice_timing = TargetChoiceTiming::Resolution;
     }
+}
+
+/// CR 115.10a + CR 608.2d: the timing of one node of the clause's own sub chain
+/// (`clause_ir.parsed.sub_ability`, whichever clause parser built it): the
+/// accepting-player predicate the head uses, else the node's own timing.
+pub(super) fn target_choice_timing_for_clause_sub(
+    clause_ir: &ClauseIr,
+    sub: &AbilityDefinition,
+) -> TargetChoiceTiming {
+    accepting_player_object_timing(clause_ir, &sub.effect).unwrap_or(sub.target_choice_timing)
+}
+
+/// The clause's own sub chain with every node timed by
+/// `target_choice_timing_for_clause_sub` (assembly's single materialization).
+pub(super) fn timed_clause_sub_chain(clause_ir: &ClauseIr) -> Option<Box<AbilityDefinition>> {
+    let mut chain = clause_ir.parsed.sub_ability.clone();
+    let mut node = chain.as_deref_mut();
+    while let Some(def) = node {
+        def.target_choice_timing = target_choice_timing_for_clause_sub(clause_ir, def);
+        node = def.sub_ability.as_deref_mut();
+    }
+    chain
+}
+
+/// CR 115.10a: whether an accepting-player body's printed text calls an object a
+/// "target" (the clause's recorded source fragment).
+fn accepting_body_prints_target(fragment: &str) -> bool {
+    nom_primitives::scan_contains(&fragment.to_lowercase(), "target ")
+}
+
+/// CR 115.10a + CR 608.2d: an accepting-player body ("any opponent may tap an
+/// untapped creature they control") whose object is described, not called a
+/// "target", declares no target: the player who accepts chooses the object while
+/// the ability resolves. A determined object ("them", "that card") or a player is
+/// not a choice of that kind and is not re-timed.
+fn accepting_player_object_timing(
+    clause_ir: &ClauseIr,
+    effect: &Effect,
+) -> Option<TargetChoiceTiming> {
+    (clause_ir.opponent_may_scope.is_some()
+        && effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref() && !filter.denotes_player_target())
+        && !accepting_body_prints_target(clause_ir.source.fragment().unwrap_or_default()))
+    .then_some(TargetChoiceTiming::Resolution)
 }
 
 /// The clause's target-choice timing from its parsed effect and printed fragment; the
@@ -13262,6 +13490,10 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
+        accepting_bindings_confined, accepting_player_bindings, operand_bindings,
+        parse_effect_clause, target_filter_controller_ref, ParsedEffectClause,
+    };
+    use super::{
         extract_put_counter_multi_target, gate_other_revealed_card_on_multiplayer_reveal,
         match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
         parse_enter_counters_clause_body, parse_where_x_quantity_expression,
@@ -13271,14 +13503,18 @@ mod tests {
         strip_trailing_duration, strip_trailing_where_x,
         value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
+    use crate::parser::oracle_ir::ast::parsed_clause;
+    use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::ClauseGapKind;
+    use crate::parser::oracle_ir::effect_chain::AcceptingPlayerBinding;
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, CardSelectionMode,
-        Chooser, ContinuousModification, DelayedTriggerCondition, Duration, Effect, ModalChoice,
-        MultiTargetSpec, ObjectProperty, ObjectScope, PerPlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SubAbilityLink, TargetFilter, TriggerDefinition, ZoneChoiceCandidateSource,
-        ZoneOwner,
+        Chooser, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
+        EffectScope, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope, OpponentMayScope,
+        PerPlayerScope, PtValue, QuantityExpr, QuantityRef, SubAbilityLink, TapStateChange,
+        TargetChoiceTiming, TargetFilter, TriggerDefinition, TypedFilter,
+        ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::TrackedSetId;
@@ -14915,6 +15151,185 @@ mod tests {
             None,
             "a named producer's category key must NOT decode as a clause-gap verdict"
         );
+    }
+
+    // ===== D15a building blocks: the accepting-player seed =====
+
+    fn creature_controlled_by(controller: ControllerRef) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().controller(controller))
+    }
+
+    fn tap(target: TargetFilter) -> Effect {
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    }
+
+    fn goad(target: TargetFilter) -> Effect {
+        Effect::Goad { target }
+    }
+
+    fn with_sub(mut clause: ParsedEffectClause, sub: AbilityDefinition) -> ParsedEffectClause {
+        clause.sub_ability = Some(Box::new(sub));
+        clause
+    }
+
+    fn binding(node: usize) -> AcceptingPlayerBinding {
+        AcceptingPlayerBinding {
+            node,
+            unseeded: creature_controlled_by(ControllerRef::You),
+            seeded: creature_controlled_by(ControllerRef::ScopedPlayer),
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d + CR 118.12: `operand_bindings` admits a seed
+    /// difference only in a direct operand of the clause's own chain; any other
+    /// difference withholds the seed from the whole clause.
+    #[test]
+    fn operand_bindings_admit_only_direct_operand_differences() {
+        let you = || creature_controlled_by(ControllerRef::You);
+        let scoped = || creature_controlled_by(ControllerRef::ScopedPlayer);
+        let spell = |effect: Effect| AbilityDefinition::new(AbilityKind::Spell, effect);
+
+        // (a) only the head's operand differs.
+        assert_eq!(
+            operand_bindings(&parsed_clause(tap(you())), parsed_clause(tap(scoped()))),
+            Some(vec![binding(0)])
+        );
+        // (b) the head's operand and its duration differ.
+        let mut seeded = parsed_clause(tap(scoped()));
+        seeded.duration = Some(Duration::UntilEndOfTurn);
+        assert_eq!(operand_bindings(&parsed_clause(tap(you())), seeded), None);
+        // (c) only a sub node's condition differs.
+        let mut conditioned = spell(goad(you()));
+        conditioned.condition = Some(AbilityCondition::IsYourTurn);
+        assert_eq!(
+            operand_bindings(
+                &with_sub(parsed_clause(tap(you())), spell(goad(you()))),
+                with_sub(parsed_clause(tap(you())), conditioned),
+            ),
+            None
+        );
+        // (d) identical parses: no binding.
+        assert_eq!(
+            operand_bindings(&parsed_clause(tap(you())), parsed_clause(tap(you()))),
+            Some(vec![])
+        );
+        // (f) equal heads; only the `Goad` sub node's operand differs.
+        assert_eq!(
+            operand_bindings(
+                &with_sub(parsed_clause(tap(you())), spell(goad(you()))),
+                with_sub(parsed_clause(tap(you())), spell(goad(scoped()))),
+            ),
+            Some(vec![binding(1)])
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d + CR 118.12: the probe parses an accepting body
+    /// with and without the seed. Reservoir Kraken's body binds its "they" to the
+    /// accepting player (e); a body whose seed also moves a context side channel
+    /// (the "of their choice" chooser) is withheld (g).
+    #[test]
+    fn accepting_player_bindings_probe_the_seeded_parse() {
+        // (e) Reservoir Kraken's accepting body.
+        let bindings = accepting_player_bindings(
+            "tap an untapped creature they control",
+            &ParseContext::default(),
+        );
+        assert_eq!(bindings.len(), 1, "{bindings:?}");
+        assert_eq!(bindings[0].node, 0);
+        assert_eq!(
+            target_filter_controller_ref(&bindings[0].unseeded),
+            Some(ControllerRef::You)
+        );
+        assert_eq!(
+            target_filter_controller_ref(&bindings[0].seeded),
+            Some(ControllerRef::ScopedPlayer)
+        );
+
+        // (g) the seed also sets `target_chooser`.
+        let text = "destroy target creature they control of their choice";
+        let destroy_controller = |clause: &ParsedEffectClause| match &clause.effect {
+            Effect::Destroy { target, .. } => target_filter_controller_ref(target),
+            other => panic!("reach-guard: expected Destroy, got {other:?}"),
+        };
+        let mut unseeded_ctx = ParseContext::default().clone_throwaway();
+        let unseeded = parse_effect_clause(text, &mut unseeded_ctx);
+        let mut seeded_ctx = ParseContext::default().clone_throwaway();
+        let seeded = seeded_ctx.with_player_scope(ControllerRef::ScopedPlayer, |ctx| {
+            parse_effect_clause(text, ctx)
+        });
+        assert_eq!(destroy_controller(&unseeded), Some(ControllerRef::You));
+        assert_eq!(unseeded_ctx.target_chooser, None);
+        assert_eq!(
+            destroy_controller(&seeded),
+            Some(ControllerRef::ScopedPlayer)
+        );
+        assert_eq!(seeded_ctx.target_chooser, Some(TargetFilter::ScopedPlayer));
+        assert_eq!(
+            accepting_player_bindings(text, &ParseContext::default()),
+            Vec::new()
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d + CR 115.10a: the seeded assembly is admitted only
+    /// where every difference sits in the direct operand of a `Resolution`-timed
+    /// node of an accepting frame (a node with `optional_for` and its
+    /// `sub_ability` chain).
+    #[test]
+    fn accepting_bindings_confined_admits_only_resolution_operands_in_an_accepting_frame() {
+        let you = || creature_controlled_by(ControllerRef::You);
+        let scoped = || creature_controlled_by(ControllerRef::ScopedPlayer);
+        let node = |effect: Effect, timing: TargetChoiceTiming| {
+            let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+            def.target_choice_timing = timing;
+            def
+        };
+        let frame = |effect: Effect, timing: TargetChoiceTiming| {
+            let mut def = node(effect, timing);
+            def.optional_for = Some(OpponentMayScope::AnyOpponent);
+            def
+        };
+        let with_sub = |mut def: AbilityDefinition, sub: AbilityDefinition| {
+            def.sub_ability = Some(Box::new(sub));
+            def
+        };
+
+        // (a) a `Resolution` node of an accepting frame.
+        assert!(accepting_bindings_confined(
+            &frame(tap(you()), TargetChoiceTiming::Resolution),
+            &frame(tap(scoped()), TargetChoiceTiming::Resolution),
+        ));
+        // (b) a `Stack` node of an accepting frame.
+        assert!(!accepting_bindings_confined(
+            &frame(tap(you()), TargetChoiceTiming::Stack),
+            &frame(tap(scoped()), TargetChoiceTiming::Stack),
+        ));
+        // (c) a `Resolution` `Goad` sub node under an accepting head.
+        assert!(accepting_bindings_confined(
+            &with_sub(
+                frame(tap(you()), TargetChoiceTiming::Resolution),
+                node(goad(you()), TargetChoiceTiming::Resolution),
+            ),
+            &with_sub(
+                frame(tap(you()), TargetChoiceTiming::Resolution),
+                node(goad(scoped()), TargetChoiceTiming::Resolution),
+            ),
+        ));
+        // (d) a `Resolution` node outside any accepting frame.
+        assert!(!accepting_bindings_confined(
+            &node(tap(you()), TargetChoiceTiming::Resolution),
+            &node(tap(scoped()), TargetChoiceTiming::Resolution),
+        ));
+        // (e) as (a), plus a condition difference.
+        let mut conditioned = frame(tap(scoped()), TargetChoiceTiming::Resolution);
+        conditioned.condition = Some(AbilityCondition::IsYourTurn);
+        assert!(!accepting_bindings_confined(
+            &frame(tap(you()), TargetChoiceTiming::Resolution),
+            &conditioned,
+        ));
     }
 }
 #[cfg(test)]

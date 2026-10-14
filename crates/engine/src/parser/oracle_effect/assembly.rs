@@ -67,6 +67,7 @@ use super::lower::{
     rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
     rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
     target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
+    timed_clause_sub_chain,
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
@@ -2957,7 +2958,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // CDT{Attach} instead of CDT{ChangeZone[+Attach]}. TargetOnly already
         // nests before wrap; mirror that for this attach-on-return shape.
         let clause_sub = if is_target_only {
-            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            def.sub_ability = timed_clause_sub_chain(clause_ir);
             // CR 701.3a + CR 303.4f: TargetOnly → ChangeZone[+Attach] (Necrotic
             // Plague) must stamp `forward_result` on the nested return so the
             // chosen host propagates into Attach (see
@@ -2980,10 +2981,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // `resolve_forward_result_search_attach_host` stamps `attach_to`
             // and skips the CR 303.4f host-choice consult.
             def.forward_result = true;
-            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            def.sub_ability = timed_clause_sub_chain(clause_ir);
             None
         } else {
-            clause_ir.parsed.sub_ability.clone()
+            timed_clause_sub_chain(clause_ir)
         };
 
         // CR 118.9 + CR 608.2g: A *standing-duration* `CastFromZone` lingering
