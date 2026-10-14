@@ -1,6 +1,9 @@
 //! Decode and handshake work must not queue behind an application handler.
 //! WebSocket control frames and the read deadline live in `socket_io`; this
 //! task also routes accepted application heartbeats around game computation.
+//! Native Full and LobbyOnly sockets answer Pong here without game admission.
+//! Shared/WASM broker callers retain `LobbyClientMessage::Ping` parity; hosted
+//! listing refreshes still use the broker's registration-aware liveness kernel.
 
 use axum::extract::ws::Message;
 use lobby_broker::LobbyRegistration;
@@ -18,18 +21,21 @@ use crate::{
 };
 
 pub(crate) async fn run(
-    mut frames: mpsc::UnboundedReceiver<Received<Message>>,
+    mut frames: mpsc::Receiver<Received<Message>>,
     mut socket: NegotiatedSocket,
     lobby: SharedLobby,
     host: watch::Receiver<Option<LobbyRegistration>>,
     mode: ServerMode,
     hello: oneshot::Sender<ClientHelloInfo>,
-    application: mpsc::UnboundedSender<Received<ClientMessage>>,
+    application: mpsc::Sender<Received<ClientMessage>>,
 ) {
     let mut hello = Some(hello);
+    let mut limiter = IngressRateLimiter::new();
+    let mut refresh: Option<HostRefresh> = None;
     while let Some(Received {
         message: frame,
         received_at,
+        mut admission,
     }) = frames.recv().await
     {
         let text = match frame {
@@ -47,17 +53,35 @@ pub(crate) async fn run(
                 continue
             }
         };
+        if let Err(limit) = admission.resize(text.len()) {
+            warn!(
+                ?limit,
+                "decoded WebSocket ingress payload capacity exceeded"
+            );
+            socket.ingress_overflow();
+            break;
+        }
         let message: ClientMessage = match serde_json::from_str(&text) {
             Ok(message) => message,
             Err(error) => {
+                if !limiter.allow() {
+                    continue;
+                }
                 warn!(%error, "failed to parse client message");
-                let reply = ServerMessage::error(format!("Invalid message: {error}"));
-                if send_reply(&mut socket, &reply).await.is_err() {
+                if socket
+                    .enqueue_reply(ServerMessage::error(format!("Invalid message: {error}")))
+                    .is_err()
+                {
                     break;
                 }
                 continue;
             }
         };
+        // JSON heartbeats are a control-plane message, not an application-rate
+        // quota consumer. Their replies are coalesced by the bounded control lane.
+        if !matches!(&message, ClientMessage::Ping { .. }) && !limiter.allow() {
+            continue;
+        }
         let rejection = match classify_hello_gate(hello.is_none(), &message, hello_acceptance(mode))
         {
             HelloGateOutcome::Accept(info) => {
@@ -105,52 +129,119 @@ pub(crate) async fn run(
             HelloGateOutcome::PassThrough => None,
         };
         if let Some(rejection) = rejection {
-            if send_reply(&mut socket, &rejection).await.is_err() {
+            if socket.enqueue_reply(rejection).is_err() {
+                break;
+            }
+            continue;
+        }
+        // Apply the existing cheap shape guards before a decoded command can
+        // wait behind a long handler. Authorization remains in the handler.
+        let rejection = if let Some(reason) = reject_if_disabled(&message, mode) {
+            Some(ServerMessage::error(reason.to_string()))
+        } else if let Err(reason) = guard_client_message_before_dispatch(&message, mode) {
+            Some(wire_rejection_message(&message, reason))
+        } else {
+            None
+        };
+        if let Some(rejection) = rejection {
+            if socket.enqueue_reply(rejection).is_err() {
                 break;
             }
             continue;
         }
         if let ClientMessage::Ping { timestamp } = &message {
-            if let Some(reason) = reject_if_disabled(&message, mode) {
-                if send_reply(&mut socket, &ServerMessage::error(reason.to_string()))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
+            socket.enqueue_pong(*timestamp);
+            if host.borrow().is_some() {
+                refresh
+                    .get_or_insert_with(|| HostRefresh::start(lobby.clone(), host.clone()))
+                    .notify();
             }
-            if let Err(reason) = guard_client_message_before_dispatch(&message, mode) {
-                if send_reply(&mut socket, &wire_rejection_message(&message, reason))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-            // Clone the stamp, not a watch read guard, across the broker await.
-            let registration = host.borrow().clone();
-            if let Some(registration) = registration {
-                let mut broker = lobby.lock().await;
-                broker.lobby_mut().refresh_liveness(&registration, &SysEnv);
-            }
-            // The broker guard is gone before any network backpressure.
-            if socket.enqueue_pong(*timestamp).await.is_err() {
-                break;
-            }
-        } else if application
-            .send(Received {
+        } else {
+            match application.try_send(Received {
                 message,
                 received_at,
-            })
-            .is_err()
-        {
-            break;
+                admission,
+            }) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    socket.ingress_overflow();
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => break,
+            }
         }
     }
 }
 
-async fn send_reply(socket: &NegotiatedSocket, reply: &ServerMessage) -> Result<(), String> {
-    socket.enqueue_reply(reply).await
+struct IngressRateLimiter {
+    inner: crate::RateLimiter,
+    dropped: u64,
+    last_warning: Option<std::time::Instant>,
+}
+
+impl IngressRateLimiter {
+    fn new() -> Self {
+        Self {
+            inner: crate::RateLimiter::new(),
+            dropped: 0,
+            last_warning: None,
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        if self.inner.check() {
+            return true;
+        }
+        self.dropped += 1;
+        let now = std::time::Instant::now();
+        if self
+            .last_warning
+            .is_none_or(|last| now.duration_since(last).as_secs() >= crate::RATE_LIMIT_WINDOW_SECS)
+        {
+            warn!(
+                dropped_application_frames = self.dropped,
+                "WebSocket application rate limit exceeded"
+            );
+            self.last_warning = Some(now);
+        }
+        false
+    }
+}
+
+/// Hosted listing refreshes coalesce independently of heartbeat replies.
+/// One task per hosting connection prevents a blocked broker from accumulating
+/// a detached task for every Ping or delaying the decoder's next Pong.
+struct HostRefresh {
+    changed: std::sync::Arc<tokio::sync::Notify>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl HostRefresh {
+    fn start(lobby: SharedLobby, host: watch::Receiver<Option<LobbyRegistration>>) -> Self {
+        let changed = std::sync::Arc::new(tokio::sync::Notify::new());
+        let worker = tokio::spawn({
+            let changed = changed.clone();
+            async move {
+                loop {
+                    changed.notified().await;
+                    let registration = host.borrow().clone();
+                    if let Some(registration) = registration {
+                        let mut broker = lobby.lock().await;
+                        broker.lobby_mut().refresh_liveness(&registration, &SysEnv);
+                    }
+                }
+            }
+        });
+        Self { changed, worker }
+    }
+
+    fn notify(&self) {
+        self.changed.notify_one();
+    }
+}
+
+impl Drop for HostRefresh {
+    fn drop(&mut self) {
+        self.worker.abort();
+    }
 }

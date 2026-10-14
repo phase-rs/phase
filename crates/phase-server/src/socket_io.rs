@@ -11,12 +11,14 @@ use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use server_core::protocol::{ServerMessage, WireFormat};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::warn;
 
-use crate::{wire, RateLimiter};
+use crate::socket_control::{CloseOrigin, Control, ControlLane, Liveness};
+use crate::socket_disconnect::{Cause, Death, Disconnect};
+use crate::socket_ingress::{Admission, IngressBudget, MAX_COMMANDS};
+use crate::wire;
 
 const PING_INTERVAL: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const WARN_PENDING_FRAMES: usize = 500;
 const WARN_PENDING_BYTES: usize = 64 * 1024 * 1024;
@@ -28,22 +30,7 @@ static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct Received<T> {
     pub(crate) message: T,
     pub(crate) received_at: Instant,
-}
-
-#[derive(Clone)]
-struct Death(watch::Sender<Option<Instant>>);
-
-impl Death {
-    fn record(&self) {
-        self.0.send_if_modified(|at| {
-            if at.is_some() {
-                false
-            } else {
-                *at = Some(Instant::now());
-                true
-            }
-        });
-    }
+    pub(crate) admission: Admission,
 }
 
 #[derive(Debug, Default)]
@@ -56,11 +43,6 @@ struct PendingMetrics {
 enum WriteOperation {
     Frame(Message),
     FinishPeerClose(Option<CloseFrame>),
-}
-
-enum WriteLane {
-    Application,
-    Control,
 }
 
 #[derive(Debug)]
@@ -117,14 +99,14 @@ impl Drop for PendingWrite {
     }
 }
 
-/// The handler-facing writer facade. A direct send still waits for its flush,
-/// but neither the socket reader nor priority control delivery waits for it.
+/// All application replies join the same typed FIFO as broadcasts. Only
+/// bounded, coalesced transport/Pong controls bypass application encoding.
 #[derive(Clone)]
 pub(crate) struct NegotiatedSocket {
-    application: mpsc::UnboundedSender<PendingWrite>,
-    control: mpsc::UnboundedSender<PendingWrite>,
+    messages: mpsc::UnboundedSender<ServerMessage>,
+    control: ControlLane,
     envelope: Arc<AtomicBool>,
-    metrics: Arc<PendingMetrics>,
+    death: Death,
 }
 
 impl NegotiatedSocket {
@@ -140,65 +122,32 @@ impl NegotiatedSocket {
         self.envelope.load(Ordering::Acquire)
     }
 
-    pub(crate) async fn send(&mut self, frame: Message) -> Result<(), axum::Error> {
-        let lane = if matches!(
-            &frame,
-            Message::Ping(_) | Message::Pong(_) | Message::Close(_)
-        ) {
-            WriteLane::Control
-        } else {
-            WriteLane::Application
-        };
-        self.send_frame(frame, lane).await.map_err(axum::Error::new)
+    pub(crate) fn enqueue_reply(
+        &self,
+        message: ServerMessage,
+    ) -> Result<(), mpsc::error::SendError<()>> {
+        self.messages
+            .send(message)
+            .map_err(|_| mpsc::error::SendError(()))
     }
 
-    /// Queue heartbeats without coupling decoder progress to an outbound flush.
-    pub(crate) async fn enqueue_pong(&self, timestamp: u64) -> Result<(), String> {
-        // Hosted-listing activity is refreshed independently; only the reply
-        // projection is stateless here, and the broker still defines its shape.
-        let reply = lobby_broker::Broker::stateless_reply(
-            &lobby_broker::ConnState::default(),
-            &lobby_broker::LobbyClientMessage::Ping { timestamp },
-        )
-        .expect("an unhosted Ping has a stateless broker reply");
-        self.enqueue(&crate::to_server_message(reply), WriteLane::Control)
-            .await
+    pub(crate) fn enqueue_pong(&self, timestamp: u64) {
+        self.control.application_pong(
+            timestamp,
+            self.uses_gzip_envelope()
+                .then_some(WireFormat::GzipEnvelopeV1),
+        );
     }
 
-    pub(crate) async fn enqueue_reply(&self, message: &ServerMessage) -> Result<(), String> {
-        self.enqueue(message, WriteLane::Application).await
-    }
-
-    async fn enqueue(&self, message: &ServerMessage, lane: WriteLane) -> Result<(), String> {
-        let json = serde_json::to_string(message).map_err(|error| error.to_string())?;
-        let frame = wire::encode_json_message(json, self.uses_gzip_envelope()).await?;
-        self.queue(lane)
-            .send(PendingWrite::new(frame, None, &self.metrics))
-            .map_err(|_| "WebSocket writer closed".to_string())
-    }
-
-    fn queue(&self, lane: WriteLane) -> &mpsc::UnboundedSender<PendingWrite> {
-        match lane {
-            WriteLane::Application => &self.application,
-            WriteLane::Control => &self.control,
-        }
-    }
-
-    async fn send_frame(&self, frame: Message, lane: WriteLane) -> Result<(), String> {
-        let frame = match frame {
-            Message::Text(json) if self.uses_gzip_envelope() => {
-                wire::encode_json_message(json.to_string(), true).await?
-            }
-            other => other,
-        };
-        let (acknowledgement, completed) = oneshot::channel();
-        let pending = PendingWrite::new(frame, Some(acknowledgement), &self.metrics);
-        self.queue(lane)
-            .send(pending)
-            .map_err(|_| "WebSocket writer closed".to_string())?;
-        completed
-            .await
-            .map_err(|_| "WebSocket writer closed".to_string())?
+    pub(crate) fn ingress_overflow(&self) {
+        self.control.close(
+            Some(CloseFrame {
+                code: 1013,
+                reason: Default::default(),
+            }),
+            CloseOrigin::Server,
+            || self.death.record(Cause::IngressOverflow),
+        );
     }
 }
 
@@ -216,16 +165,20 @@ impl SocketTasks {
         self.decoder = Some(decoder);
     }
 
-    pub(crate) fn closed(&self) -> watch::Receiver<Option<Instant>> {
-        self.death.0.subscribe()
+    pub(crate) fn closed(&self) -> watch::Receiver<Option<Disconnect>> {
+        self.death.closed()
     }
 
     pub(crate) fn disconnected_at(&self) -> Option<Instant> {
-        *self.death.0.borrow()
+        self.death.event().map(|event| event.at)
+    }
+
+    pub(crate) fn disconnect(&self) -> Option<Disconnect> {
+        self.death.event()
     }
 
     pub(crate) async fn shutdown(mut self) {
-        self.death.record();
+        self.death.record(Cause::ApplicationEnd);
         if let Some(decoder) = self.decoder.take() {
             decoder.abort();
             let _ = decoder.await;
@@ -241,7 +194,7 @@ impl SocketTasks {
 
 impl Drop for SocketTasks {
     fn drop(&mut self) {
-        self.death.record();
+        self.death.record(Cause::ApplicationEnd);
         self.reader.abort();
         self.encoder.abort();
         self.writer.abort();
@@ -251,43 +204,56 @@ impl Drop for SocketTasks {
     }
 }
 
+pub(crate) struct SocketConfig {
+    pub(crate) replies: mpsc::UnboundedSender<ServerMessage>,
+    pub(crate) metrics: Arc<crate::metrics::ServerMetrics>,
+    #[cfg(test)]
+    pub(crate) hooks: crate::socket_test_hooks::Hooks,
+}
+
 pub(crate) fn start(
     socket: WebSocket,
     mut messages: mpsc::UnboundedReceiver<ServerMessage>,
+    config: SocketConfig,
 ) -> (
     NegotiatedSocket,
-    mpsc::UnboundedReceiver<Received<Message>>,
+    mpsc::Receiver<Received<Message>>,
     SocketTasks,
 ) {
+    #[cfg(test)]
+    let hooks = config.hooks;
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (sink, stream) = socket.split();
-    let (death_tx, _death_rx) = watch::channel(None);
-    let death = Death(death_tx);
+    let death = Death::new(config.metrics, connection);
+    let liveness = Liveness::default();
     let envelope = Arc::new(AtomicBool::new(false));
     let metrics = Arc::new(PendingMetrics::default());
-    let (application, application_rx) = mpsc::unbounded_channel::<PendingWrite>();
-    let (control, control_rx) = mpsc::unbounded_channel::<PendingWrite>();
-    let (incoming, incoming_rx) = mpsc::unbounded_channel();
+    let (application, application_rx) = mpsc::channel::<PendingWrite>(1);
+    let control = ControlLane::default();
+    let (incoming, incoming_rx) = mpsc::channel(MAX_COMMANDS);
     let facade = NegotiatedSocket {
-        application: application.clone(),
+        messages: config.replies,
         control: control.clone(),
         envelope: envelope.clone(),
-        metrics: metrics.clone(),
+        death: death.clone(),
     };
 
     let reader = tokio::spawn(read_socket(
         stream,
-        control,
+        control.clone(),
         incoming,
         death.clone(),
-        metrics.clone(),
+        liveness.clone(),
+        IngressBudget::default(),
         connection,
     ));
 
     let encoder = tokio::spawn({
         let death = death.clone();
-        let mut closed = death.0.subscribe();
+        let mut closed = death.closed();
         let metrics = metrics.clone();
+        #[cfg(test)]
+        let hooks = hooks.clone();
         async move {
             let mut sample = tokio::time::interval(Duration::from_secs(1));
             sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -303,6 +269,8 @@ pub(crate) fn start(
                     message = messages.recv() => match message { Some(message) => message, None => break },
                 };
                 sample_backlog(connection, messages.len() + 1, &metrics, &mut warned);
+                #[cfg(test)]
+                hooks.before_encode(&message).await;
                 let encoding = encode_application(message, envelope.load(Ordering::Acquire));
                 tokio::pin!(encoding);
                 let frame = loop {
@@ -323,13 +291,14 @@ pub(crate) fn start(
                     }
                     Err(EncodingFailure::Transport(error)) => {
                         warn!(connection, %error, "WebSocket application encoding failed");
-                        death.record();
+                        death.record(Cause::EncodingFailure);
                         break;
                     }
                 };
                 let (flushed, mut completion) = oneshot::channel();
                 if application
                     .send(PendingWrite::new(frame, Some(flushed), &metrics))
+                    .await
                     .is_err()
                 {
                     break;
@@ -346,7 +315,7 @@ pub(crate) fn start(
                     }
                 };
                 if !matches!(result, Ok(Ok(()))) {
-                    death.record();
+                    death.record(Cause::WriteFailure);
                     break;
                 }
             }
@@ -356,9 +325,10 @@ pub(crate) fn start(
     let writer = tokio::spawn(write_socket(
         sink,
         application_rx,
-        control_rx,
+        control,
         death.clone(),
         metrics,
+        liveness,
     ));
 
     (
@@ -376,26 +346,50 @@ pub(crate) fn start(
 
 async fn write_socket<S>(
     mut sink: S,
-    mut application: mpsc::UnboundedReceiver<PendingWrite>,
-    mut control: mpsc::UnboundedReceiver<PendingWrite>,
+    mut application: mpsc::Receiver<PendingWrite>,
+    control: ControlLane,
     death: Death,
     metrics: Arc<PendingMetrics>,
+    liveness: Liveness,
 ) where
     S: Sink<Message, Error = axum::Error> + Unpin,
 {
-    let mut closed = death.0.subscribe();
+    enum NextWrite {
+        Control(Control),
+        Application(PendingWrite),
+        Ping,
+    }
+    let mut closed = death.closed();
     let mut ping =
         tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut shutdown_deadline = None;
     loop {
-        let mut pending = tokio::select! {
+        let next = tokio::select! {
             biased;
-            Some(pending) = control.recv() => pending,
-            _ = closed.wait_for(Option::is_some) => break,
-            _ = ping.tick() => PendingWrite::new(Message::Ping(Vec::new().into()), None, &metrics),
-            Some(pending) = application.recv() => pending,
-            else => break,
+            next = control.next() => NextWrite::Control(next),
+            _ = closed.wait_for(Option::is_some) => {
+                // Detection publishes Close while holding the control lock.
+                // Recheck after a same-poll race with the death notification.
+                match control.take_ready() {
+                    Some(next) => NextWrite::Control(next),
+                    None => break,
+                }
+            }
+            _ = ping.tick() => NextWrite::Ping,
+            Some(pending) = application.recv() => NextWrite::Application(pending),
+        };
+        let mut pending = match next {
+            NextWrite::Application(pending) => pending,
+            NextWrite::Ping => PendingWrite::new(Message::Ping(Vec::new().into()), None, &metrics),
+            NextWrite::Control(control) => match pending_control(control, &metrics).await {
+                Ok(pending) => pending,
+                Err(error) => {
+                    warn!(%error, "WebSocket control encoding failed");
+                    death.record(Cause::EncodingFailure);
+                    break;
+                }
+            },
         };
         let operation = pending
             .operation
@@ -405,14 +399,14 @@ async fn write_socket<S>(
             &operation,
             WriteOperation::Frame(Message::Close(_)) | WriteOperation::FinishPeerClose(_)
         );
-        // Priority traffic never preempts a partially written frame. Once the
-        // transport is dead, bound teardown independently of application work.
+        let server_ping = matches!(&operation, WriteOperation::Frame(Message::Ping(_)));
+        let started = liveness.write_started();
+        // A control operation cannot preempt the current RFC 6455 frame.
         let write = async {
             match operation {
                 WriteOperation::Frame(frame) => sink.send(frame).await,
-                // The reader already queued tungstenite's Close echo. Sending
-                // another frame is rejected as SendAfterClosing; poll_close
-                // flushes that automatic response before releasing the socket.
+                // Reading Close already queued the library's echo. poll_close
+                // flushes it without attempting a second SendAfterClosing.
                 WriteOperation::FinishPeerClose(_) => sink.close().await,
             }
         };
@@ -422,15 +416,19 @@ async fn write_socket<S>(
             result = &mut write => result.map_err(|error| error.to_string()),
             _ = async { let _ = closed.wait_for(Option::is_some).await; } => {
                 let deadline = *shutdown_deadline.get_or_insert_with(
-                    || tokio::time::Instant::now() + SHUTDOWN_TIMEOUT,
-                );
+                    || tokio::time::Instant::now() + SHUTDOWN_TIMEOUT);
                 match tokio::time::timeout_at(deadline, &mut write).await {
                     Ok(result) => result.map_err(|error| error.to_string()),
                     Err(_) => Err("WebSocket transport closed during write".to_string()),
                 }
             }
         };
+        liveness.write_finished((server_ping && result.is_ok()).then_some(started));
         let failed = result.is_err();
+        if let Err(error) = &result {
+            warn!(%error, "WebSocket write failed");
+            death.record(Cause::WriteFailure);
+        }
         if let Some(acknowledgement) = pending.acknowledgement.take() {
             let _ = acknowledgement.send(result);
         }
@@ -438,79 +436,148 @@ async fn write_socket<S>(
             break;
         }
     }
-    death.record();
-    // A queued Pong can lose a race with an incoming Close too. Even on that
-    // write error, flush the library's automatic Close echo before dropping
-    // the stream, without extending the transport's teardown deadline.
+    death.record(Cause::ApplicationEnd);
     let deadline =
         shutdown_deadline.unwrap_or_else(|| tokio::time::Instant::now() + SHUTDOWN_TIMEOUT);
     let _ = tokio::time::timeout_at(deadline, sink.close()).await;
 }
 
+async fn pending_control(
+    control: Control,
+    metrics: &Arc<PendingMetrics>,
+) -> Result<PendingWrite, String> {
+    let operation = match control {
+        Control::Close {
+            frame,
+            origin: CloseOrigin::Peer,
+        } => WriteOperation::FinishPeerClose(frame),
+        Control::Close {
+            frame,
+            origin: CloseOrigin::Server,
+        } => WriteOperation::Frame(Message::Close(frame)),
+        Control::NativePong(bytes) => WriteOperation::Frame(Message::Pong(bytes)),
+        Control::ApplicationPong { timestamp, format } => {
+            let envelope = matches!(format, Some(WireFormat::GzipEnvelopeV1));
+            // Host activity refresh is independent; the broker remains the
+            // single authority for the coalesced application heartbeat reply.
+            let reply = lobby_broker::Broker::stateless_reply(
+                &lobby_broker::ConnState::default(),
+                &lobby_broker::LobbyClientMessage::Ping { timestamp },
+            )
+            .expect("an unhosted Ping has a stateless broker reply");
+            let json = serde_json::to_string(&crate::to_server_message(reply))
+                .map_err(|error| error.to_string())?;
+            WriteOperation::Frame(wire::encode_json_message(json, envelope).await?)
+        }
+    };
+    Ok(PendingWrite::from_operation(operation, None, metrics))
+}
+
 async fn read_socket<S>(
     mut stream: S,
-    control: mpsc::UnboundedSender<PendingWrite>,
-    incoming: mpsc::UnboundedSender<Received<Message>>,
+    control: ControlLane,
+    incoming: mpsc::Sender<Received<Message>>,
     death: Death,
-    metrics: Arc<PendingMetrics>,
+    liveness: Liveness,
+    budget: IngressBudget,
     connection: u64,
 ) where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
-    let mut closed = death.0.subscribe();
-    let mut limiter = RateLimiter::new();
+    let mut closed = death.closed();
+    let mut activity = liveness.reader();
     loop {
+        let deadline = activity.borrow_and_update().deadline();
         let next = tokio::select! {
             biased;
             _ = closed.wait_for(Option::is_some) => break,
-            next = tokio::time::timeout(READ_TIMEOUT, stream.next()) => next,
-        };
-        match next {
-            Ok(Some(Ok(Message::Ping(bytes)))) => {
-                // RFC 6455 section 5.5.2: Pong echoes the Ping payload.
-                let _ = control.send(PendingWrite::new(Message::Pong(bytes), None, &metrics));
+            // A buffered response wins over an overdue timer after starvation.
+            next = stream.next() => next,
+            _ = activity.changed() => continue,
+            _ = response_timeout(deadline) => {
+                if activity.borrow().deadline().is_some_and(|at| at <= tokio::time::Instant::now()) {
+                    warn!(connection, "WebSocket heartbeat response deadline expired");
+                    control.close(Some(CloseFrame { code: 1001, reason: Default::default() }), CloseOrigin::Server,
+                        || death.record(Cause::ReadDeadline));
+                    break;
+                }
+                continue;
             }
-            Ok(Some(Ok(Message::Pong(_)))) => {}
-            Ok(Some(Ok(Message::Close(close)))) => {
-                let _ = control.send(PendingWrite::from_operation(
-                    WriteOperation::FinishPeerClose(close),
-                    None,
-                    &metrics,
-                ));
+        };
+        if matches!(&next, Some(Ok(_))) {
+            liveness.received();
+        }
+        match next {
+            Some(Ok(Message::Ping(bytes))) => {
+                // Keep only the latest unsent native Pong payload.
+                control.native_pong(bytes);
+            }
+            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Close(close))) => {
+                let code = close.as_ref().map(|frame| frame.code);
+                control.close(close, CloseOrigin::Peer, || death.peer_close(code));
                 break;
             }
-            Ok(Some(Ok(frame @ (Message::Text(_) | Message::Binary(_))))) => {
-                if limiter.check() {
-                    if incoming
-                        .send(Received {
-                            message: frame,
-                            received_at: Instant::now(),
-                        })
-                        .is_err()
-                    {
+            Some(Ok(frame @ (Message::Text(_) | Message::Binary(_)))) => {
+                let bytes = match &frame {
+                    Message::Text(text) => text.len(),
+                    Message::Binary(bytes) => bytes.len(),
+                    Message::Ping(_) | Message::Pong(_) | Message::Close(_) => unreachable!(),
+                };
+                let admission = match budget.admit(bytes) {
+                    Ok(admission) => admission,
+                    Err(limit) => {
+                        warn!(connection, ?limit, usage = ?budget.usage(), "WebSocket ingress capacity exceeded");
+                        control.close(
+                            Some(CloseFrame {
+                                code: 1013,
+                                reason: Default::default(),
+                            }),
+                            CloseOrigin::Server,
+                            || death.record(Cause::IngressOverflow),
+                        );
                         break;
                     }
-                } else {
-                    debug!(
-                        connection,
-                        "rate limit exceeded, dropping application message"
-                    );
+                };
+                match incoming.try_send(Received {
+                    message: frame,
+                    received_at: Instant::now(),
+                    admission,
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        control.close(
+                            Some(CloseFrame {
+                                code: 1013,
+                                reason: Default::default(),
+                            }),
+                            CloseOrigin::Server,
+                            || death.record(Cause::IngressOverflow),
+                        );
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
-            Ok(Some(Err(error))) => {
-                debug!(connection, %error, "WebSocket read failed");
+            Some(Err(error)) => {
+                warn!(connection, %error, "WebSocket read failed");
+                death.read_error(&error);
                 break;
             }
-            Ok(None) => break,
-            Err(_) => {
-                warn!(connection, "WebSocket read deadline expired");
-                let _ = control.send(PendingWrite::new(Message::Close(None), None, &metrics));
+            None => {
+                death.record(Cause::ReadEof);
                 break;
             }
         }
     }
-    // Capture the instant here, not after a game/session lock is available.
-    death.record();
+    death.record(Cause::ApplicationEnd);
+}
+
+async fn response_timeout(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 enum EncodingFailure {
@@ -522,13 +589,13 @@ async fn encode_application(
     message: ServerMessage,
     envelope: bool,
 ) -> Result<Message, EncodingFailure> {
-    let json = tokio::task::spawn_blocking(move || serde_json::to_string(&message))
-        .await
-        .map_err(|error| EncodingFailure::Transport(error.to_string()))?
-        .map_err(EncodingFailure::Serialization)?;
-    wire::encode_json_message(json, envelope)
-        .await
-        .map_err(EncodingFailure::Transport)
+    let envelope = envelope && !matches!(&message, ServerMessage::ServerHello { .. });
+    tokio::task::spawn_blocking(move || {
+        let json = serde_json::to_string(&message).map_err(EncodingFailure::Serialization)?;
+        wire::encode_json_message_sync(json, envelope).map_err(EncodingFailure::Transport)
+    })
+    .await
+    .map_err(|error| EncodingFailure::Transport(error.to_string()))?
 }
 
 fn sample_backlog(
@@ -559,64 +626,7 @@ fn sample_backlog(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn read_deadline_tracks_transport_activity_not_application_progress() {
-        let (frames, mut stream_rx) = mpsc::unbounded_channel();
-        let (polled, first_poll) = oneshot::channel();
-        let mut polled = Some(polled);
-        let stream = futures_util::stream::poll_fn(move |cx| {
-            if let Some(polled) = polled.take() {
-                let _ = polled.send(());
-            }
-            stream_rx.poll_recv(cx)
-        });
-        let (control, mut control_rx) = mpsc::unbounded_channel();
-        let (incoming, mut incoming_rx) = mpsc::unbounded_channel();
-        let (death_tx, _) = watch::channel(None);
-        let death = Death(death_tx);
-        let mut closed = death.0.subscribe();
-        let reader = tokio::spawn(read_socket(
-            stream,
-            control,
-            incoming,
-            death.clone(),
-            Arc::default(),
-            1,
-        ));
-        first_poll.await.expect("reader polled the stream");
-        tokio::time::advance(Duration::from_secs(40)).await;
-        frames.send(Ok(Message::text("application frame"))).unwrap();
-        assert!(matches!(incoming_rx.recv().await,
-            Some(Received { message: Message::Text(text), .. }) if text == "application frame"));
-        tokio::time::advance(Duration::from_secs(44)).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some))
-                .await
-                .is_err(),
-            "recent traffic keeps the transport alive"
-        );
-        tokio::time::advance(Duration::from_secs(1)).await;
-        let detected =
-            *tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some))
-                .await
-                .expect("45-second read deadline")
-                .unwrap();
-        assert!(matches!(
-            control_rx
-                .recv()
-                .await
-                .and_then(|mut pending| pending.operation.take()),
-            Some(WriteOperation::Frame(Message::Close(None)))
-        ));
-        reader.await.unwrap();
-        death.record();
-        assert_eq!(
-            *death.0.borrow(),
-            detected,
-            "cleanup cannot restart the grace clock"
-        );
-    }
+    use crate::socket_control::RESPONSE_TIMEOUT;
 
     #[tokio::test]
     async fn priority_control_waits_for_current_write_then_overtakes_unsent_frames() {
@@ -634,32 +644,28 @@ mod tests {
                 Ok::<_, axum::Error>((blocked, started, written))
             },
         ));
-        let (application, application_rx) = mpsc::unbounded_channel();
-        let (control, control_rx) = mpsc::unbounded_channel();
-        let (death_tx, _) = watch::channel(None);
-        let death = Death(death_tx);
+        let (application, application_rx) = mpsc::channel(1);
+        let control = ControlLane::default();
+        let death = Death::new(Arc::default(), 0);
         let metrics = Arc::new(PendingMetrics::default());
         let writer = tokio::spawn(write_socket(
             sink,
             application_rx,
-            control_rx,
+            control.clone(),
             death.clone(),
             metrics.clone(),
+            Liveness::default(),
         ));
         application
             .send(PendingWrite::new(Message::text("first"), None, &metrics))
+            .await
             .unwrap();
         writing.await.unwrap();
         application
             .send(PendingWrite::new(Message::text("second"), None, &metrics))
+            .await
             .unwrap();
-        control
-            .send(PendingWrite::new(
-                Message::Pong(vec![42].into()),
-                None,
-                &metrics,
-            ))
-            .unwrap();
+        control.native_pong(axum::body::Bytes::from_static(&[42]));
         assert!(
             matches!(writes.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "control cannot preempt the frame already being written"
@@ -667,10 +673,10 @@ mod tests {
         gate.send(()).unwrap();
         assert!(matches!(writes.recv().await, Some(Message::Text(text)) if text == "first"));
         assert!(
-            matches!(writes.recv().await, Some(Message::Pong(bytes)) if bytes.as_ref() == &[42])
+            matches!(writes.recv().await, Some(Message::Pong(bytes)) if bytes.as_ref() == [42])
         );
         assert!(matches!(writes.recv().await, Some(Message::Text(text)) if text == "second"));
-        death.record();
+        death.record(Cause::ApplicationEnd);
         writer.await.unwrap();
     }
 
@@ -683,103 +689,31 @@ mod tests {
                 if let Some(started) = started.take() {
                     let _ = started.send(());
                 }
-                futures_util::future::pending::<Result<Option<oneshot::Sender<()>>, axum::Error>>()
-                    .await
+                std::future::pending::<Result<Option<oneshot::Sender<()>>, axum::Error>>().await
             },
         ));
-        let (application, application_rx) = mpsc::unbounded_channel();
-        let (_control, control_rx) = mpsc::unbounded_channel();
-        let (death_tx, _) = watch::channel(None);
-        let death = Death(death_tx);
+        let (application, application_rx) = mpsc::channel(1);
+        let death = Death::new(Arc::default(), 0);
         let metrics = Arc::new(PendingMetrics::default());
         let writer = tokio::spawn(write_socket(
             sink,
             application_rx,
-            control_rx,
+            ControlLane::default(),
             death.clone(),
             metrics.clone(),
+            Liveness::default(),
         ));
         application
             .send(PendingWrite::new(Message::text("blocked"), None, &metrics))
+            .await
             .unwrap();
         writing.await.unwrap();
-        death.record();
+        death.record(Cause::ReadEof);
         tokio::time::timeout(SHUTDOWN_TIMEOUT + Duration::from_millis(1), writer)
             .await
-            .expect("dead transport teardown cannot wait for a game handler")
+            .expect("dead transport teardown waited for a handler")
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn decoder_progresses_while_replies_wait_for_the_writer() {
-        use server_core::protocol::{
-            build_commit, ClientMessage, ServerMode, LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
-        };
-
-        let (application, mut replies) = mpsc::unbounded_channel();
-        let (control, mut priority) = mpsc::unbounded_channel();
-        let socket = NegotiatedSocket {
-            application,
-            control,
-            envelope: Arc::new(AtomicBool::new(false)),
-            metrics: Arc::default(),
-        };
-        let (frames, incoming) = mpsc::unbounded_channel();
-        let (commands, mut received) = mpsc::unbounded_channel();
-        let (hello, _accepted) = oneshot::channel();
-        let (_host, host) = watch::channel(None);
-        let decoder = tokio::spawn(crate::socket_decode::run(
-            incoming,
-            socket,
-            Arc::new(tokio::sync::Mutex::new(lobby_broker::Broker::new())),
-            host,
-            ServerMode::Full,
-            hello,
-            commands,
-        ));
-        let hello = ClientMessage::ClientHello {
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-            build_commit: build_commit().to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
-            wire_formats: Vec::new(),
-        };
-        for json in [
-            serde_json::to_string(&hello).unwrap(),
-            "{".to_string(),
-            serde_json::to_string(&ClientMessage::Ping { timestamp: 77 }).unwrap(),
-            serde_json::to_string(&ClientMessage::SubscribeLobby).unwrap(),
-        ] {
-            frames
-                .send(Received {
-                    message: Message::text(json),
-                    received_at: Instant::now(),
-                })
-                .unwrap();
-        }
-        // Neither outbound queue is polled or acknowledged until an ordinary
-        // command has crossed the decoder. Backpressure cannot stall ingress.
-        let command = tokio::time::timeout(Duration::from_secs(1), received.recv())
-            .await
-            .expect("decoder waited for an outbound flush")
-            .unwrap();
-        assert!(matches!(command.message, ClientMessage::SubscribeLobby));
-        let mut reply = replies.try_recv().expect("parse error was retained");
-        assert!(matches!(
-            reply.operation.take(),
-            Some(WriteOperation::Frame(Message::Text(json)))
-                if matches!(serde_json::from_str::<ServerMessage>(&json).unwrap(),
-                    ServerMessage::Error { .. })
-        ));
-        let mut pong = priority.try_recv().expect("heartbeat reply was retained");
-        assert!(matches!(
-            pong.operation.take(),
-            Some(WriteOperation::Frame(Message::Text(json)))
-                if matches!(serde_json::from_str::<ServerMessage>(&json).unwrap(),
-                    ServerMessage::Pong { timestamp: 77 })
-        ));
-        drop(frames);
-        decoder.await.unwrap();
+        assert_eq!(death.event().unwrap().cause, Cause::ReadEof);
     }
 
     #[tokio::test(start_paused = true)]
@@ -792,44 +726,229 @@ mod tests {
                 Ok::<_, axum::Error>(written)
             },
         ));
-        let (_application, application_rx) = mpsc::unbounded_channel();
-        let (control, control_rx) = mpsc::unbounded_channel();
-        let (death_tx, _) = watch::channel(None);
-        let death = Death(death_tx);
-        let metrics = Arc::new(PendingMetrics::default());
+        let (_application, application_rx) = mpsc::channel(1);
+        let control = ControlLane::default();
+        let death = Death::new(Arc::default(), 0);
         let writer = tokio::spawn(write_socket(
             sink,
             application_rx,
-            control_rx,
+            control.clone(),
             death.clone(),
-            metrics.clone(),
+            Arc::default(),
+            Liveness::default(),
         ));
-        let (flushed, flush) = oneshot::channel();
-        control
-            .send(PendingWrite::new(
-                Message::Pong(Vec::new().into()),
-                Some(flushed),
-                &metrics,
-            ))
-            .unwrap();
-        flush.await.unwrap().unwrap();
-        let _ = writes.recv().await.unwrap();
+        control.native_pong(axum::body::Bytes::new());
+        assert!(matches!(writes.recv().await, Some(Message::Pong(_))));
         tokio::time::advance(Duration::from_secs(9)).await;
         assert!(
             tokio::time::timeout(Duration::from_millis(1), writes.recv())
                 .await
-                .is_err(),
-            "server Ping must not run before the ten-second interval"
+                .is_err()
         );
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(matches!(
             tokio::time::timeout(Duration::from_millis(1), writes.recv())
                 .await
-                .expect("server Ping is due after ten seconds"),
+                .expect("server Ping was not sent without application traffic"),
             Some(Message::Ping(_))
         ));
-        death.record();
+        death.record(Cause::ApplicationEnd);
         writer.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonreading_peer_control_flood_has_constant_retained_memory_and_close_priority() {
+        let (started, writing) = oneshot::channel();
+        let sink = Box::pin(futures_util::sink::unfold(
+            Some(started),
+            |mut started, _frame| async move {
+                if let Some(started) = started.take() {
+                    let _ = started.send(());
+                }
+                std::future::pending::<Result<Option<oneshot::Sender<()>>, axum::Error>>().await
+            },
+        ));
+        let (application, application_rx) = mpsc::channel(1);
+        let control = ControlLane::default();
+        let death = Death::new(Arc::default(), 0);
+        let metrics = Arc::new(PendingMetrics::default());
+        let writer = tokio::spawn(write_socket(
+            sink,
+            application_rx,
+            control.clone(),
+            death.clone(),
+            metrics.clone(),
+            Liveness::default(),
+        ));
+        application
+            .send(PendingWrite::new(Message::text("blocked"), None, &metrics))
+            .await
+            .unwrap();
+        writing.await.unwrap();
+        for timestamp in 0..10_000 {
+            control.native_pong(axum::body::Bytes::from_static(&[7; 125]));
+            control.application_pong(timestamp, None);
+        }
+        assert_eq!(control.pending_count(), 2);
+        assert_eq!(metrics.frames.load(Ordering::Relaxed), 1);
+        control.close(
+            Some(CloseFrame {
+                code: 1013,
+                reason: Default::default(),
+            }),
+            CloseOrigin::Server,
+            || death.record(Cause::IngressOverflow),
+        );
+        assert_eq!(control.pending_count(), 1);
+        tokio::time::timeout(SHUTDOWN_TIMEOUT + Duration::from_millis(1), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(death.event().unwrap().cause, Cause::IngressOverflow);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flushed_ping_response_expiry_records_the_first_clock_and_close_cause() {
+        let (polled, first_poll) = oneshot::channel();
+        let mut polled = Some(polled);
+        let stream = futures_util::stream::poll_fn(move |_| {
+            if let Some(polled) = polled.take() {
+                let _ = polled.send(());
+            }
+            std::task::Poll::Pending
+        });
+        let control = ControlLane::default();
+        let death = Death::new(Arc::default(), 0);
+        let mut closed = death.closed();
+        let liveness = Liveness::default();
+        let ping = liveness.write_started();
+        liveness.write_finished(Some(ping));
+        let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+        let reader = tokio::spawn(read_socket(
+            stream,
+            control.clone(),
+            incoming,
+            death.clone(),
+            liveness,
+            IngressBudget::default(),
+            0,
+        ));
+        first_poll.await.unwrap();
+        tokio::time::advance(RESPONSE_TIMEOUT + Duration::from_secs(1)).await;
+        let first =
+            *tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some))
+                .await
+                .expect("an unanswered flushed Ping must expire")
+                .unwrap();
+        assert!(
+            matches!(control.take_ready(), Some(Control::Close { frame: Some(frame), origin: CloseOrigin::Server })
+            if frame.code == 1001)
+        );
+        reader.await.unwrap();
+        death.record(Cause::ApplicationEnd);
+        assert_eq!(death.event(), first);
+        assert_eq!(first.unwrap().cause, Cause::ReadDeadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffered_native_response_wins_after_runtime_starvation_without_client_json_ping() {
+        let liveness = Liveness::default();
+        let ping = liveness.write_started();
+        liveness.write_finished(Some(ping));
+        tokio::time::advance(RESPONSE_TIMEOUT * 3).await;
+        let (frames, mut stream_rx) = mpsc::unbounded_channel();
+        frames.send(Ok(Message::Pong(Vec::new().into()))).unwrap();
+        let (polled, first_poll) = oneshot::channel();
+        let mut polled = Some(polled);
+        let stream = futures_util::stream::poll_fn(move |cx| {
+            let next = stream_rx.poll_recv(cx);
+            if let Some(polled) = polled.take() {
+                let _ = polled.send(());
+            }
+            next
+        });
+        let death = Death::new(Arc::default(), 0);
+        let mut closed = death.closed();
+        let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+        let reader = tokio::spawn(read_socket(
+            stream,
+            ControlLane::default(),
+            incoming,
+            death,
+            liveness,
+            IngressBudget::default(),
+            0,
+        ));
+        first_poll.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some))
+                .await
+                .is_err(),
+            "a buffered protocol response was discarded after scheduler starvation"
+        );
+        reader.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_slower_than_the_response_budget_cannot_close_a_healthy_peer() {
+        let (gate, blocked) = oneshot::channel();
+        let (started, writing) = oneshot::channel();
+        let sink = Box::pin(futures_util::sink::unfold(
+            (Some(blocked), Some(started)),
+            |(mut blocked, mut started), _frame| async move {
+                if let Some(blocked) = blocked.take() {
+                    let _ = started.take().unwrap().send(());
+                    blocked.await.unwrap();
+                }
+                Ok::<_, axum::Error>((blocked, started))
+            },
+        ));
+        let liveness = Liveness::default();
+        // An earlier Ping was already flushed before the slow frame began.
+        let ping = liveness.write_started();
+        liveness.write_finished(Some(ping));
+        let death = Death::new(Arc::default(), 0);
+        let mut closed = death.closed();
+        let (application, application_rx) = mpsc::channel(1);
+        let writer = tokio::spawn(write_socket(
+            sink,
+            application_rx,
+            ControlLane::default(),
+            death.clone(),
+            Arc::default(),
+            liveness.clone(),
+        ));
+        application
+            .send(PendingWrite::new(
+                Message::text("slow state frame"),
+                None,
+                &Arc::default(),
+            ))
+            .await
+            .unwrap();
+        writing.await.unwrap();
+        let stream = futures_util::stream::pending();
+        let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+        let reader = tokio::spawn(read_socket(
+            stream,
+            ControlLane::default(),
+            incoming,
+            death.clone(),
+            liveness.clone(),
+            IngressBudget::default(),
+            0,
+        ));
+        tokio::time::advance(RESPONSE_TIMEOUT * 3).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some))
+                .await
+                .is_err(),
+            "a healthy slow transfer was mistaken for an unanswered heartbeat"
+        );
+        gate.send(()).unwrap();
+        death.record(Cause::ApplicationEnd);
+        writer.await.unwrap();
+        reader.await.unwrap();
     }
 }
 
@@ -909,5 +1028,144 @@ mod socket_tests {
         .await;
         server.abort();
         result.expect("greeting or heartbeat waited for player-count publication");
+    }
+}
+
+#[cfg(test)]
+mod transport_fixup_tests {
+    use super::*;
+    use crate::game_submission_tests::connect_and_hello;
+    use crate::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+    use server_core::protocol::ClientMessage;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    #[tokio::test]
+    async fn blocked_handler_ingress_overflow_closes_explicitly_with_1013() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let metrics_url = format!(
+            "http://{}/metrics",
+            url.strip_prefix("ws://")
+                .and_then(|address| address.strip_suffix("/ws"))
+                .expect("test WebSocket URL")
+        );
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = connect_and_hello(url).await;
+            let held = app.lobby.lock().await;
+            // Unknown additive fields are valid at the serde boundary. Charge
+            // their raw bytes even when the decoded unit command is smaller.
+            let frame = serde_json::json!({
+                "type": "SubscribeLobby",
+                "padding": "x".repeat(60 * 1024),
+            })
+            .to_string();
+            for _ in 0..20 {
+                socket
+                    .send(WsMessage::Text(frame.clone().into()))
+                    .await
+                    .unwrap();
+            }
+            loop {
+                match socket.next().await {
+                    Some(Ok(WsMessage::Close(Some(close)))) => {
+                        assert_eq!(u16::from(close.code), 1013);
+                        break;
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("overflow must be an explicit retryable close: {other:?}"),
+                }
+            }
+            // Transport death must be observable even while the application
+            // handler is still waiting for its broker lock.
+            let body = reqwest::get(&metrics_url)
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(
+                body.contains("phase_ws_disconnects_total{cause=\"ingress_overflow\"} 1\n"),
+                "scrape lost the first transport failure: {body}"
+            );
+            drop(held);
+        })
+        .await;
+        server.abort();
+        result.expect("a blocked handler retained an unbounded ingress backlog");
+    }
+
+    #[tokio::test]
+    async fn json_ping_survives_an_exhausted_application_rate_limit() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut socket = connect_and_hello(url).await;
+            let held = app.lobby.lock().await;
+            for _ in 0..40 {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&ClientMessage::SubscribeLobby)
+                            .unwrap()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Ping { timestamp: 90_001 })
+                        .unwrap()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                if matches!(
+                    recv_server_message(&mut socket).await,
+                    ServerMessage::Pong { timestamp: 90_001 }
+                ) {
+                    break;
+                }
+            }
+            drop(held);
+        })
+        .await;
+        server.abort();
+        result.expect("rate limiting silently discarded the heartbeat");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reader_does_not_expire_without_a_flushed_server_ping() {
+        let (_frames, mut stream_rx) = mpsc::unbounded_channel();
+        let (polled, first_poll) = oneshot::channel();
+        let mut polled = Some(polled);
+        let stream = futures_util::stream::poll_fn(move |cx| {
+            if let Some(polled) = polled.take() {
+                let _ = polled.send(());
+            }
+            stream_rx.poll_recv(cx)
+        });
+        let control = ControlLane::default();
+        let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+        let death = Death::new(Arc::default(), 0);
+        let mut closed = death.closed();
+        let reader = tokio::spawn(read_socket(
+            stream,
+            control,
+            incoming,
+            death,
+            Liveness::default(),
+            IngressBudget::default(),
+            1,
+        ));
+        first_poll.await.unwrap();
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some),)
+                .await
+                .is_err(),
+            "a server that never flushed a Ping cannot time out its response"
+        );
+        reader.abort();
     }
 }

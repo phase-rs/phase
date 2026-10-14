@@ -9,6 +9,7 @@ name = "phase-server"
 path = "src/main.rs"
 
 [dependencies]
+parking_lot = "0.12"
 server-core = { path = "../server-core" }
 lobby-broker = { path = "../lobby-broker" }
 engine = { path = "../engine", package = "phase-engine" }

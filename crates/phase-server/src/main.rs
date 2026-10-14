@@ -5,8 +5,13 @@ mod jev_relay;
 mod logging;
 mod metrics;
 mod persistence;
+mod socket_control;
 mod socket_decode;
+mod socket_disconnect;
+mod socket_ingress;
 mod socket_io;
+#[cfg(test)]
+mod socket_test_hooks;
 mod wire;
 
 use socket_io::NegotiatedSocket;
@@ -19,7 +24,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::WebSocket;
 use axum::extract::{Request, State, WebSocketUpgrade};
 use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
@@ -866,6 +871,8 @@ impl Default for Limits {
 /// whose in-flight cap is an admission limit of the same kind.
 #[derive(Clone, Default)]
 struct ServerContext {
+    #[cfg(test)]
+    socket_hooks: socket_test_hooks::Hooks,
     limits: Limits,
     /// Ordinal of this replica within its StatefulSet, from `--replica-ordinal`.
     /// Carried only to be exposed as `phase_replica_ordinal`: an autoscaler
@@ -2610,6 +2617,8 @@ async fn serve() {
         .unwrap_or_else(|error| panic!("could not build the Jev relay HTTP client: {error}"));
     info!(upstream = %jev_relay.upstream_origin(), "jev relay upstream resolved");
     let server_context = ServerContext {
+        #[cfg(test)]
+        socket_hooks: Default::default(),
         limits: Limits {
             max_connections: cli.max_connections,
             max_games: cli.max_games,
@@ -4498,7 +4507,16 @@ async fn handle_socket(
     slot: ConnectionSlot,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<ServerMessage>();
-    let (mut socket, frames, mut transport) = socket_io::start(socket, rx);
+    let (mut socket, frames, mut transport) = socket_io::start(
+        socket,
+        rx,
+        socket_io::SocketConfig {
+            replies: tx.clone(),
+            metrics: context.metrics.clone(),
+            #[cfg(test)]
+            hooks: context.socket_hooks.clone(),
+        },
+    );
     let (heartbeat_host, host_registration) = watch::channel(None);
 
     // The slot was reserved before the upgrade; from here the two `fetch_sub`
@@ -4542,20 +4560,18 @@ async fn handle_socket(
         public_url,
         wire_formats: vec![WireFormat::GzipEnvelopeV1],
     };
-    if let Ok(json) = serde_json::to_string(&hello) {
-        if socket.send(Message::text(json)).await.is_err() {
-            transport.shutdown().await;
-            let count = player_count.fetch_sub(1, Ordering::Relaxed) - 1;
-            broadcast_player_count(&lobby_subscribers, count).await;
-            return;
-        }
+    if socket.enqueue_reply(hello).is_err() {
+        transport.shutdown().await;
+        let count = player_count.fetch_sub(1, Ordering::Relaxed) - 1;
+        broadcast_player_count(&lobby_subscribers, count).await;
+        return;
     }
 
-    // Decode and heartbeat routing run independently of this ordered application
-    // loop. Start them only after ServerHello has flushed in its required text
-    // format, before an eager ClientHello can negotiate binary envelopes.
+    // ServerHello is already first in the application FIFO. The encoder keeps
+    // it in text format even if an eager ClientHello negotiates envelopes
+    // before that queued greeting is encoded.
     let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
-    let (application, mut incoming) = mpsc::unbounded_channel();
+    let (application, mut incoming) = mpsc::channel(socket_ingress::MAX_COMMANDS);
     transport.set_decoder(tokio::spawn(socket_decode::run(
         frames,
         socket.clone(),
@@ -4578,6 +4594,7 @@ async fn handle_socket(
             let socket_io::Received {
                 message: client_msg,
                 received_at,
+                admission,
             } = tokio::select! {
                 biased;
                 _ = closed.wait_for(Option::is_some) => break,
@@ -4615,9 +4632,11 @@ async fn handle_socket(
             )
             .instrument(span)
             .await;
+            drop(admission);
         }
     }
 
+    let disconnect = transport.disconnect();
     let disconnected_at = transport.disconnected_at().unwrap_or_else(Instant::now);
     // Transport teardown must not wait on session, registry or lobby cleanup.
     transport.shutdown().await;
@@ -4627,6 +4646,9 @@ async fn handle_socket(
     info!(
         game = ?identity.game_code,
         player = ?identity.player_id,
+        cause = disconnect.map_or(socket_disconnect::Cause::ApplicationEnd, |event| event.cause).label(),
+        peer_close_code = ?disconnect.and_then(|event| event.peer_close_code),
+        read_error_kind = ?disconnect.and_then(|event| event.read_error_kind),
         "client disconnected"
     );
     disconnect_draft_seat_if_current(
@@ -7176,9 +7198,7 @@ async fn broadcast_game_started(
 async fn require_host(identity: &SocketIdentity, socket: &mut NegotiatedSocket) -> Result<(), ()> {
     if identity.player_id != Some(PlayerId(0)) {
         let msg = ServerMessage::error("Only the host can modify seats.".to_string());
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = socket.enqueue_reply(msg);
         return Err(());
     }
     Ok(())
@@ -7214,9 +7234,7 @@ async fn reject_joining_current_game(
     }
 
     let msg = ServerMessage::error("You are already in this game.".to_string());
-    if let Ok(json) = serde_json::to_string(&msg) {
-        let _ = socket.send(Message::text(json)).await;
-    }
+    let _ = socket.enqueue_reply(msg);
     Err(())
 }
 
@@ -7826,9 +7844,7 @@ async fn handle_full_game_submission(
             let msg = ServerMessage::ActionFailed {
                 message: "Not in a game".to_string(),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
     };
@@ -7838,9 +7854,7 @@ async fn handle_full_game_submission(
             let msg = ServerMessage::ActionFailed {
                 message: "No player token".to_string(),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
     };
@@ -7852,9 +7866,7 @@ async fn handle_full_game_submission(
     // actions). The channel each variant answers on is declared by
     // `GameSubmission::payload_rejection`.
     if let Err(msg) = submission.payload_rejection() {
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = socket.enqueue_reply(*msg);
         return;
     }
 
@@ -7878,9 +7890,7 @@ async fn handle_full_game_submission(
             let msg = ServerMessage::ActionFailed {
                 message: FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
         let mut session = session.expect("the gate above proved the session is present");
@@ -7997,9 +8007,7 @@ async fn handle_full_game_submission(
             }) {
                 warn!(game = %game_code, %reason, "action snapshot too large to broadcast");
                 let msg = ServerMessage::ActionFailed { message: reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -8009,9 +8017,7 @@ async fn handle_full_game_submission(
                     Err(error) => {
                         error!(game = %game_code, %error, "terminal preparation failed");
                         let msg = ServerMessage::ActionFailed { message: error };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                 },
@@ -8163,9 +8169,7 @@ async fn handle_full_game_submission(
                 SessionActionError::Operational(message) => ServerMessage::ActionFailed { message },
                 error => session_action_error_message(error),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
         }
     }
 }
@@ -8495,18 +8499,14 @@ async fn join_game_with_password_full(
         password.as_deref(),
     );
     if let Err(msg) = preflight {
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = socket.enqueue_reply(*msg);
         return;
     }
 
     if let Some(token) = reservation_token.as_deref() {
         if !conn_holds_reservation(&identity.seat_reservations, &game_code, token) {
             let msg = ServerMessage::error(NOT_OWNED_RESERVATION.to_string());
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
     }
@@ -8516,9 +8516,7 @@ async fn join_game_with_password_full(
         Err(e) => {
             error!(game = %game_code, error = %e, "JoinGameWithPassword: deck resolve failed");
             let msg = ServerMessage::error(e);
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
     };
@@ -8534,9 +8532,7 @@ async fn join_game_with_password_full(
     {
         Ok(session) => session,
         Err(msg) => {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(*msg);
             return;
         }
     };
@@ -8710,9 +8706,7 @@ async fn seat_guest_and_start(
                 Ok(player) => player,
                 Err(error) => {
                     let msg = ServerMessage::error(error);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -8724,9 +8718,7 @@ async fn seat_guest_and_start(
                 player_token,
                 full_key: Some(full_key.clone()),
             };
-            if let Ok(json) = serde_json::to_string(&attached) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(attached);
 
             // Notify all connected players about the updated room state
             let slot_senders = {
@@ -8790,9 +8782,7 @@ async fn seat_guest_and_start(
                 // list.
                 rewind_targets: Vec::new(),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
 
             let count = player_count.load(Ordering::Relaxed);
             broadcast_player_count(lobby_subscribers, count).await;
@@ -8815,9 +8805,7 @@ async fn seat_guest_and_start(
                 Ok(player) => player,
                 Err(error) => {
                     let msg = ServerMessage::error(error);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -8852,9 +8840,7 @@ async fn seat_guest_and_start(
         Err(e) => {
             error!(game = %game_code, error = %e, "guest join failed");
             let msg = ServerMessage::error(e);
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
         }
     }
 
@@ -8906,9 +8892,7 @@ async fn handle_client_message(
         let reason = reason.to_string();
         let msg = operation_failed_message(&client_msg, reason.clone())
             .unwrap_or_else(|| ServerMessage::error(reason));
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = socket.enqueue_reply(msg);
         return;
     }
 
@@ -8917,9 +8901,7 @@ async fn handle_client_message(
         // bounds themselves. Every variant except `Interaction` keeps today's
         // `ServerMessage::error`.
         let msg = wire_rejection_message(&client_msg, reason);
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = socket.enqueue_reply(msg);
         return;
     }
 
@@ -8929,9 +8911,7 @@ async fn handle_client_message(
         {
             let msg = operation_failed_message(&client_msg, reason.to_string())
                 .unwrap_or_else(|| ServerMessage::error(reason.to_string()));
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
 
@@ -8939,9 +8919,7 @@ async fn handle_client_message(
             let msg = ServerMessage::DraftActionRejected {
                 reason: reason.to_string(),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             return;
         }
     }
@@ -8959,18 +8937,14 @@ async fn handle_client_message(
                 Ok(delivery) => ServerMessage::TerminalBootstrapResult { delivery },
                 Err(error) => ServerMessage::error(format!("Terminal bootstrap rejected: {error}")),
             };
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(response);
         }
         ClientMessage::ReadTerminalResult { credential } => {
             let response = match game_db.read_terminal_result(&credential) {
                 Ok(delivery) => ServerMessage::TerminalResult { delivery },
                 Err(error) => ServerMessage::error(format!("Terminal read rejected: {error}")),
             };
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(response);
         }
         ClientMessage::AckTerminalDelivery {
             delivery_id,
@@ -8983,17 +8957,13 @@ async fn handle_client_message(
                     ServerMessage::error(format!("Terminal acknowledgement failed: {error}"))
                 }
             };
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(response);
         }
         ClientMessage::CreateGame { deck } => {
             info!(deck_size = deck.main_deck.len(), "CreateGame");
             if let Err(reason) = guard_legacy_deck(&deck) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             let resolved = match resolve_deck(db, &deck) {
@@ -9001,9 +8971,7 @@ async fn handle_client_message(
                 Err(e) => {
                     error!(error = %e, "CreateGame: deck resolve failed");
                     let msg = ServerMessage::error(e);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9025,9 +8993,7 @@ async fn handle_client_message(
                 let msg = ServerMessage::error(
                     "Server is at game capacity, please try again later".to_string(),
                 );
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             // Seat 0's provenance, not just its resolved deck: a restart
@@ -9044,9 +9010,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::error(format!(
                         "Failed to bind game session identity: {error}"
                     ));
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9061,9 +9025,7 @@ async fn handle_client_message(
                 mgr.remove_game(&game_code);
                 drop(mgr);
                 let msg = ServerMessage::error(error);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             info!(game = %game_code, "game created");
@@ -9080,9 +9042,7 @@ async fn handle_client_message(
             .await
             {
                 let msg = ServerMessage::error(error);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -9091,27 +9051,21 @@ async fn handle_client_message(
                 player_token: player_token.clone(),
                 full_key: Some(full_key.clone()),
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             let attached = ServerMessage::SessionAttached {
                 game_code,
                 player_id: PlayerId(0),
                 player_token,
                 full_key: Some(full_key),
             };
-            if let Ok(json) = serde_json::to_string(&attached) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(attached);
         }
 
         ClientMessage::JoinGame { game_code, deck } => {
             info!(game = %game_code, deck_size = deck.main_deck.len(), "JoinGame");
             if let Err(reason) = guard_legacy_join_game(&game_code, &deck) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             if reject_joining_current_game(identity, lobby, &game_code, socket)
@@ -9126,9 +9080,7 @@ async fn handle_client_message(
                 Err(e) => {
                     error!(game = %game_code, error = %e, "JoinGame: deck resolve failed");
                     let msg = ServerMessage::error(e);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9137,9 +9089,7 @@ async fn handle_client_message(
                 Ok(session) => session,
                 Err(e) => {
                     let msg = ServerMessage::error(e);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9253,9 +9203,7 @@ async fn handle_client_message(
                 },
             };
 
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(response);
         }
 
         ClientMessage::ExportAuthoritativeState => {
@@ -9302,9 +9250,7 @@ async fn handle_client_message(
                 },
             };
 
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(response);
         }
 
         ClientMessage::PreviewInteraction { request } => {
@@ -9352,9 +9298,7 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_game_reconnect(&game_code, &player_token) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             match game_db.load_active_full_key(&game_code) {
@@ -9363,18 +9307,14 @@ async fn handle_client_message(
                     let msg = ServerMessage::error(
                         "Reconnect session identity is no longer current".to_string(),
                     );
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
                 Err(error) => {
                     let msg = ServerMessage::error(format!(
                         "Failed to validate reconnect identity: {error}"
                     ));
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             }
@@ -9388,13 +9328,8 @@ async fn handle_client_message(
                 },
                 InGame {
                     player: PlayerId,
-                    game_started_msg: Box<ServerMessage>,
                     ai_result: Option<Box<server_core::RevisionedActionResult>>,
                     ai_failure: Option<server_core::AiDriverFault>,
-                    /// GH #1507: present when a takeback vote is in flight,
-                    /// so the reconnecting socket gets the same prompt it
-                    /// would have received had it stayed connected.
-                    pending_takeback_msg: Option<Box<ServerMessage>>,
                     /// Captured under the same lock as `ai_result`, for the
                     /// `StateUpdate` fan-out to the *other* seats below. The
                     /// reconnecting socket gets its own copy inside
@@ -9497,8 +9432,14 @@ async fn handle_client_message(
                                             persist_full_session_async(game_db, &mut session);
                                         }
                                         let pending_takeback_msg =
-                                            session.pending_takeback_message().map(Box::new);
+                                            session.pending_takeback_message();
                                         let rewind_targets = session.rewind_options();
+                                        // Bootstrap and any in-flight vote must precede every
+                                        // update routed through the newly installed sender.
+                                        let _ = tx.send(game_started_msg);
+                                        if let Some(prompt) = pending_takeback_msg {
+                                            let _ = tx.send(prompt);
+                                        }
                                         install_full_sender_while_state_locked(
                                             connections,
                                             &game_code,
@@ -9508,10 +9449,8 @@ async fn handle_client_message(
                                         .await;
                                         ReconnectOutcome::InGame {
                                             player,
-                                            game_started_msg: Box::new(game_started_msg),
                                             ai_result,
                                             ai_failure,
-                                            pending_takeback_msg,
                                             rewind_targets,
                                         }
                                     }
@@ -9534,18 +9473,14 @@ async fn handle_client_message(
                         player_token: player_token.clone(),
                         full_key: Some(full_key.clone()),
                     };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     let attached = ServerMessage::SessionAttached {
                         game_code,
                         player_id: player,
                         player_token,
                         full_key: Some(full_key),
                     };
-                    if let Ok(json) = serde_json::to_string(&attached) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(attached);
 
                     // Send current room state
                     send_player_slots(std::iter::once((&player, tx)), &slot_info);
@@ -9553,10 +9488,8 @@ async fn handle_client_message(
 
                 ReconnectOutcome::InGame {
                     player,
-                    game_started_msg,
                     ai_result,
                     ai_failure,
-                    pending_takeback_msg,
                     rewind_targets,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
@@ -9578,19 +9511,6 @@ async fn handle_client_message(
                     };
                     for sender in reconnect_senders {
                         let _ = sender.send(reconnect_msg.clone());
-                    }
-
-                    if let Ok(json) = serde_json::to_string(&game_started_msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
-
-                    // GH #1507: replay the pending takeback prompt, if any,
-                    // so this socket isn't left with no way to approve or
-                    // decline a vote that started while it was disconnected.
-                    if let Some(msg) = pending_takeback_msg {
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
                     }
 
                     if let Some(result) = ai_result {
@@ -9624,9 +9544,7 @@ async fn handle_client_message(
                 ReconnectOutcome::Err(e) => {
                     error!(game = %game_code, error = %e, "reconnect failed");
                     let msg = ServerMessage::error(e);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
             }
         }
@@ -9637,9 +9555,7 @@ async fn handle_client_message(
                     .await
             {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -9715,9 +9631,7 @@ async fn handle_client_message(
                 // Validate deck bounds before cloning to reject oversized decks early
                 if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
                     let msg = ServerMessage::error(reason);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
                 dispatch_broker_msg(
@@ -9765,9 +9679,7 @@ async fn handle_client_message(
                 Ok(pc) => pc,
                 Err(reason) => {
                     let msg = ServerMessage::error(reason);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9806,9 +9718,7 @@ async fn handle_client_message(
                 };
                 if let Some(error) = refusal {
                     let msg = ServerMessage::from(error);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             }
@@ -9818,9 +9728,7 @@ async fn handle_client_message(
                 Err(e) => {
                     error!(error = %e, "CreateGameWithSettings: deck resolve failed");
                     let msg = ServerMessage::error(e);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9833,9 +9741,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::error(
                         "Planechase does not support AI seats yet".to_string(),
                     );
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
                 // Server-hosted constructed play has no draft behind it, so
@@ -9864,9 +9770,7 @@ async fn handle_client_message(
                             reasons.join("; ")
                         ),
                     );
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             }
@@ -9881,9 +9785,7 @@ async fn handle_client_message(
                 Ok(setups) => setups,
                 Err(reason) => {
                     let msg = ServerMessage::error(reason);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -9995,9 +9897,7 @@ async fn handle_client_message(
                 .await
                 {
                     let msg = ServerMessage::error(error);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
 
@@ -10007,21 +9907,15 @@ async fn handle_client_message(
                     player_token: player_token.clone(),
                     full_key: Some(full_key.clone()),
                 };
-                if let Ok(json) = serde_json::to_string(&created_msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(created_msg);
                 let attached_msg = ServerMessage::SessionAttached {
                     game_code: game_code.clone(),
                     player_id: PlayerId(0),
                     player_token,
                     full_key: Some(full_key),
                 };
-                if let Ok(json) = serde_json::to_string(&attached_msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                if let Ok(json) = serde_json::to_string(&game_started_msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(attached_msg);
+                let _ = socket.enqueue_reply(game_started_msg);
                 if let Some(fault) = ai_failure {
                     let _ = tx.send(ServerMessage::AiDriverFault { fault });
                 }
@@ -10081,9 +9975,7 @@ async fn handle_client_message(
                         Ok(session) => session,
                         Err(error) => {
                             let msg = ServerMessage::from(error);
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                let _ = socket.send(Message::text(json)).await;
-                            }
+                            let _ = socket.enqueue_reply(msg);
                             return;
                         }
                     };
@@ -10169,18 +10061,14 @@ async fn handle_client_message(
                     player_token: player_token.clone(),
                     full_key: Some(full_key.clone()),
                 };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 let attached = ServerMessage::SessionAttached {
                     game_code: game_code.clone(),
                     player_id: host_player,
                     player_token,
                     full_key: Some(full_key),
                 };
-                if let Ok(json) = serde_json::to_string(&attached) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(attached);
 
                 // Send initial slot state so host sees themselves in the room.
                 broadcast_player_slots(state, connections, &game_code).await;
@@ -10208,9 +10096,7 @@ async fn handle_client_message(
                 },
             ) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -10246,9 +10132,7 @@ async fn handle_client_message(
             let mut info = match lookup {
                 Ok(info) => info,
                 Err(msg) => {
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(*msg);
                     return;
                 }
             };
@@ -10261,9 +10145,7 @@ async fn handle_client_message(
                 };
                 if !held {
                     let msg = ServerMessage::error(NOT_OWNED_RESERVATION.to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
 
@@ -10371,9 +10253,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::error(
                         "You already hold a reservation for this game".to_string(),
                     );
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
 
@@ -10412,9 +10292,7 @@ async fn handle_client_message(
                             }
                         }
                         Err(msg) => {
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                let _ = socket.send(Message::text(json)).await;
-                            }
+                            let _ = socket.enqueue_reply(*msg);
                             return;
                         }
                     }
@@ -10462,9 +10340,7 @@ async fn handle_client_message(
                             }
                         }
                         Err(msg) => {
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                let _ = socket.send(Message::text(json)).await;
-                            }
+                            let _ = socket.enqueue_reply(*msg);
                             return;
                         }
                     }
@@ -10479,9 +10355,7 @@ async fn handle_client_message(
                 }
             } else if info.max_players > 0 && info.current_players >= info.max_players {
                 let msg = ServerMessage::error(format!("Game {game_code} is full"));
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -10498,9 +10372,7 @@ async fn handle_client_message(
                 reservation_expires_at_ms,
                 draft_metadata: info.draft_metadata,
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
             info!(game = %game_code, is_p2p = info.is_p2p, "sent JoinTargetInfo");
         }
 
@@ -10524,9 +10396,7 @@ async fn handle_client_message(
                 // Validate deck bounds before cloning to reject oversized decks early
                 if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
                     let msg = ServerMessage::error(reason);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
                 dispatch_broker_msg(
@@ -10557,9 +10427,7 @@ async fn handle_client_message(
                 },
             ) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -10590,9 +10458,7 @@ async fn handle_client_message(
             }
             let Some(game_code) = identity.game_code.clone() else {
                 let msg = ServerMessage::error("Not in a game".to_string());
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             };
 
@@ -10617,9 +10483,7 @@ async fn handle_client_message(
             {
                 ControlFlow::Continue(deliveries) => deliveries,
                 ControlFlow::Break(Some(message)) => {
-                    if let Ok(json) = serde_json::to_string(&message) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(message);
                     return;
                 }
                 // The extraction already answered on `tx` and cleaned up.
@@ -10659,9 +10523,7 @@ async fn handle_client_message(
             .await;
 
             let msg = ServerMessage::GameAbandoned { game_code };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
         }
 
         ClientMessage::Concede => {
@@ -10677,9 +10539,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::ActionFailed {
                         message: "Not in a game".to_string(),
                     };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -10768,9 +10628,7 @@ async fn handle_client_message(
                         }
                         error => session_action_error_message(error),
                     };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
                 Ok((revision, result, winner, terminal, rewind_targets, full_key)) => {
                     let terminal_deliveries = match terminal {
@@ -10821,9 +10679,7 @@ async fn handle_client_message(
                     (Some(game_code), Some(player_token)) => (game_code, player_token),
                     _ => {
                         let msg = ServerMessage::error("Not in a game".to_string());
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                 };
@@ -10894,9 +10750,7 @@ async fn handle_client_message(
 
             match outcome {
                 Err(error) => {
-                    if let Ok(json) = serde_json::to_string(&session_action_error_message(error)) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(session_action_error_message(error));
                 }
                 Ok((revision, result, winner, terminal, rewind_targets, full_key)) => {
                     let terminal_deliveries = match prepare_full_terminal(game_db, terminal).await {
@@ -10946,9 +10800,7 @@ async fn handle_client_message(
                 (Some(c), Some(p)) => (c.clone(), p),
                 _ => {
                     let msg = ServerMessage::error("Not in a game".to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -10966,9 +10818,7 @@ async fn handle_client_message(
             if !current {
                 drop(session);
                 let msg = ServerMessage::error(FULL_SOCKET_AUTHORITY_REJECTION.to_string());
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             let mut guard = session.expect("the gate above proved the session is present");
@@ -11047,9 +10897,7 @@ async fn handle_client_message(
                     // this handler's inconsistency with its own sibling ~2,400
                     // lines above, not a deliberate signal.
                     let msg = ServerMessage::RequestRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
                 Ok(server_core::TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, "takeback requested");
@@ -11101,9 +10949,7 @@ async fn handle_client_message(
                 (Some(c), Some(p)) => (c.clone(), p),
                 _ => {
                     let msg = ServerMessage::error("Not in a game".to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -11121,9 +10967,7 @@ async fn handle_client_message(
             if !current {
                 drop(session);
                 let msg = ServerMessage::error(FULL_SOCKET_AUTHORITY_REJECTION.to_string());
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             let mut guard = session.expect("the gate above proved the session is present");
@@ -11171,9 +11015,7 @@ async fn handle_client_message(
                     // refusal must never travel the channel the native client
                     // treats as terminal.
                     let msg = ServerMessage::RequestRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
                 Ok(server_core::TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, approve, "takeback approval recorded");
@@ -11227,9 +11069,7 @@ async fn handle_client_message(
                 (Some(c), Some(p)) => (c.clone(), p),
                 _ => {
                     let msg = ServerMessage::error("Not in a game".to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -11247,9 +11087,7 @@ async fn handle_client_message(
             if !current {
                 drop(session);
                 let msg = ServerMessage::error(FULL_SOCKET_AUTHORITY_REJECTION.to_string());
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             let mut guard = session.expect("the gate above proved the session is present");
@@ -11268,9 +11106,7 @@ async fn handle_client_message(
                     // the adapter on ANY `error` event, so a mis-clicked
                     // cancel would end the desktop session.
                     let msg = ServerMessage::RequestRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
                 Ok(()) => {
                     info!(game = %game_code, player = ?player_id, "takeback request cancelled");
@@ -11291,9 +11127,7 @@ async fn handle_client_message(
         ClientMessage::SpectatorJoin { game_code } => {
             if let Err(reason) = guard_spectator_join(&game_code) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11305,17 +11139,13 @@ async fn handle_client_message(
                     Ok(session) => session,
                     Err(error) => {
                         let msg = ServerMessage::error(error);
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                 };
                 if !session.game_started {
                     let msg = ServerMessage::error("Game has not started yet".to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             }
@@ -11329,9 +11159,7 @@ async fn handle_client_message(
             .await
             {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11351,9 +11179,7 @@ async fn handle_client_message(
                 Err(message) => {
                     remove_game_spectator_sender(game_spectators, &game_code, tx).await;
                     let msg = ServerMessage::error(message);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -11369,9 +11195,7 @@ async fn handle_client_message(
         ClientMessage::Emote { emote } => {
             if let Err(reason) = guard_emote(&emote) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11422,9 +11246,7 @@ async fn handle_client_message(
                 let msg = ServerMessage::error(
                     "Seat mutations are not available on lobby-only servers.".to_string(),
                 );
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
             if require_host(identity, socket).await.is_err() {
@@ -11433,9 +11255,7 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_seat_mutation(&mutation) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11473,9 +11293,7 @@ async fn handle_client_message(
                 if !current {
                     drop(session);
                     let msg = ServerMessage::error(FULL_SOCKET_AUTHORITY_REJECTION.to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
                 let mut session = session.expect("the gate above proved the session is present");
@@ -11487,9 +11305,7 @@ async fn handle_client_message(
                         fault.id,
                         fault.cause.message()
                     ));
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
 
@@ -11507,9 +11323,7 @@ async fn handle_client_message(
                     Ok(delta) => delta,
                     Err(err) => {
                         let msg = ServerMessage::error(format!("Seat mutation failed: {err:?}"));
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                 };
@@ -11674,9 +11488,7 @@ async fn handle_client_message(
                 Ok(intent) => intent,
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -11700,9 +11512,7 @@ async fn handle_client_message(
                 tournament_format,
             ) {
                 let msg = ServerMessage::DraftActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11779,9 +11589,7 @@ async fn handle_client_message(
                 Ok(resolved) => resolved,
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -11790,9 +11598,7 @@ async fn handle_client_message(
                 let msg = ServerMessage::DraftActionRejected {
                     reason: "Pod size is not allowed by the draft procedure".to_string(),
                 };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11888,9 +11694,7 @@ async fn handle_client_message(
                 player_token,
                 seat_index,
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+            let _ = socket.enqueue_reply(msg);
 
             if public {
                 {
@@ -11921,9 +11725,7 @@ async fn handle_client_message(
                 guard_join_draft_with_password(&draft_code, &display_name, &password)
             {
                 let msg = ServerMessage::DraftActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -11982,24 +11784,18 @@ async fn handle_client_message(
                         seat_index,
                         view,
                     };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
                 Err(reason) => {
                     if reason == "password_required" {
                         let msg = ServerMessage::PasswordRequired {
                             game_code: draft_code.clone(),
                         };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                     let msg = ServerMessage::DraftActionRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
             }
         }
@@ -12007,17 +11803,13 @@ async fn handle_client_message(
         ClientMessage::DraftAction { draft_code, action } => {
             if let Err(reason) = guard_draft_action(&draft_code) {
                 let msg = ServerMessage::DraftActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
             if let Err(reason) = guard_draft_action_payload(&action) {
                 let msg = ServerMessage::DraftActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -12027,9 +11819,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::DraftActionRejected {
                         reason: "Not in a draft session".to_string(),
                     };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
@@ -12038,9 +11828,7 @@ async fn handle_client_message(
 
             if let Some(reason) = client_forbidden_draft_action_reason(&action) {
                 let msg = ServerMessage::DraftActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -12051,9 +11839,7 @@ async fn handle_client_message(
                     Ok(generator) => Some(generator),
                     Err(reason) => {
                         let msg = ServerMessage::DraftActionRejected { reason };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                 }
@@ -12165,9 +11951,7 @@ async fn handle_client_message(
                 }
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
             }
         }
@@ -12180,9 +11964,7 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_reconnect_draft(&draft_code, &player_token) {
                 let msg = ServerMessage::DraftActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -12195,9 +11977,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::DraftActionRejected {
                         reason: DRAFT_SOCKET_AUTHORITY_REJECTION.to_string(),
                     };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             }
@@ -12232,33 +12012,25 @@ async fn handle_client_message(
                     {
                         Ok(Some(attachment)) => {
                             for message in [attachment.match_start, attachment.game_started] {
-                                if let Ok(json) = serde_json::to_string(&message) {
-                                    let _ = socket.send(Message::text(json)).await;
-                                }
+                                let _ = socket.enqueue_reply(message);
                             }
                         }
                         Ok(None) => {}
                         Err(reason) => {
                             let msg = ServerMessage::DraftActionRejected { reason };
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                let _ = socket.send(Message::text(json)).await;
-                            }
+                            let _ = socket.enqueue_reply(msg);
                             return;
                         }
                     }
 
                     let msg = ServerMessage::DraftStateUpdate { view };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
 
                     info!(draft = %draft_code, "draft reconnect succeeded");
                 }
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                 }
             }
         }
@@ -12266,9 +12038,7 @@ async fn handle_client_message(
         ClientMessage::SpectateDraft { draft_code } => {
             if let Err(reason) = guard_spectate_draft(&draft_code) {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -12278,9 +12048,7 @@ async fn handle_client_message(
                     Some(session) => session.config.spectator_visibility,
                     None => {
                         let msg = ServerMessage::error("Draft not found".to_string());
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
+                        let _ = socket.enqueue_reply(msg);
                         return;
                     }
                 }
@@ -12296,9 +12064,7 @@ async fn handle_client_message(
             .await
             {
                 let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = socket.enqueue_reply(msg);
                 return;
             }
 
@@ -12320,19 +12086,15 @@ async fn handle_client_message(
                 Err(message) => {
                     remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
                     let msg = ServerMessage::error(message);
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
 
             let msg = ServerMessage::DraftSpectatorView { view };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if socket.send(Message::text(json)).await.is_err() {
-                    remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
-                    return;
-                }
+            if socket.enqueue_reply(msg).is_err() {
+                remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
+                return;
             }
             identity.spectator_draft_code = Some(draft_code.clone());
             identity.spectator_visibility = Some(visibility);
@@ -15225,6 +14987,7 @@ mod issue_4548_full_create_tests {
         };
         let app = Router::new()
             .route("/ws", get(ws_handler))
+            .route("/metrics", get(crate::metrics::handler))
             .with_state(app_state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -15483,58 +15246,6 @@ mod issue_4548_full_create_tests {
         );
 
         server.abort();
-    }
-
-    #[tokio::test]
-    async fn negotiated_gzip_envelope_accepts_and_returns_binary_frames() {
-        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
-            let (mut socket, _) = tokio_tungstenite::connect_async(url)
-                .await
-                .expect("connect");
-
-            let server_hello = recv_server_message(&mut socket).await;
-            assert!(matches!(
-                server_hello,
-                ServerMessage::ServerHello { wire_formats, .. }
-                    if wire_formats.contains(&WireFormat::GzipEnvelopeV1)
-            ));
-
-            send_test_message(
-                &mut socket,
-                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
-                false,
-            )
-            .await;
-            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, true).await;
-            assert!(matches!(
-                recv_enveloped_server_message(&mut socket).await,
-                ServerMessage::LobbyUpdate { .. }
-            ));
-            for _ in 0..RATE_LIMIT_MESSAGES {
-                socket
-                    .send(WsMessage::Binary(vec![0x01, 1, 2, 3].into()))
-                    .await
-                    .expect("send malformed gzip");
-            }
-            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 7 }, true).await;
-            let pong = tokio::time::timeout(Duration::from_millis(100), async {
-                loop {
-                    if matches!(
-                        recv_enveloped_server_message(&mut socket).await,
-                        ServerMessage::Pong { .. }
-                    ) {
-                        break;
-                    }
-                }
-            })
-            .await;
-            assert!(pong.is_err());
-        })
-        .await;
-        server.abort();
-
-        assert!(result.is_ok(), "binary envelope roundtrip timed out");
     }
 
     #[tokio::test]
@@ -18399,30 +18110,32 @@ mod game_submission_tests {
         created.expect("Full game identity")
     }
 
+    pub(super) fn basic_land_test_database() -> CardDatabase {
+        CardDatabase::from_json_str(
+            r#"{
+                "network test land": {
+                    "name": "Network Test Land",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": {
+                        "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Forest"]
+                    },
+                    "power": null, "toughness": null, "loyalty": null, "defense": null,
+                    "oracle_text": null,
+                    "abilities": [], "triggers": [], "static_abilities": [],
+                    "replacements": [], "keywords": []
+                }
+            }"#,
+        )
+        .expect("minimal basic-land fixture")
+    }
+
     #[tokio::test]
     async fn zero_ai_followup_preserves_human_decision_for_normal_and_debug_actions() {
         use engine::types::actions::MulliganChoice;
         use engine::types::format::FormatConfig;
         use engine::types::game_state::WaitingFor;
 
-        let db = CardDatabase::from_json_str(
-            r#"{
-            "network test land": {
-                "name": "Network Test Land",
-                "mana_cost": { "type": "NoCost" },
-                "card_type": {
-                    "supertypes": ["Basic"],
-                    "core_types": ["Land"],
-                    "subtypes": ["Forest"]
-                },
-                "power": null, "toughness": null, "loyalty": null, "defense": null,
-                "oracle_text": null,
-                "abilities": [], "triggers": [], "static_abilities": [],
-                "replacements": [], "keywords": []
-            }
-        }"#,
-        )
-        .expect("minimal basic-land fixture");
+        let db = basic_land_test_database();
         let (url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             let mut socket = connect_and_hello(url).await;
