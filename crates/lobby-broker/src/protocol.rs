@@ -60,6 +60,15 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 142 — `TargetFilter` gains `AttackedPlayerOrPlaneswalker`
+///      (`{"type":"AttackedPlayerOrPlaneswalker"}`, the player or planeswalker an
+///      attacking creature is attacking), serialized inside `GameState` in the
+///      ability definitions. A v141 peer cannot parse the tag. Full-game peers and
+///      P2P move in lockstep (wire 124); no lobby carrier names it;
+///      `ZoneChangeCombatStatus` gains `attack_target` (`Option<AttackTarget>`, the
+///      attacker's last-known declared attack target) in zone-change records and
+///      trigger-source contexts of `GameState`.
+///
 /// 141 — `ExileLinkKind` gains `CastCost` (`"CastCost"`, CR 607.2q: a card
 ///      exiled to pay a cost of casting a permanent spell, linked to that spell
 ///      and to the permanent it becomes), serialized in `GameState.exile_links`.
@@ -1053,7 +1062,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 141;
+pub const PROTOCOL_VERSION: u32 = 142;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2310,12 +2319,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 141);
+        assert_eq!(PROTOCOL_VERSION, 142);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 140);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 141);
     }
 
     #[test]

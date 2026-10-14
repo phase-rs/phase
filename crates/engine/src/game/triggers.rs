@@ -12574,6 +12574,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer => false,
+        // CR 506.3 + CR 603.4: unlike `DefendingPlayer`, whose answer rests on the
+        // event binding alone, this referent also reads live combat and battlefield
+        // state (the attacker's current attack target, whether the planeswalker is
+        // still there), which can differ between fire time and resolution. When in
+        // doubt the answer is `true`.
+        TargetFilter::AttackedPlayerOrPlaneswalker => true,
     }
 }
 
@@ -51040,6 +51046,24 @@ mod pending_trigger_pin_reassignment_tests {
             assigned_pin,
             Some(expected),
             "assigning an unpinned ability must rebind the pin from the entry's own trigger event"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_binding_tests {
+    use super::*;
+
+    /// CR 506.3 + CR 603.4: the referent also reads live combat and battlefield state,
+    /// which can differ between fire time and resolution; "when in doubt, true".
+    #[test]
+    fn attacked_referent_filter_binding_diverges() {
+        assert!(filter_binding_diverges(
+            &TargetFilter::AttackedPlayerOrPlaneswalker
+        ));
+        assert!(
+            !filter_binding_diverges(&TargetFilter::DefendingPlayer),
+            "contrast: the event binding alone is non-divergent"
         );
     }
 }

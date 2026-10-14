@@ -8087,10 +8087,10 @@ mod tests {
             source: crate::types::game_state::OpponentGuessSource {
                 prompt: expected_prompt.clone(),
             },
-            owner: Some(crate::types::game_state::OpponentGuessOwner {
+            owner: Some(Box::new(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
                 committed_choice: None,
-            }),
+            })),
             proposition_truth: Some(true),
         };
 
@@ -8275,10 +8275,10 @@ mod tests {
                     &source_context,
                 ),
             },
-            owner: Some(crate::types::game_state::OpponentGuessOwner {
+            owner: Some(Box::new(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
                 committed_choice: Some(ChosenAttribute::Number(5)),
-            }),
+            })),
             proposition_truth: None,
         };
 

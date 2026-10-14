@@ -8044,20 +8044,40 @@ pub fn resolve_defending_player(state: &GameState, source_id: ObjectId) -> Optio
     })
 }
 
-/// Which attack event, if any, a "defending player" reference is BOUND to.
+/// Run `f` with the attack event, if any, that an attack anaphor is BOUND to.
 ///
-/// Constructed ONLY by [`defending_player_cr508_5`] — no caller builds one.
-/// That is deliberate: when each door selected its own binding, the quantity
-/// door and the filter door disagreed in exactly the state this authority
-/// exists to make coherent (one anaphor, two players).
-enum DefenderBinding<'a> {
-    /// The bound attack event's per-attacker entries and its declared global
-    /// defending player (CR 508.1b).
-    TriggerEvent {
-        entries: &'a [(ObjectId, AttackTarget)],
-        global: PlayerId,
-    },
-    None,
+/// The ONE binding rule for every attack anaphor ("defending player" and "the
+/// player or planeswalker it's attacking"), evaluated here and nowhere else:
+/// an attack event binds a reference **if and only if** the reference is being
+/// evaluated inside the scope of a triggered ability, i.e.
+/// `trigger_source.is_some()`. CR 603.4: a triggered ability is bound to the
+/// event that fired it, and that event is authoritative for its anaphors. A
+/// layer/static read, an activated ability, or any filter evaluated outside a
+/// triggered ability's scope is bound to NOTHING, otherwise an unrelated
+/// in-flight `AttackersDeclared` would leak its attacker into a continuous
+/// effect's filter.
+///
+/// When bound, the event is the explicit DETECTION event (the
+/// `DETECTION_TRIGGER_EVENT` TLS, set by `resolve_quantity_for_trigger_check`
+/// whenever an explicit `event` is supplied) if one is present, else
+/// `state.current_trigger_event`: the latter may still hold a stale event from
+/// an unrelated in-flight resolution in the same step (issue #1323). A bound
+/// event that is not an `AttackersDeclared` binds nothing (it does not fall
+/// through to the other candidate).
+///
+/// The detection event is an owned clone, so the event is lent to a closure
+/// rather than returned. Keeping the selection in one function is what stops
+/// two doors disagreeing about which attack an anaphor is bound to.
+fn with_bound_attack_event<R>(
+    state: &GameState,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+    f: impl FnOnce(Option<&GameEvent>) -> R,
+) -> R {
+    let detection = trigger_source.and_then(|_| crate::game::quantity::detection_trigger_event());
+    let event = trigger_source
+        .and_then(|_| detection.as_ref().or(state.current_trigger_event.as_ref()))
+        .filter(|event| attack_entries(event).is_some());
+    f(event)
 }
 
 /// Destructure an `AttackersDeclared` into its per-attacker entries and its
@@ -8118,7 +8138,7 @@ fn sole_attacker_defender(
 /// calls THIS FUNCTION WITH THESE THREE ARGUMENTS AND NOTHING ELSE, so one
 /// anaphor can never bind two different players.
 ///
-/// # The one binding rule (stated once, applied here only)
+/// # The one binding rule (implemented in `with_bound_attack_event`)
 ///
 /// An attack event binds a "defending player" reference **if and only if** the
 /// reference is being evaluated inside the scope of a triggered ability — i.e.
@@ -8209,28 +8229,187 @@ pub(crate) fn defending_player_cr508_5(
     asker_id: ObjectId,
     trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
 ) -> Option<PlayerId> {
-    // The ONE binding rule, evaluated in the ONE place it may be evaluated.
-    let detection = crate::game::quantity::detection_trigger_event();
-    let binding = trigger_source
-        .and_then(|_| detection.as_ref().or(state.current_trigger_event.as_ref()))
-        .and_then(attack_entries)
-        .map_or(DefenderBinding::None, |(entries, global)| {
-            DefenderBinding::TriggerEvent { entries, global }
-        });
-
     let latch = trigger_source.and_then(|source| source.combat_status.defending_player);
     let entry_id = trigger_source.map_or(asker_id, |source| source.identity.reference.object_id);
 
-    match binding {
-        DefenderBinding::TriggerEvent { entries, global } => {
-            entry_defender(state, entries, global, entry_id)
+    // The ONE binding rule, evaluated in the ONE place it may be evaluated.
+    with_bound_attack_event(state, trigger_source, |event| {
+        match event.and_then(attack_entries) {
+            Some((entries, global)) => entry_defender(state, entries, global, entry_id)
                 .or_else(|| sole_attacker_defender(state, entries, global))
                 .or(latch)
-                .or(Some(global))
+                .or(Some(global)),
+            None => latch,
         }
-        DefenderBinding::None => latch,
-    }
+    })
     .or_else(|| resolve_defending_player(state, asker_id))
+}
+
+/// The attacking creature an attack anaphor refers to, for the asker `entry_id`
+/// (CR 508.5 and its second clause, applied to "the player or planeswalker it's
+/// attacking"): the asker if the bound event's entries name it, else the SOLE
+/// attacker the event names (an observer trigger: Hellrider, Cavalcade of
+/// Calamity, a Mage Slayer), else the asker. A raw multi-attacker batch that
+/// omits the asker, an event that is not an attack declaration, and no event at
+/// all all answer with the asker.
+fn referent_attacker(event: Option<&GameEvent>, entry_id: ObjectId) -> ObjectId {
+    match event.and_then(attack_entries) {
+        Some((entries, _)) => {
+            if entries.iter().any(|(attacker, _)| *attacker == entry_id) {
+                entry_id
+            } else if let [(sole, _)] = entries {
+                *sole
+            } else {
+                entry_id
+            }
+        }
+        None => entry_id,
+    }
+}
+
+/// CR 506.3: the attack target recorded when the observer's attacker `referent` left
+/// the battlefield (CR 608.2h last-known information). The departure row of the DECLARED incarnation is selected, so a
+/// creature that was blinked since (CR 400.7: a new object) still answers for the
+/// object that was attacking. A legacy declaration that recorded no incarnation falls
+/// back to the object's terminal battlefield departure.
+fn departed_attack_target(
+    state: &GameState,
+    referent: ObjectId,
+    event: Option<&GameEvent>,
+) -> Option<AttackTarget> {
+    let declared_incarnation = match event {
+        Some(GameEvent::AttackersDeclared {
+            declaration_records,
+            ..
+        }) => declaration_records
+            .iter()
+            .find(|record| record.object_id == referent)
+            .and_then(|record| record.incarnation),
+        _ => None,
+    };
+    let row = match declared_incarnation {
+        Some(incarnation) => state.zone_changes_this_turn.iter().rev().find(|row| {
+            row.object_id == referent
+                && row.from_zone == Some(Zone::Battlefield)
+                && row
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference.incarnation == incarnation)
+        }),
+        None => crate::types::game_state::terminal_battlefield_departure_row(state, referent),
+    };
+    row.and_then(|row| row.combat_status.attack_target)
+}
+
+/// CR 506.3: the attack target of the attacking creature `referent`, or none.
+///
+/// * (a) Still the live creature (`live`) and attacking (an `AttackerInfo` that
+///   `is_attacker_in_play` accepts): its LIVE attack target, which honors a
+///   reselection.
+/// * (b) Live but not in combat: none. CR 506.4: a creature removed from combat is
+///   no longer an attacking creature (CR 506.4c: it is not attacking any player,
+///   planeswalker or battle).
+/// * (c) No longer the live creature: last-known information only (CR 608.2h,
+///   CR 113.7a). The asker reads the latch captured on its trigger source; an
+///   observer's attacker reads its departure record.
+fn attack_target_referent(
+    state: &GameState,
+    referent: ObjectId,
+    asker: Option<&crate::types::game_state::TriggerSourceContext>,
+    is_asker: bool,
+    live: bool,
+    event: Option<&GameEvent>,
+) -> Option<AttackTarget> {
+    if live {
+        return state.combat.as_ref().and_then(|combat| {
+            combat
+                .attackers
+                .iter()
+                .find(|info| info.object_id == referent)
+                .filter(|info| is_attacker_in_play(state, info.object_id))
+                .map(|info| info.attack_target)
+        });
+    }
+    if is_asker {
+        asker.and_then(|source| source.combat_status.attack_target)
+    } else {
+        departed_attack_target(state, referent, event)
+    }
+}
+
+/// CR 506.3 + CR 115.10a: THE authority for "the player or planeswalker it's
+/// attacking" (and "... that creature is attacking"), the sole door for the
+/// DealDamage recipient binding and `targeting::resolved_targets`.
+///
+/// Kind-preserving, unlike [`defending_player_cr508_5`]'s CR 508.5 collapse: an
+/// attacked player is `TargetRef::Player`; an attacked planeswalker is that
+/// permanent (`TargetRef::Object`) while it is still a phased-in planeswalker on the
+/// battlefield (CR 506.4c, CR 510.1b: otherwise nothing is attacked); an attacked
+/// battle is NOT a referent of this phrase (it says "player or planeswalker"), and
+/// yields none. An absent referent never falls back to the asker's controller.
+///
+/// # Which creature (the referent attacker)
+///
+/// Chosen by [`referent_attacker`] over the event bound by
+/// [`with_bound_attack_event`]. The asker is `trigger_source`'s identity reference
+/// when present, else `asker_id`.
+///
+/// # Live versus last-known
+///
+/// The referent attacker is "live" when it is still the very object that was
+/// asking or attacking: for the asker, `trigger_source.source_read` is the exact
+/// live incarnation on the battlefield (a same-id return is never a substitute); for
+/// an observer's attacker, the object on the battlefield is the incarnation the
+/// attack declaration stamped. See [`attack_target_referent`] for the live and
+/// last-known branches.
+pub(crate) fn resolve_attacked_player_or_planeswalker(
+    state: &GameState,
+    asker_id: ObjectId,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+) -> Option<TargetRef> {
+    let entry_id = trigger_source.map_or(asker_id, |source| source.identity.reference.object_id);
+    let target = with_bound_attack_event(state, trigger_source, |event| {
+        let referent = referent_attacker(event, entry_id);
+        let is_asker = referent == entry_id;
+        let live = if is_asker {
+            match trigger_source {
+                Some(source) => matches!(
+                    source.source_read(state),
+                    crate::types::game_state::TriggerSourceRead::ExactLive(object)
+                        if object.zone == Zone::Battlefield
+                ),
+                None => state
+                    .objects
+                    .get(&referent)
+                    .is_some_and(|object| object.zone == Zone::Battlefield),
+            }
+        } else {
+            state.objects.get(&referent).is_some_and(|object| {
+                object.zone == Zone::Battlefield
+                    && event.is_none_or(|event| {
+                        crate::game::targeting::event_source_is_live_incarnation(event, object)
+                    })
+            })
+        };
+        attack_target_referent(state, referent, trigger_source, is_asker, live, event)
+    })?;
+    match target {
+        AttackTarget::Player(player) => Some(TargetRef::Player(player)),
+        AttackTarget::Planeswalker(id) => state
+            .objects
+            .get(&id)
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && !object.is_phased_out()
+                    && object
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Planeswalker)
+            })
+            .map(|_| TargetRef::Object(id)),
+        // CR 506.3: "player or planeswalker" does not name a battle.
+        AttackTarget::Battle(_) => None,
+    }
 }
 
 /// Return the next defending player who still needs to declare blockers.
@@ -8825,6 +9004,361 @@ mod tests {
             defending_player_cr508_5(&state, source, Some(&ctx)),
             Some(PlayerId(1)),
             "the asker's own CR 608.2h combat snapshot answers a batch it is not in"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 506.3 attacked player-or-planeswalker authority
+    // ---------------------------------------------------------------------
+
+    fn make_creature(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+    }
+
+    fn spawn_creature(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+        let id = spawn(state, card, name);
+        make_creature(state, id);
+        id
+    }
+
+    fn spawn_planeswalker(state: &mut GameState, card: u64, controller: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            controller,
+            "Karn".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Planeswalker];
+        id
+    }
+
+    fn declare_targets(state: &mut GameState, attacks: &[(ObjectId, AttackTarget)]) {
+        state.combat = Some(CombatState {
+            attackers: attacks
+                .iter()
+                .map(|(id, target)| {
+                    let defender = match target {
+                        AttackTarget::Player(player) => *player,
+                        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => PlayerId(1),
+                    };
+                    AttackerInfo::new(*id, *target, defender)
+                })
+                .collect(),
+            ..CombatState::default()
+        });
+    }
+
+    /// An attack event naming exactly `attacker`, stamped with its incarnation.
+    fn declared_event(state: &GameState, attacker: ObjectId, target: AttackTarget) -> GameEvent {
+        GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, target)],
+            declaration_records: vec![
+                state.objects[&attacker].snapshot_for_attack_declaration(attacker)
+            ],
+        }
+    }
+
+    /// CR 506.3 + CR 508.5: a LIVE attack target outranks the latch, honoring a
+    /// reselection after the trigger was placed.
+    #[test]
+    fn attacked_referent_live_attack_target_outranks_the_latch() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+        let ctx = latch_context(&state, source);
+        assert_eq!(
+            ctx.combat_status.attack_target,
+            Some(AttackTarget::Player(PlayerId(1)))
+        );
+        // Reach guard: unreselected, the live target is the player.
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(1)))
+        );
+        state.combat.as_mut().unwrap().attackers[0].attack_target =
+            AttackTarget::Planeswalker(karn);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Object(karn)),
+            "the live target (the planeswalker itself, not its controller) beats the latch"
+        );
+    }
+
+    /// CR 506.4: alive but out of combat is attacking nothing, for the asker and for
+    /// an observer's attacker; the same fixtures answer when the creature is in combat.
+    #[test]
+    fn attacked_referent_creature_out_of_combat_has_no_referent() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let other = spawn_creature(&mut state, 2, "Other attacker");
+        declare_targets(
+            &mut state,
+            &[
+                (source, AttackTarget::Player(PlayerId(1))),
+                (other, AttackTarget::Player(PlayerId(2))),
+            ],
+        );
+        let ctx = latch_context(&state, source);
+        let event = declared_event(&state, other, AttackTarget::Player(PlayerId(2)));
+        state.current_trigger_event = Some(event);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "positive control: the observer's attacker is in combat"
+        );
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .retain(|info| info.object_id != other);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None,
+            "the observer's attacker is alive and attacking nothing"
+        );
+
+        // The asker, with the event not naming anyone else.
+        state.current_trigger_event = None;
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(1))),
+            "positive control: the asker is still attacking"
+        );
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .retain(|info| info.object_id != source);
+        assert!(ctx.combat_status.attack_target.is_some());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None,
+            "the asker is alive, off combat: the latch must not answer"
+        );
+    }
+
+    /// CR 608.2h + CR 113.7a: a departed asker answers from its latch; no latch, no answer.
+    #[test]
+    fn attacked_referent_departed_asker_uses_the_latch() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        let ctx = latch_context(&state, source);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Object(karn))
+        );
+
+        // A latch captured outside combat holds nothing.
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let ctx = latch_context(&state, source);
+        assert_eq!(ctx.combat_status.attack_target, None);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None
+        );
+    }
+
+    /// CR 608.2h + CR 400.7: a departed observer's attacker answers from the departure
+    /// row of the DECLARED incarnation, also after a blink; a legacy declaration (no
+    /// incarnation) falls back to the terminal departure; no row means no answer.
+    #[test]
+    fn attacked_referent_departed_observer_uses_the_declared_incarnations_row() {
+        let (mut state, source) = anchor_state();
+        let other = spawn_creature(&mut state, 2, "Other attacker");
+        declare_targets(&mut state, &[(other, AttackTarget::Player(PlayerId(2)))]);
+        let ctx = latch_context(&state, source);
+        let event = declared_event(&state, other, AttackTarget::Player(PlayerId(2)));
+        let legacy = {
+            let GameEvent::AttackersDeclared {
+                attacker_ids,
+                defending_player,
+                attacks,
+                ..
+            } = event.clone()
+            else {
+                unreachable!()
+            };
+            GameEvent::AttackersDeclared {
+                attacker_ids,
+                defending_player,
+                attacks,
+                declaration_records: Vec::new(),
+            }
+        };
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Graveyard, &mut events);
+
+        state.current_trigger_event = Some(event.clone());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "exact-incarnation departure row"
+        );
+        state.current_trigger_event = Some(legacy.clone());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "legacy declaration: the terminal departure row"
+        );
+
+        // Blink: back onto the battlefield as a new object.
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+        state.current_trigger_event = Some(event);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "a blinked attacker still answers through its declared incarnation's row"
+        );
+        state.current_trigger_event = Some(legacy);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None,
+            "a legacy declaration cannot tell the incarnations apart: the terminal row refuses"
+        );
+    }
+
+    /// CR 608.2h: the asker's latch belongs to the asker only. An observer's attacker
+    /// that was not in combat when it left holds no target, whatever the asker latched.
+    #[test]
+    fn attacked_referent_asker_latch_is_ignored_for_another_attacker() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let other = spawn_creature(&mut state, 2, "Other attacker");
+        declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+        let ctx = latch_context(&state, source);
+        assert_eq!(
+            ctx.combat_status.attack_target,
+            Some(AttackTarget::Player(PlayerId(1)))
+        );
+        let event = declared_event(&state, other, AttackTarget::Player(PlayerId(2)));
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Graveyard, &mut Vec::new());
+        state.current_trigger_event = Some(event);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None
+        );
+    }
+
+    /// CR 506.3 + CR 506.4c + CR 510.1b: a planeswalker that left, stopped being one or
+    /// phased out is no referent (never its controller); a battle is no referent; a
+    /// player is a player.
+    #[test]
+    fn attacked_referent_is_kind_preserving_and_validated() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        let ctx = latch_context(&state, source);
+        let resolve =
+            |state: &GameState| resolve_attacked_player_or_planeswalker(state, source, Some(&ctx));
+        assert_eq!(resolve(&state), Some(TargetRef::Object(karn)));
+
+        state.objects.get_mut(&karn).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve(&state), None, "phased out");
+        state.objects.get_mut(&karn).unwrap().phase_status = PhaseStatus::PhasedIn;
+        assert_eq!(resolve(&state), Some(TargetRef::Object(karn)));
+
+        state.objects.get_mut(&karn).unwrap().card_types.core_types = vec![CoreType::Artifact];
+        assert_eq!(resolve(&state), None, "no longer a planeswalker");
+        state.objects.get_mut(&karn).unwrap().card_types.core_types = vec![CoreType::Planeswalker];
+        assert_eq!(resolve(&state), Some(TargetRef::Object(karn)));
+
+        crate::game::zones::move_to_zone(&mut state, karn, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(resolve(&state), None, "gone");
+
+        let siege = spawn(&mut state, 10, "Siege");
+        state.objects.get_mut(&siege).unwrap().card_types.core_types = vec![CoreType::Battle];
+        state.combat.as_mut().unwrap().attackers[0].attack_target = AttackTarget::Battle(siege);
+        assert_eq!(
+            resolve(&state),
+            None,
+            "a battle is not a player or planeswalker"
+        );
+    }
+
+    /// CR 508.5 second clause, applied to the attacked referent: which attacker.
+    #[test]
+    fn attacked_referent_attacker_selection() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let a = spawn_creature(&mut state, 2, "A");
+        let b = spawn_creature(&mut state, 3, "B");
+        declare_targets(
+            &mut state,
+            &[
+                (source, AttackTarget::Player(PlayerId(1))),
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(0))),
+            ],
+        );
+        let ctx = latch_context(&state, source);
+        let resolve =
+            |state: &GameState| resolve_attacked_player_or_planeswalker(state, source, Some(&ctx));
+
+        // The asker is among the event's entries: the asker.
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![source, a],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (source, AttackTarget::Player(PlayerId(1))),
+                (a, AttackTarget::Player(PlayerId(2))),
+            ],
+            declaration_records: Vec::new(),
+        });
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+
+        // The sole attacker the event names, though the asker is attacking someone else.
+        state.current_trigger_event =
+            Some(declared_event(&state, a, AttackTarget::Player(PlayerId(2))));
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(2))));
+
+        // A raw multi-attacker batch that omits the asker: the asker.
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![a, b],
+            defending_player: PlayerId(2),
+            attacks: vec![
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(0))),
+            ],
+            declaration_records: Vec::new(),
+        });
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+
+        // No event, and an event that is not an attack declaration: the asker.
+        state.current_trigger_event = None;
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+        state.current_trigger_event = Some(GameEvent::GameStarted);
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+
+        // No trigger source: the event binds nothing, so the asker (the object itself).
+        state.current_trigger_event =
+            Some(declared_event(&state, a, AttackTarget::Player(PlayerId(2))));
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, None),
+            Some(TargetRef::Player(PlayerId(1)))
         );
     }
 

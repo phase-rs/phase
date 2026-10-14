@@ -4617,10 +4617,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context,
                 committed_choice: Some(ChosenAttribute::Number(7)),
-            }),
+            })),
             proposition_truth: Some(true),
         };
         state

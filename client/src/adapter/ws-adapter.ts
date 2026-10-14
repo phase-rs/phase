@@ -210,6 +210,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 142 — TargetFilter gains AttackedPlayerOrPlaneswalker (the player or planeswalker an
+ *      attacking creature is attacking, CR 506.3 + CR 115.10a), serialized in the
+ *      ability definitions of GameState. A v141 peer cannot deserialize the tag; the
+ *      exact-match handshake refuses the pairing. Wire 124 moves with it; lobby
+ *      messages are unchanged; ZoneChangeCombatStatus gains `attack_target`
+ *      (Option<AttackTarget>, the attacker's last-known declared attack target)
+ *      in zone-change records and trigger-source contexts of GameState.
  * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
  *      of casting a permanent spell, linked to the permanent it becomes),
  *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
@@ -860,7 +867,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 141;
+export const PROTOCOL_VERSION = 142;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -12550,6 +12550,19 @@ fn apply_non_priority_pass_action(
                         &mut events,
                     )?;
                     state.last_effect_count = Some(chosen.len() as i32);
+                    // CR 107.3f + CR 107.3i + CR 118.12: "tap X untapped ..." as an effect
+                    // resolves with X chosen by the player, so the count tapped defines X for the
+                    // riders. The selection mode is the signal, as in casting_costs.rs and
+                    // mana_abilities.rs; min_count == 0 is not (Aggregate also has floor 0).
+                    if matches!(
+                        *mode,
+                        crate::types::ability::TapCreaturesSelectionMode::VariableX
+                    ) {
+                        engine_resolution_choices::stamp_continuation_chosen_x(
+                            state,
+                            u32::try_from(chosen.len()).unwrap_or(u32::MAX),
+                        );
+                    }
                     if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
                         state.waiting_for = WaitingFor::Priority { player: *player };
                     }

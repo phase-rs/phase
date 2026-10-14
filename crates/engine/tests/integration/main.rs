@@ -1977,6 +1977,8 @@ mod welcome_the_dead;
 #[cfg(feature = "test-support")]
 mod owned_you_target_authority;
 
+mod attack_target_latch;
+mod attacked_player_referent;
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
 mod declared_group_identity;
@@ -1984,4 +1986,5 @@ mod declared_player_gate_arms;
 mod declared_player_object_controller;
 mod exile_origin_target_acquisition;
 mod keyword_activation_cancel;
+mod resolution_tap_x_binding;
 mod tidebinder_source_type_gate;

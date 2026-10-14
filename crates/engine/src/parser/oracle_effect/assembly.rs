@@ -1743,6 +1743,7 @@ fn subject_anchored_optional_actor(
             // ability's own firing event.
             TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer => None,
@@ -1860,6 +1861,11 @@ fn subject_anchored_optional_actor(
             // is a data-model fact about this variant's `PlayerId` payload, not a
             // CR one, so only CR 109.5 is cited.
             TargetFilter::SpecificPlayer { .. } => None,
+
+            // CR 506.3: a damage recipient read from combat at resolution (a
+            // player or a planeswalker permanent), not a player actor a "may" can
+            // be attributed to.
+            TargetFilter::AttackedPlayerOrPlaneswalker => None,
 
             // DEAD ADMISSIONS: player-denoting, but NO arm in
             // `targeting::resolve_effect_player_ref` NOR in

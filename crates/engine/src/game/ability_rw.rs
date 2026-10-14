@@ -1481,6 +1481,10 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        // CR 506.3: a damage/effect recipient the combat authority names at
+        // resolution (a player or a planeswalker): external to the source, with
+        // no chain root to inherit.
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -2464,6 +2468,9 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         // `SpecificObject`, its concretized form).
         | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
+        // Not one of the 12 frozen event-context tags: a combat-state referent
+        // read from the member's own source and bound event.
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -2662,6 +2669,10 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::OriginalController
         | TargetFilter::SourceController
         | TargetFilter::EventTarget
+        // CR 506.3: the referent is the attack of the member's own attacker, read
+        // against that member's combat entry and bound event, so it differs per
+        // member (a symbolic referent takes `true`, never `false`).
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::PostReplacementSourceController
@@ -4198,7 +4209,12 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner => (true, false),
         // "any target" and player-or-object filters ⇒ both recipients.
-        TargetFilter::Any | TargetFilter::Or { .. } => (true, true),
+        // CR 506.3: the attacked player-or-planeswalker is either a player or a
+        // planeswalker permanent, so it writes both life and membership. Without
+        // this arm the catch-all below classes it as object-only.
+        TargetFilter::Any
+        | TargetFilter::Or { .. }
+        | TargetFilter::AttackedPlayerOrPlaneswalker => (true, true),
         // Everything else is object-scoped for damage purposes.
         _ => (false, true),
     }
@@ -7223,6 +7239,17 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ChosenDamageSource { .. } => reads_event_live(),
+        // CR 506.3 + CR 506.4: the bound attack event picks the attacker (live
+        // event read), the planeswalker answer is a battlefield-membership read
+        // (is it still there, still a planeswalker), and the referent reads
+        // `state.combat.attackers`, which `Effect::RemoveFromCombat` writes
+        // (`TurnStructure`).
+        TargetFilter::AttackedPlayerOrPlaneswalker => {
+            let mut p = reads_event_live();
+            p.merge(reads_board_of(StateKind::SetMembership));
+            p.merge(reads_board_of(StateKind::TurnStructure));
+            p
+        }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             rw_target_filter(filter)
         }
@@ -9347,6 +9374,18 @@ mod tests {
             profiles_conflict(&self_conflict, &batch()),
             "TurnStructure read × write ⇒ conflict"
         );
+        // NEG: the attacked-player referent READS combat (`state.combat.attackers`), so a
+        // RemoveFromCombat write alongside it DOES feed ⇒ conflict.
+        let mut referent_vs_removal = ability_rw_profile(&ra(Effect::RemoveFromCombat {
+            target: TargetFilter::Any,
+        }));
+        referent_vs_removal.merge(rw_target_filter(
+            &TargetFilter::AttackedPlayerOrPlaneswalker,
+        ));
+        assert!(
+            profiles_conflict(&referent_vs_removal, &batch()),
+            "RemoveFromCombat write × attacked-referent read ⇒ conflict"
+        );
     }
 
     /// §L14 (CR 500 + CR 500.8): extra turns / additional phases are `TurnStructure`
@@ -9828,5 +9867,52 @@ mod tests {
             rw_trigger_condition(&TriggerCondition::ChoseRingBearer),
             reads_event_live()
         );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_classification_tests {
+    use super::*;
+
+    /// CR 506.3: the attacked player-or-planeswalker is a symbolic, per-member combat
+    /// referent that is both a player and a planeswalker permanent.
+    #[test]
+    fn attacked_referent_rw_classification() {
+        let f = TargetFilter::AttackedPlayerOrPlaneswalker;
+        assert!(
+            member_bound_target_filter(&f),
+            "symbolic referent takes true"
+        );
+        assert!(
+            !member_bound_target_filter(&TargetFilter::DefendingPlayer),
+            "DefendingPlayer is member-invariant: the contrast"
+        );
+        assert!(!legacy_target_filter(&f), "not one of the frozen 12 tags");
+        assert_eq!(scope_of(&f, None), WriteScope::External);
+
+        // Recipient: player AND object, unlike DefendingPlayer's player-only.
+        assert_eq!(target_recipient(&f), (true, true));
+        assert_eq!(
+            target_recipient(&TargetFilter::DefendingPlayer),
+            (true, false)
+        );
+        let writes = damage_writes(&f);
+        let life = life_writes();
+        assert!(writes.writes_external.player_life && life.writes_external.player_life);
+        assert!(writes.writes_external.journal_life);
+        assert!(
+            writes.writes_external.set_membership,
+            "a planeswalker's loyalty/membership is written too"
+        );
+
+        // As a read carrier: the live bound event plus a battlefield membership read.
+        let read = rw_target_filter(&f);
+        assert!(read.reads_event_live);
+        assert!(read.reads_board.set_membership);
+        assert!(
+            read.reads_board.turn_structure,
+            "the referent reads combat.attackers, which RemoveFromCombat writes"
+        );
+        assert!(!read.legacy_batch_prompt);
     }
 }

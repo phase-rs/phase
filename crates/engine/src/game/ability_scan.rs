@@ -3683,6 +3683,15 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
+        // CR 506.3: reads the bound attack event (event) and live combat and
+        // battlefield state (a planeswalker's loyalty is changed by the damage it
+        // receives, so a sibling trigger can interact: sibling). Not DefendingPlayer's NONE.
+        TargetFilter::AttackedPlayerOrPlaneswalker => Axes {
+            event: true,
+            sibling: true,
+            projected: false,
+            history: HistoryReads::NONE,
+        },
         TargetFilter::HasChosenName => Axes::NONE,
         TargetFilter::ChosenDamageSource { filter } => {
             let mut acc = Axes {
@@ -11333,5 +11342,27 @@ mod tests {
             loop_axes(&grant_until_end_of_turn(not_continuous)),
             (true, true, true)
         );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_scan_tests {
+    use super::*;
+
+    /// CR 506.3: reads the bound attack event and live battlefield state; a sibling
+    /// trigger's damage changes planeswalker loyalty. Not DefendingPlayer's NONE.
+    #[test]
+    fn attacked_referent_scan_axes() {
+        let f = TargetFilter::AttackedPlayerOrPlaneswalker;
+        for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+            let axes = scan_target_filter(&f, FilterReadContext::SnapshotOrEvent, mode);
+            assert!(axes.event && axes.sibling && !axes.projected, "{mode:?}");
+            let none = scan_target_filter(
+                &TargetFilter::DefendingPlayer,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            );
+            assert!(!none.event && !none.sibling, "contrast: {mode:?}");
+        }
     }
 }

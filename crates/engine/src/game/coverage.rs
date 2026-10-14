@@ -768,6 +768,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "controller of the object targeted by the triggering event".into()
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
+        TargetFilter::AttackedPlayerOrPlaneswalker => {
+            "the player or planeswalker it's attacking".into()
+        }
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
@@ -22307,6 +22310,19 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             items.is_empty(),
             "modeled tree must emit no unsupported item"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn attacked_referent_is_named_in_coverage_text() {
+        assert_eq!(
+            fmt_target(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            "the player or planeswalker it's attacking"
         );
     }
 }

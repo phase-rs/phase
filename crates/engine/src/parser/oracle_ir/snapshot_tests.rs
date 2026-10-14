@@ -3134,9 +3134,13 @@ mod diagnostic_snapshots {
 
     #[test]
     fn diagnostic_ignored_remainder() {
+        // The Swordjack clause with a TARGETED recipient: "target player or planeswalker"
+        // consumes only up to the noun, leaving the trailing "it's attacking" ignored.
+        // (The printed untargeted phrase is consumed whole by the attacked-referent
+        // combinator; see `diagnostic_attacked_referent_leaves_no_remainder`.)
         let diagnostics = parse_diagnostics(
-            "Whenever this creature attacks, it deals damage to the player or planeswalker it's attacking equal to the number of artifacts you control.\nEncore {5}{R} ({5}{R}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)",
-            "Fathom Fleet Swordjack",
+            "Whenever this creature attacks, it deals damage to target player or planeswalker it's attacking equal to the number of artifacts you control.",
+            "Synthetic Swordjack",
             &["Creature"],
             &["Orc", "Pirate"],
         );
@@ -3144,10 +3148,42 @@ mod diagnostic_snapshots {
             diagnostics
                 .iter()
                 .any(|d| d.category_name() == "ignored-remainder"),
-            "Expected ignored-remainder diagnostic for Fathom Fleet Swordjack, got: {:?}",
+            "Expected ignored-remainder diagnostic, got: {:?}",
             diagnostics
         );
         insta::assert_json_snapshot!("diagnostic_ignored_remainder", &diagnostics);
+    }
+
+    #[test]
+    fn diagnostic_attacked_referent_leaves_no_remainder() {
+        // CR 506.3: the printed Fathom Fleet Swordjack text. "the player or planeswalker
+        // it's attacking" is consumed whole by the attacked-referent combinator, leaving
+        // no ignored-remainder "it's attacking". Reach guard: the
+        // targeted spelling of the same clause still reports the remainder.
+        let printed = parse_diagnostics(
+            "Whenever this creature attacks, it deals damage to the player or planeswalker it's attacking equal to the number of artifacts you control.\nEncore {5}{R} ({5}{R}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)",
+            "Fathom Fleet Swordjack",
+            &["Creature"],
+            &["Orc", "Pirate"],
+        );
+        let targeted = parse_diagnostics(
+            "Whenever this creature attacks, it deals damage to target player or planeswalker it's attacking equal to the number of artifacts you control.",
+            "Synthetic Swordjack",
+            &["Creature"],
+            &["Orc", "Pirate"],
+        );
+        assert!(
+            targeted
+                .iter()
+                .any(|d| d.category_name() == "ignored-remainder"),
+            "reach guard: {targeted:?}"
+        );
+        assert!(
+            !printed
+                .iter()
+                .any(|d| d.category_name() == "ignored-remainder"),
+            "unexpected ignored-remainder for Fathom Fleet Swordjack: {printed:?}"
+        );
     }
 
     #[test]

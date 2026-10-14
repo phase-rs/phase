@@ -1931,6 +1931,17 @@ pub struct ZoneChangeCombatStatus {
     pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
+    /// CR 506.3 + CR 603.10a + CR 113.7a: The attack target this creature was
+    /// attacking when the status was captured: the declared player,
+    /// planeswalker or battle itself, not the player it collapses to in
+    /// `defending_player` (CR 508.5). A source whose ability resolves after it
+    /// left the battlefield (CR 608.2h) can still be asked what it was
+    /// attacking. Every producer sets this exactly when it sets
+    /// `defending_player`. `None` means no attack target was recorded,
+    /// including records serialized before the field existed, whose target
+    /// kind cannot be reconstructed from `defending_player`.
+    #[serde(default)]
+    pub attack_target: Option<AttackTarget>,
 }
 
 /// CR 508.1a: Snapshot of a creature's public characteristics when it was
@@ -14655,6 +14666,18 @@ impl ZoneOpponentChooserPurpose {
     }
 }
 
+// clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
+// `GameState`; the stack budget that matters is the `GameState` ceiling in
+// `types/game_state_size.rs`, and this enum's inline size (1,632 B on
+// x86_64-pc-windows-msvc = its largest variant, `NamedChoice`) is already inside
+// that measurement. Boxing the cold `OpponentGuess.owner` brought the enum from
+// 1,760 B to 1,632 B and left `NamedChoice` (1,631 B, dominated by
+// `NamedChoiceSource`, 1,560 B) as the outlier against `ChooseOneOfBranch`
+// (1,258 B). Boxing the next-largest variant only moves the outlier down and puts
+// an allocation on every common prompt without reducing the inline size any
+// `GameState` pays for. Follows the documented allows on `StackEntryKind`,
+// `Effect` and `CastingPermission`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -15797,13 +15820,17 @@ pub enum WaitingFor {
     /// `waits_for_resolution_choice` — the branch chain is auto-stashed onto
     /// `pending_continuation` and re-evaluated on drain once the outcome is known
     /// (the deferred "If you do" / `NamedChoice` resolution pattern).
+    ///
+    /// Boxed (CR 608.2d guess state): a populated `owner` embeds a full
+    /// `TriggerSourceContext`, ~1.6 KB, and would otherwise set the inline size of
+    /// every `WaitingFor` and therefore of `GameState`; see `game_state_size.rs`.
     OpponentGuess {
         player: PlayerId,
         options: Vec<String>,
         choice_type: ChoiceType,
         source: OpponentGuessSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<OpponentGuessOwner>,
+        owner: Option<Box<OpponentGuessOwner>>,
         /// CR 608.2d: For a `GuessSubject::Proposition`, the proposition's truth
         /// resolved at the moment the guess was raised (when the resolving
         /// ability's targets are still in scope). The answer handler compares the
@@ -48002,5 +48029,127 @@ mod shared_zone_storage_tests {
             stray.loop_fingerprint(),
             "the non-canonical seat's own container is hashed too"
         );
+    }
+}
+
+#[cfg(test)]
+mod zone_change_combat_status_tests {
+    use super::{ZoneChangeCombatStatus, ZoneChangeRecord};
+    use crate::game::combat::AttackTarget;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// Every declared-target kind, each with a different collapsed player.
+    fn populated_statuses() -> [ZoneChangeCombatStatus; 3] {
+        [
+            (AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+            (AttackTarget::Planeswalker(ObjectId(7)), PlayerId(2)),
+            (AttackTarget::Battle(ObjectId(8)), PlayerId(1)),
+        ]
+        .map(|(target, defender)| ZoneChangeCombatStatus {
+            attacking: true,
+            defending_player: Some(defender),
+            attack_target: Some(target),
+            ..ZoneChangeCombatStatus::default()
+        })
+    }
+
+    /// Remove every `attack_target` key, returning how many were removed.
+    fn strip_attack_target(value: &mut serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(map) => {
+                let own = usize::from(map.remove("attack_target").is_some());
+                own + map.values_mut().map(strip_attack_target).sum::<usize>()
+            }
+            serde_json::Value::Array(items) => items.iter_mut().map(strip_attack_target).sum(),
+            _ => 0,
+        }
+    }
+
+    /// CR 506.3: the default record holds no attack target, and every declared
+    /// target kind survives a serialize/deserialize round trip unchanged. The
+    /// status stays `Copy`.
+    #[test]
+    fn attack_target_round_trips_for_every_target_kind() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<ZoneChangeCombatStatus>();
+        assert_eq!(ZoneChangeCombatStatus::default().attack_target, None);
+        for status in populated_statuses() {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: ZoneChangeCombatStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status, "{json}");
+            assert!(back.attack_target.is_some(), "reach guard: value survived");
+        }
+    }
+
+    /// Regression guard (not revert-discriminating: an `Option` already
+    /// tolerates an absent key; only a change away from `Option` turns this
+    /// red). A status serialized before the field existed deserializes with no
+    /// attack target and every other field intact, and the legacy
+    /// `defending_player` is not turned into a target (CR 508.5 collapses a
+    /// planeswalker to its controller, so the kind cannot be reconstructed).
+    #[test]
+    fn legacy_status_without_attack_target_deserializes_to_none() {
+        let legacy = r#"{"attacking":true,"blocking":false,"blocked":false,"attacking_alone":true,"blocking_alone":false,"defending_player":1}"#;
+        let status: ZoneChangeCombatStatus = serde_json::from_str(legacy).unwrap();
+        assert!(status.attacking && status.attacking_alone);
+        assert_eq!(status.defending_player, Some(PlayerId(1)));
+        assert_eq!(status.attack_target, None);
+        let empty: ZoneChangeCombatStatus = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, ZoneChangeCombatStatus::default());
+    }
+
+    /// Same guard through the record's wire path, in both places the status is
+    /// stored: `ZoneChangeRecord.combat_status` and the record's
+    /// `trigger_source_context.combat_status`.
+    #[test]
+    fn legacy_record_without_attack_target_deserializes_to_none() {
+        // A real snapshot: `test_minimal` owns no source context to sync.
+        let mut state = super::GameState::new_two_player(1);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Departing Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let mut record = state.objects[&id].snapshot_for_zone_change(
+            id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        record.combat_status = populated_statuses()[1];
+        record.sync_trigger_source_context();
+        assert!(
+            record.trigger_source_context().is_some(),
+            "reach guard: the snapshot owns a source context"
+        );
+        let mut value = serde_json::to_value(&record).unwrap();
+
+        // Positive control: the unmodified JSON carries the value in both places.
+        let whole: ZoneChangeRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(whole.combat_status, record.combat_status);
+        assert_eq!(
+            whole.trigger_source_context().unwrap().combat_status,
+            record.combat_status
+        );
+
+        let removed = strip_attack_target(&mut value);
+        assert!(
+            removed >= 2,
+            "both stored copies had the key, got {removed}"
+        );
+        let legacy: ZoneChangeRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.combat_status.attack_target, None);
+        assert_eq!(
+            legacy
+                .trigger_source_context()
+                .unwrap()
+                .combat_status
+                .attack_target,
+            None
+        );
+        assert_eq!(legacy.combat_status.defending_player, Some(PlayerId(2)));
     }
 }

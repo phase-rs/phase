@@ -9378,6 +9378,20 @@ fn finish_with_continuation(
     state.waiting_for.clone()
 }
 
+/// CR 107.3f + CR 107.3i + CR 608.2d: X is chosen as the ability resolves and every instance of
+/// X in the resolving chain shares that value, so the value a resolution-time payment
+/// announced (an amount paid, a count of permanents tapped) defines X for the rest of the chain.
+/// Stamps `value` on the active continuation frame's chain and every sub/else branch; a no-op
+/// when no frame is parked.
+///
+/// Precondition: the active frame is the paying ability's parked rider chain. When the paying
+/// ability has no rider and an unrelated frame is already parked, that frame is stamped instead.
+pub(crate) fn stamp_continuation_chosen_x(state: &mut GameState, value: u32) {
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.pending.chain.set_chosen_x_recursive(value);
+    }
+}
+
 /// CR 118.12 + CR 119.4 + CR 616.1: Complete the outer pay-amount action only
 /// after any interactive post-replacement child of the life payment has
 /// settled. Shared by the direct submit path and the deferred-life resumer.
@@ -9392,9 +9406,7 @@ pub(crate) fn finish_pay_amount_choice(
         .active_ability_continuation()
         .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
     if !pending_starts_with_pay_amount {
-        if let Some(frame) = state.active_ability_continuation_frame_mut() {
-            frame.pending.chain.set_chosen_x_recursive(total);
-        }
+        stamp_continuation_chosen_x(state, total);
     }
     let mut waiting_for = finish_with_continuation(state, player, events);
     if let WaitingFor::PayAmountChoice {

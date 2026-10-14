@@ -1844,6 +1844,28 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
             Some(P1),
             "ETB observers must see the result already attacking"
         );
+        // CR 506.3 + CR 508.4: the entry record also holds the declared
+        // destination itself, not the player it collapses to.
+        assert_eq!(
+            entry_record.combat_status.attack_target,
+            Some(destination),
+            "the entry snapshot latches the chosen destination kind"
+        );
+        assert_eq!(
+            entry_record.combat_status.attack_target.is_some(),
+            entry_record.combat_status.defending_player.is_some(),
+            "attack_target is Some exactly when defending_player is"
+        );
+        // The refreshed `zone_changes_this_turn` row carries the same latch.
+        let row = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|row| row.object_id == mishra && row.to_zone == Zone::Battlefield)
+            .expect("the meld entry leaves a zone-change row");
+        assert_eq!(row.combat_status.attack_target, Some(destination));
+        assert_eq!(row.combat_status.defending_player, Some(P1));
     }
 
     let (mut runner, mishra, _engine, planeswalker, _battle) = setup(effect);
@@ -1874,6 +1896,24 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
         .events
         .iter()
         .any(|event| matches!(event, GameEvent::AttackersDeclared { .. })));
+    // CR 508.4a: a stale destination leaves the entrant not attacking, so the
+    // entry snapshot latches neither a defending player nor an attack target.
+    let stale_record = result
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if *object_id == mishra => Some(record.as_ref()),
+            _ => None,
+        })
+        .expect("the stale-destination entry still emits its snapshot");
+    assert!(!stale_record.combat_status.attacking);
+    assert_eq!(stale_record.combat_status.defending_player, None);
+    assert_eq!(stale_record.combat_status.attack_target, None);
 }
 
 /// CR 508.4 + CR 701.42: when the defending opponent is the only legal
@@ -1987,6 +2027,10 @@ fn mishra_single_defender_auto_target_enters_attacking() {
     let entry_record = entry_record.expect("meld entry emits its authoritative snapshot");
     assert!(entry_record.combat_status.attacking);
     assert_eq!(entry_record.combat_status.defending_player, Some(P1));
+    assert_eq!(
+        entry_record.combat_status.attack_target,
+        Some(AttackTarget::Player(P1))
+    );
 }
 
 /// CR 614.12a + CR 707.9 + CR 508.4: an as-enters copy choice is finalized
@@ -2117,6 +2161,7 @@ fn mishra_copy_as_enters_noncreature_is_not_attacking() {
     let record = record.expect("the realized entry snapshot is emitted after the copy choice");
     assert_eq!(record.name, "Powerstone Relic");
     assert!(!record.combat_status.attacking);
+    assert_eq!(record.combat_status.attack_target, None);
 }
 
 /// CR 613.1b + CR 508.4: a layer-2 control effect that starts applying only
@@ -2230,6 +2275,10 @@ fn mishra_final_controller_owns_attack_destination_choice() {
     assert_eq!(record.controller, PlayerId(1));
     assert!(record.combat_status.attacking);
     assert_eq!(record.combat_status.defending_player, Some(PlayerId(3)));
+    assert_eq!(
+        record.combat_status.attack_target,
+        Some(AttackTarget::Player(PlayerId(3)))
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -881,7 +881,7 @@ pub fn resolve_event_context_targets(
 /// - `ZoneChanged` into the battlefield records the entrant's incarnation; a
 ///   `ZoneChanged` out of the battlefield (or to any other zone) names an object
 ///   that no longer exists as such — any permanent now at that id is a new one.
-fn event_source_is_live_incarnation(
+pub(crate) fn event_source_is_live_incarnation(
     event: &GameEvent,
     obj: &crate::game::game_object::GameObject,
 ) -> bool {
@@ -1097,6 +1097,19 @@ pub fn resolved_targets(
         } else {
             Vec::new()
         };
+    }
+    // CR 506.3 + CR 115.10a + CR 608.2h: the attacked player-or-planeswalker is read from
+    // combat at resolution by the single combat authority. An absent referent (a battle,
+    // a creature that is not attacking, a planeswalker that is gone) is the empty set; it
+    // must not fall through to `ability.targets`, the source, or a controller.
+    if matches!(target_filter, TargetFilter::AttackedPlayerOrPlaneswalker) {
+        return crate::game::combat::resolve_attacked_player_or_planeswalker(
+            state,
+            ability.source_id,
+            ability.trigger_source.as_ref(),
+        )
+        .into_iter()
+        .collect();
     }
     if matches!(target_filter, TargetFilter::SourceOrPaired) {
         return state
@@ -2319,6 +2332,12 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 })
                 .map(TargetRef::Player)
         }
+        // CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" is read by
+        // `combat::resolve_attacked_player_or_planeswalker`, which needs the ability's
+        // trigger source (the latch) as well as the bound event. This event-and-state
+        // door carries neither the ability nor the latch, so it names no referent;
+        // `resolved_targets` and the DealDamage recipient binding call the authority.
+        TargetFilter::AttackedPlayerOrPlaneswalker => None,
         TargetFilter::AttachedTo => {
             let host = resolve_source_attached_to(state, source_id)?;
             match host {
@@ -8794,5 +8813,88 @@ mod tests {
         );
         crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
         assert_eq!(read(&state), (None, vec![], None));
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_targeting_tests {
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo};
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, QuantityExpr};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    fn creature(state: &mut GameState, card: u64, controller: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            controller,
+            format!("Creature {card}"),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    fn ability(targets: Vec<TargetRef>, source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            targets,
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 506.3 + CR 115.10a + CR 608.2h: the combat authority's answer is the whole
+    /// answer. An absent referent is the empty set; it does not fall through to
+    /// propagated `ability.targets`, the source, or a controller.
+    #[test]
+    fn attacked_referent_resolved_targets_is_the_authority_alone() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = creature(&mut state, 1, PlayerId(0));
+        let bystander = creature(&mut state, 2, PlayerId(1));
+        let referent = TargetFilter::AttackedPlayerOrPlaneswalker;
+        let ability = ability(vec![TargetRef::Object(bystander)], attacker);
+
+        // Not attacking: nothing, though `ability.targets` is non-empty.
+        assert_eq!(resolved_targets(&ability, &referent, &state), vec![]);
+        // Positive control: the same ability and a propagating filter do see the target.
+        assert_eq!(
+            resolved_targets(&ability, &TargetFilter::ParentTarget, &state),
+            vec![TargetRef::Object(bystander)]
+        );
+
+        state
+            .combat
+            .get_or_insert_with(Default::default)
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+        assert_eq!(
+            resolved_targets(&ability, &referent, &state),
+            vec![TargetRef::Player(PlayerId(1))]
+        );
+
+        // Never a slot, never a pure event-context filter, and the event-and-state door
+        // names no referent.
+        assert!(!is_pure_event_context_filter(&referent));
+        assert_eq!(
+            resolve_event_context_target(&state, &referent, attacker),
+            None
+        );
     }
 }
