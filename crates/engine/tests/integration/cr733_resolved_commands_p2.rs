@@ -760,7 +760,7 @@ fn rootwater_activation(runner: &mut GameRunner, source: ObjectId, recipient: Ob
     assert!(outcome.state().objects[&source].tapped);
     assert_eq!(outcome.state().objects[&recipient].controller, P0);
     assert!(outcome.events().iter().any(|event| matches!(event,
-        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0 }
+        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0, .. }
             if *object_id == recipient)));
     assert!(outcome.events().iter().any(|event| matches!(
         event,

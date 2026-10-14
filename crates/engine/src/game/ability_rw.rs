@@ -4297,6 +4297,7 @@ fn walk_ability(
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
         activation_record: _,
+        control_change_instruction: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for

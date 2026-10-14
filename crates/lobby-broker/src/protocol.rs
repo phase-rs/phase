@@ -60,6 +60,16 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 142 — CR 603.10d control-change evidence: `GameEvent::ControllerChanged`
+///      gains `evidence` (the key of the immediately-before watcher latch and
+///      subject snapshot look-back control-change triggers read), `ResolvedAbility`
+///      gains `control_change_instruction` and `GameState` gains
+///      `control_change_observations` (the observations those events key) and
+///      `control_change_captures` (a player-scope fan-out's pre-seat capture),
+///      all serialized inside `GameState`; a v141 peer would drop the evidence
+///      and resolve those triggers differently. Full-game peers and P2P move in
+///      lockstep (wire 124); no lobby carrier names it.
+///
 /// 141 — `ExileLinkKind` gains `CastCost` (`"CastCost"`, CR 607.2q: a card
 ///      exiled to pay a cost of casting a permanent spell, linked to that spell
 ///      and to the permanent it becomes), serialized in `GameState.exile_links`.
@@ -1053,7 +1063,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 141;
+pub const PROTOCOL_VERSION: u32 = 142;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2310,12 +2320,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 141);
+        assert_eq!(PROTOCOL_VERSION, 142);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 140);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 141);
     }
 
     #[test]

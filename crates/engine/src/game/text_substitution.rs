@@ -539,6 +539,7 @@ fn rewrite_resolved_ability(
         modal: _,
         parent_target_missing_reason: _,
         illegal_targets_disposition: _,
+        control_change_instruction: _,
     } = ability;
 
     let mut occurrences = substitution.rewrite_in_place(effect)

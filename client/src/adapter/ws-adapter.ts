@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 142 — CR 603.10d control-change evidence: ControllerChanged gains evidence,
+ *      ResolvedAbility gains control_change_instruction and GameState gains
+ *      control_change_observations and control_change_captures — see
+ *      PROTOCOL_VERSION's own `/// 142` entry in
+ *      crates/lobby-broker/src/protocol.rs. Look-back control-change triggers
+ *      read them, so a v141 peer resolves them differently. Wire 124 moves with it.
  * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
  *      of casting a permanent spell, linked to the permanent it becomes),
  *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
@@ -860,7 +866,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 141;
+export const PROTOCOL_VERSION = 142;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

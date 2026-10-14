@@ -61603,6 +61603,12 @@ fn stolen_uniform_lose_control_delayed_trigger_shape() {
         TriggerMode::ChangesController,
         "trigger fires on the control change"
     );
+    // CR 603.10d: the losing side is the mode's own direction; no gaining
+    // player is named, so `valid_target` (the gaining player) is open.
+    assert_eq!(
+        trigger.valid_target, None,
+        "a lose-control trigger names no gaining player"
+    );
     // Claim 2: valid_card binds the Equipment slot, not the collision ParentTarget.
     assert_eq!(
         trigger.valid_card,

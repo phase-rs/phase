@@ -2069,6 +2069,9 @@ fn finish_action_boundary_with_lifecycle(
     EngineError,
 > {
     state.consumed_before_priority_trigger_events.clear();
+    // CR 603.10d: this action's control-change events have been collected;
+    // keep only the observations a retained carrier still names.
+    state.release_unreferenced_control_change_observations();
     let RawActionApplication {
         mut result,
         journal_start,

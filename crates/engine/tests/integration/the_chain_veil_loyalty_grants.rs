@@ -218,6 +218,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         parent_target_missing_reason: None,
         activation_cost_reduction: None,
         activation_record: None,
+        control_change_instruction: None,
     }
 }
 

@@ -472,6 +472,62 @@ fn losing_control_of_another_permanent_does_not_unattach_the_uniform() {
     );
 }
 
+/// Saves from before the lose-control trigger's player slot named the GAINING
+/// player carry `valid_target: Controller` (the losing "you") on Stolen
+/// Uniform's armed trigger; current saves carry nothing there. Both, restored
+/// through a serialized round trip, still unattach the Equipment when its
+/// control ends at cleanup (CR 514.2).
+#[test]
+fn a_restored_legacy_lose_control_trigger_still_unattaches_the_uniform() {
+    for legacy in [true, false] {
+        let mut board = board(STEAL);
+        resolve_uniform(&mut board);
+        let Board {
+            mut runner, blade, ..
+        } = board;
+
+        runner.state_mut().capture_rng_word_pos();
+        let mut saved = serde_json::to_value(runner.state()).expect("state serializes");
+        let condition = &mut saved["delayed_triggers"][0]["condition"];
+        let trigger = if condition.get("trigger").is_some() {
+            &mut condition["trigger"]
+        } else {
+            condition
+                .as_object_mut()
+                .expect("the armed delayed trigger is saved")
+                .values_mut()
+                .find(|variant| variant.get("trigger").is_some())
+                .map(|variant| &mut variant["trigger"])
+                .expect("the saved condition carries its trigger")
+        };
+        assert_eq!(
+            trigger["mode"], "ChangesController",
+            "reach guard: the saved trigger is the lose-control trigger"
+        );
+        trigger["valid_target"] = if legacy {
+            serde_json::json!({ "type": "Controller" })
+        } else {
+            serde_json::Value::Null
+        };
+        let mut restored: engine::types::game_state::GameState =
+            serde_json::from_value(saved).expect("the saved state restores");
+        restored.rehydrate_rng();
+        *runner.state_mut() = restored;
+
+        advance_past_cleanup(&mut runner);
+        assert_eq!(
+            controller(&runner, blade),
+            P1,
+            "reach guard (legacy {legacy}): the until-end-of-turn control ended at cleanup"
+        );
+        assert_eq!(
+            attached_to(&runner, blade),
+            None,
+            "legacy {legacy}: losing control of the Equipment unattaches it"
+        );
+    }
+}
+
 /// CR 608.2b: "If part of the effect requires information about an illegal
 /// target, it fails to determine any such information. Any part of the effect
 /// that requires that information won't happen." The Equipment gains

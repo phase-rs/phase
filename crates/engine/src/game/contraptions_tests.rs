@@ -369,6 +369,7 @@ fn reassemble_with_gain_control_uses_controller_change_path() {
                 object_id,
                 old_controller,
                 new_controller,
+                ..
             } if *object_id == contraption
                 && *old_controller == PlayerId(1)
                 && *new_controller == PlayerId(0)

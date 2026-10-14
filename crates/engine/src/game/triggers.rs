@@ -2214,6 +2214,26 @@ fn trigger_source_context_for_event(
     trigger_source_context_for_latch(state, source)
 }
 
+/// CR 603.10 + CR 603.10d: latch every functioning look-back control-change
+/// watcher, with its controller and trigger entries, immediately before a
+/// control-change instruction. The source contexts come from the same
+/// `trigger_source_context_for_latch` authority the zone-change group latch
+/// uses. CR 702.26b: phased-out permanents don't trigger; CR 113.6: printed
+/// control-change triggers function on the battlefield.
+pub(crate) fn latch_control_change_watchers(state: &GameState) -> Vec<TriggerSourceContext> {
+    trigger_source_ids_for_zone(state, Zone::Battlefield)
+        .into_iter()
+        .filter_map(|source_id| state.objects.get(&source_id))
+        .filter(|source| {
+            super::functioning_abilities::active_trigger_definitions(state, source).any(|active| {
+                active.definition.mode == TriggerMode::ChangesController
+                    && trigger_definition_functions_in_zone(active.definition, Zone::Battlefield)
+            })
+        })
+        .map(|source| trigger_source_context_for_latch(state, source))
+        .collect()
+}
+
 /// CR 603.10: Capture the full immediately-before authority for a logical
 /// zone-change owner after its initial layer flush and before its first
 /// delivery, preserving the look-back exception's pre-event trigger state.
@@ -2473,10 +2493,19 @@ enum TriggerSourceVisit {
     EventSubject,
     /// Every other source path: live index, off-zone cache, or co-departed LKI.
     Observer,
+    /// CR 603.10 + CR 603.10d: a look-back control-change watcher, latched
+    /// immediately before the event's instruction and carried on the event.
+    /// The only visit that admits a printed `ChangesController` definition, and
+    /// it admits nothing else.
+    ControlChangeWatcher,
 }
 
 impl LogicalZoneTriggerCollection<'_> {
     fn admits_source_visit(self, visit: TriggerSourceVisit, source: ObjectIncarnationRef) -> bool {
+        if matches!(visit, TriggerSourceVisit::ControlChangeWatcher) {
+            // Already the immediately-before authority for its event.
+            return true;
+        }
         match self {
             Self::Ordinary => true,
             // CR 603.10a: Settlement is the one observer pass for all
@@ -2951,6 +2980,16 @@ fn collect_matching_triggers_inner(
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
         let source_context = source_context_for_definition(&source_context, trig_def);
+        // CR 603.10d: a look-back control-change trigger exists, and has its
+        // controller, as of immediately before the change, so it is collected
+        // only from the watcher latched then (`ControlChangeWatcher`), never
+        // from a live, cached or post-event view; and that visit collects
+        // nothing else.
+        if (trig_def.mode == TriggerMode::ChangesController)
+            != matches!(visit, TriggerSourceVisit::ControlChangeWatcher)
+        {
+            continue;
+        }
         // Synthesized granted-keyword companion triggers carry a keyword-keyed
         // `MayTriggerOrigin` — the synthetic `trig_idx` points past
         // `trigger_definitions` and must not be used as a `Printed` index.
@@ -3066,32 +3105,10 @@ fn collect_matching_triggers_inner(
             if !admitted {
                 continue;
             }
-            // CR 603.10d + CR 603.3a: "when you lose control of ~" is
-            // controlled by the PRE-change controller — the player who just
-            // lost control — not by whoever controls the object now.
-            // `source_context.lki.controller` (captured into `controller`
-            // above) already reflects the POST-change live controller for a
-            // self-ref source: `collect_pending_triggers` flushes layers
-            // before this scan runs, so the changing object's own controller
-            // has already moved to `new_controller` by the time trigger
-            // sources are gathered. Mirror
-            // `trigger_matchers::match_changes_controller`'s own directional
-            // discriminant (`source_id == *object_id`) here rather than
-            // re-deriving it, since `admitted` above already confirms this
-            // trig_def's matcher accepted the event. The delayed /
-            // `SpecificObject` shape (Stolen Uniform, `source_id !=
-            // object_id`) is left UNCHANGED: its source is a different object
-            // whose own controller is already the right answer (CR 113.8).
-            let controller = match event {
-                GameEvent::ControllerChanged {
-                    object_id,
-                    old_controller,
-                    ..
-                } if trig_def.mode == TriggerMode::ChangesController && *object_id == obj_id => {
-                    *old_controller
-                }
-                _ => controller,
-            };
+            // CR 603.3a: `controller` is the latched source's controller. For a
+            // look-back control-change trigger that is the watcher latched
+            // immediately before the change (CR 603.10d), so the matched "you"
+            // and the trigger's controller read the same field by construction.
             if !check_trigger_constraint_with_ref(
                 state,
                 trig_def,
@@ -3108,16 +3125,6 @@ fn collect_matching_triggers_inner(
                 &source_context,
                 definition_ref.as_ref(),
             );
-            // CR 603.3a + CR 113.8: `build_triggered_ability_from_context` has
-            // no `event` parameter and so re-derives its own controller from
-            // `source_context.lki.controller` — the same value `controller`
-            // held before the CR 603.10d override above. Rebind the ability
-            // (and every sub/else branch, via the existing `player_scope`
-            // rebinding authority) to the possibly-overridden `controller` so
-            // the ability's controller and its `PendingTrigger.controller`
-            // agree by construction. A no-op for every trigger mode other
-            // than the self-ref `ChangesController` case above.
-            ability.set_controller_recursive(controller);
             // CR 603.4: Stamp the printed-trigger index so per-turn resolution
             // tracking (`AbilityCondition::AbilityUseCountThisTurn`) can identify
             // "this ability" at resolution time.
@@ -5723,6 +5730,51 @@ fn collect_pending_triggers_with_collection(
                         matched.pending,
                         matched.trigger_events,
                     ));
+                }
+            }
+        }
+
+        // CR 603.10 + CR 603.10d: look-back control-change triggers. Their
+        // existence, their controller (CR 603.3a) and the subject's appearance
+        // are those immediately before the change, which the event carries: the
+        // watcher latch and subject snapshot its instruction captured before
+        // its first mutation. Collected only here (the live, cached and LKI
+        // passes above skip `ChangesController`), so a watcher that has since
+        // changed control, lost its abilities or left the battlefield still
+        // triggers exactly as it would have then. `Unrecorded` evidence (a
+        // legacy payload) latches no watcher, so nothing is collected.
+        if let GameEvent::ControllerChanged { evidence, .. } = event {
+            if let Some(watchers) = state
+                .control_change_observation(*evidence)
+                .map(|observation| observation.watchers.clone())
+            {
+                for source_context in watchers.iter() {
+                    let source_id = source_context.identity.reference.object_id;
+                    let matched_triggers = collect_matching_triggers_from_context(
+                        state,
+                        event,
+                        events,
+                        source_context,
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                        &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::ControlChangeWatcher,
+                    );
+                    for matched in matched_triggers {
+                        if !session.record_match(state, &matched, event) {
+                            continue;
+                        }
+                        if matched.batched {
+                            batched_this_pass.insert((source_id, matched.trig_idx));
+                        }
+                        registered_this_event.insert((source_id, matched.trig_idx));
+                        pending.push(PendingTriggerContext::batched(
+                            matched.pending,
+                            matched.trigger_events,
+                        ));
+                    }
                 }
             }
         }

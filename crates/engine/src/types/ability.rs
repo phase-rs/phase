@@ -34803,6 +34803,16 @@ pub struct ResolvedAbility {
     /// `WhenYouDo` gate and the `ParentTarget` guards still read it on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
+    /// CR 608.2e + CR 603.10d: the boundary of the fan-out control-change
+    /// instruction this node belongs to. Set ONLY by a fan-out driver
+    /// (`effects::stamp_fan_out_control_boundary`) on its driver-local
+    /// template, before its first seat; parked seats clone that template, so a
+    /// resumed seat publishes against the same boundary. Never set on a stack
+    /// entry, so copies never inherit it, and a following sequential
+    /// instruction is a different node. Rules-authoritative: viewer copies drop
+    /// it (it can carry hidden information).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_change_instruction: Option<crate::types::events::ControlChangeInstructionCarrier>,
 }
 
 impl Serialize for ResolvedAbility {
@@ -34918,6 +34928,7 @@ impl PartialEq for ResolvedAbility {
             modal: a_modal,
             mode_abilities: a_mode_abilities,
             parent_target_missing_reason: a_parent_target_missing_reason,
+            control_change_instruction: a_control_change_instruction,
         } = self;
         let Self {
             effect: b_effect,
@@ -34992,6 +35003,7 @@ impl PartialEq for ResolvedAbility {
             modal: b_modal,
             mode_abilities: b_mode_abilities,
             parent_target_missing_reason: b_parent_target_missing_reason,
+            control_change_instruction: b_control_change_instruction,
         } = other;
 
         a_effect == b_effect
@@ -35068,6 +35080,7 @@ impl PartialEq for ResolvedAbility {
             && a_modal == b_modal
             && a_mode_abilities == b_mode_abilities
             && a_parent_target_missing_reason == b_parent_target_missing_reason
+            && a_control_change_instruction == b_control_change_instruction
     }
 }
 
@@ -35440,6 +35453,7 @@ impl ResolvedAbility {
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
+            control_change_instruction: None,
         }
     }
 

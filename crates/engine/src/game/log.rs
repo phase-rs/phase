@@ -1828,6 +1828,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             old_controller,
             new_controller,
+            evidence: _,
         } => vec![
             card_seg(state, *object_id),
             text(" changed controller from "),

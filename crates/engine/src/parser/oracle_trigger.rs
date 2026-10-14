@@ -19251,6 +19251,49 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::ChangesController, def));
     }
 
+    // CR 603.2 + CR 603.10d: "Whenever an opponent gains control of <subject>
+    // from you" — the opponent-gains half of CR 603.10d's look-back control
+    // triggers (Zidane, Tantalus Thief). Same ChangesController event as "you
+    // lose control of ~": `valid_card` scopes the changing permanent and
+    // `valid_target` names the gaining player, judged against the pre-event
+    // "you" (`match_changes_controller`).
+    fn parse_opponent_gains_control_from_you(i: &str) -> OracleResult<'_, &str> {
+        all_consuming(preceded(
+            (
+                alt((tag("when "), tag("whenever "))),
+                tag("an opponent gains control of "),
+            ),
+            terminated(take_until(" from you"), tag(" from you")),
+        ))
+        .parse(i)
+    }
+    if let Ok((_, subject_text)) = parse_opponent_gains_control_from_you(lower) {
+        // "from you" fixes the losing controller. Collection runs after the
+        // change, so only subjects whose match can't depend on the permanent's
+        // post-change state are claimed (CR 603.10d look-back), and only in
+        // the singular, which triggers once per permanent (CR 603.2c): "~",
+        // and "a permanent", which every object on the battlefield is
+        // (CR 110.1). Any other type, a controller, a property or a quantified
+        // subject ("one or more permanents") fails closed (stays Unknown).
+        let Ok((_, subject)) = all_consuming(alt((
+            value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
+            value(
+                TargetFilter::Typed(TypedFilter::permanent()),
+                tag("a permanent"),
+            ),
+        )))
+        .parse(subject_text) else {
+            return None;
+        };
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesController;
+        def.valid_card = Some(subject);
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        return Some((TriggerMode::ChangesController, def));
+    }
+
     if matches!(lower, "whenever you lose life" | "when you lose life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeLost;

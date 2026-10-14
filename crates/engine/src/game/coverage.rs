@@ -7338,6 +7338,35 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
     missing
 }
 
+/// The coverage label for an ability whose per-player fan-out ("each player
+/// …", "each target player …") performs a control-change action whose seat
+/// template isn't one of the allowlisted printed shapes
+/// (`effects::fan_out_control_boundary`): a mandatory mass control action over
+/// a printed producer's exact parsed population, with no executable modifier
+/// and no retained node. Every other fan-out control shape is gapped. CR 608.2e processes each
+/// action simultaneously for every player, and CR 603.10d look-back
+/// control-change triggers need that action's immediately-before board; the
+/// runtime publishes such changes with `Unrecorded` evidence, so the producer
+/// is unsupported and fails closed.
+/// Classified by `effects::player_scope_control_boundary` /
+/// `multi_target_player_control_boundary`, on the exact template the driver
+/// resolves.
+pub const PLAYER_SCOPE_CONTROL_BOUNDARY_GAP: &str = "Effect:fan_out_control_boundary";
+
+fn fan_out_control_boundary_is_unobservable(def: &AbilityDefinition) -> bool {
+    if def.player_scope.is_none() && def.multi_target.is_none() {
+        return false;
+    }
+    let resolved = crate::game::ability_utils::build_resolved_from_def(
+        def,
+        crate::types::identifiers::ObjectId(0),
+        crate::types::player::PlayerId(0),
+    );
+    let unobservable = Some(crate::game::effects::FanOutControlBoundary::Unobservable);
+    crate::game::effects::player_scope_control_boundary(&resolved) == unobservable
+        || crate::game::effects::multi_target_player_control_boundary(&resolved) == unobservable
+}
+
 /// The coverage label for a face whose as-enters choice is made before it
 /// enters (CR 614.12a) but whose own statics write a characteristic that entry
 /// consumers read and the CR 614.12 entry projection doesn't apply
@@ -8305,6 +8334,13 @@ fn collect_ability_missing_parts(
         if !missing.contains(&label) {
             missing.push(label);
         }
+    }
+    if fan_out_control_boundary_is_unobservable(def)
+        && !missing
+            .iter()
+            .any(|label| label == PLAYER_SCOPE_CONTROL_BOUNDARY_GAP)
+    {
+        missing.push(PLAYER_SCOPE_CONTROL_BOUNDARY_GAP.to_string());
     }
     for mode in delayed_trigger_modes(&def.effect) {
         if !delayed_trigger_mode_is_supported(mode, trigger_registry) {
@@ -13634,6 +13670,557 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    /// Every `player_scope` node of a parsed ability chain.
+    fn scoped_nodes(
+        def: &crate::types::ability::AbilityDefinition,
+        out: &mut Vec<crate::types::ability::AbilityDefinition>,
+    ) {
+        if def.player_scope.is_some() {
+            out.push(def.clone());
+        }
+        if let Some(sub) = &def.sub_ability {
+            scoped_nodes(sub, out);
+        }
+        if let Some(else_ability) = &def.else_ability {
+            scoped_nodes(else_ability, out);
+        }
+    }
+
+    /// CR 608.2e + CR 603.10d: the allowlist's receipt. Each printed "each player
+    /// gains control" producer on it (verbatim Scryfall text) parses to a
+    /// head-boundary template, which the runtime captures exactly, and isn't
+    /// marked unsupported; and every allowlisted population is one of these
+    /// cards' parsed populations, so the allowlist holds nothing unprinted.
+    #[test]
+    fn printed_scoped_control_producers_have_a_head_boundary() {
+        use crate::game::effects::FanOutControlBoundary;
+        let mut seen = Vec::new();
+        for (name, types, text) in [
+            (
+                "Homeward Path",
+                "Land",
+                "{T}: Add {C}.\n{T}: Each player gains control of all creatures they own.",
+            ),
+            (
+                "The Fall of Lord Konda",
+                "Enchantment Saga",
+                "(As this Saga enters and after your draw step, add a lore counter.)\nI \u{2014} \
+                 Exile target creature an opponent controls with mana value 4 or greater.\nII \
+                 \u{2014} Each player gains control of all permanents they own.\nIII \u{2014} \
+                 Exile this Saga, then return it to the battlefield transformed under your \
+                 control.",
+            ),
+            (
+                "Brooding Saurian",
+                "Creature",
+                "At the beginning of each end step, each player gains control of all nontoken \
+                 permanents they own.",
+            ),
+            (
+                "Trostani Discordant",
+                "Creature",
+                "Other creatures you control get +1/+1.\nWhen Trostani enters, create two 1/1 \
+                 white Soldier creature tokens with lifelink.\nAt the beginning of your end \
+                 step, each player gains control of all creatures they own.",
+            ),
+            (
+                "Alicia Masters, Skilled Sculptor",
+                "Creature",
+                "At the beginning of combat on your turn, if you've cast a noncreature spell \
+                 this turn, create a Treasure token.\nSense the Good \u{2014} At the beginning \
+                 of your end step, each player gains control of all creatures they own.",
+            ),
+            (
+                "Aminatou, the Fateshifter",
+                "Planeswalker",
+                "+1: Draw a card, then put a card from your hand on top of your library.\n\
+                 \u{2212}1: Exile another target permanent you own, then return it to the \
+                 battlefield under your control.\n\u{2212}6: Choose left or right. Each player \
+                 gains control of all nonland permanents other than Aminatou controlled by the \
+                 next player in the chosen direction.\nAminatou, the Fateshifter can be your \
+                 commander.",
+            ),
+            (
+                "Herald of Leshrac",
+                "Creature",
+                "Flying\nCumulative upkeep\u{2014}Gain control of a land you don't control. (At \
+                 the beginning of your upkeep, put an age counter on this permanent, then \
+                 sacrifice it unless you pay its upkeep cost for each age counter on it.)\nThis \
+                 creature gets +1/+1 for each land you control but don't own.\nWhen this \
+                 creature leaves the battlefield, each player gains control of each land they \
+                 own that you control.",
+            ),
+            (
+                "Scrambleverse",
+                "Sorcery",
+                "For each nonland permanent, choose a player at random. Then each player gains \
+                 control of each permanent for which they were chosen. Untap those permanents.",
+            ),
+        ] {
+            // "Enchantment Saga": the card type, then its subtypes.
+            let (core, subtypes) = types.split_once(' ').unwrap_or((types, ""));
+            let subtypes: Vec<String> = subtypes.split_whitespace().map(String::from).collect();
+            let parsed =
+                crate::parser::parse_oracle_text(text, name, &[], &[core.to_string()], &subtypes);
+            let mut scoped = Vec::new();
+            for def in parsed.abilities.iter() {
+                scoped_nodes(def, &mut scoped);
+            }
+            for trigger in parsed.triggers.iter() {
+                if let Some(execute) = &trigger.execute {
+                    scoped_nodes(execute, &mut scoped);
+                }
+            }
+            let serialized = serde_json::to_string(&(&parsed.abilities, &parsed.triggers))
+                .expect("the parse serializes");
+            assert!(
+                serialized.contains("\"player_scope\"") && serialized.contains("Control"),
+                "REACH: {name} parses a scoped control-change clause"
+            );
+            let mut missing = Vec::new();
+            super::check_abilities(
+                &parsed.abilities,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            super::check_triggers(
+                &parsed.triggers,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            assert!(
+                !missing
+                    .iter()
+                    .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+                "{name}: the production coverage walk doesn't mark it: {missing:?}"
+            );
+            for def in scoped {
+                let resolved = crate::game::ability_utils::build_resolved_from_def(
+                    &def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                );
+                assert_eq!(
+                    crate::game::effects::player_scope_control_boundary(&resolved),
+                    Some(FanOutControlBoundary::Head),
+                    "{name}: its scoped control action is the template's head"
+                );
+                if let crate::types::ability::Effect::GainControlAll { target } = &*def.effect {
+                    seen.push(target.clone());
+                }
+                assert!(
+                    !super::fan_out_control_boundary_is_unobservable(&def),
+                    "{name}: not marked unsupported"
+                );
+            }
+        }
+        for population in crate::game::effects::allowlisted_fan_out_control_populations() {
+            assert!(
+                seen.contains(&population),
+                "allowlisted {population:?} is a printed producer's parsed population"
+            );
+        }
+    }
+
+    /// CR 611.2c + CR 608.2e: the printed scoped producers whose seat template
+    /// isn't an allowlisted shape (a per-seat choice, a retained following
+    /// node, a single-object control head) fail closed: coverage marks them
+    /// unsupported, and Zidane doesn't trigger on their changes.
+    #[test]
+    fn printed_scoped_producers_off_the_allowlist_are_unsupported() {
+        for (name, types, text) in [
+            (
+                "Inniaz, the Gale Force",
+                "Creature",
+                "Flying\n{2}{W/U}: Attacking creatures with flying get +1/+1 until end of turn. \
+                 ({W/U} can be paid with either {W} or {U}.)\nWhenever three or more creatures \
+                 you control with flying attack, each player gains control of a nonland \
+                 permanent of your choice controlled by the player to their right.",
+            ),
+            (
+                "Seize the Spotlight",
+                "Sorcery",
+                "Each opponent chooses fame or fortune. For each player who chose fame, gain \
+                 control of a creature that player controls until end of turn. Untap those \
+                 creatures and they gain haste until end of turn. For each player who chose \
+                 fortune, you draw a card and create a Treasure token.",
+            ),
+            (
+                "Dack Fayden, Helping Hand",
+                "Creature",
+                "When Dack Fayden enters, reveal cards from the top of your library until you \
+                 reveal X creature cards, where X is the number of opponents you have. Put \
+                 those creature cards onto the battlefield, then shuffle. They're goaded for \
+                 the rest of the game. For each of those permanents, choose a different \
+                 opponent. Each opponent gains control of the permanent for which they were \
+                 chosen.",
+            ),
+        ] {
+            let parsed =
+                crate::parser::parse_oracle_text(text, name, &[], &[types.to_string()], &[]);
+            let mut missing = Vec::new();
+            super::check_abilities(
+                &parsed.abilities,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            super::check_triggers(
+                &parsed.triggers,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            assert!(
+                missing
+                    .iter()
+                    .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+                "{name}: the production coverage walk marks it: {missing:?}"
+            );
+        }
+    }
+    /// CR 608.2e + CR 611.2c + CR 118.12a: the `Head` admission is a closed
+    /// allowlist. An allowlisted printed population, mandatory and bare, is
+    /// exact. The same population with any axis that lets a seat pause, pay,
+    /// re-evaluate or act between seats is unsupported (R4-1, R5-1, R6-1, R7-1,
+    /// R7-2), and so is a bare mandatory head over any population off the
+    /// allowlist (R5-1's live owner reference, R8-1's last-zone-changed set) or
+    /// a single-object control head.
+    #[test]
+    fn only_an_allowlisted_bare_mass_control_head_is_exact() {
+        use crate::game::effects::FanOutControlBoundary;
+        use crate::types::ability::{
+            AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Comparator,
+            ControllerRef, Duration, Effect, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+            StaticCondition, TargetFilter, TypedFilter, UnlessPayModifier,
+        };
+        let owned_by = |owner: ControllerRef| {
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::NonToken,
+                FilterProp::Owned { controller: owner },
+            ]))
+        };
+        let head = |target: TargetFilter| {
+            AbilityDefinition::new(AbilityKind::Spell, Effect::GainControlAll { target })
+                .player_scope(PlayerFilter::All)
+        };
+        let allowlisted = || head(owned_by(ControllerRef::ScopedPlayer));
+        let boundary = |def: &AbilityDefinition| {
+            crate::game::effects::player_scope_control_boundary(
+                &crate::game::ability_utils::build_resolved_from_def(
+                    def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                ),
+            )
+        };
+        assert_eq!(
+            boundary(&allowlisted()),
+            Some(FanOutControlBoundary::Head),
+            "REACH: Brooding Saurian's population, mandatory and bare"
+        );
+
+        let mut unsupported: Vec<(&str, AbilityDefinition)> = vec![
+            ("optional (R4-1)", allowlisted().optional()),
+            (
+                "off the allowlist: a live owner reference (R5-1)",
+                head(owned_by(ControllerRef::ParentTargetController)),
+            ),
+            (
+                "off the allowlist: the last-zone-changed set (R8-1)",
+                head(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::LastZoneChanged,
+                        TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                            FilterProp::Owned {
+                                controller: ControllerRef::ScopedPlayer,
+                            },
+                        ])),
+                    ],
+                }),
+            ),
+            (
+                "a condition re-checked per seat (R7-2)",
+                allowlisted().condition(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                }),
+            ),
+            (
+                "a single-object control head",
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainControl {
+                        target: TargetFilter::ParentTarget,
+                    },
+                )
+                .player_scope(PlayerFilter::All),
+            ),
+        ];
+        let mut paying = allowlisted();
+        paying.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Tap,
+            payer: TargetFilter::ScopedPlayer,
+        });
+        unsupported.push(("an unless-payment (R6-1, R7-1)", paying));
+        let mut repeated = allowlisted();
+        repeated.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        unsupported.push(("a repeat", repeated));
+        let mut lasting = allowlisted();
+        lasting.duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::IsPresent { filter: None },
+        });
+        unsupported.push(("a \"for as long as\" duration", lasting));
+        for (axis, def) in unsupported {
+            assert_eq!(
+                boundary(&def),
+                Some(FanOutControlBoundary::Unobservable),
+                "{axis}"
+            );
+            assert!(
+                super::fan_out_control_boundary_is_unobservable(&def),
+                "{axis}: coverage marks it"
+            );
+        }
+    }
+
+    /// CR 608.2e: a node retained in the seat template after the head can
+    /// remove a later seat's member before that seat's head runs, so no
+    /// retained node is admitted (R5-2). The parsed synthetic retains its
+    /// destroy inside the seat template and is unsupported.
+    #[test]
+    fn a_retained_mutating_continuation_is_unsupported() {
+        use crate::game::effects::FanOutControlBoundary;
+        let text = "Each player may gain control of all nontoken permanents they own and \
+                    destroy target creature.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Return and Destroy",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let mut scoped = Vec::new();
+        for def in parsed.abilities.iter() {
+            scoped_nodes(def, &mut scoped);
+        }
+        let def = scoped.first().expect("REACH: a scoped clause parses");
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            def,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        let scope = resolved.player_scope.clone().expect("scoped");
+        let (template, _) = crate::game::effects::split_player_scope_chain(&resolved, &scope);
+        assert!(
+            template.sub_ability.as_deref().is_some_and(|sub| matches!(
+                sub.effect,
+                crate::types::ability::Effect::Destroy { .. }
+            )),
+            "REACH: the destroy is retained inside the seat template"
+        );
+        assert_eq!(
+            crate::game::effects::player_scope_control_boundary(&resolved),
+            Some(FanOutControlBoundary::Unobservable)
+        );
+        assert!(super::fan_out_control_boundary_is_unobservable(def));
+    }
+    /// CR 118.12a + CR 608.2e: an unless-payment is a per-seat pause, read from
+    /// the exhaustive field authority (`resolution_prompt::node_modifiers_offer_choice`)
+    /// (R6-1). Homeward Path's mandatory head stays exact; the same head with an
+    /// unless-payment is unsupported. Scrambleverse's untap is detached, so a
+    /// rider there leaves it exact; any node retained inside the seat template,
+    /// even a plain untap, is unsupported.
+    #[test]
+    fn an_unless_payment_on_the_head_or_a_retained_node_settles_seats() {
+        use crate::game::effects::FanOutControlBoundary;
+        use crate::types::ability::{AbilityCost, TargetFilter, UnlessPayModifier};
+        let scoped = |text: &str, name: &str, types: &str| {
+            let parsed = crate::parser::parse_oracle_text(text, name, &[], &[types.into()], &[]);
+            let mut scoped = Vec::new();
+            for def in parsed.abilities.iter() {
+                scoped_nodes(def, &mut scoped);
+            }
+            scoped
+                .into_iter()
+                .next()
+                .expect("REACH: a scoped clause parses")
+        };
+        let boundary = |def: &crate::types::ability::AbilityDefinition| {
+            crate::game::effects::player_scope_control_boundary(
+                &crate::game::ability_utils::build_resolved_from_def(
+                    def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                ),
+            )
+        };
+        let rider = || UnlessPayModifier {
+            cost: AbilityCost::Tap,
+            payer: TargetFilter::ScopedPlayer,
+        };
+
+        let homeward = scoped(
+            "{T}: Add {C}.\n{T}: Each player gains control of all creatures they own.",
+            "Homeward Path",
+            "Land",
+        );
+        assert_eq!(
+            boundary(&homeward),
+            Some(FanOutControlBoundary::Head),
+            "REACH"
+        );
+        let mut paying = homeward.clone();
+        paying.unless_pay = Some(rider());
+        assert_eq!(boundary(&paying), Some(FanOutControlBoundary::Unobservable));
+        assert!(super::fan_out_control_boundary_is_unobservable(&paying));
+
+        // Scrambleverse's untap is a following sentence, detached from the seat
+        // template (it runs once, after every seat), so a rider there leaves the
+        // link exact.
+        let scramble = scoped(
+            "For each nonland permanent, choose a player at random. Then each player gains \
+             control of each permanent for which they were chosen. Untap those permanents.",
+            "Scrambleverse",
+            "Sorcery",
+        );
+        let mut detached = scramble.clone();
+        detached
+            .sub_ability
+            .as_mut()
+            .expect("REACH: Scrambleverse has an untap")
+            .unless_pay = Some(rider());
+        assert_eq!(boundary(&detached), Some(FanOutControlBoundary::Head));
+
+        // A node retained inside the seat template runs between seats: even a
+        // plain untap is not admitted.
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TypedFilter,
+        };
+        let template = |retained: Option<bool>| {
+            let mut head = ResolvedAbility::new(
+                Effect::GainControlAll {
+                    target: TargetFilter::Typed(TypedFilter::permanent()),
+                },
+                vec![],
+                crate::types::identifiers::ObjectId(1),
+                crate::types::player::PlayerId(0),
+            );
+            if let Some(rider_on_untap) = retained {
+                let mut untap = ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::Any,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Untap,
+                    },
+                    vec![],
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                );
+                if rider_on_untap {
+                    untap.unless_pay = Some(rider());
+                }
+                head.sub_ability = Some(Box::new(untap));
+            }
+            head
+        };
+        assert_eq!(
+            crate::game::effects::fan_out_control_boundary(&template(None)),
+            FanOutControlBoundary::Head,
+            "REACH: the allowlisted head"
+        );
+        for rider_on_untap in [false, true] {
+            assert_eq!(
+                crate::game::effects::fan_out_control_boundary(&template(Some(rider_on_untap))),
+                FanOutControlBoundary::Unobservable,
+                "a retained untap (rider {rider_on_untap})"
+            );
+        }
+    }
+    /// CR 608.2e + CR 603.10d: a control action retained behind a scoped prefix
+    /// ("each player may <X> and gain control of …": the optional clause keeps
+    /// its continuation in the seat) has no single pre-seat boundary, so the
+    /// producer is unsupported. The same chain with the control action at the
+    /// head is accepted.
+    #[test]
+    fn a_control_action_behind_a_retained_scoped_prefix_is_unsupported() {
+        use crate::game::effects::FanOutControlBoundary;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr, SubAbilityLink,
+            TargetFilter,
+        };
+        let steal = || {
+            let mut steal = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainControl {
+                    target: TargetFilter::Any,
+                },
+            );
+            steal.sub_link = SubAbilityLink::ContinuationStep;
+            steal
+        };
+        let draw = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        let rejected = AbilityDefinition::new(AbilityKind::Spell, draw.clone())
+            .player_scope(PlayerFilter::All)
+            .optional()
+            .sub_ability(steal());
+        let accepted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
+            },
+        )
+        .player_scope(PlayerFilter::All);
+        let boundary = |def: &AbilityDefinition| {
+            crate::game::effects::player_scope_control_boundary(
+                &crate::game::ability_utils::build_resolved_from_def(
+                    def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                ),
+            )
+        };
+        assert_eq!(
+            boundary(&rejected),
+            Some(FanOutControlBoundary::Unobservable),
+            "the optional clause retains the control action behind its prefix"
+        );
+        assert!(super::fan_out_control_boundary_is_unobservable(&rejected));
+        let mut missing = Vec::new();
+        super::check_abilities(
+            std::slice::from_ref(&rejected),
+            &super::build_trigger_registry(),
+            &super::build_static_registry(),
+            super::TokenStaticTraversal::Include,
+            &mut missing,
+        );
+        assert!(
+            missing
+                .iter()
+                .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+            "coverage marks the producer unsupported: {missing:?}"
+        );
+
+        assert_eq!(boundary(&accepted), Some(FanOutControlBoundary::Head));
+        assert!(!super::fan_out_control_boundary_is_unobservable(&accepted));
+    }
+
     /// Fixture shared by the replacement-payload stranding tests: an unbound
     /// delayed tracked-set return nested in an `AddTargetReplacement` execute
     /// body — the minimal carrier for the shape CodeRabbit's Major flagged as
