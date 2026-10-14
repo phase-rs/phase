@@ -1494,9 +1494,15 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// The shape set is the runtime rider classifier's in
 /// `game::effects::cast_from_zone` — the single authority the resolver itself
 /// reads, so a parser-side copy cannot drift from what the resolver consumes.
-/// This function adds only the sub-ability walk around it.
+/// This function adds only the sub-ability walk around it. An outcome-gated
+/// decline link ("If you don't, put it into your hand") is not a rider
+/// (CR 608.2c), so it suppresses nothing.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    crate::game::effects::cast_from_zone::graveyard_destination_rider(&def.effect).is_some()
+    crate::game::effects::cast_from_zone::graveyard_destination_rider(
+        &def.effect,
+        def.condition.as_ref(),
+    )
+    .is_some()
         || def
             .sub_ability
             .as_deref()
@@ -6032,9 +6038,10 @@ mod tests {
     use crate::parser::swallow_evidence::UnitEvidence;
 
     use super::{
-        any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
-        detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
-        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
+        any_ability_has_unimplemented, def_tree_has_cast_graveyard_redirect_rider,
+        def_tree_has_optional, def_tree_has_unimplemented, detect_replacement,
+        dynamic_markers_are_all_recorded_unrecognized, effect_has_internal_optionality,
+        trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_effect::gap_diagnosis::{
@@ -6043,10 +6050,11 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint,
-        Chooser, Comparator, ContinuousModification, CopyRetargetPermission, DamageModification,
-        Effect, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
-        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, Chooser, Comparator,
+        ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
+        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
         StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
         ZoneChoiceCandidateSource, ZoneOwner,
     };
@@ -14246,6 +14254,64 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         // the guard above cannot be passing by rejecting everything.
         assert_eq!(classify_conjunct("each opponent"), ConjunctShape::Player);
         assert_eq!(classify_conjunct("each player"), ConjunctShape::Player);
+    }
+
+    /// CR 608.2c: a `CastFromZone` whose sub link is the "If you don't, put it
+    /// into your hand" decline branch carries no graveyard-redirect rider; the
+    /// same link with no condition does (paired positive).
+    #[test]
+    fn decline_link_under_cast_from_zone_is_not_a_graveyard_redirect_rider() {
+        let cast_with = |link: AbilityDefinition| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CastFromZone {
+                    target: TargetFilter::Any,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+            )
+            .sub_ability(link)
+        };
+        let to_hand = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+        };
+        assert!(
+            def_tree_has_cast_graveyard_redirect_rider(&cast_with(to_hand())),
+            "reach: the unconditioned link is the hand-redirect rider"
+        );
+        let declined = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            }),
+        };
+        assert!(!def_tree_has_cast_graveyard_redirect_rider(&cast_with(
+            to_hand().condition(declined)
+        )));
     }
 }
 
