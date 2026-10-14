@@ -46,6 +46,7 @@ use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
 };
 use super::match_config::{MatchConfig, MatchForfeitResult, MatchPhase, MatchScore};
+use super::object_map::ObjectMap;
 use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
@@ -356,18 +357,13 @@ mod legacy_trigger_definition_ref_map {
 /// have no such proof and are rejected at the state restore boundary.
 fn deserialize_objects_with_trigger_provenance<'de, D>(
     deserializer: D,
-) -> Result<im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>, D::Error>
+) -> Result<ObjectMap, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let mut objects =
-        im::HashMap::<ObjectId, GameObject, rustc_hash::FxBuildHasher>::deserialize(deserializer)?;
-    for (_, object) in objects.iter_mut() {
-        object
-            .migrate_legacy_trigger_definitions()
-            .map_err(serde::de::Error::custom)?;
-    }
-    Ok(objects)
+    ObjectMap::deserialize_with_migration(deserializer, |object| {
+        object.migrate_legacy_trigger_definitions()
+    })
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
@@ -21072,11 +21068,13 @@ declare_game_state! {
     // the default SipHash RandomState: ObjectId is a thin integer key and this
     // map is looked up millions of times per large-board resolution — profiling
     // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    // Each object sits behind an `Arc` inside `ObjectMap`, so a cloned state
+    // shares every object it does not write.
     #[serde(
         deserialize_with = "deserialize_objects_with_trigger_provenance",
-        serialize_with = "crate::types::deterministic_serde::im_hash_map"
+        serialize_with = "crate::types::object_map::serialize_sorted"
     )]
-    pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+    pub objects: ObjectMap,
     pub next_object_id: u64,
     /// CR 603.7: persisted monotonic delayed-trigger installation allocator.
     #[serde(default)]
@@ -29210,7 +29208,7 @@ impl GameState {
             active_combat_phase_control: None,
             active_library_searches: ActiveLibrarySearches::default(),
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
-            objects: im::HashMap::default(),
+            objects: ObjectMap::default(),
             next_object_id: 1,
             next_delayed_trigger_token: 1,
             next_delayed_trigger_instance: initial_delayed_trigger_instance_id(),
@@ -32060,10 +32058,7 @@ pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
 /// [`object_content_eq`]'s own doc states and not on immutability — they are not
 /// immutable within a game; only the fields a mandatory action could change are
 /// compared.
-pub(crate) fn objects_content_eq(
-    a: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
-    b: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
-) -> bool {
+pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
     a.len() == b.len()
         && a.iter()
             .all(|(id, x)| b.get(id).is_some_and(|y| object_content_eq(x, y)))

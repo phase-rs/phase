@@ -957,6 +957,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions_broad_with_probe(state, None)
 }
 
+/// Enumerates the broad candidate actions for the current `WaitingFor`.
+///
+/// Priority enumeration asks many off-zone keyword questions of one unchanged
+/// state, so it runs inside an off-zone keyword scope and shares one gather.
 pub fn candidate_actions_broad_with_probe(
     state: &GameState,
     probe: Option<&casting::PriorityCastProbe>,
@@ -977,7 +981,11 @@ pub fn candidate_actions_broad_with_probe(
             debug_assert!(exact_owns_candidate_domain(&state.waiting_for));
             candidate_actions_exact(state)
         }
-        WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
+        WaitingFor::Priority { player } => {
+            crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
+                priority_actions_with_probe(state, *player, probe)
+            })
+        }
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -7508,6 +7516,109 @@ mod tests {
                 } if source_id == hand_sliver && ability_index == printed_len
             )
         }));
+    }
+
+    /// Priority enumeration asks for the off-zone keywords of several cards
+    /// against one unchanged state; the dispatcher's scope must make them share
+    /// one gather without changing the enumerated actions.
+    #[test]
+    fn priority_enumeration_shares_one_keyword_gather() {
+        use crate::game::off_zone_characteristics::{
+            off_zone_keyword_scope_counts, off_zone_keyword_scope_depth,
+            reset_off_zone_keyword_scope_counts,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+        state.priority_player = p0;
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+
+        let granter = create_object(
+            &mut state,
+            CardId(100),
+            p0,
+            "Homing Sliver".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&granter).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .subtype("Sliver".to_string())
+                            .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Typecycling {
+                            cost: ManaCost::NoCost,
+                            subtype: "Sliver".to_string(),
+                        },
+                    }]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .subtype("Sliver".to_string())
+                            .properties(vec![FilterProp::InZone {
+                                zone: Zone::Graveyard,
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(crate::types::keywords::FlashbackCost::Mana(
+                            ManaCost::NoCost,
+                        )),
+                    }]),
+            );
+        }
+        let mut slivers = Vec::new();
+        for (index, zone) in [Zone::Hand, Zone::Hand, Zone::Graveyard, Zone::Graveyard]
+            .into_iter()
+            .enumerate()
+        {
+            let id = create_object(
+                &mut state,
+                CardId(101 + index as u64),
+                p0,
+                format!("Sliver {index}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Sliver".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            slivers.push(id);
+        }
+
+        // Called directly, the enumeration runs outside any scope.
+        reset_off_zone_keyword_scope_counts();
+        let direct = priority_actions_with_probe(&state, p0, None);
+        let unscoped = off_zone_keyword_scope_counts();
+        assert_eq!(unscoped.matched, 0, "{unscoped:?}");
+        assert!(
+            unscoped.unmatched > 1,
+            "reach-guard: enumeration issues several off-zone keyword queries: {unscoped:?}"
+        );
+        assert!(
+            direct.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::ActivateAbility { source_id, .. } if source_id == slivers[0]
+            )),
+            "reach-guard: a granted off-zone keyword produces an action"
+        );
+
+        reset_off_zone_keyword_scope_counts();
+        let dispatched = candidate_actions_broad_with_probe(&state, None);
+        let counts = off_zone_keyword_scope_counts();
+        assert!(counts.matched > 1, "reach-guard: {counts:?}");
+        assert_eq!(counts.fills, 1, "{counts:?}");
+        assert_eq!(counts.hits, counts.matched - 1, "{counts:?}");
+        assert_eq!(counts.context_fall_opens, 0, "{counts:?}");
+        assert_eq!(off_zone_keyword_scope_depth(), 0);
+        assert_eq!(format!("{dispatched:?}"), format!("{direct:?}"));
     }
 
     #[test]

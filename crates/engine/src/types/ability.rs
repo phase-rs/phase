@@ -355,6 +355,71 @@ mod trigger_occurrence_tests {
             .0;
         assert_eq!(instance, TriggerGrantInstanceRef(1));
     }
+
+    /// `has_absent_grants` must be exactly the "would retire something"
+    /// predicate of `retire_absent_grants`: for every live set it answers true
+    /// if and only if retiring against that set shrinks the active grants.
+    #[test]
+    fn has_absent_grants_is_true_exactly_when_retirement_shrinks_the_active_set() {
+        let mut seeded = TriggerOccurrenceState::default();
+        let first = seeded
+            .grant_instance_for(TriggerGrantProducerKey::Granted {
+                origin: static_origin(),
+                output_index: 0,
+            })
+            .unwrap();
+        let second = seeded
+            .grant_instance_for(TriggerGrantProducerKey::Granted {
+                origin: static_origin(),
+                output_index: 1,
+            })
+            .unwrap();
+        assert_ne!(first, second);
+        let unrelated = TriggerGrantInstanceRef(first.0 + second.0 + 100);
+
+        // (state, live set, whether a grant is expected to be absent)
+        let cases: Vec<(TriggerOccurrenceState, Vec<TriggerGrantInstanceRef>, bool)> = vec![
+            // No active grant at all: nothing can be absent.
+            (TriggerOccurrenceState::default(), Vec::new(), false),
+            (TriggerOccurrenceState::default(), vec![first], false),
+            // Every active grant is live.
+            (seeded.clone(), vec![first, second], false),
+            (seeded.clone(), vec![second, unrelated, first], false),
+            // Exactly one active grant is absent.
+            (seeded.clone(), vec![first], true),
+            (seeded.clone(), vec![second], true),
+            // Every active grant is absent.
+            (seeded.clone(), Vec::new(), true),
+            (seeded.clone(), vec![unrelated], true),
+        ];
+
+        let mut saw_absent = 0;
+        let mut saw_none_absent = 0;
+        for (state, live, expected) in cases {
+            let before = state.active_grants().count();
+            let predicted = state.has_absent_grants(&live);
+            let mut retired = state.clone();
+            retired.retire_absent_grants(&live);
+            let shrank = retired.active_grants().count() < before;
+            assert_eq!(
+                predicted, shrank,
+                "has_absent_grants must match retirement for live set {live:?}"
+            );
+            assert_eq!(predicted, expected, "unexpected answer for {live:?}");
+            if shrank {
+                saw_absent += 1;
+            } else {
+                assert_eq!(
+                    retired, state,
+                    "a no-op retirement must leave the state equal"
+                );
+                saw_none_absent += 1;
+            }
+        }
+        // Reach-guard: both outcomes were exercised.
+        assert_eq!(saw_absent, 4);
+        assert_eq!(saw_none_absent, 4);
+    }
 }
 
 /// CR 101.4 + CR 102.3 + CR 115.1: Which players a [`ZoneOwner::Each`]
@@ -31573,6 +31638,16 @@ impl TriggerOccurrenceState {
     pub fn retire_absent_grants(&mut self, live_instances: &[TriggerGrantInstanceRef]) {
         self.active_grants
             .retain(|active| live_instances.contains(&active.instance));
+    }
+
+    /// Reports whether `retire_absent_grants` would retire at least one active
+    /// grant for the same `live_instances`, i.e. whether some active grant's
+    /// instance is missing from that live set. It lets a caller skip the write
+    /// (and keep the owning object shared) when nothing would be retired.
+    pub fn has_absent_grants(&self, live_instances: &[TriggerGrantInstanceRef]) -> bool {
+        self.active_grants
+            .iter()
+            .any(|active| !live_instances.contains(&active.instance))
     }
 
     pub fn active_grants(

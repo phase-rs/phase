@@ -4335,15 +4335,14 @@ fn board_covers_modulo_fodder(
     // in both partitions and unequal on `object_content_eq`'s `zone` conjunct, so a one-sided
     // strip would leave it refusing exactly the departures the certificate exists to admit.
     // An id the certificate does NOT name stays here and is refused as before.
-    let stable =
-        |state: &GameState| -> im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher> {
-            state
-                .objects
-                .iter()
-                .filter(|(id, o)| !growing.contains(id) && !fodder_content_eq(o, fodder_class))
-                .map(|(id, o)| (*id, o.clone()))
-                .collect()
-        };
+    let stable = |state: &GameState| -> crate::types::object_map::ObjectMap {
+        state
+            .objects
+            .iter()
+            .filter(|(id, o)| !growing.contains(id) && !fodder_content_eq(o, fodder_class))
+            .map(|(id, o)| (*id, o.clone()))
+            .collect()
+    };
     if !crate::types::game_state::objects_content_eq(&stable(prior), &stable(current)) {
         return false;
     }
@@ -5566,7 +5565,7 @@ fn board_covers(prior: &GameState, current: &GameState, grown: &HashSet<ObjectId
     // id-keyed content equality with `prior`. A stray extra object in ANY zone (or
     // a content drift on a shared object) fails the `objects_content_eq` len/all
     // check — fail-safe.
-    let current_nongrown: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher> = current
+    let current_nongrown: crate::types::object_map::ObjectMap = current
         .objects
         .iter()
         .filter(|(id, _)| !grown.contains(id))

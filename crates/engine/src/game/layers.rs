@@ -704,15 +704,20 @@ fn prune_casting_permissions_at(
     seam: PermissionSeam,
     active: Option<PlayerId>,
 ) {
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.casting_permissions.retain(|p| {
-            let lifetime = p.lifetime();
-            match lifetime.duration {
-                Some(d) => !permission_duration_expires_at(seam, d, lifetime.keyed_player, active),
-                None => true,
-            }
-        });
-    }
+    state.objects.update_where(
+        |_, obj| !obj.casting_permissions.is_empty(),
+        |_, obj| {
+            obj.casting_permissions.retain(|p| {
+                let lifetime = p.lifetime();
+                match lifetime.duration {
+                    Some(d) => {
+                        !permission_duration_expires_at(seam, d, lifetime.keyed_player, active)
+                    }
+                    None => true,
+                }
+            });
+        },
+    );
 }
 
 /// CR 514.2: Remove durational casting permissions whose duration ends at the
@@ -776,29 +781,42 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
 /// `state.transient_continuous_effects` only, which is not where a casting
 /// permission lives.
 pub fn prune_untap_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        for p in obj.casting_permissions.iter_mut() {
-            // CR 514.2: arming keys on the GRANTEE — "until the end of THEIR
-            // next turn" names the player the grant was made to, not the player
-            // a `PlayerScope::Controller` deadline resolves "your" against. See
-            // `CastingPermission::lifetime_mut` for why the two differ and what
-            // collapsing them costs (Suspend Aggression).
-            let (Some(duration), grantee) = p.lifetime_mut() else {
-                continue;
-            };
-            if matches!(
-                duration,
-                Duration::UntilEndOfNextTurnOf {
-                    player: PlayerScope::Controller
-                }
-            ) && grantee == Some(active_player)
-            {
-                *duration = Duration::UntilEndOfTurn;
-            }
-        }
-    }
+    arm_grantee_next_turn_casting_permissions(state, active_player);
     prune_casting_permissions_at(state, PermissionSeam::TurnStart, Some(active_player));
     prune_casting_permissions_at(state, PermissionSeam::UntapStep, Some(active_player));
+}
+
+/// Rewrites every casting permission that lasts "until the end of the
+/// grantee's next turn" and was granted to `active_player` so that it ends at
+/// the end of the turn now beginning. This is the arming step of
+/// `prune_untap_step_casting_permissions`, its only caller. Objects holding no
+/// casting permission are not written, so they stay shared with clones of the
+/// state.
+fn arm_grantee_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
+    state.objects.update_where(
+        |_, obj| !obj.casting_permissions.is_empty(),
+        |_, obj| {
+            for p in obj.casting_permissions.iter_mut() {
+                // CR 514.2: arming keys on the GRANTEE — "until the end of THEIR
+                // next turn" names the player the grant was made to, not the player
+                // a `PlayerScope::Controller` deadline resolves "your" against. See
+                // `CastingPermission::lifetime_mut` for why the two differ and what
+                // collapsing them costs (Suspend Aggression).
+                let (Some(duration), grantee) = p.lifetime_mut() else {
+                    continue;
+                };
+                if matches!(
+                    duration,
+                    Duration::UntilEndOfNextTurnOf {
+                        player: PlayerScope::Controller
+                    }
+                ) && grantee == Some(active_player)
+                {
+                    *duration = Duration::UntilEndOfTurn;
+                }
+            }
+        },
+    );
 }
 
 /// CR 500.4 + CR 500.8 + CR 500.9 + CR 500.10: the casting-permission seam
@@ -996,15 +1014,18 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
 /// carrying no duration at all, and are ended by
 /// `zones::apply_zone_exit_cleanup` when the card leaves exile.)
 pub fn prune_host_left_casting_permissions(state: &mut GameState, departed_id: ObjectId) {
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.casting_permissions.retain(|p| {
-            let lifetime = p.lifetime();
-            let host_bound = lifetime
-                .duration
-                .is_some_and(Duration::ends_when_host_leaves_play);
-            !(host_bound && lifetime.source_id == Some(departed_id))
-        });
-    }
+    state.objects.update_where(
+        |_, obj| !obj.casting_permissions.is_empty(),
+        |_, obj| {
+            obj.casting_permissions.retain(|p| {
+                let lifetime = p.lifetime();
+                let host_bound = lifetime
+                    .duration
+                    .is_some_and(Duration::ends_when_host_leaves_play);
+                !(host_bound && lifetime.source_id == Some(departed_id))
+            });
+        },
+    );
 }
 
 /// CR 611.2b: revoke every casting permission whose stated lifetime has ended
@@ -1279,8 +1300,14 @@ pub(crate) fn prune_controller_controls_source_on_leave(
     use crate::types::ability::ReplacementCondition;
 
     let mut changed = false;
-    for (host_id, obj) in state.objects.iter_mut() {
-        let host_left = *host_id == departed_id;
+    // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def, a
+    // turn-bound die-exile rider, or a host-lifetime exile rider
+    // (`UntilHostLeavesPlay`, CR 702.84a) on the departing host is eligible
+    // to be dropped. The host-left arm must not wipe printed replacements or
+    // unrelated runtime riders. Dropping the host-lifetime rider from
+    // base+live here is what prevents it reviving on a same-ObjectId
+    // re-entry (CR 400.7 — the returning object is new).
+    let drop = |host_left: bool, def: &crate::types::ability::ReplacementDefinition| {
         let is_lapsed = |def: &crate::types::ability::ReplacementDefinition| {
             host_left
                 || matches!(
@@ -1289,33 +1316,41 @@ pub(crate) fn prune_controller_controls_source_on_leave(
                         if source == departed_id
                 )
         };
-        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def, a
-        // turn-bound die-exile rider, or a host-lifetime exile rider
-        // (`UntilHostLeavesPlay`, CR 702.84a) on the departing host is eligible
-        // to be dropped. The host-left arm must not wipe printed replacements or
-        // unrelated runtime riders. Dropping the host-lifetime rider from
-        // base+live here is what prevents it reviving on a same-ObjectId
-        // re-entry (CR 400.7 — the returning object is new).
-        let drop = |def: &crate::types::ability::ReplacementDefinition| {
-            (matches!(
-                def.condition,
-                Some(ReplacementCondition::ControllerControlsSource { .. })
-            ) && is_lapsed(def))
-                || (host_left && is_runtime_target_die_exile_replacement(def))
-                || (host_left && is_runtime_host_lifetime_replacement(def))
-        };
-        let before_live = obj.replacement_definitions.len();
-        obj.replacement_definitions.retain(|d| !drop(d));
-        let before_base = obj.base_replacement_definitions.len();
-        if obj.base_replacement_definitions.iter().any(drop) {
-            std::sync::Arc::make_mut(&mut obj.base_replacement_definitions).retain(|d| !drop(d));
-        }
-        if obj.replacement_definitions.len() != before_live
-            || obj.base_replacement_definitions.len() != before_base
-        {
-            changed = true;
-        }
-    }
+        (matches!(
+            def.condition,
+            Some(ReplacementCondition::ControllerControlsSource { .. })
+        ) && is_lapsed(def))
+            || (host_left && is_runtime_target_die_exile_replacement(def))
+            || (host_left && is_runtime_host_lifetime_replacement(def))
+    };
+    state.objects.update_where(
+        |host_id, obj| {
+            let host_left = *host_id == departed_id;
+            obj.replacement_definitions
+                .iter_all()
+                .any(|d| drop(host_left, d))
+                || obj
+                    .base_replacement_definitions
+                    .iter()
+                    .any(|d| drop(host_left, d))
+        },
+        |host_id, obj| {
+            let host_left = *host_id == departed_id;
+            let drop = |def: &crate::types::ability::ReplacementDefinition| drop(host_left, def);
+            let before_live = obj.replacement_definitions.len();
+            obj.replacement_definitions.retain(|d| !drop(d));
+            let before_base = obj.base_replacement_definitions.len();
+            if obj.base_replacement_definitions.iter().any(drop) {
+                std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+                    .retain(|d| !drop(d));
+            }
+            if obj.replacement_definitions.len() != before_live
+                || obj.base_replacement_definitions.len() != before_base
+            {
+                changed = true;
+            }
+        },
+    );
     if changed {
         state.layers_dirty.mark_full();
     }
@@ -3415,6 +3450,69 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     bf_ids
 }
 
+/// Collects the grant instance of every trigger definition on `obj` that was
+/// materialized from a grant (keyword companion, copy-retained, granted or
+/// expanded grant). Printed, copied-value and unmaterialized definitions carry
+/// no grant instance and are skipped. Used by `retire_absent_trigger_grants`
+/// as the live set a recipient's active grants are reconciled against.
+fn live_trigger_grant_instances(
+    obj: &crate::game::game_object::GameObject,
+) -> Vec<crate::types::ability::TriggerGrantInstanceRef> {
+    obj.trigger_definitions
+        .iter_all()
+        .filter_map(|entry| match &entry.occurrence {
+            crate::types::ability::TriggerDefinitionOccurrenceRef::KeywordCompanion {
+                grant_instance,
+                ..
+            }
+            | crate::types::ability::TriggerDefinitionOccurrenceRef::CopyRetained {
+                grant_instance,
+                ..
+            }
+            | crate::types::ability::TriggerDefinitionOccurrenceRef::Granted { grant_instance }
+            | crate::types::ability::TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                grant_instance,
+                ..
+            } => Some(*grant_instance),
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
+            | crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+            | crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized => None,
+        })
+        .collect::<Vec<_>>()
+}
+
+/// Complete the Layer-6 producer reconciliation only after the entire pass
+/// has materialized every candidate. A producer absent from this finalized
+/// live set is retired; reappearing later receives a fresh monotonic grant
+/// generation rather than resurrecting an old identity.
+/// Objects with no active grant to retire are not written, so they stay
+/// shared with clones of the state.
+fn retire_absent_trigger_grants(state: &mut GameState) {
+    state.objects.update_where(
+        |_, obj| {
+            obj.trigger_occurrence_state
+                .active_grants()
+                .next()
+                .is_some()
+                && obj
+                    .trigger_occurrence_state
+                    .has_absent_grants(&live_trigger_grant_instances(obj))
+        },
+        |_, obj| {
+            let live_instances = live_trigger_grant_instances(obj);
+            obj.trigger_occurrence_state
+                .retire_absent_grants(&live_instances);
+        },
+    );
+}
+
+/// Finishes a full layer evaluation once every layer has been applied: runs
+/// the post-layer bookkeeping over the derived board (rule-changing effects,
+/// control-change consequences, cache and index refreshes) and leaves the
+/// state ready for the next incremental flush. Grant retirement
+/// (`retire_absent_trigger_grants`) runs here only after the entire pass has
+/// materialized every candidate, and before the trigger index is rebuilt from
+/// the finalized trigger sets.
 fn finish_layer_evaluation(
     state: &mut GameState,
     bf_ids: Vec<ObjectId>,
@@ -3495,42 +3593,7 @@ fn finish_layer_evaluation(
     // eval always leaves a precise presence index for the next scan-gate consult.
     refresh_static_mode_presence(state);
 
-    // Complete the Layer-6 producer reconciliation only after the entire pass
-    // has materialized every candidate. A producer absent from this finalized
-    // live set is retired; reappearing later receives a fresh monotonic grant
-    // generation rather than resurrecting an old identity.
-    let trigger_object_ids = state.objects.keys().copied().collect::<Vec<_>>();
-    for object_id in trigger_object_ids {
-        let Some(obj) = state.objects.get_mut(&object_id) else {
-            continue;
-        };
-        let live_instances = obj
-            .trigger_definitions
-            .iter_all()
-            .filter_map(|entry| match &entry.occurrence {
-                crate::types::ability::TriggerDefinitionOccurrenceRef::KeywordCompanion {
-                    grant_instance,
-                    ..
-                }
-                | crate::types::ability::TriggerDefinitionOccurrenceRef::CopyRetained {
-                    grant_instance,
-                    ..
-                }
-                | crate::types::ability::TriggerDefinitionOccurrenceRef::Granted {
-                    grant_instance,
-                }
-                | crate::types::ability::TriggerDefinitionOccurrenceRef::ExpandedGrant {
-                    grant_instance,
-                    ..
-                } => Some(*grant_instance),
-                crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
-                | crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue { .. }
-                | crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized => None,
-            })
-            .collect::<Vec<_>>();
-        obj.trigger_occurrence_state
-            .retire_absent_grants(&live_instances);
-    }
+    retire_absent_trigger_grants(state);
 
     // Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
@@ -6678,28 +6741,219 @@ fn bucket_effects_by_layer(
     effects
 }
 
+/// Which modifications a gather pass keeps.
+#[derive(Clone, Copy)]
+enum ModificationAdmission {
+    /// Keep everything (the full gather).
+    Every,
+    /// Keep only modifications the total predicate accepts. The predicate must
+    /// be decidable for every variant; in particular it must never call
+    /// `ContinuousModification::layer()`, which is unreachable for the
+    /// never-layered and combat-assignment variants.
+    Matching(fn(&ContinuousModification) -> bool),
+}
+
+impl ModificationAdmission {
+    /// Whether the pass keeps an effect whose own modification is `modification`.
+    fn admits(self, modification: &ContinuousModification) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Matching(keep) => keep(modification),
+        }
+    }
+
+    /// Whether gathering `modification` can yield a kept effect: either the
+    /// modification itself is kept, or it is a `GrantStaticAbility` whose
+    /// expansion would synthesize at least one kept child. One level is enough
+    /// because `expand_granted_static_effects` does not recurse into a nested
+    /// grant.
+    fn reaches_admitted(self, modification: &ContinuousModification) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Matching(keep) => {
+                if keep(modification) {
+                    return true;
+                }
+                let ContinuousModification::GrantStaticAbility { definition: inner } = modification
+                else {
+                    return false;
+                };
+                inner.mode == StaticMode::Continuous
+                    && inner
+                        .modifications
+                        .iter()
+                        .any(|granted| !continuous_gather_skips(granted) && keep(granted))
+            }
+        }
+    }
+
+    /// Whether any modification of one transient effect can yield a kept
+    /// effect. The full gather answers `true` without scanning, so it reaches
+    /// the liveness check for every stored transient exactly as before.
+    fn reaches_any_admitted(self, modifications: &[ContinuousModification]) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Matching(_) => modifications
+                .iter()
+                .any(|modification| self.reaches_admitted(modification)),
+        }
+    }
+}
+
+/// Whether the continuous-effect gather drops this modification before
+/// producing an effect for it. The single skip predicate shared by the static
+/// loop (top-level modifications), `expand_granted_static_effects` (a granted
+/// definition's inner modifications) and the admission scan in
+/// `ModificationAdmission::reaches_admitted`, which tests it before the
+/// admission predicate.
+fn continuous_gather_skips(modification: &ContinuousModification) -> bool {
+    is_combat_assignment_rule_modification(modification)
+        || matches!(
+            modification,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::Goaded
+            }
+        )
+}
+
+/// Whether a gather evaluated a filter or condition (which can read ambient
+/// call-stack state) or only object-local and definition-local gates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GatherDependence {
+    /// Only object-local and definition-local gates ran, so the result is a
+    /// pure function of the state.
+    Structural,
+    /// A host filter or a transient liveness check ran, so the result may
+    /// depend on the caller's ambient query context.
+    ContextDependent,
+}
+
+/// Proof that a gather pass recorded a `GrantStaticAbility` host walk before
+/// evaluating the host's affected filter.
+struct GrantExpansion(());
+
+/// Proof that a gather pass recorded a transient liveness evaluation before
+/// evaluating the transient's gates.
+struct TransientLiveness(());
+
+/// One gather pass: what it admits and what it has had to evaluate so far.
+struct GatherPass {
+    admission: ModificationAdmission,
+    dependence: GatherDependence,
+}
+
+impl GatherPass {
+    /// A pass that keeps every modification (the full gather).
+    fn every() -> Self {
+        Self {
+            admission: ModificationAdmission::Every,
+            dependence: GatherDependence::Structural,
+        }
+    }
+
+    /// A pass that keeps only the modifications `keep` accepts.
+    fn matching(keep: fn(&ContinuousModification) -> bool) -> Self {
+        Self {
+            admission: ModificationAdmission::Matching(keep),
+            dependence: GatherDependence::Structural,
+        }
+    }
+
+    /// What this pass keeps.
+    fn admission(&self) -> ModificationAdmission {
+        self.admission
+    }
+
+    /// Ends the pass, reporting what it had to evaluate.
+    fn into_dependence(self) -> GatherDependence {
+        self.dependence
+    }
+
+    /// Records that the pass is about to match a grant host's affected filter
+    /// and returns the token that statement requires.
+    fn enter_grant_expansion(&mut self) -> GrantExpansion {
+        self.dependence = GatherDependence::ContextDependent;
+        GrantExpansion(())
+    }
+
+    /// Records that the pass is about to evaluate one transient's liveness and
+    /// returns the token those statements require.
+    fn enter_transient_liveness(&mut self) -> TransientLiveness {
+        self.dependence = GatherDependence::ContextDependent;
+        TransientLiveness(())
+    }
+}
+
+/// The host-filter matcher for a grant expansion inside a gather pass. Taking
+/// the token keeps the filter evaluation unreachable without recording it.
+fn granted_static_host_matches_in_pass<'a>(
+    _entered: &GrantExpansion,
+    state: &'a GameState,
+    parent: &'a ActiveContinuousEffect,
+) -> impl Fn(&ObjectId) -> bool + 'a {
+    granted_static_host_matches(state, parent)
+}
+
+/// The first liveness evaluation for one transient inside a gather pass.
+fn transient_participates_in_pass(
+    _entered: &TransientLiveness,
+    state: &GameState,
+    tce: &TransientContinuousEffect,
+    participates: fn(&GameState, &TransientContinuousEffect) -> bool,
+) -> bool {
+    participates(state, tce)
+}
+
+/// The source-condition gate for one transient inside a gather pass, guarded
+/// by the same token as its liveness evaluation.
+fn transient_source_condition_passes_in_pass(
+    _entered: &TransientLiveness,
+    state: &GameState,
+    tce: &TransientContinuousEffect,
+    condition: &StaticCondition,
+) -> bool {
+    source_condition_gate_passes(state, condition, tce.controller, tce.source_id)
+}
+
+/// Gathers every continuous effect that is active independently of any one
+/// recipient: functioning statics, live transients, and the Ring emblem.
 pub(crate) fn collect_shared_active_continuous_effects(
     state: &GameState,
 ) -> Vec<ActiveContinuousEffect> {
-    collect_continuous_effects(state, gather_transient_continuous_effects)
+    collect_continuous_effects(state, transient_effect_is_live, &mut GatherPass::every())
+}
+
+/// The shared gather narrowed to the modifications `keep` accepts, in the same
+/// relative order as [`collect_shared_active_continuous_effects`]. Work whose
+/// every output would be dropped is skipped, and the returned
+/// [`GatherDependence`] says whether what remained had to evaluate a filter or
+/// a condition. `keep` must be total (see [`ModificationAdmission::Matching`]).
+pub(crate) fn collect_shared_active_continuous_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> (Vec<ActiveContinuousEffect>, GatherDependence) {
+    let mut pass = GatherPass::matching(keep);
+    let effects = collect_continuous_effects(state, transient_effect_is_live, &mut pass);
+    (effects, pass.into_dependence())
 }
 
 /// CR 611.2b + CR 613.1: installed state durations participate while deriving
 /// the candidate board. Their irreversible end is checked only after every
 /// layer has settled, never against a temporarily reset controller or P/T.
 fn collect_derivation_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEffect> {
-    collect_continuous_effects(state, |state, effects| {
-        gather_transient_continuous_effects_with(
-            state,
-            effects,
-            transient_effect_passes_other_gates,
-        );
-    })
+    collect_continuous_effects(
+        state,
+        transient_effect_passes_other_gates,
+        &mut GatherPass::every(),
+    )
 }
 
+/// Runs one gather pass: static sources, then transients admitted by
+/// `transient_participates`, then the Ring emblem.
 fn collect_continuous_effects(
     state: &GameState,
-    gather_transients: fn(&GameState, &mut Vec<ActiveContinuousEffect>),
+    transient_participates: fn(&GameState, &TransientContinuousEffect) -> bool,
+    pass: &mut GatherPass,
 ) -> Vec<ActiveContinuousEffect> {
     #[cfg(test)]
     record_active_effect_collection();
@@ -6707,17 +6961,27 @@ fn collect_continuous_effects(
     let mut effects = Vec::new();
 
     for_each_static_effect_source(state, |state, obj| {
-        effects.extend(active_continuous_effects_from_static_source(state, obj));
+        effects.extend(static_source_effects_in_pass(state, obj, pass));
     });
-    gather_transients(state, &mut effects);
-    gather_ring_emblem_continuous_effects(state, &mut effects);
+    gather_transient_continuous_effects_with(state, &mut effects, transient_participates, pass);
+    gather_ring_emblem_continuous_effects(state, &mut effects, pass.admission());
     effects
 }
 
+/// Appends the Ring emblem's legendary effect for each Ring-bearer, unless the
+/// pass does not keep that modification.
 fn gather_ring_emblem_continuous_effects(
     state: &GameState,
     effects: &mut Vec<ActiveContinuousEffect>,
+    admission: ModificationAdmission,
 ) {
+    // The only modification produced here; a pass that drops it reads no ring
+    // state at all.
+    if !admission.admits(&ContinuousModification::AddSupertype {
+        supertype: Supertype::Legendary,
+    }) {
+        return;
+    }
     for &player in state.ring_level.keys() {
         let Some(bearer_id) = super::effects::ring::ring_bearer_for(state, player) else {
             continue;
@@ -6881,9 +7145,21 @@ pub(crate) fn for_each_static_effect_source(
     }
 }
 
+/// The continuous effects one source's live static definitions contribute to
+/// the full gather.
 pub(crate) fn active_continuous_effects_from_static_source(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
+) -> Vec<ActiveContinuousEffect> {
+    static_source_effects_in_pass(state, source, &mut GatherPass::every())
+}
+
+/// The continuous effects one source's live static definitions contribute to
+/// `pass`.
+fn static_source_effects_in_pass(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+    pass: &mut GatherPass,
 ) -> Vec<ActiveContinuousEffect> {
     // CR 613.7n: a static ability's continuous effect inherits `source.timestamp`,
     // which is the object's battlefield-entry timestamp drawn in `move_to_zone`
@@ -6900,12 +7176,18 @@ pub(crate) fn active_continuous_effects_from_static_source(
         source.timestamp,
         source.static_definitions.as_slice(),
         StaticZoneAdmission::LiveSource,
+        pass,
     )
 }
 
+/// The continuous effects an object's own base static definitions contribute
+/// to an off-zone keyword query about that object, narrowed to the
+/// modifications `keep` accepts. These effects are per object and never
+/// shared, so the pass's dependence is not reported.
 pub(crate) fn active_continuous_effects_from_base_static_source(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
+    keep: fn(&ContinuousModification) -> bool,
 ) -> Vec<ActiveContinuousEffect> {
     let static_definitions: Vec<StaticDefinition> = source
         .base_static_definitions
@@ -6920,6 +7202,7 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
         source.timestamp,
         &static_definitions,
         StaticZoneAdmission::PreFilteredBaseStatic,
+        &mut GatherPass::matching(keep),
     )
 }
 
@@ -6984,6 +7267,10 @@ enum StaticZoneAdmission {
     PreFilteredBaseStatic,
 }
 
+/// Builds the continuous effects of `static_definitions` that `pass` keeps,
+/// expanding each `GrantStaticAbility` over its current battlefield hosts.
+/// `admission` says which zone-of-function screening the caller already
+/// applied (see [`StaticZoneAdmission`]).
 fn active_continuous_effects_from_static_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -6991,6 +7278,7 @@ fn active_continuous_effects_from_static_definitions(
     timestamp: u64,
     static_definitions: &[StaticDefinition],
     admission: StaticZoneAdmission,
+    pass: &mut GatherPass,
 ) -> Vec<ActiveContinuousEffect> {
     let mut effects = Vec::new();
     let source_obj = state.objects.get(&source_id);
@@ -7042,14 +7330,14 @@ fn active_continuous_effects_from_static_definitions(
         for (mod_index, modification) in def.modifications.iter().enumerate() {
             // CR 701.15b: Goaded is a designation, not an ability granted
             // to the affected permanent. Combat reads this functioning source.
-            if is_combat_assignment_rule_modification(modification)
-                || matches!(
-                    modification,
-                    ContinuousModification::AddStaticMode {
-                        mode: StaticMode::Goaded
-                    }
-                )
-            {
+            if continuous_gather_skips(modification) {
+                continue;
+            }
+            // A narrowed pass drops, before any further work, a modification
+            // that can yield no kept effect. This runs after the skip above
+            // and before `layer()` below, and uses only the pass's total
+            // predicate.
+            if !pass.admission().reaches_admitted(modification) {
                 continue;
             }
             let trigger_producer_origin =
@@ -7099,6 +7387,7 @@ fn active_continuous_effects_from_static_definitions(
             // `append_late_granted_static_effects`, and application gates every
             // child through `granted_static_parent_qualifies`.
             if let ContinuousModification::GrantStaticAbility { definition: inner } = modification {
+                let entered = pass.enter_grant_expansion();
                 effects.extend(expand_granted_static_effects(
                     state,
                     source_id,
@@ -7109,14 +7398,19 @@ fn active_continuous_effects_from_static_definitions(
                         .battlefield
                         .iter()
                         .copied()
-                        .filter(granted_static_host_matches(state, &effect)),
+                        .filter(granted_static_host_matches_in_pass(
+                            &entered, state, &effect,
+                        )),
+                    pass.admission(),
                 ));
                 // Continue: also push the meta-effect below so layer-6 apply
                 // pushes the inner static onto the recipient's
                 // `static_definitions` for inspectability and downstream
                 // queries (e.g., parser/coverage walks).
             }
-            effects.push(effect);
+            if pass.admission().admits(modification) {
+                effects.push(effect);
+            }
         }
     }
 
@@ -7157,6 +7451,10 @@ fn active_continuous_effects_from_static_definitions(
 /// `depends_on` would suppress the cross-grant edge between them as if they were one
 /// static. No known card grants two such interacting static abilities to the same
 /// recipient; documented here for the next maintainer who hits that case.
+///
+/// `admission` narrows the synthesized children to the inner modifications the
+/// calling gather pass keeps; the late-grant path passes
+/// `ModificationAdmission::Every`.
 fn expand_granted_static_effects(
     state: &GameState,
     host_source_id: ObjectId,
@@ -7164,6 +7462,7 @@ fn expand_granted_static_effects(
     inner: &StaticDefinition,
     host_origin: Option<TriggerProducerOrigin>,
     recipients: impl IntoIterator<Item = ObjectId>,
+    admission: ModificationAdmission,
 ) -> Vec<ActiveContinuousEffect> {
     if inner.mode != StaticMode::Continuous {
         return Vec::new();
@@ -7190,14 +7489,12 @@ fn expand_granted_static_effects(
         // preceding layers have established that controller.
         let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
-            if is_combat_assignment_rule_modification(modification)
-                || matches!(
-                    modification,
-                    ContinuousModification::AddStaticMode {
-                        mode: StaticMode::Goaded
-                    }
-                )
-            {
+            if continuous_gather_skips(modification) {
+                continue;
+            }
+            // After the skip above and before `layer()` below: a narrowed
+            // pass synthesizes no child for a modification it does not keep.
+            if !admission.admits(modification) {
                 continue;
             }
             out.push(ActiveContinuousEffect {
@@ -7657,6 +7954,7 @@ fn append_late_granted_static_effects(
                 inner,
                 parent.trigger_producer_origin.clone(),
                 candidates,
+                ModificationAdmission::Every,
             )
             .into_iter()
             .filter(move |child| {
@@ -7981,25 +8279,43 @@ fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinu
     true
 }
 
+/// Appends the effects of every live transient continuous effect (the full
+/// transient gather).
 pub(crate) fn gather_transient_continuous_effects(
     state: &GameState,
     effects: &mut Vec<ActiveContinuousEffect>,
 ) {
-    gather_transient_continuous_effects_with(state, effects, transient_effect_is_live);
+    gather_transient_continuous_effects_with(
+        state,
+        effects,
+        transient_effect_is_live,
+        &mut GatherPass::every(),
+    );
 }
 
+/// Appends the effects of every stored transient that `participates` admits
+/// and `pass` keeps. A narrowed pass skips, before any liveness evaluation, a
+/// transient none of whose modifications can yield a kept effect.
 fn gather_transient_continuous_effects_with(
     state: &GameState,
     effects: &mut Vec<ActiveContinuousEffect>,
     participates: fn(&GameState, &TransientContinuousEffect) -> bool,
+    pass: &mut GatherPass,
 ) {
     for tce in &state.transient_continuous_effects {
-        if !participates(state, tce) {
+        // Scans the raw modification list with the pass's total predicate
+        // only. It over-approximates: a modification the per-modification
+        // skips below would drop still lets the transient through.
+        if !pass.admission().reaches_any_admitted(&tce.modifications) {
+            continue;
+        }
+        let entered = pass.enter_transient_liveness();
+        if !transient_participates_in_pass(&entered, state, tce, participates) {
             continue;
         }
 
         let retained_condition = if let Some(condition) = &tce.condition {
-            if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
+            if !transient_source_condition_passes_in_pass(&entered, state, tce, condition) {
                 continue;
             }
             condition_uses_recipient_context(condition).then(|| condition.clone())
@@ -8049,6 +8365,11 @@ fn gather_transient_continuous_effects_with(
             ) {
                 continue;
             }
+            // After both skips above and before `layer()` below: a narrowed
+            // pass drops a modification that can yield no kept effect.
+            if !pass.admission().reaches_admitted(modification) {
+                continue;
+            }
             let effect = ActiveContinuousEffect {
                 source_id: tce.source_id,
                 controller: tce.controller,
@@ -8074,6 +8395,7 @@ fn gather_transient_continuous_effects_with(
             // modifications to recipients during the same layer pass (Roar of the
             // Fifth People chapter II: saga gains "Creatures you control have …").
             if let ContinuousModification::GrantStaticAbility { definition: inner } = modification {
+                let expansion = pass.enter_grant_expansion();
                 effects.extend(expand_granted_static_effects(
                     state,
                     tce.source_id,
@@ -8084,10 +8406,15 @@ fn gather_transient_continuous_effects_with(
                         .battlefield
                         .iter()
                         .copied()
-                        .filter(granted_static_host_matches(state, &effect)),
+                        .filter(granted_static_host_matches_in_pass(
+                            &expansion, state, &effect,
+                        )),
+                    pass.admission(),
                 ));
             }
-            effects.push(effect);
+            if pass.admission().admits(modification) {
+                effects.push(effect);
+            }
         }
     }
 }
@@ -9917,6 +10244,7 @@ fn original_granted_static_parent(
                 state,
                 &mut effects,
                 transient_effect_passes_other_gates,
+                &mut GatherPass::every(),
             );
             effects
         }
@@ -30813,5 +31141,637 @@ mod controller_change_combat_removal_tests {
             removals_since(state, start).is_empty(),
             "the attachment-owned pass records no separate removal"
         );
+    }
+}
+
+/// Per-site tests for the guarded object sweeps in this file
+/// (`prune_casting_permissions_at`, `arm_grantee_next_turn_casting_permissions`,
+/// `prune_host_left_casting_permissions`,
+/// `prune_controller_controls_source_on_leave`, `retire_absent_trigger_grants`):
+/// a sharing witness, a targeted test and a reference-equality test against
+/// the BASE-shaped unguarded loop for each.
+#[cfg(test)]
+mod object_sweep_sharing_tests {
+    use super::*;
+    use crate::types::ability::{
+        occurrence_for_grant, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
+        TriggerDefinition, TriggerEntry, TriggerGrantProducerKey, TriggerProducerOrigin,
+    };
+    use crate::types::game_state::LayersDirty;
+    use crate::types::object_map::sweep_test_support::{
+        assert_sweep_keeps_store_shared, assert_sweep_matches_reference, object_mut,
+        run_sweep_targeting, state_with_objects,
+    };
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// Four exiled cards, two per player.
+    fn exiled_fixture() -> (GameState, Vec<ObjectId>) {
+        state_with_objects(&[
+            (P0, Zone::Exile),
+            (P1, Zone::Exile),
+            (P0, Zone::Exile),
+            (P1, Zone::Exile),
+        ])
+    }
+
+    /// An impulse "play from exile" permission with the given lifetime.
+    fn play_from_exile(
+        duration: Duration,
+        granted_to: PlayerId,
+        source_id: Option<ObjectId>,
+    ) -> CastingPermission {
+        CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
+            duration,
+            granted_to,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            source_id,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        }
+    }
+
+    /// Adds `permission` to the casting permissions of `id`.
+    fn grant(state: &mut GameState, id: ObjectId, permission: CastingPermission) {
+        object_mut(state, id).casting_permissions.push(permission);
+    }
+
+    // ---- S1: prune_casting_permissions_at ----
+
+    /// BASE-shaped unguarded `prune_casting_permissions_at`.
+    fn reference_prune_casting_permissions_at(
+        state: &mut GameState,
+        seam: PermissionSeam,
+        active: Option<PlayerId>,
+    ) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            obj.casting_permissions.retain(|p| {
+                let lifetime = p.lifetime();
+                match lifetime.duration {
+                    Some(d) => {
+                        !permission_duration_expires_at(seam, d, lifetime.keyed_player, active)
+                    }
+                    None => true,
+                }
+            });
+        }
+    }
+
+    /// The cleanup-step permission that expires (`UntilEndOfTurn`).
+    fn cleanup_expiring() -> CastingPermission {
+        play_from_exile(Duration::UntilEndOfTurn, P0, None)
+    }
+
+    /// The turn-start permission that expires when `P0`'s turn begins.
+    fn turn_start_expiring() -> CastingPermission {
+        play_from_exile(
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            P0,
+            None,
+        )
+    }
+
+    /// A turn-start permission keyed to `P1`, which `P0`'s turn start keeps.
+    fn turn_start_kept() -> CastingPermission {
+        play_from_exile(
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            P1,
+            None,
+        )
+    }
+
+    /// Sharing witness for the cleanup shape (`Cleanup`, `None`): no object
+    /// holds a casting permission.
+    #[test]
+    fn cleanup_permission_prune_without_permissions_keeps_store_shared() {
+        let (state, _) = exiled_fixture();
+        assert_sweep_keeps_store_shared(state, |state| {
+            prune_casting_permissions_at(state, PermissionSeam::Cleanup, None)
+        });
+    }
+
+    /// Targeted test for the cleanup shape: only the holder of the expiring
+    /// permission is copied.
+    #[test]
+    fn cleanup_permission_prune_copies_only_the_holder() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[1], cleanup_expiring());
+        let (before, after) = run_sweep_targeting(state, ids[1], |state| {
+            prune_casting_permissions_at(state, PermissionSeam::Cleanup, None)
+        });
+        assert_eq!(before.objects[&ids[1]].casting_permissions.len(), 1);
+        assert!(after.objects[&ids[1]].casting_permissions.is_empty());
+    }
+
+    /// Reference equality for the cleanup shape.
+    #[test]
+    fn cleanup_permission_prune_matches_unguarded_sweep() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[0], cleanup_expiring());
+        grant(&mut state, ids[1], cleanup_expiring());
+        grant(&mut state, ids[1], CastingPermission::AdventureCreature);
+        // Needs the sweep (holds a permission) but keeps it.
+        grant(&mut state, ids[2], CastingPermission::AdventureCreature);
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| prune_casting_permissions_at(state, PermissionSeam::Cleanup, None),
+            |state| reference_prune_casting_permissions_at(state, PermissionSeam::Cleanup, None),
+        );
+    }
+
+    /// Sharing witness for the turn-start shape (`TurnStart`, `Some(player)`).
+    #[test]
+    fn turn_start_permission_prune_without_permissions_keeps_store_shared() {
+        let (state, _) = exiled_fixture();
+        assert_sweep_keeps_store_shared(state, |state| {
+            prune_casting_permissions_at(state, PermissionSeam::TurnStart, Some(P0))
+        });
+    }
+
+    /// Targeted test for the turn-start shape.
+    #[test]
+    fn turn_start_permission_prune_copies_only_the_holder() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[2], turn_start_expiring());
+        let (before, after) = run_sweep_targeting(state, ids[2], |state| {
+            prune_casting_permissions_at(state, PermissionSeam::TurnStart, Some(P0))
+        });
+        assert_eq!(before.objects[&ids[2]].casting_permissions.len(), 1);
+        assert!(after.objects[&ids[2]].casting_permissions.is_empty());
+    }
+
+    /// Reference equality for the turn-start shape.
+    #[test]
+    fn turn_start_permission_prune_matches_unguarded_sweep() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[0], turn_start_expiring());
+        grant(&mut state, ids[1], turn_start_expiring());
+        grant(&mut state, ids[1], turn_start_kept());
+        // Needs the sweep (holds a permission) but keeps it.
+        grant(&mut state, ids[2], turn_start_kept());
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| prune_casting_permissions_at(state, PermissionSeam::TurnStart, Some(P0)),
+            |state| {
+                reference_prune_casting_permissions_at(state, PermissionSeam::TurnStart, Some(P0))
+            },
+        );
+    }
+
+    // ---- S2: arm_grantee_next_turn_casting_permissions ----
+
+    /// BASE-shaped unguarded `arm_grantee_next_turn_casting_permissions`.
+    fn reference_arm_grantee_next_turn_casting_permissions(
+        state: &mut GameState,
+        active_player: PlayerId,
+    ) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            for p in obj.casting_permissions.iter_mut() {
+                let (Some(duration), grantee) = p.lifetime_mut() else {
+                    continue;
+                };
+                if matches!(
+                    duration,
+                    Duration::UntilEndOfNextTurnOf {
+                        player: PlayerScope::Controller
+                    }
+                ) && grantee == Some(active_player)
+                {
+                    *duration = Duration::UntilEndOfTurn;
+                }
+            }
+        }
+    }
+
+    /// "Until the end of your next turn", granted to `granted_to`.
+    fn next_turn_grant(granted_to: PlayerId) -> CastingPermission {
+        play_from_exile(
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            granted_to,
+            None,
+        )
+    }
+
+    /// Sharing witness: no object holds a casting permission.
+    #[test]
+    fn arming_without_permissions_keeps_store_shared() {
+        let (state, _) = exiled_fixture();
+        assert_sweep_keeps_store_shared(state, |state| {
+            arm_grantee_next_turn_casting_permissions(state, P0)
+        });
+    }
+
+    /// Targeted test: only the holder of the grant being armed is copied.
+    #[test]
+    fn arming_copies_only_the_grantee_permission_holder() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[0], next_turn_grant(P0));
+        let (before, after) = run_sweep_targeting(state, ids[0], |state| {
+            arm_grantee_next_turn_casting_permissions(state, P0)
+        });
+        assert_ne!(
+            before.objects[&ids[0]].casting_permissions,
+            after.objects[&ids[0]].casting_permissions
+        );
+        assert!(matches!(
+            after.objects[&ids[0]].casting_permissions[0],
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            }
+        ));
+    }
+
+    /// Reference equality, including a holder whose grant belongs to the
+    /// other player and is therefore left alone.
+    #[test]
+    fn arming_matches_unguarded_sweep() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[0], next_turn_grant(P0));
+        grant(&mut state, ids[1], next_turn_grant(P1));
+        grant(&mut state, ids[1], next_turn_grant(P0));
+        // Needs the sweep (holds a permission) but nothing is armed.
+        grant(&mut state, ids[2], next_turn_grant(P1));
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| arm_grantee_next_turn_casting_permissions(state, P0),
+            |state| reference_arm_grantee_next_turn_casting_permissions(state, P0),
+        );
+    }
+
+    // ---- S3: prune_host_left_casting_permissions ----
+
+    /// BASE-shaped unguarded `prune_host_left_casting_permissions`.
+    fn reference_prune_host_left_casting_permissions(state: &mut GameState, departed_id: ObjectId) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            obj.casting_permissions.retain(|p| {
+                let lifetime = p.lifetime();
+                let host_bound = lifetime
+                    .duration
+                    .is_some_and(Duration::ends_when_host_leaves_play);
+                !(host_bound && lifetime.source_id == Some(departed_id))
+            });
+        }
+    }
+
+    /// A permission bound to the presence of `host` on the battlefield.
+    fn host_bound(host: ObjectId) -> CastingPermission {
+        play_from_exile(Duration::UntilHostLeavesPlay, P0, Some(host))
+    }
+
+    /// Sharing witness: no object holds a casting permission.
+    #[test]
+    fn host_left_prune_without_permissions_keeps_store_shared() {
+        let (state, ids) = exiled_fixture();
+        let departed = ids[3];
+        assert_sweep_keeps_store_shared(state, |state| {
+            prune_host_left_casting_permissions(state, departed)
+        });
+    }
+
+    /// Targeted test: only the holder of the host-bound permission is copied.
+    #[test]
+    fn host_left_prune_copies_only_the_holder() {
+        let (mut state, ids) = exiled_fixture();
+        let departed = ids[3];
+        grant(&mut state, ids[1], host_bound(departed));
+        let (before, after) = run_sweep_targeting(state, ids[1], |state| {
+            prune_host_left_casting_permissions(state, departed)
+        });
+        assert_eq!(before.objects[&ids[1]].casting_permissions.len(), 1);
+        assert!(after.objects[&ids[1]].casting_permissions.is_empty());
+    }
+
+    /// Reference equality, including a permission bound to a different host.
+    #[test]
+    fn host_left_prune_matches_unguarded_sweep() {
+        let (mut state, ids) = exiled_fixture();
+        let departed = ids[3];
+        grant(&mut state, ids[0], host_bound(departed));
+        grant(&mut state, ids[1], host_bound(departed));
+        grant(&mut state, ids[1], host_bound(ids[0]));
+        // Needs the sweep (holds a permission) but its host is still here.
+        grant(&mut state, ids[2], host_bound(ids[0]));
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| prune_host_left_casting_permissions(state, departed),
+            |state| reference_prune_host_left_casting_permissions(state, departed),
+        );
+    }
+
+    // ---- S5: prune_controller_controls_source_on_leave ----
+
+    /// BASE-shaped unguarded `prune_controller_controls_source_on_leave`,
+    /// including the `changed` flag and the `mark_full` it feeds.
+    fn reference_prune_controller_controls_source_on_leave(
+        state: &mut GameState,
+        departed_id: ObjectId,
+    ) {
+        let mut changed = false;
+        for (host_id, obj) in state.objects.iter_mut() {
+            let host_left = *host_id == departed_id;
+            let is_lapsed = |def: &ReplacementDefinition| {
+                host_left
+                    || matches!(
+                        def.condition,
+                        Some(ReplacementCondition::ControllerControlsSource { source, .. })
+                            if source == departed_id
+                    )
+            };
+            let drop = |def: &ReplacementDefinition| {
+                (matches!(
+                    def.condition,
+                    Some(ReplacementCondition::ControllerControlsSource { .. })
+                ) && is_lapsed(def))
+                    || (host_left && is_runtime_target_die_exile_replacement(def))
+                    || (host_left && is_runtime_host_lifetime_replacement(def))
+            };
+            let before_live = obj.replacement_definitions.len();
+            obj.replacement_definitions.retain(|d| !drop(d));
+            let before_base = obj.base_replacement_definitions.len();
+            if obj.base_replacement_definitions.iter().any(drop) {
+                Arc::make_mut(&mut obj.base_replacement_definitions).retain(|d| !drop(d));
+            }
+            if obj.replacement_definitions.len() != before_live
+                || obj.base_replacement_definitions.len() != before_base
+            {
+                changed = true;
+            }
+        }
+        if changed {
+            state.layers_dirty.mark_full();
+        }
+    }
+
+    /// A replacement gated on the controller still controlling `source`.
+    fn controls_source(source: ObjectId) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved).condition(
+            ReplacementCondition::ControllerControlsSource {
+                source,
+                controller: P0,
+            },
+        )
+    }
+
+    /// Five battlefield permanents; the last one is the departing host.
+    fn controls_source_fixture() -> (GameState, Vec<ObjectId>) {
+        let (mut state, ids) = state_with_objects(&[
+            (P0, Zone::Battlefield),
+            (P0, Zone::Battlefield),
+            (P1, Zone::Battlefield),
+            (P1, Zone::Battlefield),
+            (P0, Zone::Battlefield),
+        ]);
+        state.layers_dirty = LayersDirty::Clean;
+        (state, ids)
+    }
+
+    /// Sharing witness: definitions exist, but none lapses with this
+    /// departure, so nothing is copied and `layers_dirty` stays clean.
+    #[test]
+    fn controls_source_prune_without_lapsed_definitions_keeps_store_shared() {
+        let (mut state, ids) = controls_source_fixture();
+        let departed = ids[4];
+        object_mut(&mut state, ids[0])
+            .replacement_definitions
+            .push(controls_source(ids[1]));
+        Arc::make_mut(&mut object_mut(&mut state, ids[2]).base_replacement_definitions)
+            .push(controls_source(ids[3]));
+        let after = assert_sweep_keeps_store_shared(state, |state| {
+            prune_controller_controls_source_on_leave(state, departed)
+        });
+        assert_eq!(after.layers_dirty, LayersDirty::Clean);
+    }
+
+    /// Targeted test: only the holder of the lapsed definition is copied.
+    #[test]
+    fn controls_source_prune_copies_only_the_holder() {
+        let (mut state, ids) = controls_source_fixture();
+        let departed = ids[4];
+        object_mut(&mut state, ids[1])
+            .replacement_definitions
+            .push(controls_source(departed));
+        let (before, after) = run_sweep_targeting(state, ids[1], |state| {
+            prune_controller_controls_source_on_leave(state, departed)
+        });
+        assert_eq!(before.objects[&ids[1]].replacement_definitions.len(), 1);
+        assert!(after.objects[&ids[1]].replacement_definitions.is_empty());
+        assert_eq!(after.layers_dirty, LayersDirty::Full);
+    }
+
+    /// Reference equality, with one object per disjunct of the guard (lapsed
+    /// definition only in the live list; only in the base list), the
+    /// departing host's own host-lifetime rider, and an unrelated holder.
+    /// `layers_dirty` is `serde(skip)`, so it is compared separately, for a
+    /// changed and a no-op fixture.
+    #[test]
+    fn controls_source_prune_matches_unguarded_sweep() {
+        let (mut state, ids) = controls_source_fixture();
+        let departed = ids[4];
+        object_mut(&mut state, ids[0])
+            .replacement_definitions
+            .push(controls_source(departed));
+        Arc::make_mut(&mut object_mut(&mut state, ids[1]).base_replacement_definitions)
+            .push(controls_source(departed));
+        object_mut(&mut state, ids[2])
+            .replacement_definitions
+            .push(controls_source(ids[3]));
+        let host_rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .expiry(RestrictionExpiry::UntilHostLeavesPlay);
+        object_mut(&mut state, departed)
+            .replacement_definitions
+            .push(host_rider.clone());
+        Arc::make_mut(&mut object_mut(&mut state, departed).base_replacement_definitions)
+            .push(host_rider);
+        let (actual, reference) = assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1], departed],
+            |state| prune_controller_controls_source_on_leave(state, departed),
+            |state| reference_prune_controller_controls_source_on_leave(state, departed),
+        );
+        assert_eq!(reference.layers_dirty, LayersDirty::Full);
+        assert_eq!(actual.layers_dirty, reference.layers_dirty);
+
+        // No-op: only the unrelated holder remains.
+        let (mut state, ids) = controls_source_fixture();
+        let departed = ids[4];
+        object_mut(&mut state, ids[2])
+            .replacement_definitions
+            .push(controls_source(ids[3]));
+        let mut actual = state.clone();
+        let mut reference = state.clone();
+        prune_controller_controls_source_on_leave(&mut actual, departed);
+        reference_prune_controller_controls_source_on_leave(&mut reference, departed);
+        assert_eq!(reference.layers_dirty, LayersDirty::Clean);
+        assert_eq!(actual.layers_dirty, reference.layers_dirty);
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&reference).unwrap()
+        );
+    }
+
+    // ---- S13: retire_absent_trigger_grants ----
+
+    /// BASE-shaped unguarded `retire_absent_trigger_grants`: every object is
+    /// written.
+    fn reference_retire_absent_trigger_grants(state: &mut GameState) {
+        let trigger_object_ids = state.objects.keys().copied().collect::<Vec<_>>();
+        for object_id in trigger_object_ids {
+            let Some(obj) = state.objects.get_mut(&object_id) else {
+                continue;
+            };
+            let live = live_trigger_grant_instances(obj);
+            obj.trigger_occurrence_state.retire_absent_grants(&live);
+        }
+    }
+
+    /// The producer key for output slot `output_index` of one static grantor.
+    fn producer(output_index: usize) -> TriggerGrantProducerKey {
+        TriggerGrantProducerKey::Granted {
+            origin: TriggerProducerOrigin::Static {
+                source: ObjectIncarnationRef::of(ObjectId(900), 1),
+                definition_index: 0,
+                modification_index: 0,
+            },
+            output_index,
+        }
+    }
+
+    /// Activates a grant from `producer(output_index)` on `id`; when `live`,
+    /// also materializes the matching trigger definition so the grant is in
+    /// the object's live set.
+    fn activate_grant(state: &mut GameState, id: ObjectId, output_index: usize, live: bool) {
+        let obj = object_mut(state, id);
+        let key = producer(output_index);
+        let instance = obj
+            .trigger_occurrence_state
+            .grant_instance_for(key.clone())
+            .expect("grant allocates");
+        if live {
+            obj.trigger_definitions.push(TriggerEntry::new(
+                occurrence_for_grant(&key, instance),
+                TriggerDefinition::new(TriggerMode::Attacks),
+            ));
+        }
+    }
+
+    /// Battlefield fixture for grant retirement.
+    fn grant_fixture() -> (GameState, Vec<ObjectId>) {
+        state_with_objects(&[
+            (P0, Zone::Battlefield),
+            (P0, Zone::Battlefield),
+            (P1, Zone::Battlefield),
+            (P1, Zone::Battlefield),
+        ])
+    }
+
+    /// Sharing witness: one object's active grants are all live (so the
+    /// second half of the guard is evaluated) and the others have none.
+    #[test]
+    fn grant_retirement_without_absent_grants_keeps_store_shared() {
+        let (mut state, ids) = grant_fixture();
+        activate_grant(&mut state, ids[0], 0, true);
+        activate_grant(&mut state, ids[0], 1, true);
+        assert_eq!(
+            state.objects[&ids[0]]
+                .trigger_occurrence_state
+                .active_grants()
+                .count(),
+            2
+        );
+        assert_sweep_keeps_store_shared(state, retire_absent_trigger_grants);
+    }
+
+    /// Targeted test: only the object holding an absent grant is copied.
+    #[test]
+    fn grant_retirement_copies_only_the_holder_of_an_absent_grant() {
+        let (mut state, ids) = grant_fixture();
+        activate_grant(&mut state, ids[0], 0, true);
+        activate_grant(&mut state, ids[2], 0, true);
+        activate_grant(&mut state, ids[2], 1, false);
+        let (before, after) = run_sweep_targeting(state, ids[2], retire_absent_trigger_grants);
+        let count = |state: &GameState| {
+            state.objects[&ids[2]]
+                .trigger_occurrence_state
+                .active_grants()
+                .count()
+        };
+        assert_eq!(count(&before), 2);
+        assert_eq!(count(&after), 1);
+    }
+
+    /// Reference equality: two objects lose a grant, one has only live
+    /// grants, one has none.
+    #[test]
+    fn grant_retirement_matches_unguarded_sweep() {
+        let (mut state, ids) = grant_fixture();
+        activate_grant(&mut state, ids[0], 0, false);
+        activate_grant(&mut state, ids[1], 0, true);
+        activate_grant(&mut state, ids[1], 1, false);
+        activate_grant(&mut state, ids[2], 0, true);
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            retire_absent_trigger_grants,
+            reference_retire_absent_trigger_grants,
+        );
+    }
+
+    // ---- Call-site pins ----
+
+    /// Call-site pin (S2): the untap-step seam still arms the active
+    /// player's "until the end of your next turn" grants.
+    #[test]
+    fn untap_step_prune_arms_grantee_next_turn_permissions() {
+        let (mut state, ids) = exiled_fixture();
+        grant(&mut state, ids[0], next_turn_grant(P0));
+        prune_untap_step_casting_permissions(&mut state, P0);
+        assert!(matches!(
+            state.objects[&ids[0]].casting_permissions.as_slice(),
+            [CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            }]
+        ));
+    }
+
+    /// Call-site pin (S13): a full layer evaluation still retires an active
+    /// grant whose producer no longer materializes it.
+    #[test]
+    fn layer_evaluation_retires_absent_trigger_grants() {
+        let (mut state, ids) = grant_fixture();
+        activate_grant(&mut state, ids[0], 0, false);
+        let active = |state: &GameState| {
+            state.objects[&ids[0]]
+                .trigger_occurrence_state
+                .active_grants()
+                .count()
+        };
+        assert_eq!(active(&state), 1);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(active(&state), 0);
     }
 }

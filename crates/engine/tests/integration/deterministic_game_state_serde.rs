@@ -44,6 +44,7 @@ const HASH_MAP_OF_HASH_SET: &str =
     "serialize_with=\"crate::types::deterministic_serde::hash_map_of_hash_set\"";
 const IM_HASH_SET: &str = "serialize_with=\"crate::types::deterministic_serde::im_hash_set\"";
 const IM_HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::im_hash_map\"";
+const OBJECT_MAP: &str = "serialize_with=\"crate::types::object_map::serialize_sorted\"";
 const IM_HASH_MAP_OF_IM_HASH_MAP: &str =
     "serialize_with=\"crate::types::deterministic_serde::im_hash_map_of_im_hash_map\"";
 const NUMERIC_HASH_MAP_DESERIALIZER: &str =
@@ -182,6 +183,9 @@ fn add_spec(
     );
 }
 
+/// The hand-maintained census of every serialized hash-backed owner and the
+/// adapter each one must name; the census test compares it against the owners
+/// discovered in the source files.
 fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     let mut specs = BTreeMap::new();
     let game_state = "src/types/game_state.rs";
@@ -372,7 +376,16 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "Box<HashMap<HashSet>>",
         Classification::Canonical(HASH_MAP_OF_HASH_SET),
     );
-    for field in ["objects", "attribution", "lki_cache", "tracked_object_sets"] {
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "objects",
+        "ObjectMap",
+        Classification::Canonical(OBJECT_MAP),
+    );
+    for field in ["attribution", "lki_cache", "tracked_object_sets"] {
         add_spec(
             &mut specs,
             game_state,
@@ -945,6 +958,8 @@ fn type_label(ty: &Type) -> String {
     }
 }
 
+/// The key type labels of every unordered map nested in `ty`, outermost first,
+/// looking through `Option`, `Vec`, `Arc` and `Box` and into map values.
 fn unordered_map_key_types(ty: &Type) -> Vec<String> {
     let Type::Path(path) = ty else {
         return Vec::new();
@@ -967,10 +982,13 @@ fn unordered_map_key_types(ty: &Type) -> Vec<String> {
             keys
         }
         "SpecializeFaceMap" => vec!["ManaColor".to_string()],
+        "ObjectMap" => vec!["ObjectId".to_string()],
         _ => Vec::new(),
     }
 }
 
+/// The hash-backed container shape of `ty` as the census labels it, or `None`
+/// when `ty` holds no hash-backed container (such fields are not census owners).
 fn hash_shape(ty: &Type) -> Option<String> {
     let Type::Path(path) = ty else {
         return None;
@@ -1000,6 +1018,7 @@ fn hash_shape(ty: &Type) -> Option<String> {
             })
         }
         "SpecializeFaceMap" => Some("HashMap".to_string()),
+        "ObjectMap" => Some("ObjectMap".to_string()),
         _ => None,
     }
 }
