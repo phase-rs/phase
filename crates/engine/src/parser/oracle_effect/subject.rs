@@ -8171,16 +8171,17 @@ fn strip_trailing_additive_adverb(subject: &str) -> &str {
     }
 }
 
+fn is_copula_negation(token: &str) -> bool {
+    matches!(token, "isn't" | "isn\u{2019}t" | "aren't" | "aren\u{2019}t")
+}
+
 fn is_restriction_predicate_verb(token: &str) -> bool {
     // CR 613.1d: "isn't"/"aren't" head a layer-4 type-removal predicate ("~ isn't
     // a creature until end of turn", Blink's Alien Angel token). Recognizing the
     // copula-negation here lets `find_predicate_start` split subject from
     // predicate so the continuous-clause path produces a `RemoveType`
     // modification (via `parse_continuous_modifications`).
-    matches!(
-        token,
-        "can't" | "can\u{2019}t" | "cannot" | "isn't" | "isn\u{2019}t" | "aren't" | "aren\u{2019}t"
-    )
+    is_copula_negation(token) || matches!(token, "can't" | "can\u{2019}t" | "cannot")
 }
 
 fn token_starts_predicate(token: &str) -> bool {
@@ -8213,6 +8214,31 @@ fn is_embedded_who_has_the_most(prev_token: Option<&str>, token: &str, rest_afte
             .is_ok()
 }
 
+/// A copula negation introduced by a relative pronoun
+/// ("creatures **that aren't** of the chosen type get -3/-3", Crippling Fear)
+/// is the relative clause of the subject noun phrase, not the sentence's own
+/// predicate. `is_restriction_predicate_verb` accepts "isn't"/"aren't" as a
+/// predicate head for the layer-4 type-removal form ("~ isn't a creature until
+/// end of turn", where nothing relative precedes it), so without this guard
+/// the subject is truncated at "creatures that" and the qualifier plus the real
+/// verb collapse into a bogus predicate over an unrestricted target. Only the
+/// relative-pronoun + copula-negation shape is excluded; every other predicate
+/// verb keeps splitting the subject exactly as before.
+fn is_embedded_relative_copula_negation(prev_token: Option<&str>, token: &str) -> bool {
+    matches!(prev_token, Some("that" | "who" | "which")) && is_copula_negation(token)
+}
+
+/// Whether `token` at a predicate-verb position sits inside a relative clause
+/// of the subject noun phrase and therefore must not end the subject.
+fn is_embedded_relative_clause_verb(
+    prev_token: Option<&str>,
+    token: &str,
+    rest_after: &str,
+) -> bool {
+    is_embedded_who_has_the_most(prev_token, token, rest_after)
+        || is_embedded_relative_copula_negation(prev_token, token)
+}
+
 pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
     let lower = text.to_lowercase();
     let mut word_start = None;
@@ -8222,7 +8248,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         if ch.is_whitespace() {
             if let Some(start) = word_start.take() {
                 let token = &lower[start..idx];
-                if !is_embedded_who_has_the_most(prev_token, token, &lower[idx..])
+                if !is_embedded_relative_clause_verb(prev_token, token, &lower[idx..])
                     && token_starts_predicate(token)
                 {
                     return Some(start);
@@ -8239,7 +8265,8 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 
     if let Some(start) = word_start {
         let token = &lower[start..];
-        if !is_embedded_who_has_the_most(prev_token, token, "") && token_starts_predicate(token) {
+        if !is_embedded_relative_clause_verb(prev_token, token, "") && token_starts_predicate(token)
+        {
             return Some(start);
         }
     }
@@ -8257,6 +8284,40 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::statics::BlockExceptionKind;
+
+    /// CR 613.1d: "isn't"/"aren't" head a type-removal predicate only when no
+    /// relative pronoun introduces them. After "that"/"who"/"which" the copula
+    /// negation belongs to the subject's relative clause and the real predicate
+    /// verb that follows is where the subject ends.
+    #[test]
+    fn find_predicate_start_keeps_relative_clause_copula_negation_in_the_subject() {
+        for (text, predicate) in [
+            (
+                "creatures that aren't of the chosen type get -3/-3 until end of turn",
+                "get -3/-3 until end of turn",
+            ),
+            (
+                "creatures that aren't elves get -1/-1 until end of turn",
+                "get -1/-1 until end of turn",
+            ),
+            ("players who aren't you lose 1 life", "lose 1 life"),
+            // Reach-guards for the unchanged splits: a copula negation with no
+            // relative pronoun before it still heads the predicate, and an
+            // earlier predicate verb still wins over a later relative clause.
+            (
+                "~ isn't a creature until end of turn",
+                "isn't a creature until end of turn",
+            ),
+            (
+                "that player can't activate abilities that aren't mana abilities",
+                "can't activate abilities that aren't mana abilities",
+            ),
+        ] {
+            let start = find_predicate_start(text)
+                .unwrap_or_else(|| panic!("no predicate start found in {text:?}"));
+            assert_eq!(&text[start..], predicate, "predicate split of {text:?}");
+        }
+    }
 
     #[test]
     fn they_ignores_controllerless_empty_typed_target_slot() {

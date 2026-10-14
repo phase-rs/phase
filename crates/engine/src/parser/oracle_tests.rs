@@ -23318,6 +23318,201 @@ fn leveler_activated_abilities_get_level_counter_range() {
     assert_eq!(r.triggers.len(), 0);
 }
 
+/// CR 711.2 + CR 711.2a + CR 711.2b: Kargan Dragonlord's `LEVEL 8+` striation
+/// grants the printed `{R}: This creature gets +1/+0 until end of turn.` — an
+/// ACTIVATED ability gated on level counters (CR 602.1: cost before the colon),
+/// never a bare static P/T grant.
+///
+/// `oracle_level.rs` normalizes the self-reference before handing the striation to
+/// the static parser, so the costed line reached the static-line "~ has/gets …"
+/// arm and flattened to `Continuous { SelfRef, [AddPower 1, AddToughness 0] }`
+/// under `HasCounters { level, min 8 }` — the `{R}` cost and the until-end-of-turn
+/// duration dropped outright. Guul Draz Assassin survived the same arm only by
+/// accident (its subject slice contains "creature").
+#[test]
+fn kargan_dragonlord_level_band_grants_an_activated_pump() {
+    const KARGAN_DRAGONLORD: &str = "Level up {R} ({R}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 4-7\n4/4\nFlying\nLEVEL 8+\n8/8\nFlying, trample\n{R}: This creature gets +1/+0 until end of turn.";
+    let r = parse(
+        KARGAN_DRAGONLORD,
+        "Kargan Dragonlord",
+        &[Keyword::LevelUp(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })],
+        &["Creature"],
+        &["Human", "Warrior"],
+    );
+    let level = CounterType::Generic("level".to_string());
+
+    // Reach guard: the level preprocessor actually ran over both striations, and the
+    // parse left no `Effect::Unimplemented` behind — so the ability assertions below
+    // cannot pass vacuously.
+    //
+    // The level-up `PutCounter` is deliberately NOT asserted here: CR 702.87a's
+    // level-up ability is synthesized at the DATABASE layer from the MTGJSON `LevelUp`
+    // keyword (`database/synthesis.rs::synthesize_level_up`), never by
+    // `parse_oracle_text`, so it is not observable in this venue. It stays covered by
+    // the export-level metric checks.
+    let band_8_plus = r
+        .statics
+        .iter()
+        .find(|definition| {
+            definition.condition
+                == Some(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(level.clone()),
+                    minimum: 8,
+                    maximum: None,
+                })
+        })
+        .unwrap_or_else(|| panic!("LEVEL 8+ band static missing: {:#?}", r.statics));
+    for expected in [
+        ContinuousModification::SetPower { value: 8 },
+        ContinuousModification::SetToughness { value: 8 },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        },
+    ] {
+        assert!(
+            band_8_plus.modifications.contains(&expected),
+            "LEVEL 8+ lost {expected:?}: {:#?}",
+            band_8_plus.modifications
+        );
+    }
+    assert!(
+        !r.abilities
+            .iter()
+            .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+        "the leveler must parse with no residual Unimplemented ability: {:#?}",
+        r.abilities
+    );
+
+    // (a) The printed costed line is an activated ability bound to LEVEL 8+.
+    let pump = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::LevelCounterRange {
+                    minimum: 8,
+                    maximum: None,
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no LEVEL 8+ activated ability — the costed line is still a static: {:#?}",
+                r.abilities
+            )
+        });
+    assert_eq!(pump.kind, AbilityKind::Activated);
+    assert_eq!(
+        pump.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+        }),
+        "the {{R}} activation cost must be carried, not dropped"
+    );
+    let Effect::Pump {
+        power,
+        toughness,
+        target,
+    } = &*pump.effect
+    else {
+        panic!("expected Pump, got {:?}", pump.effect);
+    };
+    assert_eq!(
+        (power, toughness),
+        (&PtValue::Fixed(1), &PtValue::Fixed(0)),
+        "expected +1/+0"
+    );
+    assert_eq!(target, &TargetFilter::SelfRef);
+    assert_eq!(
+        pump.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the duration must be carried, not dropped"
+    );
+    // Sibling/negative: the costed line sits in the LEVEL 8+ block only — it must
+    // not inherit the LEVEL 4-7 band.
+    assert!(
+        !r.abilities
+            .iter()
+            .any(|ability| ability.activation_restrictions.contains(
+                &ActivationRestriction::LevelCounterRange {
+                    minimum: 4,
+                    maximum: Some(7),
+                }
+            )),
+        "Kargan's costed line must not inherit the LEVEL 4-7 band: {:#?}",
+        r.abilities
+    );
+
+    // (b) No static reclaims it as a bare P/T grant.
+    assert!(
+        !r.statics
+            .iter()
+            .flat_map(|definition| definition.modifications.iter())
+            .any(|modification| matches!(
+                modification,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+        "the flattened pump must be gone from the statics: {:#?}",
+        r.statics
+    );
+
+    // (c) The LEVEL 4-7 summary static is unchanged.
+    let band_4_7 = r
+        .statics
+        .iter()
+        .find(|definition| {
+            definition.condition
+                == Some(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(level.clone()),
+                    minimum: 4,
+                    maximum: Some(7),
+                })
+        })
+        .unwrap_or_else(|| panic!("LEVEL 4-7 band static missing: {:#?}", r.statics));
+    for expected in [
+        ContinuousModification::SetPower { value: 4 },
+        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        },
+    ] {
+        assert!(
+            band_4_7.modifications.contains(&expected),
+            "LEVEL 4-7 lost {expected:?}: {:#?}",
+            band_4_7.modifications
+        );
+    }
+
+    // Reach guard / sibling: the two-band leveler shape is untouched.
+    const GUUL_DRAZ: &str = "Level up {1}{B} ({1}{B}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-3\n2/2\n{B}, {T}: Target creature gets -2/-2 until end of turn.\nLEVEL 4+\n4/4\n{B}, {T}: Target creature gets -4/-4 until end of turn.";
+    let guul = parse(
+        GUUL_DRAZ,
+        "Guul Draz Assassin",
+        &[Keyword::LevelUp(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })],
+        &["Creature"],
+        &["Vampire", "Assassin"],
+    );
+    for (minimum, maximum) in [(2u32, Some(3u32)), (4, None)] {
+        assert!(
+            guul.abilities.iter().any(|ability| ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::LevelCounterRange { minimum, maximum })),
+            "Guul Draz's {{minimum: {minimum}, maximum: {maximum:?}}} band must survive: {:#?}",
+            guul.abilities
+        );
+    }
+}
+
 #[test]
 fn fatal_push_full_composition() {
     use crate::types::ability::AbilityCondition;

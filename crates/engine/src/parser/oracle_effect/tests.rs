@@ -85024,3 +85024,45 @@ fn count_slot_preserves_derived_readings() {
         "P10: {false_cure}"
     );
 }
+
+/// CR 205.3m + CR 611.2a: a plural subject carrying the "that aren't of the
+/// chosen type" exclusion ("Creatures that aren't of the chosen type get -3/-3
+/// until end of turn" — Crippling Fear) is a mass pump over the creatures
+/// outside the chosen creature type, not a single-target pump at `Any`, and
+/// its "until end of turn" duration survives onto the pump.
+#[test]
+fn subject_creatures_not_of_chosen_type_pumps_all_excluding_chosen_type() {
+    let def = parse_effect_chain(
+        "Choose a creature type. Creatures that aren't of the chosen type get -3/-3 until end of turn.",
+        AbilityKind::Spell,
+    );
+    let pump = def
+        .sub_ability
+        .as_deref()
+        .expect("choose clause chains into the pump");
+    let Effect::PumpAll {
+        power,
+        toughness,
+        target,
+    } = pump.effect.as_ref()
+    else {
+        panic!("expected PumpAll, got {:?}", pump.effect);
+    };
+    assert_eq!(*power, PtValue::Fixed(-3));
+    assert_eq!(*toughness, PtValue::Fixed(-3));
+    assert_eq!(
+        *target,
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+                    )),
+                },
+            ],
+        }
+    );
+    // Without the duration the mass -3/-3 would never wear off.
+    assert_eq!(pump.duration, Some(Duration::UntilEndOfTurn));
+}

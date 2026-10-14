@@ -196,6 +196,71 @@ fn classify_quoted_inner_normalizes_trailing_sentence_comma() {
     );
 }
 
+/// CR 602.1 + CR 602.1a + CR 604.1: text of the shape "[Cost]: [Effect]" is an
+/// ACTIVATED ability, so the static-line authority must decline it. Before the
+/// guard, the "~ has/gets …" arm admitted `{R}: ~ gets +1/+0 until end of turn.`
+/// on a subject heuristic (the subject slice `{r}: ~` carries no
+/// creature/permanent/land) and produced a bare `AddPower`/`AddToughness` static —
+/// the cost and the duration were dropped outright. Dragon Egg's token, Nesting
+/// Dragon's nested token, and Kargan Dragonlord's `LEVEL 8+` line all reached it
+/// through this path. Building-block level, not that card: the predicate is the
+/// single authority both static entry points consult.
+#[test]
+fn unquoted_cost_separator_declines_costed_lines_in_the_static_authority() {
+    // Revert-failing: pre-guard `parse_static_line` returned the flattened
+    // `Continuous { SelfRef, [AddPower 1, AddToughness 0] }`.
+    assert!(
+        parse_static_line("{R}: ~ gets +1/+0 until end of turn.").is_none(),
+        "a costed pump line is an activated ability, not a static"
+    );
+    assert!(
+        parse_static_line_multi("{R}: ~ gets +1/+0 until end of turn.").is_empty(),
+        "the multi-entry fallback must decline it too"
+    );
+
+    // Reminder-text control pair. The parenthetical `({2}: Attach …)` colon IS a
+    // cost separator for the bare predicate — the predicate does not strip reminder
+    // text — but `parse_static_line_inner` strips reminders BEFORE consulting it, so
+    // the line stays a static and the equipped arm still claims it. Both legs are
+    // real, which is what makes this pair non-vacuous.
+    let equipped = "Equipped creature gets +2/+2. ({2}: Attach to target creature you control. \
+                    Equip only as a sorcery.)";
+    assert!(
+        super::grammar::unquoted_cost_separator(equipped).is_some(),
+        "the bare predicate does see the parenthetical colon"
+    );
+    let def = parse_static_line(equipped).expect("equip static must survive the guard");
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+
+    // Quote-masking guard: the colon belongs to the INNER granted ability, so the
+    // outer line stays a static grant. Goes red if the guard were
+    // `find_cost_separator(text)` without `strip_quoted_segments`.
+    let granted = parse_static_line("Creatures you control have \"{T}: Add {G}.\"")
+        .expect("a quoted granted activated ability keeps the outer line static");
+    assert!(
+        granted
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "quoted inner ability must be granted, got {:?}",
+        granted.modifications
+    );
+
+    // Adjacent statics are untouched.
+    assert!(parse_static_line("~ can't block.").is_some());
+    assert!(parse_static_line("Other Merfolk creatures you control get +1/+1.").is_some());
+
+    // Class boundary (documents the scanner's coverage, not a discriminating
+    // row): a text-based cost the scanner recognizes declines here too. Measured
+    // empty BEFORE the guard as well — no static arm ever claimed it.
+    assert!(
+        parse_static_line("Tap an untapped creature you control: Add {G}.").is_none(),
+        "text-based cost prefix is a cost separator"
+    );
+}
+
 // Regression: a for-each pump with only a trailing KEYWORD is unchanged and gains
 // no spurious subtype/grant.
 #[test]

@@ -3993,6 +3993,199 @@ mod kazar_token_landfall_tests {
     }
 }
 
+#[cfg(test)]
+mod granted_activated_pump_tests {
+    use super::*;
+    use crate::types::ability::{AbilityCost, AbilityKind, Duration};
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    const DRAGON_EGG_TOKEN_CLAUSE: &str = "Create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"";
+    /// Nesting Dragon's nested single-quoted binding, masked as one span by
+    /// `strip_quoted_segments` (verbatim Oracle text).
+    const NESTING_DRAGON: &str = "Flying\nLandfall — Whenever a land you control enters, create a 0/2 red Dragon Egg creature token with defender and \"When this token dies, create a 2/2 red Dragon creature token with flying and '{R}: This token gets +1/+0 until end of turn.'\"";
+    /// Brood Keeper is the in-corpus control: the same granted ability reaching a
+    /// token through the `It has \"…\"` path, which already carried the guard one
+    /// level down (`parse_quoted_rule_static_modifications`).
+    const BROOD_KEEPER: &str = "Whenever an Aura becomes attached to this creature, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn.\"";
+
+    /// CR 602.1 + CR 602.1a + CR 604.1 + CR 611.2a: the token's granted ability is
+    /// an ACTIVATED `{R}` pump +1/+0 on the recipient lasting until end of turn.
+    ///
+    /// Revert-failing at every assertion past the first: before the static-line
+    /// guard, `push_parsed_statics` took the `parse_static_line_multi` early return
+    /// and emitted `Continuous { SelfRef, [AddPower 1, AddToughness 0] }` — no
+    /// granted ability at all, cost and duration dropped outright.
+    ///
+    /// Asserted as a SHAPE, never byte equality: Brood Keeper's wrapper is built by
+    /// the `It has "…"` path and carries a `description`, while Dragon Egg's is built
+    /// by `push_parsed_statics`' fallback (`token.rs:1359-1367`) and carries none.
+    fn assert_granted_red_pump(statics: &[StaticDefinition], token: &str) {
+        assert_eq!(
+            statics.len(),
+            1,
+            "{token}: expected exactly one static definition, got {statics:#?}"
+        );
+        let def = &statics[0];
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::SelfRef),
+            "{token}: the recipient must be the token itself"
+        );
+        assert_eq!(
+            def.modifications.len(),
+            1,
+            "{token}: a bare AddPower/AddToughness would show up here — got {:#?}",
+            def.modifications
+        );
+        let ContinuousModification::GrantAbility { definition } = &def.modifications[0] else {
+            panic!(
+                "{token}: expected GrantAbility, got {:#?}",
+                def.modifications[0]
+            );
+        };
+        assert_eq!(definition.kind, AbilityKind::Activated, "{token}");
+        assert_eq!(
+            definition.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                },
+            }),
+            "{token}: the {{R}} activation cost must be carried, not dropped"
+        );
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*definition.effect
+        else {
+            panic!("{token}: expected Pump, got {:?}", definition.effect);
+        };
+        assert_eq!(
+            (power, toughness),
+            (&PtValue::Fixed(1), &PtValue::Fixed(0)),
+            "{token}: expected +1/+0"
+        );
+        assert_eq!(target, &TargetFilter::SelfRef, "{token}");
+        assert_eq!(
+            definition.duration,
+            Some(Duration::UntilEndOfTurn),
+            "{token}: the duration must be carried, not dropped"
+        );
+    }
+
+    /// Reach guard: the unit parsed through to a real payload instead of tripping
+    /// the `Effect::Unimplemented` short-circuit that would make every absence
+    /// assertion below vacuous.
+    fn assert_no_unimplemented(debugged: &impl std::fmt::Debug, what: &str) {
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !format!("{debugged:?}").contains("Unimplemented"),
+            "{what} must have no residual Unimplemented effect"
+        );
+    }
+
+    /// Dragon Egg's token clause at the seam the defect was reached through:
+    /// `try_parse_token` → `push_parsed_statics`.
+    #[test]
+    fn dragon_egg_token_clause_grants_an_activated_pump() {
+        let effect = try_parse_token(
+            &DRAGON_EGG_TOKEN_CLAUSE.to_lowercase(),
+            DRAGON_EGG_TOKEN_CLAUSE,
+            &mut ParseContext::default(),
+        )
+        .expect("Dragon Egg's token clause must parse");
+        assert_no_unimplemented(&effect, "Dragon Egg's token clause");
+        let Effect::Token {
+            static_abilities, ..
+        } = &effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_granted_red_pump(static_abilities, "Dragon Egg");
+    }
+
+    /// Nesting Dragon: the same granted ability, one token nesting deeper — the
+    /// Dragon Egg token's dies trigger creates the Dragon token whose quoted grant
+    /// is the defect site.
+    #[test]
+    fn nesting_dragon_inner_token_grants_an_activated_pump() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            NESTING_DRAGON,
+            "Nesting Dragon",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Nesting Dragon's Landfall trigger must parse")
+            .execute
+            .as_deref()
+            .expect("Landfall trigger must have an execute chain");
+        let Effect::Token {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("expected the outer Effect::Token, got {:?}", execute.effect);
+        };
+        let inner_trigger = static_abilities
+            .iter()
+            .flat_map(|def| def.modifications.iter())
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("the Dragon Egg token must carry a granted dies trigger");
+        let inner_execute = inner_trigger
+            .execute
+            .as_deref()
+            .expect("the granted dies trigger must have an execute chain");
+        assert_no_unimplemented(inner_execute, "Nesting Dragon's inner trigger");
+        let Effect::Token {
+            static_abilities, ..
+        } = &*inner_execute.effect
+        else {
+            panic!(
+                "expected the inner Effect::Token, got {:?}",
+                inner_execute.effect
+            );
+        };
+        assert_granted_red_pump(static_abilities, "Nesting Dragon's inner Dragon token");
+    }
+
+    /// Brood Keeper parity: a different host path (`It has "…"`) must reach the
+    /// identical shape, so the two are asserted by the same helper rather than by
+    /// two independently drifting expectations.
+    #[test]
+    fn brood_keeper_token_grant_has_the_same_shape() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            BROOD_KEEPER,
+            "Brood Keeper",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Brood Keeper's Aura trigger must parse")
+            .execute
+            .as_deref()
+            .expect("the Aura trigger must have an execute chain");
+        let Effect::Token {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("expected Effect::Token, got {:?}", execute.effect);
+        };
+        assert_no_unimplemented(static_abilities, "Brood Keeper's token");
+        assert_granted_red_pump(static_abilities, "Brood Keeper");
+    }
+}
+
 #[test]
 fn copy_token_non_saga_token_you_control_issue_3294() {
     use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};

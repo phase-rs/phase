@@ -6496,13 +6496,19 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // One verbatim-Oracle corpus card per corpus-present non-phrase detector. Several
         // also fire a phrase-bearing detector; those records are filtered out below, so a
         // card carrying both is fine.
+        //
+        // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
+        // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
+        // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
+        // below stays at nine — a detector that stops firing here needs a different corpus
+        // card, never a shrunken set.
         let fixtures: &[(&str, &str, &[&str])] = &[
             ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
             ("Dementia Sliver", "All Slivers have \"{T}: Choose a card name. Target opponent reveals a card at random from their hand. If that card has the chosen name, that player discards it. Activate only during your turn.\"", &["Creature"]),
             ("Disorder", "Disorder deals 2 damage to each white creature and each player who controls a white creature.", &["Sorcery"]),
             ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
             ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
-            ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
+            ("Savage Punch", "Target creature you control fights target creature you don't control.\nFerocious — The creature you control gets +2/+2 until end of turn before it fights if you control a creature with power 4 or greater.", &["Sorcery"]),
             ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
@@ -12061,25 +12067,77 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     #[test]
-    fn duration_until_eot_dragon_egg_reports_known_gap() {
+    fn duration_until_eot_dragon_egg_token_grant_carries_the_duration() {
         let parsed = parse_named(
             "Defender\n\
              When this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"",
             "Dragon Egg",
             &["Creature"],
         );
-        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
-        // horse_and_champions_helm` for the full explanation. Dragon Egg reports a
-        // swallowed `Duration_UntilEndOfTurn`, and did so in the shipped card data long
-        // before this change: the "until end of turn" lives inside the *token's granted*
-        // activated ability, and the duration evidence walker does not descend into a
-        // token grant. The test asserted the opposite and passed only because its empty
-        // MTGJSON keyword list turned the "Defender" line into an `Effect::Unimplemented`,
-        // tripping the card-wide gate that silenced every detector on the card.
+        // CR 602.1 + CR 602.1a + CR 611.2a: Dragon Egg's token clause is an ACTIVATED
+        // `{R}` pump +1/+0 on the token itself, lasting until end of turn — so the
+        // duration IS a real AST carrier at key `duration` inside the unit tree and
+        // `any_duration(UntilEndOfTurn)` is satisfied. No gap.
+        //
+        // At BASE there was no granted activated ability at all: `push_parsed_statics`
+        // took `parse_static_line_multi`'s early return and emitted
+        // `Continuous { SelfRef, [AddPower 1, AddToughness 0] }`, cost and duration
+        // dropped outright — which is why the phrase had no carrier and the detector
+        // fired. (Not because the walk is blind to token grants: the duration
+        // detector's own reach is serde-derived and covers
+        // `Effect::Token.static_abilities → GrantTrigger → trigger.execute`.)
+        //
+        // Reach guard: the dies unit parsed through to a granted activated ability
+        // carrying cost + duration, with no `Effect::Unimplemented` in that unit (an
+        // Unimplemented ability would make the absence assertion below vacuous via the
+        // per-unit suppression gate).
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Dragon Egg's dies trigger must parse")
+            .execute
+            .as_deref()
+            .expect("the dies trigger must have an execute chain");
         assert!(
-            has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
-            "pre-existing gap: the duration evidence walker does not descend into a \
-             token's granted ability. Warnings: {:?}",
+            !def_tree_has_unimplemented(execute),
+            "reach: the token unit must parse with zero Unimplemented: {execute:#?}"
+        );
+        let Effect::Token {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("reach: expected Effect::Token, got {:?}", execute.effect);
+        };
+        let granted = static_abilities
+            .iter()
+            .flat_map(|definition| definition.modifications.iter())
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("reach: the token must carry a granted ability: {static_abilities:#?}")
+            });
+        assert_eq!(granted.kind, AbilityKind::Activated);
+        assert_eq!(
+            granted.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Red],
+                    generic: 0,
+                },
+            }),
+            "reach: the {{R}} cost must be carried"
+        );
+        assert_eq!(
+            granted.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "reach: the duration must be carried"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
+            "the granted activated ability carries the duration, so the phrase is \
+             represented, not swallowed. Warnings: {:?}",
             parsed.parse_warnings
         );
     }
