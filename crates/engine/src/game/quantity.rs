@@ -177,16 +177,14 @@ fn linked_exile_for_context(
     ctx.trigger_source
         .as_ref()
         .map(|source| {
-            // CR 607.2a: the linked pile is the cards still in the exile zone; a
-            // card that left exile after the trigger latched its pile is not
-            // "the exiled card" (CR 610.3 return, CR 608.2h).
+            // CR 607.2a + CR 400.7: the linked pile is the cards still in the exile zone
+            // as the objects the trigger latched; a card that left exile after the
+            // trigger latched its pile (a CR 610.3 return, for one) is not "the exiled
+            // card", including when another effect exiled it again.
             source
                 .linked_exile_snapshot
                 .iter()
-                .filter(|linked| {
-                    crate::game::exile_links::exiled_card_snapshot(state, linked.exiled_id)
-                        .is_some()
-                })
+                .filter(|linked| linked.is_still_exiled(state))
                 .cloned()
                 .collect()
         })
@@ -20196,16 +20194,19 @@ mod tests {
                         exiled_id: exiled_a,
                         owner: PlayerId(0),
                         mana_value: 2,
+                        incarnation: state.objects[&exiled_a].incarnation,
                     },
                     crate::types::game_state::LinkedExileSnapshot {
                         exiled_id: exiled_b,
                         owner: PlayerId(0),
                         mana_value: 3,
+                        incarnation: state.objects[&exiled_b].incarnation,
                     },
                     crate::types::game_state::LinkedExileSnapshot {
                         exiled_id: exiled_c,
                         owner: PlayerId(1),
                         mana_value: 4,
+                        incarnation: state.objects[&exiled_c].incarnation,
                     },
                 ],
                 ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)

@@ -6244,6 +6244,8 @@ fn filter_inner_for_object(
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
         // leaves-the-battlefield trigger resolves from the trigger event's
         // zone-change snapshot; other contexts fall back to live exile links.
+        // CR 400.7: an entry names the object it captured, so a card that left
+        // exile (and any later exile of it) does not match.
         TargetFilter::ExiledBySource => {
             let source_ctx = source_context_from_filter(
                 state,
@@ -6260,7 +6262,9 @@ fn filter_inner_for_object(
             } else {
                 crate::game::players::linked_exile_cards_for_source(state, source_id).to_vec()
             };
-            linked.iter().any(|entry| entry.exiled_id == object_id)
+            linked
+                .iter()
+                .any(|entry| entry.exiled_id == object_id && entry.is_still_exiled(state))
         }
         // CR 607.2a: References a specific card exiled by the source, indexed by order.
         // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
@@ -14581,6 +14585,85 @@ mod tests {
             &filter,
             source
         ));
+    }
+
+    /// CR 607.2a + CR 400.7: a snapshot entry names the object it captured. The
+    /// card matches while it stays in exile; once it leaves exile it no longer
+    /// matches, and it still does not match after it is exiled again, because
+    /// the card in exile is a new object. Checked for the trigger-snapshot arm
+    /// and for the live-link arm.
+    #[test]
+    fn exiled_by_source_does_not_match_a_card_exiled_again() {
+        let fixture = || {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".into(),
+                Zone::Battlefield,
+            );
+            let card = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Exiled Card".into(),
+                Zone::Exile,
+            );
+            (state, source, card)
+        };
+        let move_card = |state: &mut GameState, card: ObjectId, zone: Zone| {
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(state, card, zone, &mut events);
+        };
+
+        // Trigger-snapshot arm: the trigger latched the card while it was in exile.
+        let (mut state, source, card) = fixture();
+        let mut trigger_source = state.objects[&source]
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context
+            .expect("a battlefield object has a trigger source context");
+        trigger_source.linked_exile_snapshot =
+            vec![crate::game::exile_links::exiled_card_snapshot(&state, card)
+                .expect("the card is in exile")];
+        let matches_snapshot = |state: &GameState| {
+            super::matches_target_filter(
+                state,
+                card,
+                &TargetFilter::ExiledBySource,
+                &FilterContext::from_trigger_source(&trigger_source),
+            )
+        };
+        assert!(
+            matches_snapshot(&state),
+            "positive: the latched card in exile matches"
+        );
+        move_card(&mut state, card, Zone::Graveyard);
+        assert!(!matches_snapshot(&state), "the card left exile");
+        move_card(&mut state, card, Zone::Exile);
+        assert!(
+            !matches_snapshot(&state),
+            "CR 400.7: the card exiled again is a new object"
+        );
+
+        // Live-link arm (no trigger source): the link is pruned when the card
+        // leaves exile.
+        let (mut state, source, card) = fixture();
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            exiled_id: card,
+            source_id: source,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+        assert!(
+            matches_target_filter(&state, card, &TargetFilter::ExiledBySource, source),
+            "positive: the linked card in exile matches"
+        );
+        move_card(&mut state, card, Zone::Graveyard);
+        move_card(&mut state, card, Zone::Exile);
+        assert!(
+            !matches_target_filter(&state, card, &TargetFilter::ExiledBySource, source),
+            "CR 400.7: the card exiled again is a new object"
+        );
     }
 
     #[test]

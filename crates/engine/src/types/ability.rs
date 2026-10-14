@@ -10519,12 +10519,13 @@ pub struct CostPaidObjectSnapshot {
     pub incarnation: u64,
 }
 
-/// Serde default for [`CostPaidObjectSnapshot::incarnation`] on pre-migration
-/// saves. Mirrors `ObjectIncarnationRefCompat`'s legacy arm
+/// Serde default for [`CostPaidObjectSnapshot::incarnation`] and
+/// `LinkedExileSnapshot::incarnation` on pre-migration saves. Mirrors
+/// `ObjectIncarnationRefCompat`'s legacy arm
 /// (`types/identifiers.rs`): a record written before the incarnation was
 /// captured cannot prove which incarnation it bound, so it is pinned to a
 /// sentinel that never matches a live object.
-fn legacy_incarnation() -> u64 {
+pub(crate) fn legacy_incarnation() -> u64 {
     crate::types::identifiers::LEGACY_INCARNATION
 }
 

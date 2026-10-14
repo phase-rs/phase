@@ -5010,6 +5010,7 @@ mod tests {
                 exiled_id: exiled,
                 owner: PlayerId(1),
                 mana_value: 4,
+                incarnation: state.objects[&exiled].incarnation,
             }]
         );
         assert!(
@@ -5151,6 +5152,7 @@ mod tests {
                     exiled_id: exiled,
                     owner: PlayerId(1),
                     mana_value: 0,
+                    incarnation: state.objects[&exiled].incarnation,
                 }],
             });
         }

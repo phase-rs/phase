@@ -504,7 +504,7 @@ mod tests {
         );
     }
     use super::*;
-    use crate::game::zones::create_object;
+    use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{LinkedExileLki, StackEntry, StackEntryKind};
@@ -1074,6 +1074,8 @@ mod tests {
                 exiled_id: card,
                 owner: PlayerId(1),
                 mana_value: 0,
+                // `departed_pile` makes the card directly in exile.
+                incarnation: 0,
             }],
         }
     }
@@ -1224,5 +1226,29 @@ mod tests {
         assert_eq!(linked_ids(&state, source), vec![first]);
         resolving_ability_of(&mut state, source, DEPARTED + 2);
         assert_eq!(linked_ids(&state, source), vec![second]);
+    }
+
+    /// CR 607.2a + CR 400.7: a pile member that leaves exile is not read, and it
+    /// is still not read once it is exiled again, because the card in exile is
+    /// a new object. Checked for a source that no longer exists and for the
+    /// object the source became.
+    #[test]
+    fn linked_exile_lki_drops_a_member_that_left_exile_and_was_exiled_again() {
+        for live in [None, Some(DEPARTED + 1)] {
+            let (mut state, source, card) = departed_pile(live);
+            assert_eq!(
+                linked_ids(&state, source),
+                vec![card],
+                "positive control: the member is read while it stays in exile"
+            );
+            let mut events = Vec::new();
+            move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+            assert!(linked_ids(&state, source).is_empty(), "it left exile");
+            move_to_zone(&mut state, card, Zone::Exile, &mut events);
+            assert!(
+                linked_ids(&state, source).is_empty(),
+                "CR 400.7: the card exiled again is a new object, not the member"
+            );
+        }
     }
 }

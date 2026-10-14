@@ -24,10 +24,31 @@
 //! changes, declare-attackers, the attack trigger and stack resolution, then
 //! reads the effective (post-layer) power and toughness. The Dreadnought rows
 //! start on the battlefield; R4 seeds its link (a labelled reader row).
+//!
+//! The re-exile rows (R-B1, R-B2, R-B0) exile Bishop's card again with another
+//! effect. CR 400.7 makes the card in exile a new object that Bishop's first
+//! ability did not exile, so it is not "the exiled card" (CR 607.2a):
+//!   Swords to Plowshares: "Exile target creature. Its controller gains life
+//!    equal to its power."
+//!   Relic of Progenitus: "{T}: Target player exiles a card from their
+//!    graveyard.
+//!    {1}, Exile this artifact: Exile all graveyards. Draw a card."
+//!
+//! Admonition Angel (Oracle text, same source):
+//!   "Flying
+//!    Landfall — Whenever a land you control enters, you may exile target
+//!    nonland permanent other than this creature.
+//!    When this creature leaves the battlefield, return all cards exiled with
+//!    it to the battlefield under their owners' control."
+//! Ruling (2010-03-01): "Admonition Angel's landfall ability and its last
+//! ability are linked. The last ability refers only to cards exiled with its
+//! landfall ability." The R-F rows drive the population of its
+//! leaves-the-battlefield return (CR 607.2a + CR 603.10a).
 
 use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::turns::start_next_turn;
+use engine::game::zones::move_to_zone;
 use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -54,6 +75,18 @@ Plasma Incinerator — Whenever this creature attacks, if a card is exiled with 
 until end of turn, where X is the power of the exiled card.";
 
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
+
+const SWORDS_TO_PLOWSHARES: &str =
+    "Exile target creature. Its controller gains life equal to its power.";
+
+const RELIC_OF_PROGENITUS: &str = "{T}: Target player exiles a card from their graveyard.\n\
+{1}, Exile this artifact: Exile all graveyards. Draw a card.";
+
+const ADMONITION_ANGEL: &str = "Flying\n\
+Landfall — Whenever a land you control enters, you may exile target nonland permanent other than \
+this creature.\n\
+When this creature leaves the battlefield, return all cards exiled with it to the battlefield \
+under their owners' control.";
 
 const STRIONIC_RESONATOR: &str = "{2}, {T}: Copy target triggered ability you control. You may \
 choose new targets for the copy. (A triggered ability uses the words \"when,\" \"whenever,\" or \
@@ -132,8 +165,9 @@ fn settled(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty()
 }
 
-/// Answers target prompts with `targets` in order and passes priority until
-/// `stop` holds. Panics on any prompt the rows below do not expect.
+/// Answers target prompts with `targets` in order, accepts optional ("you may")
+/// effects, and passes priority until `stop` holds. Panics on any prompt the
+/// rows below do not expect.
 fn drive_until(runner: &mut GameRunner, targets: &[ObjectId], stop: impl Fn(&GameState) -> bool) {
     let mut targets = targets.iter().copied();
     for _ in 0..64 {
@@ -149,6 +183,9 @@ fn drive_until(runner: &mut GameRunner, targets: &[ObjectId], stop: impl Fn(&Gam
                     targets.next().expect("a declared target for this prompt"),
                 )),
             },
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
             other => panic!("unexpected prompt: {other:?}"),
         };
         runner.act(action).expect("action accepted");
@@ -397,4 +434,330 @@ fn reentered_bishop_reads_only_its_new_exiled_card() {
         "X is the power of the card the current Bishop exiled (3), so the \
          Vampire is 2/2 + 3/3"
     );
+}
+
+/// Bishop's pump resolved (an `EffectResolved` of kind Pump from Bishop), so a
+/// 2/2 Vampire is X = 0, not a removed or fizzled trigger.
+fn bishop_pump_resolved(events: &[GameEvent], bishop: ObjectId) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::Pump, source_id, .. }
+                if *source_id == bishop
+        )
+    })
+}
+
+/// Adds one colorless mana to P0's pool for Relic of Progenitus's `{1}`.
+fn add_one_colorless(runner: &mut GameRunner) {
+    runner
+        .state_mut()
+        .add_mana_to_pool(
+            P0,
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        )
+        .expect("P0's pool takes the mana");
+}
+
+/// R-B1, ruling + CR 607.2a + CR 400.7: Bishop leaves with its attack trigger
+/// on the stack, so the 4/4 returns (CR 610.3); Swords to Plowshares then
+/// exiles it again. The card in exile is a new object that Bishop's first
+/// ability did not exile, so there is no exiled card and X = 0, the same
+/// answer as R3, where the 4/4 stays out of exile.
+#[test]
+fn card_exiled_again_after_the_source_left_is_not_the_exiled_card() {
+    let mut scenario = GameScenario::new();
+    let (bishop, vampire, brute) = bishop_board(&mut scenario, true);
+    // Unsummon and Swords are cost-free here (a test setting; printed {U} and
+    // {W}), and `bishop_board` gives Bishop haste so it attacks this turn.
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let swords = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swords to Plowshares", true, SWORDS_TO_PLOWSHARES)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(bishop).target_object(brute).resolve();
+    assert_eq!(runner.state().objects[&brute].zone, Zone::Exile);
+    let exiled_by_bishop = runner.state().objects[&brute].incarnation;
+
+    declare_attack(&mut runner, bishop);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "setup: Bishop's attack trigger is on the stack"
+    );
+
+    // Unsummon Bishop in response and resolve only Unsummon.
+    runner.cast(unsummon).target_object(bishop).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&bishop].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&brute].zone,
+        Zone::Battlefield,
+        "setup: CR 610.3 returns the 4/4 when Bishop leaves"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "setup: the attack trigger is still on the stack"
+    );
+
+    // Swords exiles the 4/4 again; the outcome resolves Swords, then the trigger.
+    let outcome = runner.cast(swords).target_object(brute).resolve();
+    let brute_now = &runner.state().objects[&brute];
+    assert_eq!(brute_now.zone, Zone::Exile, "setup: Swords exiled the 4/4");
+    assert_ne!(
+        brute_now.incarnation, exiled_by_bishop,
+        "setup: CR 400.7 — the 4/4 in exile is a new object"
+    );
+    assert!(settled(runner.state()), "the attack trigger resolved");
+    assert!(
+        bishop_pump_resolved(outcome.events(), bishop),
+        "positive: Bishop's attack trigger resolved its pump"
+    );
+
+    assert_eq!(
+        power_toughness(&runner, vampire),
+        (Some(2), Some(2)),
+        "ruling + CR 607.2a + CR 400.7: the 4/4 Swords exiled is not the card \
+         Bishop exiled, so there is no exiled card, X is 0 and the Vampire stays 2/2"
+    );
+}
+
+/// The Bishop attack line shared by R-B2 and R-B0: Bishop (haste) exiles the
+/// 4/4 and attacks. With `re_exile`, the 4/4 then leaves exile for the
+/// graveyard; either way Relic of Progenitus's second ability ("Exile all
+/// graveyards") resolves above the attack trigger, then the trigger resolves.
+/// Returns the runner and the Vampire.
+fn bishop_relic_line(re_exile: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    // `bishop_board` gives Bishop haste (a test setting) so it attacks this turn.
+    let (bishop, vampire, brute) = bishop_board(&mut scenario, true);
+    let relic = scenario
+        .add_artifact_from_oracle(P0, "Relic of Progenitus", RELIC_OF_PROGENITUS)
+        .id();
+    // A library card for Relic's "Draw a card."
+    scenario.add_card_to_library_top(P0, "Library A");
+    let mut runner = scenario.build();
+    runner.cast(bishop).target_object(brute).resolve();
+    assert_eq!(runner.state().objects[&brute].zone, Zone::Exile);
+    let exiled_by_bishop = runner.state().objects[&brute].incarnation;
+
+    declare_attack(&mut runner, bishop);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "setup: Bishop's attack trigger is on the stack"
+    );
+
+    if re_exile {
+        // Stand-in for Pull from Eternity's resolution (P1): the parser does not
+        // yet produce Pull's exiled-card target, so the production zone mover
+        // moves the card. This step is not Oracle text.
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), brute, Zone::Graveyard, &mut events);
+        assert_eq!(runner.state().objects[&brute].zone, Zone::Graveyard);
+    }
+
+    add_one_colorless(&mut runner);
+    let outcome = runner.activate(relic, 1).resolve();
+    assert!(
+        settled(runner.state()),
+        "Relic's ability and the trigger resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&relic].zone,
+        Zone::Exile,
+        "setup: Relic was exiled to pay its cost"
+    );
+    let brute_now = &runner.state().objects[&brute];
+    assert_eq!(brute_now.zone, Zone::Exile);
+    if re_exile {
+        assert_ne!(
+            brute_now.incarnation, exiled_by_bishop,
+            "setup: CR 400.7 — the 4/4 Relic exiled is a new object"
+        );
+    } else {
+        assert_eq!(
+            brute_now.incarnation, exiled_by_bishop,
+            "setup: the 4/4 never left exile"
+        );
+    }
+    assert!(
+        bishop_pump_resolved(outcome.events(), bishop),
+        "positive: Bishop's attack trigger resolved its pump"
+    );
+    (runner, vampire)
+}
+
+/// R-B2, CR 607.2a + CR 400.7: Bishop stays on the battlefield, but the 4/4
+/// leaves exile and Relic of Progenitus exiles it again. The card in exile is a
+/// new object that Bishop's first ability did not exile, so X = 0.
+#[test]
+fn card_exiled_again_by_another_effect_is_not_the_exiled_card() {
+    let (runner, vampire) = bishop_relic_line(true);
+    assert_eq!(
+        power_toughness(&runner, vampire),
+        (Some(2), Some(2)),
+        "CR 607.2a + CR 400.7: the 4/4 Relic exiled is not the card Bishop \
+         exiled, so X is 0 and the Vampire stays 2/2"
+    );
+}
+
+/// R-B0, guard for R-B2: on the same line with the 4/4 never leaving exile, the
+/// 4/4 is still the card Bishop exiled, so X = 4.
+#[test]
+fn card_that_never_left_exile_is_still_the_exiled_card() {
+    let (runner, vampire) = bishop_relic_line(false);
+    assert_eq!(
+        power_toughness(&runner, vampire),
+        (Some(6), Some(6)),
+        "CR 607.2a: X is the power of the card exiled with Bishop (4), so the \
+         Vampire is 2/2 + 4/4"
+    );
+}
+
+/// The Admonition Angel line shared by R-F and R-F0: a land enters, the
+/// landfall ability exiles the opponent's 4/4, and Unsummon returns the Angel
+/// to hand, so its leaves-the-battlefield trigger waits on the stack. With
+/// `re_exile`, the 4/4 then leaves exile for the graveyard; either way Relic of
+/// Progenitus's second ability ("Exile all graveyards") resolves above the
+/// trigger, then the trigger resolves. Returns the runner and the 4/4.
+fn admonition_line(re_exile: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let angel = scenario
+        .add_creature(P0, "Admonition Angel", 6, 6)
+        .from_oracle_text_with_keywords(&["Flying", "Landfall"], ADMONITION_ANGEL)
+        .id();
+    let brute = scenario.add_creature(P1, "Opp Brute", 4, 4).id();
+    let land = scenario.add_land_to_hand(P0, "Plains").id();
+    // Unsummon is cost-free here (a test setting; printed {U}).
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let relic = scenario
+        .add_artifact_from_oracle(P0, "Relic of Progenitus", RELIC_OF_PROGENITUS)
+        .id();
+    // A library card for Relic's "Draw a card."
+    scenario.add_card_to_library_top(P0, "Library A");
+    let mut runner = scenario.build();
+
+    // Landfall: exile the 4/4 (the "you may" is accepted).
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect("playing the land is accepted");
+    drive_until(&mut runner, &[brute], |state| {
+        settled(state) && state.objects[&brute].zone == Zone::Exile
+    });
+    assert_eq!(
+        linked_pile(runner.state(), angel),
+        vec![brute],
+        "reach guard: the landfall exile is linked to the Angel"
+    );
+    let exiled_by_angel = runner.state().objects[&brute].incarnation;
+
+    // The Angel leaves; its leaves-the-battlefield trigger waits on the stack.
+    runner.cast(unsummon).target_object(angel).commit();
+    drive_until(&mut runner, &[], |state| {
+        state.objects[&angel].zone == Zone::Hand
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    });
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "setup: one entry on the stack"
+    );
+    assert!(
+        matches!(
+            runner.state().stack[0].kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if source_id == angel
+        ),
+        "setup: the Angel's leaves-the-battlefield trigger is waiting"
+    );
+    assert_eq!(runner.state().objects[&brute].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&brute].incarnation, exiled_by_angel);
+
+    if re_exile {
+        // Stand-in for Pull from Eternity's resolution (P1): the parser does not
+        // yet produce Pull's exiled-card target, so the production zone mover
+        // moves the card. This step is not Oracle text.
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), brute, Zone::Graveyard, &mut events);
+        assert_eq!(runner.state().objects[&brute].zone, Zone::Graveyard);
+    }
+
+    add_one_colorless(&mut runner);
+    let outcome = runner.activate(relic, 1).resolve();
+    assert!(
+        settled(runner.state()),
+        "Relic's ability and the trigger resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&relic].zone,
+        Zone::Exile,
+        "setup: Relic was exiled to pay its cost"
+    );
+    if re_exile {
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Graveyard), to: Zone::Exile, .. }
+                    if *object_id == brute
+            )),
+            "setup: Relic exiled the 4/4 from the graveyard"
+        );
+        assert_ne!(
+            runner.state().objects[&brute].incarnation,
+            exiled_by_angel,
+            "setup: CR 400.7 — the 4/4 Relic exiled is a new object"
+        );
+    }
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::ChangeZoneAll, source_id, .. }
+                if *source_id == angel
+        )),
+        "reach: the Angel's leaves-the-battlefield return resolved"
+    );
+    (runner, brute)
+}
+
+/// R-F, ruling + CR 607.2a + CR 400.7: with the Angel's leaves-the-battlefield
+/// trigger on the stack, the 4/4 leaves exile and Relic of Progenitus exiles it
+/// again. That card is a new object the landfall ability did not exile, so
+/// "all cards exiled with it" is empty and the 4/4 stays in exile.
+#[test]
+fn leaves_the_battlefield_return_skips_a_card_exiled_again() {
+    let (runner, brute) = admonition_line(true);
+    assert_eq!(
+        runner.state().objects[&brute].zone,
+        Zone::Exile,
+        "CR 607.2a + CR 400.7: the 4/4 Relic exiled is not a card exiled with \
+         the Angel, so nothing returns"
+    );
+}
+
+/// R-F0, guard for R-F: on the same line with the 4/4 never leaving exile, it
+/// is the card the landfall ability exiled, so it returns under its owner's
+/// control.
+#[test]
+fn leaves_the_battlefield_return_brings_back_the_linked_card() {
+    let (runner, brute) = admonition_line(false);
+    let brute_now = &runner.state().objects[&brute];
+    assert_eq!(
+        brute_now.zone,
+        Zone::Battlefield,
+        "CR 607.2a: the card exiled with the Angel returns"
+    );
+    assert_eq!(brute_now.controller, P1, "under its owner's control");
 }
