@@ -162,8 +162,7 @@ pub(crate) fn capture_attachment_snapshot(
 /// CR 400.7: Snapshot LKI and apply all cleanup side effects when an object
 /// leaves its current zone. Shared by `move_to_zone` and `move_to_library_at_index`.
 ///
-/// Handles: LKI snapshot (CR 400.7), activation-use clearing, modal
-/// no-repeat history clearing (CR 700.2), transform
+/// Handles: LKI snapshot (CR 400.7), activation-use clearing, transform
 /// revert (CR 712.14), exile permission clearing (CR 113.6e), monstrous reset
 /// (CR 701.37b), counter clearing (CR 122.2), layer pruning, and mana-tap
 /// cleanup.
@@ -234,15 +233,6 @@ pub(crate) fn apply_zone_exit_cleanup(
     state
         .activated_abilities_this_game
         .retain(|(id, _), _| *id != object_id);
-    // CR 400.7 + CR 700.2: Modal "choose one that hasn't been chosen [this
-    // turn]" history belongs to the old object too. Clear both scopes so a
-    // permanent that leaves and returns can choose any mode again.
-    state
-        .modal_modes_chosen_this_turn
-        .retain(|(id, _)| *id != object_id);
-    state
-        .modal_modes_chosen_this_game
-        .retain(|(id, _)| *id != object_id);
 
     // CR 400.7: Snapshot LKI before a zone change out of any zone whose
     // characteristics are not recomputed on demand. Power/toughness reflect

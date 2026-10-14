@@ -16434,6 +16434,9 @@ pub(super) fn begin_pending_trigger_target_selection(
         if !trigger.mode_abilities.is_empty() {
             let player = trigger.controller;
             let source_id = trigger.source_id;
+            // CR 400.7 + CR 603.10a: read the history of the incarnation the
+            // trigger came from, before any `&mut state` borrow.
+            let modal_history_source = trigger.modal_history_source(state);
             let mode_abilities = trigger.mode_abilities.clone();
             let trigger_event = trigger.trigger_event.clone();
             // Clone optional-gate fields before any `&mut state` borrow so the
@@ -16469,7 +16472,8 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &modal,
                 &crate::types::ability::SpellContext::default(),
             );
-            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+            let mut unavailable_modes =
+                compute_unavailable_modes(state, modal_history_source, &modal);
             super::ability_utils::filter_modes_by_target_legality(
                 state,
                 source_id,
