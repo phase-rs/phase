@@ -544,7 +544,9 @@ fn rod_cannot_cast_a_card_that_left_exile_and_was_exiled_again() {
     engine::game::zones::move_to_zone(runner.state_mut(), bolt_b, Zone::Graveyard, &mut events);
     assert_eq!(runner.state().objects[&bolt_b].zone, Zone::Graveyard);
 
-    // Relic's ability resolves first (exiling Bolt B and Rod), then Rod's.
+    // One colorless mana in P0's pool pays Relic's {1} (a test setting in place
+    // of tapping a land). Relic's ability resolves first (exiling Bolt B and
+    // Rod), then Rod's.
     runner
         .state_mut()
         .add_mana_to_pool(
