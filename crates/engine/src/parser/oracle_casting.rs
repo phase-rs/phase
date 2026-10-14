@@ -39,19 +39,16 @@ pub(crate) fn additional_cost_line_text(line: &str) -> Option<&str> {
         return Some(line);
     }
     let (label, rest) = split_short_label_prefix(line, FLAVOR_WORD_COST_LABEL_MAX_WORDS)?;
-    // CR 702.186a + CR 702.178a: a keyword-ability label ("∞", "Max speed")
-    // gates the text after it, so that text is never an ungated cost.
+    // CR 702.169b + CR 702.178a + CR 702.186b: a keyword label ("Solved",
+    // "Max speed", "∞", …) gives the text after it rules meaning, so that text
+    // is never an ungated cost.
     if is_keyword_ability_label(&label.to_lowercase()) {
         return None;
     }
     // CR 118.8: after a label, only a cost on this spell is read. A labeled
     // line that imposes a cost on other spells is left to the later line
     // parsers, because `parse_additional_cost_line` reads no cost from it.
-    let rest_lower = rest.to_lowercase();
-    let costs_this_spell = tag::<_, _, OracleError<'_>>(THIS_SPELL_ADDITIONAL_COST_PREFIX)
-        .parse(rest_lower.as_str())
-        .is_ok();
-    costs_this_spell.then_some(rest)
+    lower_starts_with(&rest.to_lowercase(), THIS_SPELL_ADDITIONAL_COST_PREFIX).then_some(rest)
 }
 
 /// Split a combined additional-cost line from its trailing self-spell cost
@@ -1877,6 +1874,26 @@ Trample";
             Some(COST),
             "an ability word with a mapped condition is still stripped"
         );
+        assert_eq!(
+            additional_cost_line_text(
+                "Fallen Warrior — As an additional cost to cast this spell, discard a card."
+            ),
+            Some(COST),
+            "a flavor word is still stripped"
+        );
+        // CR 702.169b, CR 719.3a, CR 702.142a, CR 702.177a, CR 702.193a,
+        // CR 702.57a, CR 702.159a: each keyword gives its labeled text rules meaning.
+        for label in [
+            "Solved", "To solve", "Boast", "Exhaust", "Power-up", "Forecast", "Visit",
+        ] {
+            assert_eq!(
+                additional_cost_line_text(&format!(
+                    "{label} — As an additional cost to cast this spell, discard a card."
+                )),
+                None,
+                "label: {label}"
+            );
+        }
         assert_eq!(
             additional_cost_line_text(
                 "Max speed — As an additional cost to cast this spell, discard a card."
