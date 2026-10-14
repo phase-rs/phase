@@ -44709,7 +44709,11 @@ fn an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate() {
     );
     // Reach-guard 2: the body really IS the O1a rider shape, so only the reading can refuse it.
     assert!(
-        crate::game::effects::cast_from_zone::graveyard_destination_rider(&clause.effect).is_some(),
+        crate::game::effects::cast_from_zone::graveyard_destination_rider(
+            &clause.effect,
+            clause.condition.as_ref(),
+        )
+        .is_some(),
         "reach-guard: the body must be the graveyard-redirect rider shape, got {:?}",
         clause.effect
     );
