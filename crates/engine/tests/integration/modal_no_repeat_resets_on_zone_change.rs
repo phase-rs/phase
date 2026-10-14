@@ -24,6 +24,10 @@
 //!   • Create a 2/2 white Fox creature token with vigilance.
 //!   • Create a 1/2 blue Moonfolk creature token with flying.
 //!   • Create a 1/1 black Rat creature token with lifelink.
+//!
+//! Oracle (Ghostly Flicker):
+//!   Exile two target artifacts, creatures, and/or lands you control, then
+//!   return those cards to the battlefield under your control.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
@@ -49,6 +53,9 @@ const GENKU_ORACLE: &str = "Whenever another nontoken permanent you control leav
 const LIFE_ORACLE: &str = "You gain 1 life.";
 const FODDER_ORACLE: &str = "Sacrifice this creature: You gain 1 life.";
 const WIPE_ORACLE: &str = "Destroy all creatures.";
+const GHOSTLY_FLICKER_ORACLE: &str =
+    "Exile two target artifacts, creatures, and/or lands you control, \
+     then return those cards to the battlefield under your control.";
 const THREATEN_ORACLE: &str = "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.";
 
 /// Gandalf's "deals 3 damage to each opponent" mode.
@@ -464,10 +471,12 @@ struct Genku {
     fodder: Vec<ObjectId>,
     bystanders: Vec<ObjectId>,
     wipe: ObjectId,
+    flicker: ObjectId,
 }
 
 /// Genku, `fodder_count` sacrifice outlets, `bystanders` vanilla nontoken
-/// creatures, and a zero-cost "Destroy all creatures." in P0's hand.
+/// creatures, and a zero-cost "Destroy all creatures." and Ghostly Flicker in
+/// P0's hand.
 fn genku_board(fodder_count: usize, bystanders: usize) -> Genku {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -488,12 +497,17 @@ fn genku_board(fodder_count: usize, bystanders: usize) -> Genku {
         .add_spell_to_hand_from_oracle(P0, "Wipe", false, WIPE_ORACLE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
     Genku {
         runner: scenario.build(),
         genku,
         fodder,
         bystanders,
         wipe,
+        flicker,
     }
 }
 
@@ -640,4 +654,104 @@ fn genku_second_lookback_trigger_is_removed_after_last_mode() {
     );
     assert_eq!(tokens_with_subtype(&k.runner, "Rat"), 1, "exactly one Rat");
     assert_eq!(token_count(&k.runner), 1, "the Rat is the only token");
+}
+
+/// CR 603.10a + CR 400.7 + CR 700.2: Ghostly Flicker exiles Genku with another
+/// nontoken permanent and returns both. Genku's look-back trigger was captured
+/// from the departed incarnation, but its mode is chosen only after the return,
+/// while a new Genku occupies the same `ObjectId`. The old trigger reads and
+/// writes the departed incarnation's history; the returned Genku's history is
+/// fresh.
+#[test]
+fn genku_flicker_old_trigger_uses_departed_history_while_returned_genku_is_fresh() {
+    let mut k = genku_board(2, 1);
+    sacrifice_fodder(&mut k, &[FOX]);
+    let genku = k.genku;
+    let departed = ObjectIncarnationRef::of(genku, incarnation(&k.runner, genku));
+    assert!(
+        k.runner
+            .state()
+            .modal_modes_chosen_this_turn
+            .contains(&(departed, FOX)),
+        "reach: the Fox choice is recorded under Genku's first incarnation"
+    );
+
+    let flicker = k.flicker;
+    let bystander = k.bystanders[0];
+    k.runner
+        .cast(flicker)
+        .target_objects(&[genku, bystander])
+        .commit();
+    let prompts = drive(&mut k.runner, None, |_| None);
+    let returned = ObjectIncarnationRef::of(genku, incarnation(&k.runner, genku));
+    assert_eq!(
+        k.runner.state().objects[&genku].zone,
+        Zone::Battlefield,
+        "reach: Ghostly Flicker returned Genku before the trigger's mode choice"
+    );
+    assert_ne!(
+        returned, departed,
+        "reach: CR 400.7 the returned Genku is a new object on the same ObjectId"
+    );
+    assert_eq!(
+        prompts,
+        vec![ModePrompt {
+            player: P0,
+            source_id: genku,
+            unavailable: vec![FOX],
+        }],
+        "CR 603.10a: the departed Genku's trigger still excludes the mode it chose"
+    );
+    assert!(
+        k.runner
+            .act(GameAction::SelectModes { indices: vec![FOX] })
+            .is_err(),
+        "CR 700.2: the departed Genku's trigger cannot re-choose its used mode"
+    );
+    k.runner
+        .act(GameAction::SelectModes {
+            indices: vec![MOONFOLK],
+        })
+        .expect("an unchosen mode is accepted");
+    let rest = drive(&mut k.runner, None, |_| None);
+    assert!(rest.is_empty(), "no further mode prompt: {rest:?}");
+    assert_eq!(
+        tokens_with_subtype(&k.runner, "Moonfolk"),
+        1,
+        "reach: Moonfolk made"
+    );
+    let turn = &k.runner.state().modal_modes_chosen_this_turn;
+    assert!(
+        turn.contains(&(departed, MOONFOLK)),
+        "CR 603.10a: the old trigger's choice is written under the departed incarnation"
+    );
+    assert!(
+        !turn.contains(&(returned, MOONFOLK)),
+        "CR 400.7: the old trigger's choice is not written to the returned Genku"
+    );
+
+    let fodder = k.fodder[1];
+    activate(&mut k.runner, fodder);
+    let prompts = drive(&mut k.runner, None, |_| Some(vec![FOX]));
+    assert_eq!(
+        prompts,
+        vec![ModePrompt {
+            player: P0,
+            source_id: genku,
+            unavailable: vec![],
+        }],
+        "CR 400.7: the returned Genku has no memory of either incarnation's choices"
+    );
+    assert_eq!(
+        tokens_with_subtype(&k.runner, "Fox"),
+        2,
+        "the returned Genku made a Fox"
+    );
+    assert!(
+        k.runner
+            .state()
+            .modal_modes_chosen_this_turn
+            .contains(&(returned, FOX)),
+        "the returned Genku's choice is written under its own incarnation"
+    );
 }
