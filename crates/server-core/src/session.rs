@@ -133,6 +133,59 @@ pub type ActionResult = (
 /// pairing intact when it fans a snapshot out to multiple viewers.
 pub type RevisionedActionResult = (u64, ActionResult);
 
+/// The atomic decision fields derived from one authoritative state.
+#[derive(Debug, Clone)]
+pub struct DecisionSnapshot {
+    pub legal_actions: Vec<GameAction>,
+    pub auto_pass_recommended: bool,
+    pub spell_costs: HashMap<ObjectId, ManaCost>,
+    pub legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+}
+
+impl DecisionSnapshot {
+    pub fn from_state(state: &GameState) -> Self {
+        let (legal_actions, spell_costs, legal_actions_by_object) =
+            engine_legal_actions_full(state);
+        let auto_pass_recommended = auto_pass_recommended(state, &legal_actions);
+        Self {
+            legal_actions,
+            auto_pass_recommended,
+            spell_costs,
+            legal_actions_by_object,
+        }
+    }
+}
+
+/// An AI transition retains presentation and rewind history even when no
+/// decision is offered. Only the final transition in a batch has a decision.
+#[derive(Debug, Clone)]
+pub struct AiTransition {
+    pub state_revision: u64,
+    pub state: GameState,
+    pub events: Vec<GameEvent>,
+    pub log_entries: Vec<GameLogEntry>,
+    pub decision: Option<DecisionSnapshot>,
+}
+
+impl AiTransition {
+    /// Extract a decision-bearing transition for a single-snapshot recipient.
+    pub fn into_action_result(self) -> Option<RevisionedActionResult> {
+        let decision = self.decision?;
+        Some((
+            self.state_revision,
+            (
+                self.state,
+                self.events,
+                decision.legal_actions,
+                self.log_entries,
+                decision.auto_pass_recommended,
+                decision.spell_costs,
+                decision.legal_actions_by_object,
+            ),
+        ))
+    }
+}
+
 /// Distinguishes an engine-owned, viewer-safe action refusal from an
 /// operational session failure. Only the former is eligible for a structured
 /// `ActionRejected` frame at the WebSocket boundary.
@@ -194,7 +247,7 @@ impl PreviewRefusal {
 /// not discard transitions that were already committed before that failure.
 #[derive(Debug)]
 pub struct AiRunOutcome {
-    pub transitions: Vec<RevisionedActionResult>,
+    pub transitions: Vec<AiTransition>,
     pub failure: Option<AiDriverFailure>,
     /// The durable terminal record, when this invocation observed or created
     /// an AI driver failure. Transports must send the final state frames before
@@ -207,7 +260,7 @@ pub struct AiRunOutcome {
 /// stack-resolution session is necessary: a safety cap is terminal only when
 /// an AI submitter is still eligible in the resulting state.
 struct AiActionBatch {
-    transitions: Vec<RevisionedActionResult>,
+    transitions: Vec<AiTransition>,
     stop: AiActionsStop,
 }
 
@@ -1321,9 +1374,9 @@ impl GameSession {
 
     /// Run AI actions and return per-action broadcast data.
     ///
-    /// Each entry is one authoritative transition: raw state snapshot, events,
-    /// legal actions, and log entries. Stack automation remains in that ordinary
-    /// engine transition stream rather than using a separate Resolve All frame.
+    /// Each entry retains its raw state, events, log entries and revision.
+    /// Only the final entry carries a decision snapshot. Stack automation remains
+    /// in that ordinary transition stream rather than a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
     /// Returns an empty vec if the session has no AI seats.
     ///
@@ -1401,12 +1454,14 @@ impl GameSession {
 
         let stop = ai_results.stop;
 
+        let result_count = ai_results.results.len();
         let transitions = ai_results
             .results
             .into_iter()
-            .map(|r| {
-                let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
-                let auto_pass = auto_pass_recommended(&r.state, &legal);
+            .enumerate()
+            .map(|(index, r)| {
+                let decision =
+                    (index + 1 == result_count).then(|| DecisionSnapshot::from_state(&r.state));
                 let revision = self.advance_state_revision();
                 // Per AI result, which is exactly the granularity
                 // `run_ai_actions` reports. This is what makes a turn that
@@ -1423,18 +1478,13 @@ impl GameSession {
                 // `handle_interaction_with_rejection`.
                 self.game_log
                     .write_game_log_entries(&self.game_code, &r.log_entries);
-                (
-                    revision,
-                    (
-                        r.state,
-                        r.events,
-                        legal,
-                        r.log_entries,
-                        auto_pass,
-                        spell_costs,
-                        by_object,
-                    ),
-                )
+                AiTransition {
+                    state_revision: revision,
+                    state: r.state,
+                    events: r.events,
+                    log_entries: r.log_entries,
+                    decision,
+                }
             })
             .collect();
 
@@ -5874,6 +5924,44 @@ mod tests {
     }
 
     #[test]
+    fn run_ai_only_final_transition_offers_a_current_decision() {
+        let (mgr, code, token0, _ai_seat) = single_user_game_vs_ai();
+        for _ in 0..80 {
+            let mut session = mgr.try_session(&code).unwrap();
+            let before_revision = session.state_revision;
+            let outcome = session.run_ai();
+            assert!(outcome.failure.is_none(), "{:?}", outcome.failure);
+            if let Some((last, intermediate)) = outcome.transitions.split_last() {
+                for (index, transition) in outcome.transitions.iter().enumerate() {
+                    assert_eq!(
+                        transition.state_revision,
+                        before_revision + index as u64 + 1
+                    );
+                }
+                assert!(intermediate
+                    .iter()
+                    .all(|transition| transition.decision.is_none()));
+                let decision = last
+                    .decision
+                    .as_ref()
+                    .expect("final state offers its decision");
+                let (legal, costs, by_object) = engine_legal_actions_full(&session.state);
+                assert_eq!(decision.legal_actions, legal);
+                assert_eq!(decision.spell_costs, costs);
+                assert_eq!(decision.legal_actions_by_object, by_object);
+                assert_eq!(last.state.waiting_for, session.state.waiting_for);
+                if !intermediate.is_empty() {
+                    return;
+                }
+            }
+            session
+                .handle_action(&token0, GameAction::PassPriority)
+                .expect("human passes to advance the driven game");
+        }
+        panic!("fixture never produced an intermediate AI transition");
+    }
+
+    #[test]
     fn ai_driver_failure_gate_requires_an_authorized_ai_submitter() {
         let (mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
         let mut session = mgr.try_session(&code).unwrap();
@@ -8896,20 +8984,17 @@ mod tests {
             "the engine-owned runner must publish the post-collapse state"
         );
         assert!(
-            transitions
-                .transitions
-                .iter()
-                .all(|(_, (broadcast_state, ..))| !matches!(
-                    broadcast_state.waiting_for,
-                    WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
-                )),
+            transitions.transitions.iter().all(|transition| !matches!(
+                transition.state.waiting_for,
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+            )),
             "a published frame parked a player on a Resolve All consent decision"
         );
         assert!(
             transitions
                 .transitions
                 .iter()
-                .any(|(_, (broadcast_state, ..))| broadcast_state.stack.is_empty()),
+                .any(|transition| transition.state.stack.is_empty()),
             "no broadcast frame carried the post-collapse state"
         );
     }

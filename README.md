@@ -312,6 +312,9 @@ downloaded into the data volume on first boot. It exposes:
 `PHASE_LOBBY_ONLY=true` runs the same lightweight matchmaking mode as the public
 phase.rs server. Omit it for full server-hosted games and drafts.
 
+Full-mode AI batches retain every transition for presentation and rewind history,
+but derive legal actions and costs only for the final decision offered to players.
+
 Docker uses environment variables for the common options:
 
 | Environment variable | Equivalent flag | Default | Notes |

@@ -84,8 +84,8 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, CreateGameError, FullRuntime, GameSession, HostingMode, PreviewRefusal,
-    RevisionedActionResult, SessionActionError, SessionManager,
+    ActionResult, AiTransition, CreateGameError, FullRuntime, GameSession, HostingMode,
+    PreviewRefusal, SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -7168,22 +7168,27 @@ async fn broadcast_ai_results(
     full_key: &server_core::FullSessionKey,
     player_count: u8,
     eliminated: &[PlayerId],
-    ai_results: &[RevisionedActionResult],
+    ai_results: &[AiTransition],
     rewind_targets: &[RewindOption],
 ) {
     let game_code = &full_key.game_code;
     // Broadcast AI follow-up results with delays
-    for (i, (ai_revision, result)) in ai_results.iter().enumerate() {
+    for transition in ai_results {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let (
-            ai_raw_state,
-            ai_events,
-            ai_legal,
-            ai_log_entries,
-            _ai_auto_pass,
-            ai_spell_costs,
-            ai_by_object,
-        ) = result;
+        let ai_revision = transition.state_revision;
+        let ai_raw_state = &transition.state;
+        let ai_events = &transition.events;
+        let ai_log_entries = &transition.log_entries;
+        let empty_costs = HashMap::new();
+        let empty_by_object = HashMap::new();
+        let (ai_legal, ai_spell_costs, ai_by_object) = match &transition.decision {
+            Some(decision) => (
+                decision.legal_actions.as_slice(),
+                &decision.spell_costs,
+                &decision.legal_actions_by_object,
+            ),
+            None => (&[][..], &empty_costs, &empty_by_object),
+        };
         if guard_state_snapshot_broadcast(StateSnapshotParts {
             state: ai_raw_state,
             events: ai_events,
@@ -7196,7 +7201,7 @@ async fn broadcast_ai_results(
         {
             continue;
         }
-        let is_last = i == ai_results.len() - 1;
+        let is_last = transition.decision.is_some();
 
         // Filter AI state per-player outside the lock
         let ai_filtered: Vec<(PlayerId, GameState)> = (0..player_count)
@@ -7256,7 +7261,7 @@ async fn broadcast_ai_results(
                     );
                     let _ = s.send(ServerMessage::StateUpdate {
                         full_key: Some(full_key.clone()),
-                        state_revision: *ai_revision,
+                        state_revision: ai_revision,
                         state: pstate.clone(),
                         events: server_core::filter_events_for_player(
                             ai_events,
@@ -7279,13 +7284,12 @@ async fn broadcast_ai_results(
                 }
             }
         }
-        let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
         if let Ok(spectator_msg) = build_spectator_state_update_message(
             full_key,
             ai_raw_state,
             ai_events,
             ai_log_entries,
-            *ai_revision,
+            ai_revision,
         ) {
             let mut specs = game_spectators.lock().await;
             if let Some(spectators) = specs.get_mut(game_code) {
@@ -9417,8 +9421,12 @@ async fn handle_client_message(
                                             session.player_for_token(&player_token).unwrap();
                                         let ai_outcome = session.run_ai();
                                         let ai_failure = ai_outcome.fault;
-                                        let ai_result =
-                                            ai_outcome.transitions.last().cloned().map(Box::new);
+                                        let ai_result = ai_outcome
+                                            .transitions
+                                            .into_iter()
+                                            .last()
+                                            .and_then(AiTransition::into_action_result)
+                                            .map(Box::new);
                                         if ai_result.is_some() || ai_failure.is_some() {
                                             persist_full_session_async(game_db, &mut session);
                                         }
