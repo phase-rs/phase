@@ -3890,48 +3890,6 @@ fn keyword_prefix_activation_restriction(
     }
 }
 
-/// Whether an em-dash label is a keyword whose rules give the text after it
-/// rules meaning. An ability word or flavor word (CR 207.2c, CR 207.2d) has no
-/// rules meaning and answers `false`. `label` is lowercase.
-///
-/// The keywords with a mapped gate ("∞", "Max speed": CR 702.186b, CR 702.178a)
-/// come from the split `keyword_prefix_activation_restriction` draws over
-/// `ability_word_to_condition`; the rest come from `parse_keyword_ability_label`.
-pub(super) fn is_keyword_ability_label(label: &str) -> bool {
-    all_consuming(parse_keyword_ability_label)
-        .parse(label)
-        .is_ok()
-        || keyword_prefix_activation_restriction(ability_word_to_condition(label).as_ref())
-            .is_some()
-}
-
-/// The keyword of a "[Keyword] — [text]" label that `ability_word_to_condition`
-/// does not map. Each keyword's rule defines the labeled form.
-fn parse_keyword_ability_label(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            // CR 702.169b: "Solved — [Ability text]" means "As long as this Case
-            // is solved, [ability text]"; CR 702.169c and CR 702.169d give the
-            // triggered and activated forms.
-            tag("solved"),
-            // CR 719.3a: "To solve — [Condition]" is the Case's end-step solve trigger.
-            tag("to solve"),
-            // CR 702.142a: "Boast — [Cost]: [Effect]".
-            tag("boast"),
-            // CR 702.177a: "Exhaust — [Cost]: [Effect]".
-            tag("exhaust"),
-            // CR 702.193a: "Power-up — [Cost]: [Effect]".
-            tag("power-up"),
-            // CR 702.57a: "Forecast — [Activated ability]".
-            tag("forecast"),
-            // CR 702.159a: "Visit — [Effect]" on an Attraction.
-            tag("visit"),
-        )),
-    )
-    .parse(input)
-}
-
 /// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
 /// CR 608.2c: Bridge an ability-word / "instead if" `StaticCondition` to its
 /// effect-resolution `AbilityCondition` form. Delegates to the single
