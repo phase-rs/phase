@@ -1345,6 +1345,9 @@ pub struct AiConfig {
     pub difficulty: AiDifficulty,
     pub temperature: f64,
     pub profile: AiProfile,
+    /// Whether the AI plans multi-action plays within a turn before scoring
+    /// single candidates — today, the certified lethal burn-line search
+    /// (`crate::reach`). Off only for the near-random `VeryEasy` preset.
     pub play_lookahead: bool,
     pub combat_lookahead: bool,
     pub search: SearchConfig,
