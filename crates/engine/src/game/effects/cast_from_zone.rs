@@ -1981,11 +1981,24 @@ fn cast_resolution_request_during_resolution(
 /// instead" as a sequential rider sub-ability on `CastFromZone`, targeting the
 /// cast spell (`ParentTarget`). Runtime consumes that rider as permission
 /// metadata (the CR 608.2n redirect destination), not as an immediate zone
-/// move. Returns the redirect destination the rider encodes, or `None` when the
-/// sub-ability is not such a rider.
+/// move. Asked of the LINK, not the effect alone: CR 608.2c — a link whose gate
+/// reads the preceding instruction's outcome
+/// (`condition_depends_on_effect_performed`; the "If you don't [cast it], put it
+/// into your hand / exile it / put it on the bottom" decline branch of Solstice
+/// Revelations, Djinn of Wishes, Descendants' Path) carries a printed "if you
+/// do" / "if you don't" instruction that the controller follows in order, never
+/// a CR 614.1a "instead" replacement of the cast spell's trip to the graveyard.
+/// Returns the redirect destination the rider encodes, or `None` when the link
+/// is not such a rider.
 pub(crate) fn graveyard_destination_rider(
     effect: &Effect,
+    condition: Option<&AbilityCondition>,
 ) -> Option<SpellStackToGraveyardReplacement> {
+    // CR 608.2c + CR 614.1a: an outcome-gated link is an instruction followed in
+    // order, not an "instead" replacement.
+    if condition.is_some_and(super::condition_depends_on_effect_performed) {
+        return None;
+    }
     match effect {
         Effect::ChangeZone {
             destination: Zone::Exile,
@@ -2017,9 +2030,12 @@ pub(crate) fn graveyard_destination_rider(
 /// is the only destination the COUNTER rider ever encodes (Force of Negation,
 /// No More Lies; the counter library/hand redirect rides `countered_spell_zone`
 /// instead, never a sub-ability).
-pub(crate) fn is_graveyard_exile_rider_subability(effect: &Effect) -> bool {
+pub(crate) fn is_graveyard_exile_rider_subability(
+    effect: &Effect,
+    condition: Option<&AbilityCondition>,
+) -> bool {
     matches!(
-        graveyard_destination_rider(effect),
+        graveyard_destination_rider(effect, condition),
         Some(SpellStackToGraveyardReplacement::Exile)
     )
 }
@@ -2068,7 +2084,7 @@ pub(crate) fn graveyard_exile_rider_applies_to(
     sub: &ResolvedAbility,
     obj_id: ObjectId,
 ) -> bool {
-    is_graveyard_exile_rider_subability(&sub.effect)
+    is_graveyard_exile_rider_subability(&sub.effect, sub.condition.as_ref())
         && match &sub.condition {
             None => true,
             Some(AbilityCondition::ZoneChangedThisWay {
@@ -2142,7 +2158,7 @@ fn cast_from_zone_graveyard_destination(
     ability
         .sub_ability
         .as_deref()
-        .and_then(|s| graveyard_destination_rider(&s.effect))
+        .and_then(|s| graveyard_destination_rider(&s.effect, s.condition.as_ref()))
 }
 
 /// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class — the
@@ -2583,8 +2599,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
-        Effect, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        ResolutionCastWindow, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+        Effect, EffectOutcomeSignal, FilterProp, LibraryPosition, ObjectScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, ResolutionCastWindow, TargetFilter, ThisWayCause,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -5200,6 +5217,185 @@ mod tests {
                 )
             }) || !state.objects[&instant].replacement_definitions.is_empty(),
             "exile rider must stamp either the permission or a graveyard redirect"
+        );
+    }
+
+    fn parent_target_move(destination: Zone) -> Effect {
+        Effect::ChangeZone {
+            origin: None,
+            destination,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    fn optional_effect_performed() -> AbilityCondition {
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }
+    }
+
+    fn optional_effect_declined() -> AbilityCondition {
+        AbilityCondition::Not {
+            condition: Box::new(optional_effect_performed()),
+        }
+    }
+
+    /// CR 608.2c + CR 614.1a: the rider classifier reads the link. Each of the
+    /// three rider shapes is a rider with no condition, and none is a rider
+    /// when its gate reads the preceding instruction's outcome — the "If you
+    /// don't" decline branch, its composite form, and the "if you do" form.
+    #[test]
+    fn graveyard_destination_rider_refuses_an_outcome_gated_link() {
+        let shapes = [
+            (
+                parent_target_move(Zone::Exile),
+                SpellStackToGraveyardReplacement::Exile,
+            ),
+            (
+                parent_target_move(Zone::Hand),
+                SpellStackToGraveyardReplacement::Hand,
+            ),
+            (
+                Effect::PutAtLibraryPosition {
+                    target: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Bottom,
+                },
+                SpellStackToGraveyardReplacement::Library {
+                    position: LibraryPosition::Bottom,
+                },
+            ),
+        ];
+        let outcome_gates = [
+            optional_effect_declined(),
+            AbilityCondition::And {
+                conditions: vec![
+                    optional_effect_declined(),
+                    AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Fixed { value: 1 },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    },
+                ],
+            },
+            optional_effect_performed(),
+        ];
+        for (effect, destination) in &shapes {
+            let is_exile = *destination == SpellStackToGraveyardReplacement::Exile;
+            assert_eq!(
+                graveyard_destination_rider(effect, None),
+                Some(destination.clone()),
+                "reach: an unconditioned link is the rider"
+            );
+            assert_eq!(is_graveyard_exile_rider_subability(effect, None), is_exile);
+            for gate in &outcome_gates {
+                assert_eq!(
+                    graveyard_destination_rider(effect, Some(gate)),
+                    None,
+                    "an outcome-gated link is an instruction, not a rider: {gate:?}"
+                );
+                assert!(!is_graveyard_exile_rider_subability(effect, Some(gate)));
+            }
+        }
+
+        // The counter rider's "If that spell is countered this way" gate is not
+        // an outcome gate: the rider stays a rider.
+        let countered_this_way = AbilityCondition::ZoneChangedThisWay {
+            filter: TargetFilter::Typed(TypedFilter::card()),
+            destination: None,
+        };
+        let exile = parent_target_move(Zone::Exile);
+        assert_eq!(
+            graveyard_destination_rider(&exile, Some(&countered_this_way)),
+            Some(SpellStackToGraveyardReplacement::Exile)
+        );
+        assert!(is_graveyard_exile_rider_subability(
+            &exile,
+            Some(&countered_this_way)
+        ));
+    }
+
+    /// CR 608.2c: a "you may cast it … If you don't, exile it" decline link
+    /// stamps no graveyard redirect, neither on the permission it grants nor
+    /// on the spell it casts (the two places
+    /// `graveyard_cast_exile_rider_stamps_permission_flag` accepts a rider).
+    #[test]
+    fn graveyard_cast_decline_link_stamps_no_graveyard_redirect() {
+        let mut state = make_test_state();
+        let instant = {
+            let obj_id = add_card_to_graveyard(&mut state, PlayerId(0), CardId(2937));
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj_id
+        };
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            vec![TargetRef::Object(instant)],
+            ObjectId(999),
+            PlayerId(0),
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                parent_target_move(Zone::Exile),
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            )
+            .condition(optional_effect_declined()),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&instant].zone,
+            Zone::Stack,
+            "reach: the instant was cast"
+        );
+        assert!(
+            state.objects[&instant].replacement_definitions.is_empty(),
+            "a decline link installs no graveyard redirect on the cast spell; replacements={:?}",
+            state.objects[&instant].replacement_definitions
+        );
+        let permissions = &state.objects[&instant].casting_permissions;
+        assert!(
+            permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. })),
+            "reach: the cast permission was granted; permissions={permissions:?}"
+        );
+        assert!(
+            permissions.iter().all(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    graveyard_replacement: None,
+                    ..
+                }
+            )),
+            "a decline link is not a graveyard redirect; permissions={permissions:?}"
         );
     }
 

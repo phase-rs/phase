@@ -1494,9 +1494,15 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// The shape set is the runtime rider classifier's in
 /// `game::effects::cast_from_zone` — the single authority the resolver itself
 /// reads, so a parser-side copy cannot drift from what the resolver consumes.
-/// This function adds only the sub-ability walk around it.
+/// This function adds only the sub-ability walk around it. An outcome-gated
+/// decline link ("If you don't, put it into your hand") is not a rider
+/// (CR 608.2c), so it suppresses nothing.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    crate::game::effects::cast_from_zone::graveyard_destination_rider(&def.effect).is_some()
+    crate::game::effects::cast_from_zone::graveyard_destination_rider(
+        &def.effect,
+        def.condition.as_ref(),
+    )
+    .is_some()
         || def
             .sub_ability
             .as_deref()
@@ -6032,9 +6038,10 @@ mod tests {
     use crate::parser::swallow_evidence::UnitEvidence;
 
     use super::{
-        any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
-        detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
-        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
+        any_ability_has_unimplemented, def_tree_has_cast_graveyard_redirect_rider,
+        def_tree_has_optional, def_tree_has_unimplemented, detect_replacement,
+        dynamic_markers_are_all_recorded_unrecognized, effect_has_internal_optionality,
+        trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_effect::gap_diagnosis::{
@@ -6043,10 +6050,11 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint,
-        Chooser, Comparator, ContinuousModification, CopyRetargetPermission, DamageModification,
-        Effect, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
-        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, Chooser, Comparator,
+        ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
+        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
         StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
         ZoneChoiceCandidateSource, ZoneOwner,
     };
@@ -6496,13 +6504,19 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // One verbatim-Oracle corpus card per corpus-present non-phrase detector. Several
         // also fire a phrase-bearing detector; those records are filtered out below, so a
         // card carrying both is fine.
+        //
+        // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
+        // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
+        // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
+        // below stays at nine — a detector that stops firing here needs a different corpus
+        // card, never a shrunken set.
         let fixtures: &[(&str, &str, &[&str])] = &[
             ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
             ("Dementia Sliver", "All Slivers have \"{T}: Choose a card name. Target opponent reveals a card at random from their hand. If that card has the chosen name, that player discards it. Activate only during your turn.\"", &["Creature"]),
             ("Disorder", "Disorder deals 2 damage to each white creature and each player who controls a white creature.", &["Sorcery"]),
             ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
             ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
-            ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
+            ("Savage Punch", "Target creature you control fights target creature you don't control.\nFerocious — The creature you control gets +2/+2 until end of turn before it fights if you control a creature with power 4 or greater.", &["Sorcery"]),
             ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
@@ -12061,25 +12075,77 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     #[test]
-    fn duration_until_eot_dragon_egg_reports_known_gap() {
+    fn duration_until_eot_dragon_egg_token_grant_carries_the_duration() {
         let parsed = parse_named(
             "Defender\n\
              When this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"",
             "Dragon Egg",
             &["Creature"],
         );
-        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
-        // horse_and_champions_helm` for the full explanation. Dragon Egg reports a
-        // swallowed `Duration_UntilEndOfTurn`, and did so in the shipped card data long
-        // before this change: the "until end of turn" lives inside the *token's granted*
-        // activated ability, and the duration evidence walker does not descend into a
-        // token grant. The test asserted the opposite and passed only because its empty
-        // MTGJSON keyword list turned the "Defender" line into an `Effect::Unimplemented`,
-        // tripping the card-wide gate that silenced every detector on the card.
+        // CR 602.1 + CR 602.1a + CR 611.2a: Dragon Egg's token clause is an ACTIVATED
+        // `{R}` pump +1/+0 on the token itself, lasting until end of turn — so the
+        // duration IS a real AST carrier at key `duration` inside the unit tree and
+        // `any_duration(UntilEndOfTurn)` is satisfied. No gap.
+        //
+        // At BASE there was no granted activated ability at all: `push_parsed_statics`
+        // took `parse_static_line_multi`'s early return and emitted
+        // `Continuous { SelfRef, [AddPower 1, AddToughness 0] }`, cost and duration
+        // dropped outright — which is why the phrase had no carrier and the detector
+        // fired. (Not because the walk is blind to token grants: the duration
+        // detector's own reach is serde-derived and covers
+        // `Effect::Token.static_abilities → GrantTrigger → trigger.execute`.)
+        //
+        // Reach guard: the dies unit parsed through to a granted activated ability
+        // carrying cost + duration, with no `Effect::Unimplemented` in that unit (an
+        // Unimplemented ability would make the absence assertion below vacuous via the
+        // per-unit suppression gate).
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Dragon Egg's dies trigger must parse")
+            .execute
+            .as_deref()
+            .expect("the dies trigger must have an execute chain");
         assert!(
-            has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
-            "pre-existing gap: the duration evidence walker does not descend into a \
-             token's granted ability. Warnings: {:?}",
+            !def_tree_has_unimplemented(execute),
+            "reach: the token unit must parse with zero Unimplemented: {execute:#?}"
+        );
+        let Effect::Token {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("reach: expected Effect::Token, got {:?}", execute.effect);
+        };
+        let granted = static_abilities
+            .iter()
+            .flat_map(|definition| definition.modifications.iter())
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("reach: the token must carry a granted ability: {static_abilities:#?}")
+            });
+        assert_eq!(granted.kind, AbilityKind::Activated);
+        assert_eq!(
+            granted.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Red],
+                    generic: 0,
+                },
+            }),
+            "reach: the {{R}} cost must be carried"
+        );
+        assert_eq!(
+            granted.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "reach: the duration must be carried"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
+            "the granted activated ability carries the duration, so the phrase is \
+             represented, not swallowed. Warnings: {:?}",
             parsed.parse_warnings
         );
     }
@@ -14246,6 +14312,64 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         // the guard above cannot be passing by rejecting everything.
         assert_eq!(classify_conjunct("each opponent"), ConjunctShape::Player);
         assert_eq!(classify_conjunct("each player"), ConjunctShape::Player);
+    }
+
+    /// CR 608.2c: a `CastFromZone` whose sub link is the "If you don't, put it
+    /// into your hand" decline branch carries no graveyard-redirect rider; the
+    /// same link with no condition does (paired positive).
+    #[test]
+    fn decline_link_under_cast_from_zone_is_not_a_graveyard_redirect_rider() {
+        let cast_with = |link: AbilityDefinition| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CastFromZone {
+                    target: TargetFilter::Any,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+            )
+            .sub_ability(link)
+        };
+        let to_hand = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+        };
+        assert!(
+            def_tree_has_cast_graveyard_redirect_rider(&cast_with(to_hand())),
+            "reach: the unconditioned link is the hand-redirect rider"
+        );
+        let declined = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            }),
+        };
+        assert!(!def_tree_has_cast_graveyard_redirect_rider(&cast_with(
+            to_hand().condition(declined)
+        )));
     }
 }
 

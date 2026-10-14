@@ -20,7 +20,7 @@ use crate::types::game_state::{
     ChainStep, GameState, PtDirection, RetargetSlotAddress, TargetEffectDetail,
     TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use rand::seq::IndexedRandom;
@@ -1033,11 +1033,29 @@ fn modal_selection_condition_matches(
     }
 }
 
-/// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
-/// CR 700.2: Checks per-turn and per-game tracking maps for previously chosen modes.
-pub fn compute_unavailable_modes(
+/// CR 400.7 + CR 700.2: the modal no-repeat history key for a source whose mode
+/// choice is made while it is a live object — an activated ability (CR 602.2b:
+/// modes are chosen before costs, so the source has not yet moved) or a spell.
+/// A source with no live object cannot prove its incarnation and binds
+/// `LEGACY_INCARNATION`, which matches no live object's history.
+pub(crate) fn live_modal_history_source(
     state: &GameState,
     source_id: ObjectId,
+) -> ObjectIncarnationRef {
+    state.objects.get(&source_id).map_or(
+        ObjectIncarnationRef::of(source_id, LEGACY_INCARNATION),
+        ObjectIncarnationRef::from_object,
+    )
+}
+
+/// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
+/// CR 700.2: Checks per-turn and per-game tracking maps for previously chosen modes.
+/// CR 400.7: history belongs to the exact `source` incarnation; a triggered
+/// ability passes its captured source (CR 603.10a look-back), every other
+/// caller passes `live_modal_history_source`.
+pub fn compute_unavailable_modes(
+    state: &GameState,
+    source: ObjectIncarnationRef,
     modal: &ModalChoice,
 ) -> Vec<usize> {
     let mut unavailable = Vec::new();
@@ -1047,7 +1065,7 @@ pub fn compute_unavailable_modes(
                 for mode_idx in 0..modal.mode_count {
                     if state
                         .modal_modes_chosen_this_turn
-                        .contains(&(source_id, mode_idx))
+                        .contains(&(source, mode_idx))
                     {
                         unavailable.push(mode_idx);
                     }
@@ -1057,7 +1075,7 @@ pub fn compute_unavailable_modes(
                 for mode_idx in 0..modal.mode_count {
                     if state
                         .modal_modes_chosen_this_game
-                        .contains(&(source_id, mode_idx))
+                        .contains(&(source, mode_idx))
                     {
                         unavailable.push(mode_idx);
                     }
@@ -1110,7 +1128,8 @@ pub fn spell_modal_unavailable_modes(
     modal: &ModalChoice,
     mode_abilities: &[AbilityDefinition],
 ) -> Vec<usize> {
-    let mut unavailable_modes = compute_unavailable_modes(state, source_id, modal);
+    let mut unavailable_modes =
+        compute_unavailable_modes(state, live_modal_history_source(state, source_id), modal);
     let x_dependent_modal_targets = state
         .objects
         .get(&source_id)
@@ -1385,9 +1404,11 @@ fn modal_indices_have_legal_target_assignment(
 
 /// Records chosen mode indices for NoRepeat constraint enforcement.
 /// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
+/// CR 400.7: `source` must be the same incarnation key the matching
+/// `compute_unavailable_modes` call read for this choice.
 pub fn record_modal_mode_choices(
     state: &mut GameState,
-    source_id: ObjectId,
+    source: ObjectIncarnationRef,
     modal: &ModalChoice,
     indices: &[usize],
 ) {
@@ -1395,12 +1416,12 @@ pub fn record_modal_mode_choices(
         match constraint {
             ModalSelectionConstraint::NoRepeatThisTurn => {
                 for &idx in indices {
-                    state.modal_modes_chosen_this_turn.insert((source_id, idx));
+                    state.modal_modes_chosen_this_turn.insert((source, idx));
                 }
             }
             ModalSelectionConstraint::NoRepeatThisGame => {
                 for &idx in indices {
-                    state.modal_modes_chosen_this_game.insert((source_id, idx));
+                    state.modal_modes_chosen_this_game.insert((source, idx));
                 }
             }
             _ => {}
@@ -18636,7 +18657,7 @@ mod tests {
     #[test]
     fn compute_unavailable_modes_returns_previously_chosen() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(100);
+        let source = ObjectIncarnationRef::of(ObjectId(100), 0);
 
         let modal = ModalChoice {
             min_choices: 1,
@@ -18647,23 +18668,32 @@ mod tests {
         };
 
         // No modes chosen yet.
-        assert!(compute_unavailable_modes(&state, source_id, &modal).is_empty());
+        assert!(compute_unavailable_modes(&state, source, &modal).is_empty());
 
         // Record mode 1 chosen.
-        record_modal_mode_choices(&mut state, source_id, &modal, &[1]);
-        assert_eq!(
-            compute_unavailable_modes(&state, source_id, &modal),
-            vec![1]
-        );
+        record_modal_mode_choices(&mut state, source, &modal, &[1]);
+        assert_eq!(compute_unavailable_modes(&state, source, &modal), vec![1]);
 
-        // Different source_id is unaffected.
-        assert!(compute_unavailable_modes(&state, ObjectId(200), &modal).is_empty());
+        // CR 400.7: a later incarnation of the same storage id is a new object.
+        assert!(compute_unavailable_modes(
+            &state,
+            ObjectIncarnationRef::of(ObjectId(100), 1),
+            &modal
+        )
+        .is_empty());
+        // Different source is unaffected.
+        assert!(compute_unavailable_modes(
+            &state,
+            ObjectIncarnationRef::of(ObjectId(200), 0),
+            &modal
+        )
+        .is_empty());
     }
 
     #[test]
     fn record_modal_mode_choices_tracks_game_scoped() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(100);
+        let source = ObjectIncarnationRef::of(ObjectId(100), 0);
 
         let modal = ModalChoice {
             min_choices: 1,
@@ -18673,10 +18703,18 @@ mod tests {
             ..Default::default()
         };
 
-        record_modal_mode_choices(&mut state, source_id, &modal, &[2]);
-        assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 2)));
+        record_modal_mode_choices(&mut state, source, &modal, &[2]);
+        assert!(state.modal_modes_chosen_this_game.contains(&(source, 2)));
         // Turn-scoped map should NOT be populated for game-scoped constraint.
-        assert!(!state.modal_modes_chosen_this_turn.contains(&(source_id, 2)));
+        assert!(!state.modal_modes_chosen_this_turn.contains(&(source, 2)));
+        assert_eq!(compute_unavailable_modes(&state, source, &modal), vec![2]);
+        // CR 400.7: the game-scoped history is per incarnation too.
+        assert!(compute_unavailable_modes(
+            &state,
+            ObjectIncarnationRef::of(ObjectId(100), 1),
+            &modal
+        )
+        .is_empty());
     }
 
     #[test]

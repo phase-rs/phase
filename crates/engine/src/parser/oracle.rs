@@ -8764,21 +8764,25 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
 
 /// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b): does the assembled tree
 /// place this body under a typed owner that consumes it in the dropped guard's stead?
-/// Reads the owner head's `Effect` variant and the body's `Effect` shape — no card names,
-/// no Oracle text.
+/// Reads the owner head's `Effect` variant and the body link's `Effect` shape and outcome
+/// gate — no card names, no Oracle text.
 ///
 /// The guard's READING is deliberately not a parameter. The sole caller settles a verdict
 /// only for `GuardReading::Event`, so a `reading == Event` conjunct in any arm here would
 /// be tautological; the Event gating is stated once, at that call site.
-fn guard_owner(body: &Effect, parent: Option<&Effect>) -> bool {
+fn guard_owner(body: &AbilityDefinition, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            cast_from_zone::graveyard_destination_rider(body).is_some()
+            cast_from_zone::graveyard_destination_rider(&body.effect, body.condition.as_ref())
+                .is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
-        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(body),
+        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(
+            &body.effect,
+            body.condition.as_ref(),
+        ),
         // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
         // clause's unsupportedness, and a second gap over the same defect double-counts it
         // — the same per-unit suppression rule `swallow_check` applies via its
@@ -8918,7 +8922,7 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
              reading,
              clause_text,
          }| {
-            (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+            (reading == GuardReading::Event && !guard_owner(def, parent)).then(|| {
                 // Before gapping, attempt the whole-body graveyard-redirect
                 // authority (`parse_windowed_graveyard_redirect_install`): a
                 // chain-position "If <subject> would be put into <graveyard>

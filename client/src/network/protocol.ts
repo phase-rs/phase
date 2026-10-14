@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  125 — game_setup and state_update carry GameState whose modal no-repeat
+ *       history (modal_modes_chosen_this_turn / _this_game) is keyed by
+ *       object incarnation, not bare ObjectId (CR 400.7). Bumped in lockstep
+ *       with full-game protocol 143.
  *  124 — game_setup and state_update carry GameState whose linked-exile
  *       snapshots carry the exiled card's incarnation (CR 400.7). Bumped in
  *       lockstep with full-game protocol 142.
@@ -674,7 +678,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 124 as const;
+export const WIRE_PROTOCOL_VERSION = 125 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

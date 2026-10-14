@@ -22711,18 +22711,26 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_etb_counters: Vec<(ObjectId, CounterType, u32)>,
 
-    /// Modal modes chosen this turn per source: (ObjectId, mode_index).
-    /// CR 700.2: "choose one that hasn't been chosen this turn"
-    /// Note: ObjectId-keyed — zone changes create new ObjectId per CR 400.7, naturally resetting tracking.
+    /// Modal modes chosen this turn per source incarnation: (source, mode_index).
+    /// CR 700.2: "choose one that hasn't been chosen this turn".
+    /// CR 400.7: keyed by the exact object incarnation, not the reused storage
+    /// `ObjectId` — a permanent that leaves and returns is a new object whose
+    /// history starts empty, while a control change (no zone change) keeps it.
+    /// CR 603.10a: a look-back trigger from a departed source reads the departed
+    /// incarnation's history, so entries are never pruned at zone exit.
+    /// Cleared at turn start. Legacy saves keyed by bare `ObjectId` load as
+    /// `LEGACY_INCARNATION`, which matches no live object.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub modal_modes_chosen_this_turn: HashSet<(ObjectId, usize)>,
-    /// Modal modes chosen this game per source: (ObjectId, mode_index).
-    /// CR 700.2: "choose one that hasn't been chosen" (game-scoped)
-    /// Note: ObjectId-keyed — zone changes create new ObjectId per CR 400.7, naturally resetting tracking.
+    pub modal_modes_chosen_this_turn: HashSet<(ObjectIncarnationRef, usize)>,
+    /// Modal modes chosen this game per source incarnation: (source, mode_index).
+    /// CR 700.2: "choose one that hasn't been chosen" (game-scoped).
+    /// CR 400.7 + CR 603.10a: keyed by exact incarnation exactly like
+    /// `modal_modes_chosen_this_turn`; never pruned (bounded by modes chosen).
+    /// Legacy saves keyed by bare `ObjectId` load as `LEGACY_INCARNATION`.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub modal_modes_chosen_this_game: HashSet<(ObjectId, usize)>,
+    pub modal_modes_chosen_this_game: HashSet<(ObjectIncarnationRef, usize)>,
 
     /// Cards currently revealed to all players (e.g. during a RevealHand effect).
     /// `filter_state_for_player` skips hiding these cards.

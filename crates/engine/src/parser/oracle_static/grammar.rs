@@ -1604,7 +1604,7 @@ pub(crate) fn parse_quoted_rule_static_modifications(
     // activated ability, not the outer static line — mask quoted spans before
     // testing so the static grant path is not skipped (Roar of the Fifth People
     // chapter II, #5978).
-    if find_cost_separator(&strip_quoted_segments(text)).is_some() {
+    if unquoted_cost_separator(text).is_some() {
         return None;
     }
 
@@ -1794,6 +1794,25 @@ pub(crate) fn find_cost_separator(text: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// CR 602.1: Activated abilities have a cost and an effect and are written as
+/// "[Cost]: [Effect]"; CR 602.1a puts the whole activation cost before the colon.
+/// CR 604.1: a static ability is written as a statement — never in that shape.
+/// So text carrying a cost separator OUTSIDE any quoted granted ability is an
+/// activated ability, not a static one.
+///
+/// Quoted spans are masked first (CR 602.1: inside a granted ability the colon
+/// belongs to the INNER ability, e.g. `Creatures you control have "{T}: Add
+/// {R}."`), so masking keeps that line a static grant.
+/// This is the single authority for the rule; `parse_static_line_inner` and
+/// `parse_quoted_rule_static_modifications` both consult it.
+///
+/// The returned offset is an index into the QUOTE-MASKED text, not into `text`
+/// (masking also trims a trailing ` and`/` or` connector, so the masked string is
+/// shorter); every caller uses `.is_some()`.
+pub(crate) fn unquoted_cost_separator(text: &str) -> Option<usize> {
+    find_cost_separator(&strip_quoted_segments(text))
 }
 
 /// Check if a prefix string looks like a text-based activated ability cost.

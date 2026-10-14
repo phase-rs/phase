@@ -26929,7 +26929,13 @@ fn activate_with_cost_carrier(
                 ));
             }
         }
-        let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+        // CR 400.7 + CR 602.2b: modes are chosen before costs, so the history
+        // belongs to the live source incarnation.
+        let mut unavailable_modes = compute_unavailable_modes(
+            state,
+            super::ability_utils::live_modal_history_source(state, source_id),
+            &modal,
+        );
         let x_dependent_modal_targets = ability_def.cost.as_ref().is_some_and(|cost| {
             ability_def.mode_abilities.iter().any(|mode| {
                 let resolved = build_resolved_from_def(mode, source_id, player);

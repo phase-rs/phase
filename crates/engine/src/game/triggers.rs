@@ -147,6 +147,21 @@ impl PendingTrigger {
             provenance: None,
         }
     }
+
+    /// CR 400.7 + CR 603.10a + CR 700.2: the source incarnation whose modal
+    /// no-repeat history this trigger's mode choice reads and records. A
+    /// triggered ability remembers the object it triggered from, so a
+    /// look-back trigger from a source that already left the battlefield keeps
+    /// that departed incarnation's "hasn't been chosen" history. A trigger with
+    /// no provable incarnation binds `LEGACY_INCARNATION` (matches no history).
+    pub(crate) fn modal_history_source(&self, state: &GameState) -> ObjectIncarnationRef {
+        self.ability
+            .source_ref(state)
+            .unwrap_or(ObjectIncarnationRef::of(
+                self.source_id,
+                crate::types::identifiers::LEGACY_INCARNATION,
+            ))
+    }
 }
 
 /// Legacy public scheduling classification retained for source and wire
@@ -9654,7 +9669,7 @@ fn dispatch_pending_trigger_context_core(
             );
             let mut unavailable_modes = super::ability_utils::compute_unavailable_modes(
                 state,
-                trigger.source_id,
+                trigger.modal_history_source(state),
                 &modal_for_player,
             );
             super::ability_utils::filter_modes_by_target_legality(
