@@ -5,7 +5,11 @@ mod jev_relay;
 mod logging;
 mod metrics;
 mod persistence;
+mod socket_decode;
+mod socket_io;
 mod wire;
+
+use socket_io::NegotiatedSocket;
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -94,7 +98,7 @@ use server_core::takeback::RewindOption;
 use std::borrow::Cow;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, OwnedMutexGuard};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
@@ -1098,6 +1102,8 @@ struct SocketIdentity {
     /// 5-minute expiry. Empty in `Full` mode (handled via `game_code` +
     /// `SessionManager` cleanup).
     lobby_host_game: Option<LobbyRegistration>,
+    /// Read-only listing stamp for the independent heartbeat decoder.
+    heartbeat_host: Option<watch::Sender<Option<LobbyRegistration>>>,
     seat_reservations: Vec<(String, String)>,
     lobby_reservations: Vec<(String, String)>,
     /// Tournament codes this socket created, mirroring
@@ -1479,6 +1485,9 @@ impl SocketIdentity {
     fn absorb_conn_state(&mut self, conn: ConnState) {
         self.lobby_subscribed = conn.subscribed;
         self.lobby_host_game = conn.host_game;
+        if let Some(host) = &self.heartbeat_host {
+            let _ = host.send_replace(self.lobby_host_game.clone());
+        }
         self.lobby_reservations = conn.reservations;
         self.lobby_organized_tournaments = conn.organized_tournaments;
         self.lobby_joined_tournaments = conn.joined_tournaments;
@@ -1779,11 +1788,12 @@ async fn reconnect_seat_while_session_locked(
     state: &SharedState,
     session: &mut GameSession,
     player_token: &str,
+    received_at: Instant,
 ) -> Result<GameState, String> {
     let player = session
         .player_for_token(player_token)
         .ok_or_else(|| "Invalid player token".to_string())?;
-    admit_seat_return_while_session_locked(state, session, player).await?;
+    admit_seat_return_while_session_locked(state, session, player, received_at).await?;
     Ok(server_core::filter_state_for_player(&session.state, player))
 }
 
@@ -1794,11 +1804,12 @@ async fn admit_seat_return_while_session_locked(
     state: &SharedState,
     session: &mut GameSession,
     player: PlayerId,
+    received_at: Instant,
 ) -> Result<(), String> {
     let outcome = state
         .lock()
         .await
-        .attempt_reconnect(&session.game_code, player);
+        .attempt_reconnect(&session.game_code, player, received_at);
     match outcome {
         // `NotFound` means the player was never marked disconnected, which has
         // always been allowed to reconnect anyway.
@@ -1991,6 +2002,7 @@ async fn transition_listing(
 /// The one Full seat-departure authority, called with the game's session guard
 /// held; a no-op unless `tx` still owns the seat. A pregame room whose seat 0
 /// departs is marked away, which delists it.
+#[allow(clippy::too_many_arguments)]
 async fn depart_full_seat_while_session_locked(
     state: &SharedState,
     connections: &SharedConnections,
@@ -1999,6 +2011,7 @@ async fn depart_full_seat_while_session_locked(
     session: &mut GameSession,
     player_id: PlayerId,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    disconnected_at: Instant,
 ) {
     let game_code = session.game_code.clone();
     let peers = {
@@ -2013,7 +2026,12 @@ async fn depart_full_seat_while_session_locked(
         players.values().cloned().collect::<Vec<_>>()
     };
     session.mark_disconnected(player_id);
-    state.lock().await.record_disconnect(&game_code, player_id);
+    let grace = {
+        let mut registry = state.lock().await;
+        let grace = registry.reconnect.grace_period;
+        registry.record_disconnect(&game_code, player_id, disconnected_at);
+        grace
+    };
     if player_id == PlayerId(0) && session.is_pregame() {
         transition_listing(lobby, lobby_subscribers, &game_code, |lob| {
             lob.mark_host_away(&game_code)
@@ -2021,9 +2039,14 @@ async fn depart_full_seat_while_session_locked(
         .await;
     }
     let full_key = session.full_runtime.as_ref().map(|r| r.key.clone());
+    let remaining = grace.saturating_sub(disconnected_at.elapsed());
+    let grace_seconds = remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() != 0))
+        .min(u64::from(u32::MAX)) as u32;
     let message = ServerMessage::OpponentDisconnected {
         full_key,
-        grace_seconds: 120,
+        grace_seconds,
         player: Some(player_id),
     };
     for sender in peers {
@@ -2044,10 +2067,11 @@ async fn return_full_seat_while_session_locked(
     player: PlayerId,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     hello: Option<&ClientHelloInfo>,
+    received_at: Instant,
 ) -> Result<(), String> {
     let game_code = session.game_code.clone();
     let was_disconnected = !session.connected[player.0 as usize];
-    admit_seat_return_while_session_locked(state, session, player).await?;
+    admit_seat_return_while_session_locked(state, session, player, received_at).await?;
     install_full_sender_while_state_locked(connections, &game_code, player, tx).await;
     if player == PlayerId(0) {
         let (host_version, host_build_commit) = hello
@@ -2090,6 +2114,7 @@ async fn disconnect_full_seat_if_current(
     lobby_subscribers: &SharedLobbySubscribers,
     identity: &SocketIdentity,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    disconnected_at: Instant,
 ) {
     let Some((game_code, player_id, player_token)) = identity.full_seat() else {
         return;
@@ -2121,6 +2146,7 @@ async fn disconnect_full_seat_if_current(
             &mut session,
             player_id,
             tx,
+            disconnected_at,
         )
         .await;
     }
@@ -2199,6 +2225,7 @@ async fn reconnect_draft_seat(
     draft_code: String,
     player_token: String,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    received_at: Instant,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let mut manager = draft_state.lock().await;
     if let Some((attached_code, _attached_seat, attached_token)) = identity.draft_seat() {
@@ -2215,7 +2242,7 @@ async fn reconnect_draft_seat(
         .get(&draft_code)
         .and_then(|session| session.seat_for_token(&player_token))
         .ok_or_else(|| "Invalid player token".to_string())?;
-    let view = manager.handle_reconnect(&draft_code, &player_token)?;
+    let view = manager.handle_reconnect(&draft_code, &player_token, received_at)?;
     install_draft_sender_while_state_locked(connections, &draft_code, seat, tx).await;
     if seat == DRAFT_HOST_SEAT {
         let (host_version, host_build_commit) = identity
@@ -2257,6 +2284,7 @@ async fn attach_current_draft_match(
     identity: &mut SocketIdentity,
     draft_code: &str,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    received_at: Instant,
 ) -> Result<Option<DraftMatchAttachment>, String> {
     let (attached_draft, draft_seat, draft_token) = identity
         .draft_seat()
@@ -2339,7 +2367,8 @@ async fn attach_current_draft_match(
             }
             let was_disconnected = !session.connected[player_index];
 
-            reconnect_seat_while_session_locked(state, &mut session, &player_token).await?;
+            reconnect_seat_while_session_locked(state, &mut session, &player_token, received_at)
+                .await?;
             let decision = DecisionSnapshot::from_state(&session.state);
             let game_started =
                 build_game_started_message(&session, &decision, game_player, None, Vec::new());
@@ -2359,6 +2388,7 @@ async fn attach_current_draft_match(
                         &mut previous,
                         previous_player,
                         tx,
+                        std::time::Instant::now(),
                     )
                     .await;
                 }
@@ -2415,6 +2445,7 @@ async fn disconnect_draft_seat_if_current(
     lobby_subscribers: &SharedLobbySubscribers,
     identity: &SocketIdentity,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    disconnected_at: Instant,
 ) {
     let Some((draft_code, seat, player_token)) = identity.draft_seat() else {
         return;
@@ -2444,7 +2475,7 @@ async fn disconnect_draft_seat_if_current(
 
     players.remove(&player_id);
     drop(conns);
-    manager.handle_disconnect(draft_code, seat);
+    manager.handle_disconnect(draft_code, seat, disconnected_at);
     // Not status-gated: the registry holds a draft code only while its pod is in
     // `Lobby`, apart from the gap between `StartDraft`'s status change and its
     // unregister, where a seat-0 transition can emit one extra listing delta that
@@ -2530,8 +2561,12 @@ fn publish_restored_full_session(
     // a failed resume is not reconnectable.
     let default_grace = mgr.reconnect.grace_period;
     for player in reconnect_players {
-        mgr.reconnect
-            .record_disconnect(game_code, player, default_grace);
+        mgr.reconnect.record_disconnect(
+            game_code,
+            player,
+            default_grace,
+            std::time::Instant::now(),
+        );
     }
 
     // Restore lobby entry if game hasn't started.
@@ -4421,47 +4456,6 @@ struct ConnectionSlot {
     armed: bool,
 }
 
-/// Per-connection WebSocket writer. Once the text handshake negotiates a wire
-/// format, every later JSON text send passes through the same envelope path —
-/// including direct errors as well as queued broadcasts.
-struct NegotiatedSocket {
-    inner: WebSocket,
-    wire_format: Option<WireFormat>,
-}
-
-impl NegotiatedSocket {
-    fn new(inner: WebSocket) -> Self {
-        Self {
-            inner,
-            wire_format: None,
-        }
-    }
-
-    fn set_wire_format(&mut self, wire_format: Option<WireFormat>) {
-        self.wire_format = wire_format;
-    }
-
-    fn uses_gzip_envelope(&self) -> bool {
-        self.wire_format == Some(WireFormat::GzipEnvelopeV1)
-    }
-
-    async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
-        let message = match message {
-            Message::Text(json) => {
-                wire::encode_json_message(json.to_string(), self.uses_gzip_envelope())
-                    .await
-                    .map_err(axum::Error::new)?
-            }
-            other => other,
-        };
-        self.inner.send(message).await
-    }
-
-    async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
-        self.inner.recv().await
-    }
-}
-
 impl ConnectionSlot {
     fn new(player_count: SharedPlayerCount) -> Self {
         Self {
@@ -4503,17 +4497,18 @@ async fn handle_socket(
     online_count: u32,
     slot: ConnectionSlot,
 ) {
-    let mut socket = NegotiatedSocket::new(socket);
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (tx, rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (mut socket, frames, mut transport) = socket_io::start(socket, rx);
+    let (heartbeat_host, host_registration) = watch::channel(None);
 
     // The slot was reserved before the upgrade; from here the two `fetch_sub`
     // paths below own the release, so the guard must not also fire.
     slot.disarm();
     let count = online_count;
     info!(online_count = count, "client connected");
-    broadcast_player_count(&lobby_subscribers, count).await;
 
     let mut identity = SocketIdentity {
+        heartbeat_host: Some(heartbeat_host),
         game_code: None,
         player_id: None,
         player_token: None,
@@ -4532,7 +4527,6 @@ async fn handle_socket(
         spectator_visibility: None,
         spectator_game_code: None,
     };
-    let mut rate_limiter = RateLimiter::new();
 
     // Greet the client with our version identity. The client uses this to
     // decide whether to proceed (protocol-version mismatch ⇒ it gives up
@@ -4550,91 +4544,83 @@ async fn handle_socket(
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if socket.send(Message::text(json)).await.is_err() {
+            transport.shutdown().await;
             let count = player_count.fetch_sub(1, Ordering::Relaxed) - 1;
             broadcast_player_count(&lobby_subscribers, count).await;
             return;
         }
     }
 
-    loop {
-        tokio::select! {
-            biased;
-            Some(msg) = rx.recv() => {
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    if socket.send(Message::text(json)).await.is_err() { break; }
-                }
-            }
-
-            result = socket.recv() => {
-                match result {
-                    // RFC 6455 §5.5.1: tungstenite sends the queued Close reply on the next read, which then ends the stream.
-                    Some(Ok(Message::Close(_))) => {
-                        while let Some(Ok(_)) = socket.recv().await {}
-                        break;
-                    }
-                    Some(Ok(msg)) => {
-                        if !rate_limiter.check() {
-                            debug!("rate limit exceeded, dropping message");
-                            continue;
-                        }
-
-                        let text = match msg {
-                            Message::Text(t) => t.to_string(),
-                            Message::Binary(bytes) if socket.uses_gzip_envelope() => {
-                                match wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES).await {
-                                    Ok(text) => text,
-                                    Err(error) => {
-                                        warn!(%error, "failed to decode client binary envelope");
-                                        continue;
-                                    }
-                                }
-                            }
-                            _ => continue,
-                        };
-
-                        let client_msg: ClientMessage = match serde_json::from_str(&text) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                warn!(error = %e, "failed to parse client message");
-                                let err_msg = ServerMessage::error(format!("Invalid message: {}", e));
-                                if let Ok(json) = serde_json::to_string(&err_msg) {
-                                    let _ = socket.send(Message::text(json)).await;
-                                }
-                                continue;
-                            }
-                        };
-
-                        let span = identity.session_span.clone()
-                            .unwrap_or_else(|| info_span!("ws_message"));
-                        handle_client_message(
-                            client_msg,
-                            &mut socket,
-                            &state,
-                            &draft_state,
-                            &draft_pools,
-                            &connections,
-                            &db,
-                            &lobby,
-                            &lobby_subscribers,
-                            &player_count,
-                            &game_db,
-                            &draft_spectators,
-                            &game_spectators,
-                            &tx,
-                            &mut identity,
-                            mode,
-                            &context,
-                        )
-                        .instrument(span)
-                        .await;
-                    }
-                    Some(Err(_)) | None => break,
-                }
-            }
+    // Decode and heartbeat routing run independently of this ordered application
+    // loop. Start them only after ServerHello has flushed in its required text
+    // format, before an eager ClientHello can negotiate binary envelopes.
+    let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
+    let (application, mut incoming) = mpsc::unbounded_channel();
+    transport.set_decoder(tokio::spawn(socket_decode::run(
+        frames,
+        socket.clone(),
+        lobby.clone(),
+        host_registration,
+        mode,
+        hello_tx,
+        application,
+    )));
+    let mut closed = transport.closed();
+    broadcast_player_count(&lobby_subscribers, count).await;
+    let accepted = tokio::select! {
+        biased;
+        _ = closed.wait_for(Option::is_some) => None,
+        accepted = hello_rx => accepted.ok(),
+    };
+    if let Some(hello) = accepted {
+        identity.client_hello = Some(hello);
+        loop {
+            let socket_io::Received {
+                message: client_msg,
+                received_at,
+            } = tokio::select! {
+                biased;
+                _ = closed.wait_for(Option::is_some) => break,
+                message = incoming.recv() => match message {
+                    Some(message) => message,
+                    None => break,
+                },
+            };
+            let span = identity
+                .session_span
+                .clone()
+                .unwrap_or_else(|| info_span!("ws_message"));
+            // Do not cancel a mutating command partway through its awaits.
+            // Transport death and control traffic remain independent; the first
+            // death timestamp survives until ordered session cleanup can run.
+            handle_client_message(
+                client_msg,
+                &mut socket,
+                &state,
+                &draft_state,
+                &draft_pools,
+                &connections,
+                &db,
+                &lobby,
+                &lobby_subscribers,
+                &player_count,
+                &game_db,
+                &draft_spectators,
+                &game_spectators,
+                &tx,
+                &mut identity,
+                mode,
+                &context,
+                received_at,
+            )
+            .instrument(span)
+            .await;
         }
     }
 
-    // The peer's TCP close must not wait on the cleanup's lock acquisitions below.
+    let disconnected_at = transport.disconnected_at().unwrap_or_else(Instant::now);
+    // Transport teardown must not wait on session, registry or lobby cleanup.
+    transport.shutdown().await;
     drop(socket);
 
     // Socket closed -- handle disconnect
@@ -4650,6 +4636,7 @@ async fn handle_socket(
         &lobby_subscribers,
         &identity,
         &tx,
+        disconnected_at,
     )
     .await;
 
@@ -4660,6 +4647,7 @@ async fn handle_socket(
         &lobby_subscribers,
         &identity,
         &tx,
+        disconnected_at,
     )
     .await;
 
@@ -5748,9 +5736,12 @@ async fn sweep_draft_seat_expiry(
     lobby_subscribers: &SharedLobbySubscribers,
     game_db: &SharedGameDb,
 ) {
+    // Capture before joining the draft lock queue. A sweep queued before a
+    // timely reconnect must not age that lease while it waits behind compute.
+    let as_of = Instant::now();
     let sweep = {
         let mut manager = draft_state.lock().await;
-        let sweep = manager.sweep_expired_seats();
+        let sweep = manager.sweep_expired_seats(as_of);
         for code in &sweep.freed {
             let claimed = manager.sessions.get(code).map_or(0, |session| {
                 session
@@ -8902,72 +8893,10 @@ async fn handle_client_message(
     identity: &mut SocketIdentity,
     mode: Mode,
     context: &ServerContext,
+    received_at: Instant,
 ) {
-    // Handshake gate: ClientHello must be the first message. See
-    // `classify_hello_gate` for the full truth table.
-    match classify_hello_gate(
-        identity.client_hello.is_some(),
-        &client_msg,
-        hello_acceptance(mode),
-    ) {
-        HelloGateOutcome::Accept(info) => {
-            info!(
-                version = %info.client_version,
-                commit = %info.build_commit,
-                "ClientHello accepted"
-            );
-            socket.set_wire_format(info.wire_format);
-            identity.client_hello = Some(info);
-            return;
-        }
-        HelloGateOutcome::RejectInvalidHello(reason) => {
-            warn!(%reason, "ClientHello rejected at wire guard");
-            let msg = ServerMessage::error(reason);
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
-            return;
-        }
-        HelloGateOutcome::RejectProtocol { client, server } => {
-            warn!(
-                client_protocol = client,
-                server_protocol = server,
-                "protocol version mismatch at ClientHello"
-            );
-            // Branch on which side is older so the user-facing remedy points at
-            // the right party. "Please update" is wrong when the *server* is
-            // the older one (post-bump preview server rolled back, or operator
-            // running a stale build behind a freshly-deployed client).
-            let remedy = if client < server {
-                "Please update your client."
-            } else {
-                "This server is older than your client; wait for the rollout to complete."
-            };
-            let msg = ServerMessage::error(format!(
-                "Protocol version mismatch (client={client} server={server}). {remedy}"
-            ));
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
-            return;
-        }
-        HelloGateOutcome::RejectHandshakeRequired => {
-            warn!("client sent non-hello message before ClientHello");
-            let msg =
-                ServerMessage::error("ClientHello required before any other message".to_string());
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
-            return;
-        }
-        HelloGateOutcome::IgnoreRedundantHello => {
-            debug!("ignoring redundant ClientHello");
-            return;
-        }
-        HelloGateOutcome::PassThrough => {
-            // Fall through to the regular dispatch below.
-        }
-    }
+    // The independent decoder owns ClientHello admission and heartbeat routing.
+    // This loop receives only ordinary commands after an accepted handshake.
 
     // Mode gate: some messages are meaningless in one mode or the other.
     // Rejecting here keeps every handler below single-purpose — they never
@@ -9018,9 +8947,8 @@ async fn handle_client_message(
     }
 
     match client_msg {
-        ClientMessage::ClientHello { .. } => {
-            // Unreachable: IgnoreRedundantHello above handled this case.
-            debug!("unreachable ClientHello arm");
+        ClientMessage::ClientHello { .. } | ClientMessage::Ping { .. } => {
+            unreachable!("the independent decoder consumes handshake and heartbeat frames");
         }
         // These terminal-only messages deliberately do not touch identity,
         // SessionManager, connection registration, or reconnect leases. A
@@ -9519,6 +9447,7 @@ async fn handle_client_message(
                                         player,
                                         tx,
                                         identity.client_hello.as_ref(),
+                                        received_at,
                                     )
                                     .await
                                     {
@@ -9538,6 +9467,7 @@ async fn handle_client_message(
                                     state,
                                     &mut session,
                                     &player_token,
+                                    received_at,
                                 )
                                 .await
                                 {
@@ -11487,23 +11417,6 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::Ping { .. } => {
-            // Mode-agnostic keepalive: the broker is the single authority for
-            // the Pong reply on both Full and LobbyOnly servers, whether it is
-            // computed under the lobby lock (`Broker::handle`, which also
-            // refreshes a host's liveness) or without it
-            // (`Broker::stateless_reply`, in `dispatch_broker_msg`).
-            dispatch_broker(
-                &client_msg,
-                lobby,
-                lobby_subscribers,
-                player_count,
-                tx,
-                identity,
-            )
-            .await;
-        }
-
         ClientMessage::SeatMutate { mutation } => {
             if matches!(mode, ServerMode::LobbyOnly) {
                 let msg = ServerMessage::error(
@@ -12298,6 +12211,7 @@ async fn handle_client_message(
                 draft_code.clone(),
                 player_token,
                 tx,
+                received_at,
             )
             .await;
 
@@ -12312,6 +12226,7 @@ async fn handle_client_message(
                         identity,
                         &draft_code,
                         tx,
+                        received_at,
                     )
                     .await
                     {
@@ -12798,6 +12713,7 @@ mod state_transport_derived_tests {
                 .await
                 .insert(game_code.clone(), HashMap::from([(ai_player, ai_tx)]));
             let identity = SocketIdentity {
+                heartbeat_host: None,
                 game_code: Some(game_code.clone()),
                 player_id: Some(PlayerId(0)),
                 player_token: Some(player_token),
@@ -12899,6 +12815,7 @@ mod state_transport_derived_tests {
             );
             let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
             let identity = SocketIdentity {
+                heartbeat_host: None,
                 game_code: Some(game_code),
                 player_id: Some(PlayerId(0)),
                 player_token: Some(player_token),
@@ -13077,6 +12994,7 @@ mod interaction_preview_route_tests {
 
     fn empty_identity() -> SocketIdentity {
         SocketIdentity {
+            heartbeat_host: None,
             game_code: None,
             player_id: None,
             player_token: None,
@@ -13480,6 +13398,7 @@ mod full_socket_authority_tests {
 
     fn empty_identity() -> SocketIdentity {
         SocketIdentity {
+            heartbeat_host: None,
             game_code: None,
             player_id: None,
             player_token: None,
@@ -13752,6 +13671,7 @@ mod full_socket_authority_tests {
             &Arc::new(Mutex::new(Vec::new())),
             &stale_a,
             &a_tx,
+            std::time::Instant::now(),
         )
         .await;
 
@@ -13893,9 +13813,14 @@ mod full_socket_authority_tests {
             let mut session = lock_session(&state, &persisted.key.game_code)
                 .await
                 .expect("the restored room is registered");
-            reconnect_seat_while_session_locked(&state, &mut session, &player_token)
-                .await
-                .expect("restored Full session accepts its persisted token");
+            reconnect_seat_while_session_locked(
+                &state,
+                &mut session,
+                &player_token,
+                std::time::Instant::now(),
+            )
+            .await
+            .expect("restored Full session accepts its persisted token");
         }
         let mut fresh_identity = empty_identity();
         attach_full_seat(
@@ -13941,6 +13866,7 @@ mod full_socket_authority_tests {
                     &Arc::new(Mutex::new(Vec::new())),
                     &identity_a,
                     &a_tx,
+                    std::time::Instant::now(),
                 )
                 .await;
             });
@@ -13977,6 +13903,7 @@ mod draft_socket_authority_tests {
 
     fn empty_identity() -> SocketIdentity {
         SocketIdentity {
+            heartbeat_host: None,
             game_code: None,
             player_id: None,
             player_token: None,
@@ -14440,6 +14367,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token,
             &tx,
+            std::time::Instant::now(),
         )
         .await
         .expect("attach draft seat");
@@ -14494,6 +14422,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token.clone(),
             &stale_tx,
+            std::time::Instant::now(),
         )
         .await
         .expect("attach original socket");
@@ -14507,6 +14436,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token,
             &current_tx,
+            std::time::Instant::now(),
         )
         .await
         .expect("replace original socket");
@@ -14546,6 +14476,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token.clone(),
             &a_tx,
+            std::time::Instant::now(),
         )
         .await
         .expect("initial reconnect attaches A");
@@ -14559,6 +14490,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token.clone(),
             &b_tx,
+            std::time::Instant::now(),
         )
         .await
         .expect("replacement reconnect attaches B");
@@ -14580,6 +14512,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token,
             &a_tx,
+            std::time::Instant::now(),
         )
         .await
         .expect_err("superseded A must not replace B after a stale reconnect");
@@ -14621,6 +14554,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token.clone(),
             &a_tx,
+            std::time::Instant::now(),
         )
         .await
         .unwrap();
@@ -14634,6 +14568,7 @@ mod draft_socket_authority_tests {
             draft_code.clone(),
             player_token,
             &b_tx,
+            std::time::Instant::now(),
         )
         .await
         .unwrap();
@@ -14645,6 +14580,7 @@ mod draft_socket_authority_tests {
             &subs,
             &identity_a,
             &a_tx,
+            std::time::Instant::now(),
         )
         .await;
 
@@ -15196,6 +15132,22 @@ mod issue_4548_full_create_tests {
         spawn_server_with_mode(ServerMode::Full).await
     }
 
+    pub(super) async fn spawn_full_mode_server_with_db(
+        db: CardDatabase,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        AppState,
+    ) {
+        spawn_server(
+            ServerMode::Full,
+            draft_pools::DraftPools::default(),
+            Arc::new(db),
+        )
+        .await
+    }
+
     pub(super) async fn spawn_server_with_mode(
         mode: ServerMode,
     ) -> (
@@ -15204,7 +15156,12 @@ mod issue_4548_full_create_tests {
         tempfile::TempDir,
         AppState,
     ) {
-        spawn_server(mode, draft_pools::DraftPools::default()).await
+        spawn_server(
+            mode,
+            draft_pools::DraftPools::default(),
+            Arc::new(CardDatabase::default()),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -15234,6 +15191,7 @@ mod issue_4548_full_create_tests {
     async fn spawn_server(
         mode: ServerMode,
         pools: draft_pools::DraftPools,
+        db: Arc<CardDatabase>,
     ) -> (
         String,
         tokio::task::JoinHandle<()>,
@@ -15253,7 +15211,7 @@ mod issue_4548_full_create_tests {
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
             draft_pools: Arc::new(pools),
             connections: Arc::new(Mutex::new(HashMap::new())),
-            db: Arc::new(CardDatabase::default()),
+            db,
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -15933,7 +15891,10 @@ mod issue_4548_full_create_tests {
 
         /// The subscriber's listing frames for this room since the last call.
         async fn listing(&mut self) -> Vec<&'static str> {
-            listing_of(&frames_until_pong(&mut self.sub).await, &self.code)
+            listing_of(
+                &frames_until_lobby_snapshot(&mut self.sub).await,
+                &self.code,
+            )
         }
 
         /// Closes the host socket and returns the listing frames its departure sent.
@@ -16035,15 +15996,16 @@ mod issue_4548_full_create_tests {
             .any(|game| game.game_code == code)
     }
 
-    /// Every frame queued for `sock` before a fresh `Ping` is answered.
-    async fn frames_until_pong(sock: &mut TestWs) -> Vec<ServerMessage> {
-        static NEXT_PING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let timestamp = NEXT_PING.fetch_add(1, Ordering::Relaxed);
-        send_test_message(sock, &ClientMessage::Ping { timestamp }, false).await;
+    /// Drain the application FIFO through an ordered lobby snapshot. Heartbeat
+    /// replies intentionally bypass that FIFO and cannot serve as this barrier.
+    /// Subscribe is idempotent for subscriber fixtures; participant fixtures
+    /// acquire a subscription which ordinary socket cleanup releases.
+    async fn frames_until_lobby_snapshot(sock: &mut TestWs) -> Vec<ServerMessage> {
+        send_test_message(sock, &ClientMessage::SubscribeLobby, false).await;
         let mut frames = Vec::new();
         loop {
             match recv_server_message(sock).await {
-                ServerMessage::Pong { timestamp: t } if t == timestamp => return frames,
+                ServerMessage::LobbyUpdate { .. } => return frames,
                 other => frames.push(other),
             }
         }
@@ -16213,7 +16175,7 @@ mod issue_4548_full_create_tests {
             let mut room = host_room(&url, 2, true, None).await;
             let host = room.host.as_mut().expect("host socket open");
             send_test_message(host, &ClientMessage::AbandonGame, false).await;
-            let frames = frames_until_pong(host).await;
+            let frames = frames_until_lobby_snapshot(host).await;
             assert!(frames
                 .iter()
                 .any(|f| matches!(f, ServerMessage::GameAbandoned { .. })));
@@ -16337,6 +16299,57 @@ mod issue_4548_full_create_tests {
     }
 
     #[tokio::test]
+    async fn a_timely_reconnect_can_wait_past_grace_for_the_game_executor() {
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        timed(server, async {
+            let room = host_room(&url, 2, true, None).await;
+            let handle = app.sessions.lock().await.session(&room.code).unwrap();
+            let mut busy = handle.lock().await;
+            busy.mark_disconnected(PlayerId(0));
+            let disconnected_at = Instant::now();
+            app.sessions.lock().await.reconnect.record_disconnect(
+                &room.code,
+                PlayerId(0),
+                Duration::from_secs(120),
+                disconnected_at,
+            );
+            let mut returning = connect_and_hello(url.clone()).await;
+            send_test_message(&mut returning, &room.reconnect(), false).await;
+            send_test_message(
+                &mut returning,
+                &ClientMessage::Ping { timestamp: 91 },
+                false,
+            )
+            .await;
+            while !matches!(
+                recv_server_message(&mut returning).await,
+                ServerMessage::Pong { timestamp: 91 }
+            ) {}
+            // The decoder has observed the reconnect. Put its deadline just
+            // ahead of this barrier, then keep the executor busy beyond it.
+            app.sessions.lock().await.reconnect.record_disconnect(
+                &room.code,
+                PlayerId(0),
+                disconnected_at.elapsed() + Duration::from_millis(50),
+                disconnected_at,
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(busy);
+            loop {
+                match recv_server_message(&mut returning).await {
+                    ServerMessage::SessionAttached { .. } => break,
+                    ServerMessage::Error { message, .. } => {
+                        panic!("a timely reconnect was charged for executor wait: {message}");
+                    }
+                    _ => {}
+                }
+            }
+            assert!(handle.lock().await.connected[0]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn a_host_returning_after_its_grace_expired_is_refused_and_the_room_stays_delisted() {
         let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
         timed(server, async {
@@ -16408,7 +16421,7 @@ mod issue_4548_full_create_tests {
             let _second = return_as(&url, Some("build-c"), &room.reconnect()).await;
 
             assert_eq!(room.listing().await, ["Removed"]);
-            let frames = frames_until_pong(&mut sub_c).await;
+            let frames = frames_until_lobby_snapshot(&mut sub_c).await;
             assert_eq!(listing_of(&frames, &room.code), ["Updated"]);
             assert!(frames.iter().any(|frame| matches!(
                 frame,
@@ -16435,14 +16448,14 @@ mod issue_4548_full_create_tests {
             let (mut sub_b, _) = subscribe_as(&url, "build-b").await;
             assert_eq!(room.drop_host(&app).await, ["Removed"]);
             assert_eq!(
-                listing_of(&frames_until_pong(&mut sub_b).await, &room.code),
+                listing_of(&frames_until_lobby_snapshot(&mut sub_b).await, &room.code),
                 ["Removed"]
             );
 
             let _host = return_as(&url, Some("build-b"), &room.reconnect()).await;
             assert!(room.listing().await.is_empty());
             assert_eq!(
-                listing_of(&frames_until_pong(&mut sub_b).await, &room.code),
+                listing_of(&frames_until_lobby_snapshot(&mut sub_b).await, &room.code),
                 ["Added"]
             );
         })
@@ -16481,7 +16494,7 @@ mod issue_4548_full_create_tests {
                 assert_eq!(sorted_codes(&snap_b), listed(&[1, 2]), "{mode:?}");
                 assert_eq!(sorted_codes(&snap_e), listed(&[0, 1, 2]), "{mode:?}");
                 for sub in [&mut sub_a, &mut sub_b, &mut sub_e] {
-                    frames_until_pong(sub).await;
+                    frames_until_lobby_snapshot(sub).await;
                 }
 
                 let mut host_b2 = connect_as(&url, "build-b").await;
@@ -16494,9 +16507,9 @@ mod issue_4548_full_create_tests {
                 while listing_of(&seen_b, &b2).last() != Some(&"Removed") {
                     seen_b.push(recv_server_message(&mut sub_b).await);
                 }
-                seen_b.extend(frames_until_pong(&mut sub_b).await);
-                let seen_a = frames_until_pong(&mut sub_a).await;
-                let seen_e = frames_until_pong(&mut sub_e).await;
+                seen_b.extend(frames_until_lobby_snapshot(&mut sub_b).await);
+                let seen_a = frames_until_lobby_snapshot(&mut sub_a).await;
+                let seen_e = frames_until_lobby_snapshot(&mut sub_e).await;
 
                 assert_eq!(
                     listing_of(&seen_b, &b2),
@@ -16673,11 +16686,11 @@ mod issue_4548_full_create_tests {
             let guest_token = attached_token(
                 send_and_reply(&mut guest, &password_join(&room.code, None, None)).await,
             );
-            frames_until_pong(&mut guest).await;
+            frames_until_lobby_snapshot(&mut guest).await;
             room.listing().await;
 
             assert_eq!(room.drop_host(&app).await, ["Removed"]);
-            assert!(frames_until_pong(&mut guest)
+            assert!(frames_until_lobby_snapshot(&mut guest)
                 .await
                 .iter()
                 .any(|frame| matches!(
@@ -16703,9 +16716,9 @@ mod issue_4548_full_create_tests {
                 server_core::session::HOST_AWAY_REFUSAL
             );
 
-            frames_until_pong(&mut guest).await;
+            frames_until_lobby_snapshot(&mut guest).await;
             let _host = return_as(&url, None, &room.reconnect()).await;
-            assert!(frames_until_pong(&mut guest)
+            assert!(frames_until_lobby_snapshot(&mut guest)
                 .await
                 .iter()
                 .any(|frame| matches!(
@@ -16776,7 +16789,7 @@ mod issue_4548_full_create_tests {
             attached_token(
                 send_and_reply(&mut guest, &password_join(&room.code, None, None)).await,
             );
-            frames_until_pong(&mut guest).await;
+            frames_until_lobby_snapshot(&mut guest).await;
             room.listing().await;
 
             let (draft_code, draft_token, _key, _start) = start_draft_match(&app).await;
@@ -16797,7 +16810,7 @@ mod issue_4548_full_create_tests {
 
             assert_eq!(room.listing().await, ["Removed"]);
             assert!(!snapshot_lists(&url, build_commit(), &room.code).await);
-            assert!(frames_until_pong(&mut guest)
+            assert!(frames_until_lobby_snapshot(&mut guest)
                 .await
                 .iter()
                 .any(|frame| matches!(
@@ -16951,7 +16964,7 @@ mod issue_4548_full_create_tests {
             ));
             room.listing().await;
             let mut host = room.host.take().expect("host socket open");
-            frames_until_pong(&mut host).await;
+            frames_until_lobby_snapshot(&mut host).await;
             let handle = app
                 .sessions
                 .lock()
@@ -17426,7 +17439,12 @@ mod issue_4548_full_create_tests {
         tempfile::TempDir,
         AppState,
     ) {
-        spawn_server(ServerMode::Full, tst_draft_pools()).await
+        spawn_server(
+            ServerMode::Full,
+            tst_draft_pools(),
+            Arc::new(CardDatabase::default()),
+        )
+        .await
     }
 
     /// A draft pod plus a lobby subscriber that saw it created.
@@ -17443,7 +17461,10 @@ mod issue_4548_full_create_tests {
         }
 
         async fn listing(&mut self) -> Vec<&'static str> {
-            listing_of(&frames_until_pong(&mut self.sub).await, &self.code)
+            listing_of(
+                &frames_until_lobby_snapshot(&mut self.sub).await,
+                &self.code,
+            )
         }
 
         async fn drop_host(&mut self, app: &AppState) -> Vec<&'static str> {
@@ -17483,7 +17504,7 @@ mod issue_4548_full_create_tests {
                 _ => {}
             }
         };
-        frames_until_pong(&mut host).await;
+        frames_until_lobby_snapshot(&mut host).await;
         let mut pod = HostedPod {
             sub,
             host: Some(host),
@@ -17781,13 +17802,15 @@ mod issue_4548_full_create_tests {
         timed(server, async {
             let (mut sub_b, _) = subscribe_as(&url, "build-b").await;
             let mut pod = host_pod(&url, "build-a", 3, true).await;
-            assert!(listing_of(&frames_until_pong(&mut sub_b).await, &pod.code).is_empty());
+            assert!(
+                listing_of(&frames_until_lobby_snapshot(&mut sub_b).await, &pod.code).is_empty()
+            );
             assert!(!snapshot_lists(&url, "build-b", &pod.code).await);
             assert!(snapshot_lists(&url, "build-a", &pod.code).await);
 
             assert_eq!(pod.drop_host(&app).await, ["Removed"]);
             assert_eq!(
-                listing_of(&frames_until_pong(&mut sub_b).await, &pod.code),
+                listing_of(&frames_until_lobby_snapshot(&mut sub_b).await, &pod.code),
                 ["Removed"]
             );
             let mut host = connect_as(&url, "build-b").await;
@@ -17796,7 +17819,7 @@ mod issue_4548_full_create_tests {
                 ServerMessage::DraftStateUpdate { .. }
             ));
             assert!(pod.listing().await.is_empty());
-            let frames = frames_until_pong(&mut sub_b).await;
+            let frames = frames_until_lobby_snapshot(&mut sub_b).await;
             assert_eq!(listing_of(&frames, &pod.code), ["Added"]);
             assert!(frames.iter().any(|frame| matches!(
                 frame,
@@ -17873,7 +17896,7 @@ mod issue_4548_full_create_tests {
             };
             assert!(away.listing().await.is_empty());
             assert_eq!(
-                listing_of(&frames_until_pong(&mut sub_b).await, &away.code),
+                listing_of(&frames_until_lobby_snapshot(&mut sub_b).await, &away.code),
                 ["Added"]
             );
             assert_eq!(
@@ -17896,7 +17919,7 @@ mod issue_4548_full_create_tests {
             let (drafting, pool_before) = {
                 let mut drafts = app.draft_sessions.lock().await;
                 let (code, _) = start_fixture_pod(&mut drafts);
-                drafts.handle_disconnect(&code, 0);
+                drafts.handle_disconnect(&code, 0, std::time::Instant::now());
                 let pool = drafts.sessions[&code].session.pools[0].len();
                 (code, pool)
             };
@@ -17981,7 +18004,7 @@ mod issue_4548_full_create_tests {
                 sock
             };
             assert!(pod.listing().await.is_empty());
-            let frames = frames_until_pong(&mut sub_b).await;
+            let frames = frames_until_lobby_snapshot(&mut sub_b).await;
             assert_eq!(listing_of(&frames, &pod.code), ["Added"]);
             assert!(frames.iter().any(|frame| matches!(
                 frame,
@@ -18163,7 +18186,7 @@ mod issue_4548_full_create_tests {
                     Some(1)
                 );
             }
-            let frames = frames_until_pong(&mut lapsed.sub).await;
+            let frames = frames_until_lobby_snapshot(&mut lapsed.sub).await;
             assert_eq!(listing_of(&frames, &lapsed.code), ["Updated"]);
             assert!(frames.iter().any(|frame| matches!(
                 frame,
@@ -18210,7 +18233,9 @@ mod issue_4548_full_create_tests {
 /// extraction of that arm into a shared handler.
 #[cfg(test)]
 mod game_submission_tests {
-    use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+    use super::issue_4548_full_create_tests::{
+        recv_server_message, spawn_full_mode_server, spawn_full_mode_server_with_db,
+    };
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
     use engine::types::actions::{DebugAction, DebugCardCreationKind};
@@ -18243,16 +18268,9 @@ mod game_submission_tests {
         assert!(!GameSubmission::Action(GameAction::PassPriority).is_zero_count_debug_create());
     }
 
-    /// Connect, handshake, and create a two-seat game so the socket carries an
-    /// authenticated `SocketIdentity` with both a `game_code` and a
-    /// `player_token`.
-    ///
-    /// Seat 1 never joins, so the game never *starts* — which is exactly the
-    /// reachable surface these tests need: everything up to and including
-    /// `SessionManager`'s verdict and the `Err(e) => ActionRejected` arm. The
-    /// `Ok(..)` broadcast fan-out is not reachable over this harness, because
-    /// `spawn_full_mode_server` builds `AppState` with an empty
-    /// `CardDatabase::default()`.
+    /// Connect and complete the wire handshake. Game creation is explicit so
+    /// empty-database refusal fixtures and supported-card native games share
+    /// the same connection path.
     pub(super) async fn connect_and_hello(
         url: String,
     ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
@@ -18327,25 +18345,26 @@ mod game_submission_tests {
     async fn create_started_ai_game(
         socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
         booster_pack_pool: Option<Vec<String>>,
+        deck: DeckData,
+        format_config: Option<engine::types::format::FormatConfig>,
     ) -> (String, String, server_core::FullSessionKey) {
         let create = ClientMessage::CreateGameWithSettings {
-            deck: DeckData::default(),
+            deck: deck.clone(),
             display_name: "Alice".to_string(),
             public: false,
             password: None,
             timer_seconds: None,
             player_count: 2,
             match_config: Default::default(),
-            // An explicit empty list, matching the host's `DeckData::default()`:
-            // this harness runs on an empty `CardDatabase`, where a random
-            // starter deck resolves to nothing and the create is refused.
+            // Always supply an explicit list: default fixtures use an empty
+            // database, while positive-action fixtures supply their own cards.
             ai_seats: vec![AiSeatRequest {
                 seat_index: 1,
                 difficulty: phase_ai::config::AiDifficulty::Easy,
                 deck_name: None,
-                deck: Some(DeckChoice::DeckList(Box::default())),
+                deck: Some(DeckChoice::DeckList(Box::new(deck))),
             }],
-            format_config: None,
+            format_config,
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
@@ -18381,6 +18400,139 @@ mod game_submission_tests {
     }
 
     #[tokio::test]
+    async fn zero_ai_followup_preserves_human_decision_for_normal_and_debug_actions() {
+        use engine::types::actions::MulliganChoice;
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::WaitingFor;
+
+        let db = CardDatabase::from_json_str(
+            r#"{
+            "network test land": {
+                "name": "Network Test Land",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"],
+                    "core_types": ["Land"],
+                    "subtypes": ["Forest"]
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null,
+                "abilities": [], "triggers": [], "static_abilities": [],
+                "replacements": [], "keywords": []
+            }
+        }"#,
+        )
+        .expect("minimal basic-land fixture");
+        let (url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = connect_and_hello(url).await;
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let (code, _, _) = create_started_ai_game(
+                &mut socket,
+                None,
+                deck,
+                Some(FormatConfig::freeform().with_sandbox()),
+            )
+            .await;
+            let mut revision = {
+                let session = lock_session(&app.sessions, &code).await.unwrap();
+                assert!(session.ai_seats.contains(&PlayerId(1)));
+                assert!(matches!(&session.state.waiting_for,
+                    WaitingFor::MulliganDecision { pending, .. }
+                        if matches!(pending.as_slice(), [entry] if entry.player == PlayerId(0))));
+                session.state_revision
+            };
+            for (label, action) in [
+                (
+                    "permission update",
+                    GameAction::RevokeDebugPermission {
+                        player_id: PlayerId(1),
+                    },
+                ),
+                (
+                    "debug creation",
+                    GameAction::Debug(DebugAction::CreateCard {
+                        card_name: "Network Test Land".to_string(),
+                        owner: PlayerId(0),
+                        zone: Zone::Battlefield,
+                        count: 1,
+                        attach_to: None,
+                        run_etb: false,
+                        nonlegendary: false,
+                        creation_kind: DebugCardCreationKind::Card,
+                    }),
+                ),
+            ] {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&ClientMessage::Action { action })
+                            .unwrap()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let reply = loop {
+                    let reply = recv_server_message(&mut socket).await;
+                    if matches!(
+                        &reply,
+                        ServerMessage::StateUpdate { .. }
+                            | ServerMessage::ActionRejected { .. }
+                            | ServerMessage::ActionFailed { .. }
+                            | ServerMessage::Error { .. }
+                    ) {
+                        break reply;
+                    }
+                };
+                let ServerMessage::StateUpdate {
+                    state_revision,
+                    state,
+                    legal_actions,
+                    auto_pass_recommended,
+                    viewer_interaction,
+                    ..
+                } = reply
+                else {
+                    panic!("{label}: expected the human StateUpdate, got {reply:?}");
+                };
+                assert_eq!(state_revision, revision + 1);
+                revision = state_revision;
+                assert!(!state.debug_permitted.contains(&PlayerId(1)));
+                if label == "debug creation" {
+                    assert!(state
+                        .objects
+                        .values()
+                        .any(|object| object.name == "Network Test Land"
+                            && object.owner == PlayerId(0)
+                            && object.zone == Zone::Battlefield));
+                }
+                assert!(matches!(&state.waiting_for,
+                    WaitingFor::MulliganDecision { pending, .. }
+                        if matches!(pending.as_slice(), [entry] if entry.player == PlayerId(0))));
+                assert!(
+                    legal_actions.contains(&GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    }),
+                    "{label}: the human still owes a mulligan decision"
+                );
+                assert!(!auto_pass_recommended);
+                assert!(viewer_interaction.can_submit);
+                assert_eq!(viewer_interaction.authorized_submitters, vec![0]);
+                let session = lock_session(&app.sessions, &code).await.unwrap();
+                assert_eq!(
+                    session.state_revision, state_revision,
+                    "no AI transition may have been hidden after the human snapshot"
+                );
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("human decision was not delivered after a zero-transition AI follow-up");
+    }
+
+    #[tokio::test]
     async fn native_shaped_full_create_preserves_cube_pool_through_start_and_ordinary_control() {
         let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
         let pool = vec![
@@ -18389,7 +18541,13 @@ mod game_submission_tests {
             "Undealt sentinel".to_string(),
         ];
         let mut native_host = connect_and_hello(url.clone()).await;
-        let (cube_code, _, _) = create_started_ai_game(&mut native_host, Some(pool.clone())).await;
+        let (cube_code, _, _) = create_started_ai_game(
+            &mut native_host,
+            Some(pool.clone()),
+            DeckData::default(),
+            None,
+        )
+        .await;
         {
             let sessions = app_state.sessions.lock().await;
             let cube = sessions.try_session(&cube_code).expect("Cube session");
@@ -18404,7 +18562,8 @@ mod game_submission_tests {
         }
 
         let mut ordinary_host = connect_and_hello(url).await;
-        let (ordinary_code, _, _) = create_started_ai_game(&mut ordinary_host, None).await;
+        let (ordinary_code, _, _) =
+            create_started_ai_game(&mut ordinary_host, None, DeckData::default(), None).await;
         assert!(app_state
             .sessions
             .lock()
@@ -18528,7 +18687,7 @@ mod game_submission_tests {
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let mut socket_a = connect_and_hello(url.clone()).await;
             let (game_code, player_token, full_key) =
-                create_started_ai_game(&mut socket_a, None).await;
+                create_started_ai_game(&mut socket_a, None, DeckData::default(), None).await;
 
             let mut socket_b = connect_and_hello(url).await;
             reconnect_started_game(&mut socket_b, &game_code, &player_token, full_key.clone())
@@ -19701,6 +19860,7 @@ mod handshake_tests {
 
     fn empty_identity() -> SocketIdentity {
         SocketIdentity {
+            heartbeat_host: None,
             game_code: None,
             player_id: None,
             player_token: None,
@@ -20418,6 +20578,7 @@ mod issue_4548_deadlock_tests {
 
     pub(super) fn empty_identity() -> SocketIdentity {
         SocketIdentity {
+            heartbeat_host: None,
             game_code: None,
             player_id: None,
             player_token: None,
@@ -20522,6 +20683,7 @@ mod issue_4548_deadlock_tests {
                 &Arc::new(Mutex::new(Vec::new())),
                 &identity_b,
                 &b_tx,
+                std::time::Instant::now(),
             ),
         )
         .await
@@ -20553,8 +20715,12 @@ mod issue_4548_deadlock_tests {
         let code = {
             let mut mgr = state.lock().await;
             let (code, _token) = mgr.create_game(PlayerDeckPayload::default(), None);
-            mgr.reconnect
-                .record_disconnect(&code, PlayerId(0), Duration::from_millis(0));
+            mgr.reconnect.record_disconnect(
+                &code,
+                PlayerId(0),
+                Duration::from_millis(0),
+                std::time::Instant::now(),
+            );
             code
         };
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -20633,8 +20799,12 @@ mod issue_4548_deadlock_tests {
         let (_file, game_db) = temp_game_db();
         {
             let mut mgr = state.lock().await;
-            mgr.reconnect
-                .record_disconnect("GONE01", PlayerId(0), Duration::from_millis(0));
+            mgr.reconnect.record_disconnect(
+                "GONE01",
+                PlayerId(0),
+                Duration::from_millis(0),
+                std::time::Instant::now(),
+            );
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
 
@@ -20670,8 +20840,12 @@ mod issue_4548_deadlock_tests {
         mgr.try_session(&code)
             .expect("session")
             .mark_disconnected(PlayerId(0));
-        mgr.reconnect
-            .record_disconnect(&code, PlayerId(0), Duration::from_millis(0));
+        mgr.reconnect.record_disconnect(
+            &code,
+            PlayerId(0),
+            Duration::from_millis(0),
+            std::time::Instant::now(),
+        );
         let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
         {
             let mut broker = lobby.lock().await;
@@ -20741,8 +20915,12 @@ mod issue_4548_deadlock_tests {
             let mut mgr = state.lock().await;
             let (code, _token) = mgr.create_game(PlayerDeckPayload::default(), None);
             mgr.try_session(&code).expect("session").game_started = true;
-            mgr.reconnect
-                .record_disconnect(&code, PlayerId(0), Duration::from_millis(0));
+            mgr.reconnect.record_disconnect(
+                &code,
+                PlayerId(0),
+                Duration::from_millis(0),
+                std::time::Instant::now(),
+            );
             code
         };
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -20798,10 +20976,18 @@ mod issue_4548_deadlock_tests {
             // Production prepares a terminal only for a started game, and an
             // unprepared started game is precisely the arm that defers.
             mgr.try_session(&code).expect("session").game_started = true;
-            mgr.reconnect
-                .record_disconnect(&code, PlayerId(0), Duration::from_millis(0));
-            mgr.reconnect
-                .record_disconnect("GONE02", PlayerId(0), Duration::from_millis(0));
+            mgr.reconnect.record_disconnect(
+                &code,
+                PlayerId(0),
+                Duration::from_millis(0),
+                std::time::Instant::now(),
+            );
+            mgr.reconnect.record_disconnect(
+                "GONE02",
+                PlayerId(0),
+                Duration::from_millis(0),
+                std::time::Instant::now(),
+            );
             code
         };
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -21393,7 +21579,7 @@ mod issue_4548_deadlock_tests {
             mgr.try_session(&code)
                 .expect("session")
                 .mark_disconnected(PlayerId(0));
-            mgr.record_disconnect(&code, PlayerId(0));
+            mgr.record_disconnect(&code, PlayerId(0), std::time::Instant::now());
             assert!(
                 !mgr.try_session(&code).expect("session").connected[0],
                 "reach guard: the host seat is disconnected"
@@ -21482,6 +21668,7 @@ mod issue_4548_deadlock_tests {
                     &Arc::new(Mutex::new(Vec::new())),
                     &identity,
                     &tx,
+                    std::time::Instant::now(),
                 )
                 .await;
             }
@@ -21598,7 +21785,7 @@ mod issue_4548_deadlock_tests {
         .expect("the seat attaches");
         {
             let mut mgr = state.lock().await;
-            mgr.record_disconnect(&game_code, PlayerId(0));
+            mgr.record_disconnect(&game_code, PlayerId(0), std::time::Instant::now());
         }
 
         // The in-flight transition: a snapshot taken from a handle that is

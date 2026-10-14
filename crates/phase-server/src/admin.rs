@@ -364,7 +364,7 @@ mod tests {
         assert!(state.lobby.lock().await.lobby_mut().has_game(&draft_code));
         let snapshot = {
             let mut drafts = state.draft_sessions.lock().await;
-            drafts.handle_disconnect(&draft_code, 0);
+            drafts.handle_disconnect(&draft_code, 0, std::time::Instant::now());
             assert!(drafts.reconnect.is_disconnected(&draft_code, PlayerId(0)));
             drafts.sessions[&draft_code].to_persisted()
         };
@@ -431,7 +431,7 @@ mod tests {
                 let (b, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
                 let (c, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
                 drafts.reconnect.grace_period = std::time::Duration::ZERO;
-                drafts.handle_disconnect(&c, 0);
+                drafts.handle_disconnect(&c, 0, std::time::Instant::now());
                 (a, b, c)
             };
             let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();

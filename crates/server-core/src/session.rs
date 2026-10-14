@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
@@ -2849,10 +2849,15 @@ impl SessionManager {
     /// the session half. Both run under one held session guard, so the presence
     /// gate the single `handle_disconnect` used to get from its registry lookup
     /// is supplied by the guard plus this call in the same critical section.
-    pub fn record_disconnect(&mut self, game_code: &str, player: PlayerId) {
+    pub fn record_disconnect(
+        &mut self,
+        game_code: &str,
+        player: PlayerId,
+        disconnected_at: Instant,
+    ) {
         let default_grace = self.reconnect.grace_period;
         self.reconnect
-            .record_disconnect(game_code, player, default_grace);
+            .record_disconnect(game_code, player, default_grace, disconnected_at);
         info!(game = %game_code, player = ?player, "player disconnected");
     }
 
@@ -2862,8 +2867,10 @@ impl SessionManager {
         &mut self,
         game_code: &str,
         player: PlayerId,
+        received_at: Instant,
     ) -> crate::reconnect::ReconnectResult {
-        self.reconnect.attempt_reconnect(game_code, player)
+        self.reconnect
+            .attempt_reconnect(game_code, player, received_at)
     }
 
     /// Look up game_code by player_token.
@@ -3052,7 +3059,7 @@ mod tests {
             };
             session.mark_disconnected(player);
         }
-        mgr.record_disconnect(game_code, player);
+        mgr.record_disconnect(game_code, player, std::time::Instant::now());
     }
 
     /// The pair `handle_reconnect` used to be: the session resolves the token,
@@ -3070,7 +3077,7 @@ mod tests {
                 .player_for_token(player_token)
                 .ok_or_else(|| "Invalid player token".to_string())?
         };
-        let outcome = mgr.attempt_reconnect(game_code, player);
+        let outcome = mgr.attempt_reconnect(game_code, player, std::time::Instant::now());
         let mut session = mgr
             .try_session(game_code)
             .ok_or_else(|| game_not_found(game_code))?;
@@ -3786,9 +3793,9 @@ mod tests {
         let (token2, _state) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
         let (other_code, other_token) = mgr.create_game(make_deck(), None);
 
-        mgr.record_disconnect(&code, PlayerId(0));
-        mgr.record_disconnect(&code, PlayerId(1));
-        mgr.record_disconnect(&other_code, PlayerId(0));
+        mgr.record_disconnect(&code, PlayerId(0), std::time::Instant::now());
+        mgr.record_disconnect(&code, PlayerId(1), std::time::Instant::now());
+        mgr.record_disconnect(&other_code, PlayerId(0), std::time::Instant::now());
 
         // While the game exists, both players' tokens resolve to it and both
         // seats hold a disconnect record.
