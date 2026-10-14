@@ -312,14 +312,6 @@ downloaded into the data volume on first boot. It exposes:
 `PHASE_LOBBY_ONLY=true` runs the same lightweight matchmaking mode as the public
 phase.rs server. Omit it for full server-hosted games and drafts.
 
-Full-mode AI batches retain every transition for presentation and rewind history,
-but derive legal actions and costs only for the final decision offered to players.
-Initial and reconnect snapshots share one decision derivation across their viewers,
-including reusing the final AI decision when AI play precedes the snapshot.
-Full-mode fan-out captures connection handles before projecting viewer state.
-Lobby expiry publishes ordered removals before route cleanup, without retaining
-the lobby lock while waiting for connection or spectator maps.
-
 Docker uses environment variables for the common options:
 
 | Environment variable | Equivalent flag | Default | Notes |

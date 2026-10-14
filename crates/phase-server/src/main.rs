@@ -26,7 +26,6 @@ use engine::ai_support::{
     activation_block_reasons_for_viewer as engine_activation_block_reasons_for_viewer,
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
     end_continuous_effect_offers as engine_end_continuous_effect_offers,
-    legal_actions_full as engine_legal_actions_full,
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
     with_viewer_actions as engine_with_viewer_actions,
 };
@@ -5273,6 +5272,17 @@ async fn dispatch_broker_msg(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
 ) {
+    // An unhosted heartbeat has no broker side effects. Keep its liveness
+    // independent of unrelated listing work; hosts still refresh their stamp
+    // through Broker::handle before receiving the same ordered Pong.
+    if let (lobby_broker::LobbyClientMessage::Ping { timestamp }, None) =
+        (&lobby_msg, &identity.lobby_host_game)
+    {
+        let _ = tx.send(ServerMessage::Pong {
+            timestamp: *timestamp,
+        });
+        return;
+    }
     let mut conn = identity.to_conn_state();
     let mut broker = lobby.lock().await;
     let outbounds = broker.handle(&mut conn, lobby_msg, &SysEnv);
@@ -12548,7 +12558,8 @@ mod state_transport_derived_tests {
             free_first_mulligan: false,
             declared: Vec::new(),
         };
-        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&state);
+        let (legal_actions, spell_costs, by_object) =
+            engine::ai_support::legal_actions_full(&state);
         (
             state,
             Vec::new(),
@@ -15181,6 +15192,30 @@ mod issue_4548_full_create_tests {
         AppState,
     ) {
         spawn_server(mode, draft_pools::DraftPools::default()).await
+    }
+
+    #[tokio::test]
+    async fn unhosted_ping_remains_responsive_while_the_broker_is_locked() {
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = connect_and_hello(url).await;
+            // Complete the hello path before deliberately holding its broker.
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 1 }, false).await;
+            while !matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::Pong { timestamp: 1 }
+            ) {}
+            let held = app.lobby.lock().await;
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 2 }, false).await;
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::Pong { timestamp: 2 }
+            ));
+            drop(held);
+        })
+        .await;
+        server.abort();
+        result.expect("an unhosted socket must answer Ping independently of the broker");
     }
 
     async fn spawn_server(
@@ -20844,6 +20879,63 @@ mod issue_4548_deadlock_tests {
             },
             &SysEnv,
         );
+    }
+
+    #[tokio::test]
+    async fn hosted_ping_still_refreshes_the_listing_liveness_stamp() {
+        struct AncientEnv;
+        impl BrokerEnv for AncientEnv {
+            fn now_ms(&self) -> u64 {
+                0
+            }
+            fn new_token(&self) -> String {
+                SysEnv.new_token()
+            }
+            fn new_game_code(&self) -> String {
+                SysEnv.new_game_code()
+            }
+        }
+        let code = "ABC123";
+        let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+        let mut identity = empty_identity();
+        identity.lobby_host_game = Some(lobby.lock().await.lobby_mut().register_game(
+            code,
+            RegisterGameRequest {
+                public: true,
+                ..Default::default()
+            },
+            &AncientEnv,
+        ));
+        assert!(lobby
+            .lock()
+            .await
+            .lobby()
+            .check_expired(300, &SysEnv)
+            .iter()
+            .any(|registration| registration.game_code() == code));
+        let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let count = Arc::new(AtomicU32::new(1));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        dispatch_broker_msg(
+            lobby_broker::LobbyClientMessage::Ping { timestamp: 7 },
+            &lobby,
+            &subscribers,
+            &count,
+            &tx,
+            &mut identity,
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMessage::Pong { timestamp: 7 })
+        ));
+        let broker = lobby.lock().await;
+        assert!(broker.lobby().public_game(code).is_some());
+        assert!(!broker
+            .lobby()
+            .check_expired(300, &SysEnv)
+            .iter()
+            .any(|registration| registration.game_code() == code));
     }
 
     #[tokio::test]
