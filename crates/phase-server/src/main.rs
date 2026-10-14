@@ -2892,68 +2892,18 @@ async fn serve() {
             // Every tick, not only the ticks a lobby entry lapsed: the
             // tournament half of this sweep runs on its own lifecycle clocks
             // and has no shell-side decline to wait for.
-            let mut broker = bg_lobby.lock().await;
-            let reaped = consume_lobby_expiry_sweep(&mut broker, &lobby_sweep, &SysEnv);
-            // Every disjunct is load-bearing, because each names work this tick
-            // did that no other disjunct witnesses: a tick that deferred every
-            // lapsed listing hands the broker nothing, and a tick whose every
-            // listing was superseded produces no outbound either — yet it
-            // retired a session, which is exactly the tick worth seeing.
-            if !reaped.lobby_removed.is_empty()
-                || !reaped.tournament.is_empty()
-                || lobby_sweep.sweep.deferred > 0
-                || reaped.superseded > 0
-                || !lobby_sweep.live.is_empty()
-            {
-                // Every count comes from the sweep that produced it; nothing
-                // here is recovered by arithmetic over the outbounds. That is
-                // deliberate — deriving the lobby half by subtracting what was
-                // handed in underflowed on exactly the tick a superseded
-                // observation appears, which is the tick this reports on.
-                //
-                // The counts stay named rather than summed: they are different
-                // kinds of expiry with different cleanup, and a single total
-                // would hide which one actually fired.
-                info!(
-                    lobby_games = reaped.lobby_removed.len(),
-                    superseded = reaped.superseded,
-                    tournament_events = reaped.tournament.len(),
-                    deferred = lobby_sweep.sweep.deferred,
-                    kept_live = lobby_sweep.live.len(),
-                    "expiring stale lobby entries"
-                );
-                // Every code whose removal the broker announced — which is
-                // every code this sweep dispositioned except a superseded one.
-                // That asymmetry with the reaper's prune, which takes only the
-                // codes it removed, is base behaviour and is why the abandon
-                // path keeps both of its authority checks. A deferred code
-                // drops out and is pruned on the tick that retires it; a
-                // superseded code drops out because it now names a live
-                // replacement, and pruning it would reach into a game this
-                // sweep did not retire.
-                prune_game_connections(
-                    &bg_connections,
-                    reaped.lobby_removed.iter().map(String::as_str),
-                )
-                .await;
-                let mut specs = bg_game_spectators.lock().await;
-                for game_code in &reaped.lobby_removed {
-                    specs.remove(game_code);
-                }
-
-                for ob in reaped.into_outbounds() {
-                    if let Outbound::ToSubscribers(msg) = ob {
-                        broadcast_to_lobby_subscribers(
-                            &broker,
-                            &bg_lobby_subs,
-                            to_server_message(msg),
-                        )
-                        .await;
-                    }
-                }
-            }
-            // Before the draft sweep: `draft_sessions` is ordered before `lobby`.
-            drop(broker);
+            let routes =
+                ExpiredLobbyRoutes::capture(&lobby_sweep, &bg_connections, &bg_game_spectators)
+                    .await;
+            finish_lobby_expiry_sweep(
+                &bg_lobby,
+                &bg_lobby_subs,
+                &bg_connections,
+                &bg_game_spectators,
+                &lobby_sweep,
+                routes,
+            )
+            .await;
 
             sweep_draft_seat_expiry(
                 &bg_draft_state,
@@ -6433,6 +6383,140 @@ fn consume_lobby_expiry_sweep(
     broker.reap_expired_handled(&lobby_sweep.sweep.acted, env)
 }
 
+/// Route identities observed before consuming a listing. Cleanup must not
+/// remove a replacement connection installed after the broker guard is released.
+#[derive(Default)]
+struct ExpiredLobbyRoutes {
+    players: HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>,
+    spectators: HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>,
+}
+
+impl ExpiredLobbyRoutes {
+    async fn capture(
+        sweep: &LobbyExpirySweep,
+        connections: &SharedConnections,
+        spectators: &SharedGameSpectators,
+    ) -> Self {
+        if sweep.sweep.acted.is_empty() {
+            return Self::default();
+        }
+        let players = {
+            let routes = connections.lock().await;
+            sweep
+                .sweep
+                .acted
+                .iter()
+                .filter_map(|registration| {
+                    let code = registration.game_code();
+                    routes
+                        .get(code)
+                        .map(|players| (code.to_string(), players.clone()))
+                })
+                .collect()
+        };
+        let spectators = {
+            let routes = spectators.lock().await;
+            sweep
+                .sweep
+                .acted
+                .iter()
+                .filter_map(|registration| {
+                    let code = registration.game_code();
+                    routes
+                        .get(code)
+                        .map(|senders| (code.to_string(), senders.clone()))
+                })
+                .collect()
+        };
+        Self {
+            players,
+            spectators,
+        }
+    }
+
+    async fn prune(
+        self,
+        removed: &[String],
+        connections: &SharedConnections,
+        spectators: &SharedGameSpectators,
+    ) {
+        {
+            let mut routes = connections.lock().await;
+            for code in removed {
+                if let (Some(retired), Some(players)) =
+                    (self.players.get(code), routes.get_mut(code))
+                {
+                    players.retain(|player, sender| {
+                        retired
+                            .get(player)
+                            .is_none_or(|old| !old.same_channel(sender))
+                    });
+                    if players.is_empty() {
+                        routes.remove(code);
+                    }
+                }
+            }
+        }
+        let mut routes = spectators.lock().await;
+        for code in removed {
+            if let (Some(retired), Some(senders)) =
+                (self.spectators.get(code), routes.get_mut(code))
+            {
+                senders.retain(|sender| !retired.iter().any(|old| old.same_channel(sender)));
+                if senders.is_empty() {
+                    routes.remove(code);
+                }
+            }
+        }
+    }
+}
+
+async fn finish_lobby_expiry_sweep(
+    lobby: &SharedLobby,
+    subscribers: &SharedLobbySubscribers,
+    connections: &SharedConnections,
+    spectators: &SharedGameSpectators,
+    sweep: &LobbyExpirySweep,
+    routes: ExpiredLobbyRoutes,
+) {
+    let removed = {
+        let mut broker = lobby.lock().await;
+        let reaped = consume_lobby_expiry_sweep(&mut broker, sweep, &SysEnv);
+        if !reaped.lobby_removed.is_empty()
+            || !reaped.tournament.is_empty()
+            || sweep.sweep.deferred > 0
+            || reaped.superseded > 0
+            || !sweep.live.is_empty()
+        {
+            // Report the actual categories, including a sweep which deferred
+            // every listing or found only superseded registrations.
+            info!(
+                lobby_games = reaped.lobby_removed.len(),
+                superseded = reaped.superseded,
+                tournament_events = reaped.tournament.len(),
+                deferred = sweep.sweep.deferred,
+                kept_live = sweep.live.len(),
+                "expiring stale lobby entries"
+            );
+        }
+        let removed = reaped.lobby_removed.clone();
+        // Mutation and publication remain one ordered broker critical section:
+        // subscribers cannot observe a later listing update before this removal.
+        for outbound in reaped.into_outbounds() {
+            if let Outbound::ToSubscribers(message) = outbound {
+                broadcast_to_lobby_subscribers(&broker, subscribers, to_server_message(message))
+                    .await;
+            }
+        }
+        removed
+    };
+    // No broker guard while waiting for either global route map. Captured
+    // channel identities also protect a new owner of a reused game code.
+    if !removed.is_empty() {
+        routes.prune(&removed, connections, spectators).await;
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RankedDuelPlayers {
     player_a_name: String,
@@ -7225,6 +7309,7 @@ async fn broadcast_ai_results(
         }
         let is_last = transition.decision.is_some();
 
+        let players = connections.lock().await.get(game_code).cloned();
         // Filter AI state per-player outside the lock
         let ai_filtered: Vec<(PlayerId, GameState)> = (0..player_count)
             .map(|j| {
@@ -7233,8 +7318,7 @@ async fn broadcast_ai_results(
             })
             .collect();
 
-        let conns = connections.lock().await;
-        if let Some(players) = conns.get(game_code) {
+        if let Some(players) = players {
             for (pid, pstate) in &ai_filtered {
                 if let Some(s) = players.get(pid) {
                     let is_actor = server_core::is_acting(ai_raw_state, *pid);
@@ -7364,6 +7448,7 @@ async fn broadcast_takeback_approved(
     rewind_targets: Vec<RewindOption>,
 ) {
     let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) = snapshot;
+    let players = connections.lock().await.get(game_code).cloned();
     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
         .map(|i| {
             let pid = PlayerId(i);
@@ -7371,8 +7456,7 @@ async fn broadcast_takeback_approved(
         })
         .collect();
 
-    let conns = connections.lock().await;
-    if let Some(players) = conns.get(game_code) {
+    if let Some(players) = players {
         for (pid, pstate) in &filtered_states {
             if let Some(s) = players.get(pid) {
                 let is_actor = server_core::is_acting(&raw_state, *pid);
@@ -7446,7 +7530,6 @@ async fn broadcast_takeback_approved(
             let _ = sender.send(resolved_msg.clone());
         }
     }
-    drop(conns);
 
     // Spectators are read-only viewers of `StateUpdate` only (mirroring the
     // normal action-broadcast path) — they never receive player-facing
@@ -7924,6 +8007,7 @@ async fn handle_full_game_submission(
                 None => Vec::new(),
             };
 
+            let players = connections.lock().await.get(&game_code).cloned();
             // Filter state per-player outside the lock
             let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
                 .map(|i| {
@@ -7934,8 +8018,7 @@ async fn handle_full_game_submission(
 
             // Broadcast human action result
             {
-                let conns = connections.lock().await;
-                if let Some(players) = conns.get(&game_code) {
+                if let Some(players) = players {
                     for (pid, pstate) in &filtered_states {
                         if let Some(s) = players.get(pid) {
                             let is_actor = server_core::is_acting(&raw_state, *pid);
@@ -10751,9 +10834,9 @@ async fn handle_client_message(
                         },
                         None => Vec::new(),
                     };
-                    let conns = connections.lock().await;
-                    if let Some(players) = conns.get(&game_code) {
-                        for (player, sender) in players {
+                    let players = connections.lock().await.get(&game_code).cloned();
+                    if let Some(players) = players {
+                        for (player, sender) in &players {
                             if let Ok(update) = build_state_update_message(
                                 &result,
                                 revision,
@@ -10773,7 +10856,6 @@ async fn handle_client_message(
                             }
                         }
                     }
-                    drop(conns);
 
                     if !terminal_deliveries.is_empty() {
                         report_draft_game_over(draft_state, connections, &game_code, winner).await;
@@ -10875,9 +10957,9 @@ async fn handle_client_message(
                             return;
                         }
                     };
-                    let conns = connections.lock().await;
-                    if let Some(players) = conns.get(&game_code) {
-                        for (player, sender) in players {
+                    let players = connections.lock().await.get(&game_code).cloned();
+                    if let Some(players) = players {
+                        for (player, sender) in &players {
                             if let Ok(update) = build_state_update_message(
                                 &result,
                                 revision,
@@ -10896,7 +10978,6 @@ async fn handle_client_message(
                             }
                         }
                     }
-                    drop(conns);
 
                     report_draft_game_over(draft_state, connections, &game_code, winner).await;
 
@@ -20763,6 +20844,124 @@ mod issue_4548_deadlock_tests {
             },
             &SysEnv,
         );
+    }
+
+    #[tokio::test]
+    async fn lobby_expiry_releases_broker_before_waiting_for_connections() {
+        let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let code = "ABC123";
+        list_in_lobby(&lobby, code).await;
+        let acted = lobby.lock().await.lobby().check_expired(300, &LapsedEnv);
+        let sweep = LobbyExpirySweep {
+            sweep: ExpirySweep { acted, deferred: 0 },
+            live: Vec::new(),
+        };
+        let (player_tx, _player_rx) = mpsc::unbounded_channel();
+        connections
+            .lock()
+            .await
+            .insert(code.to_string(), HashMap::from([(PlayerId(0), player_tx)]));
+        let routes = ExpiredLobbyRoutes::capture(&sweep, &connections, &spectators).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let subscribers = Arc::new(Mutex::new(vec![LobbySubscriber {
+            tx,
+            build_commit: build_commit().to_string(),
+        }]));
+        let held = connections.lock().await;
+        let cleanup = tokio::spawn({
+            let (lobby, connections, spectators) =
+                (lobby.clone(), connections.clone(), spectators.clone());
+            async move {
+                finish_lobby_expiry_sweep(
+                    &lobby,
+                    &subscribers,
+                    &connections,
+                    &spectators,
+                    &sweep,
+                    routes,
+                )
+                .await;
+            }
+        });
+        let removal = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("listing removal cannot wait for the connection map");
+        assert!(matches!(removal,
+            Some(ServerMessage::LobbyGameRemoved { game_code }) if game_code == code));
+        let broker = tokio::time::timeout(Duration::from_secs(2), lobby.lock())
+            .await
+            .expect("cleanup must not retain the global broker");
+        assert!(broker.lobby().public_game(code).is_none());
+        drop(broker);
+        drop(held);
+        cleanup.await.expect("cleanup task");
+        assert!(!connections.lock().await.contains_key(code));
+    }
+
+    #[tokio::test]
+    async fn lobby_expiry_preserves_replacement_player_and_spectator_routes() {
+        let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let code = "ABC123";
+        list_in_lobby(&lobby, code).await;
+        let sweep = LobbyExpirySweep {
+            sweep: ExpirySweep {
+                acted: lobby.lock().await.lobby().check_expired(300, &LapsedEnv),
+                deferred: 0,
+            },
+            live: Vec::new(),
+        };
+        let (old_player, _old_player_rx) = mpsc::unbounded_channel();
+        let (retired_other, _retired_other_rx) = mpsc::unbounded_channel();
+        let (old_spectator, _old_spectator_rx) = mpsc::unbounded_channel();
+        connections.lock().await.insert(
+            code.to_string(),
+            HashMap::from([(PlayerId(0), old_player), (PlayerId(1), retired_other)]),
+        );
+        spectators
+            .lock()
+            .await
+            .insert(code.to_string(), vec![old_spectator]);
+        let routes = ExpiredLobbyRoutes::capture(&sweep, &connections, &spectators).await;
+        let (new_player, _new_player_rx) = mpsc::unbounded_channel();
+        let (new_spectator, _new_spectator_rx) = mpsc::unbounded_channel();
+        connections
+            .lock()
+            .await
+            .get_mut(code)
+            .unwrap()
+            .insert(PlayerId(0), new_player.clone());
+        spectators
+            .lock()
+            .await
+            .get_mut(code)
+            .unwrap()
+            .push(new_spectator.clone());
+        let subscribers = Arc::new(Mutex::new(Vec::new()));
+        finish_lobby_expiry_sweep(
+            &lobby,
+            &subscribers,
+            &connections,
+            &spectators,
+            &sweep,
+            routes,
+        )
+        .await;
+        let conns = connections.lock().await;
+        let players = conns.get(code).expect("replacement game retains its route");
+        assert!(players.get(&PlayerId(0)).unwrap().same_channel(&new_player));
+        assert!(
+            !players.contains_key(&PlayerId(1)),
+            "retired seat must be removed"
+        );
+        let specs = spectators.lock().await;
+        let senders = specs
+            .get(code)
+            .expect("replacement spectator remains attached");
+        assert!(matches!(senders.as_slice(), [sender] if sender.same_channel(&new_spectator)));
     }
 
     /// A lobby listing whose session is mid-transition when it lapses is reaped
