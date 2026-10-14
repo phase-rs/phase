@@ -2383,7 +2383,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
                 .filter(|(_, consumed)| *consumed == s.len())
                 .map(|(subtype, _)| subtype)
                 .unwrap_or_else(|| {
-                    let capitalized = format!("{}{}", &s[..1].to_uppercase(), &s[1..]);
+                    let capitalized = capitalize_first(s);
                     // Unknown plural subtype words retain the legacy fallback
                     // ("Daleks" → "Dalek"), while values returned by
                     // `parse_subtype` above are already canonical and must not be
@@ -4342,6 +4342,19 @@ mod tests {
 
         let equip = Keyword::from_str("Equip:3").unwrap();
         assert!(matches!(equip, Keyword::Equip(ManaCost::Cost { .. })));
+    }
+
+    /// CR 702.41a + CR 205.3: an unknown subtype whose first letter is not ASCII is capitalized by
+    /// character, not by byte.
+    #[test]
+    fn parse_affinity_for_a_subtype_with_a_non_ascii_initial() {
+        let Keyword::Affinity(filter) = Keyword::from_str("Affinity for éclats").unwrap() else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            filter.type_filters,
+            vec![TypeFilter::Subtype("Éclat".to_string())]
+        );
     }
 
     #[test]

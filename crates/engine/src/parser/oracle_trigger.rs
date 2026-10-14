@@ -3830,6 +3830,11 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// (`reveal_hand::effect_parks_reveal_card_choice`) also returns `true`: a later
 /// `ParentTarget` binds to the chosen revealed card, whatever player the reveal
 /// targets.
+///
+/// A zone choice (`Effect::ChooseFromZone`, every form) also returns `true`: it
+/// hands the chosen card(s) to the next instruction, so a later `ParentTarget`
+/// binds to the pick and never to the trigger event (Gorex, the Tombshell's
+/// dies half).
 fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // CR 608.2c + CR 603.2g: Effects that populate state.last_revealed_ids
     // introduce revealed objects. Sub-ability ParentTarget binds to those
@@ -3853,6 +3858,17 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // scope, `TriggeringPlayer`, …) is not a chosen object filter, so the `Typed`
     // test below cannot see it. Shares the resolver's card-parking authority.
     if crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(effect) {
+        return true;
+    }
+    // CR 608.2c + CR 608.2d: a zone choice ("choose a card at random exiled
+    // with ~", "choose a creature card in your hand", "for each opponent,
+    // choose …") hands its pick to the next instruction — as that
+    // instruction's targets, or as the chain's tracked set for the per-player
+    // form — so a later "that card" names the chosen card, never the trigger
+    // event. Gorex, the Tombshell's dies half (CR 603.10a + CR 607.2q) chooses
+    // among the cards exiled with it; Gorex itself, now in the graveyard, is
+    // never one of them.
+    if matches!(effect, Effect::ChooseFromZone { .. }) {
         return true;
     }
     fn is_chosen(filter: &TargetFilter) -> bool {

@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 142 — LinkedExileSnapshot gains incarnation (CR 400.7), carried in
+ *      GameState.linked_exile_lki and the trigger and zone-change
+ *      linked_exile_snapshot lists — see PROTOCOL_VERSION's own `/// 142`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v141 peer re-encoding
+ *      state drops the key; the exact-match version check at connect refuses
+ *      the pairing. Wire 124 moves with it.
  * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
  *      of casting a permanent spell, linked to the permanent it becomes),
  *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
@@ -860,7 +866,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 141;
+export const PROTOCOL_VERSION = 142;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

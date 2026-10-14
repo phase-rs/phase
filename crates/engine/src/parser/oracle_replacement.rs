@@ -15,6 +15,7 @@ use nom::Parser;
 
 use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
+use super::oracle_effect::lower::{apply_where_x_quantity_expression, parse_where_x_quantity_core};
 use super::oracle_effect::{
     excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
     parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
@@ -46,7 +47,7 @@ use super::oracle_target::{
 };
 use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
-    parse_ordinal, strip_after, strip_reminder_text, TextPair,
+    parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
@@ -57,8 +58,8 @@ use crate::types::ability::{
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
@@ -4294,9 +4295,20 @@ fn enters_with_counters_outcome(
     // object's `cost_x_paid` (runtime `Variable("X")` only reads trigger-event
     // sources, not the entering permanent), so rewrite X → `CostXPaid`
     // recursively inside the expression.
+    //
+    // CR 107.3: a trailing "where X is <quantity>" defines X; it is not part
+    // of the clause's count. Split it off first so the "equal to" readers see
+    // only the clause head — otherwise an "equal to" inside the definition
+    // ("where X is equal to two", "… with power greater than or equal to 2")
+    // would be read as the count.
+    let (clause_text, where_x_tail) =
+        match nom_primitives::split_once_on(work_text, ", where x is ") {
+            Ok((_, (head, tail))) => (head, Some(tail)),
+            Err(_) => (work_text, None),
+        };
     let mut count_expr = match leading_count {
         Some(count) => count,
-        None => parse_enters_counter_equal_to_quantity(work_text)
+        None => parse_enters_counter_equal_to_quantity(clause_text)
             .ok_or(EntersWithDecline::NotThisShape)?,
     };
     rewrite_variable_x_to_cost_x_paid(&mut count_expr);
@@ -4329,13 +4341,41 @@ fn enters_with_counters_outcome(
     // CR 122.6: For "a number of counters equal to [quantity]" and the
     // sibling shorthand "counters on it equal to [quantity]", parse the
     // dynamic expression.
-    if let Some(qty) = parse_enters_counter_equal_to_quantity(work_text) {
+    if let Some(qty) = parse_enters_counter_equal_to_quantity(clause_text) {
         count_expr = qty;
     }
-    if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
-        count_expr = qty;
-    } else if nom_primitives::split_once_on(work_text, ", where x is ").is_ok() {
-        return Err(EntersWithDecline::NotThisShape);
+    // CR 107.1a: a fractional count's rounding postmodifier prints after the
+    // counter noun and its recipient ("half X +1/+1 counters on it, rounded
+    // up"); `parse_count_expr` only sees one adjacent to the fraction, so the
+    // separated form would keep the default (down). Apply it after selecting
+    // the final count, but before binding X, so an equal-to override cannot
+    // discard it and a fraction inside the where-X definition is unaffected.
+    if let Some(rounding) = parse_enters_counter_rounding_postmodifier(after_counter) {
+        rewrite_quantity_expr_rounding(&mut count_expr, rounding);
+    }
+    // CR 107.3 + CR 107.3i: "where X is <quantity>" DEFINES X — it does not
+    // replace the count X appears in. Bind the definition at every X leaf of
+    // the count, so the arithmetic around X survives ("twice X" → `Multiply`,
+    // "half X …, rounded up" → `DivideRounded` with its rounding, "X plus one"
+    // → `Offset`) and a count that prints no X keeps its printed value. A bare
+    // X count keeps the enters-with where-X reader's reading of the definition;
+    // any other count binds through the shared where-X authority only when the
+    // possessive-free core reader reads the definition and that reading does
+    // not depend on X. Everything else (comparator bounds, mana paid this way,
+    // a foreign possessive, an unreadable definition) is unread text of this
+    // clause and fails closed.
+    //
+    // List placements are #9662's: their counts do not see the where-X
+    // binding. On a list line this gate only preserves base's accept/decline
+    // (the enters-with where-X reader decides; its value is not published), so
+    // the list path is neither fixed nor widened here (CR 107.3).
+    if let Some(where_x) = where_x_tail {
+        let bound = if counter_entries.is_some() {
+            parse_enters_where_x_tail_quantity(where_x)
+        } else {
+            bind_enters_with_where_x(count_expr, where_x)
+        };
+        count_expr = bound.ok_or(EntersWithDecline::NotThisShape)?;
     }
     // CR 614.12: Any `Variable("X")` that survived the dynamic-quantity
     // overrides above refers to the X paid on the *entering* object's cost, not
@@ -4769,6 +4809,12 @@ fn has_enters_tapped_phrase(text: &str) -> bool {
 
 fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
     let (_, (_, qty_text)) = nom_primitives::split_once_on(text, ", where x is ").ok()?;
+    parse_enters_where_x_tail_quantity(qty_text)
+}
+
+/// CR 107.3: the quantity an enters-with clause's "where X is <quantity>" tail
+/// defines X as (the text after "where X is "); `None` when unreadable.
+fn parse_enters_where_x_tail_quantity(qty_text: &str) -> Option<QuantityExpr> {
     let trimmed = qty_text.trim().trim_end_matches('.');
     if let Ok((_, qty_ref)) = nom_quantity::parse_quantity_ref_complete(trimmed) {
         return Some(QuantityExpr::Ref { qty: qty_ref });
@@ -4777,6 +4823,48 @@ fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
         return Some(qty);
     }
     crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
+}
+
+/// CR 107.3 + CR 107.3i: bind an enters-with clause's "where X is …"
+/// definition into its count. `None` (the clause fails closed) when the
+/// definition is not an exact value for X.
+///
+/// * A bare X count (`CostXPaid` — the enters-with X of CR 107.3m before the
+///   definition binds — or `Variable("X")`) IS the definition, read by the
+///   enters-with where-X reader (`parse_enters_where_x_tail_quantity`).
+/// * Any other count (arithmetic around X — `Multiply`, `DivideRounded`,
+///   `Offset`, ... — or a count with no X leaf) binds through the shared
+///   where-X authority (`apply_where_x_quantity_expression`), which re-reads
+///   the definition and substitutes it at every X leaf, keeping the wrappers.
+///   It binds only when the possessive-free core reading
+///   (`parse_where_x_quantity_core`) exists and does not depend on X:
+///   * the core reader is the one validated precisely so the shared reader's
+///     printed-name possessive arm — which would read "your Ring-bearer's
+///     power" as the entering permanent's own stat — is never what admits a
+///     definition; a foreign possessive has no core reading and declines;
+///   * X := f(X) is circular and defines no value (CR 107.3 separates
+///     abilities that define the value of X from those that let their
+///     controller choose it), so comparator bounds and "mana paid this way"
+///     decline rather than publish the cost X as the count.
+///
+///   The substitution then reads the definition through the shared reader,
+///   whose reading equals the core reading whenever the core one exists.
+fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<QuantityExpr> {
+    match count {
+        QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        } => parse_enters_where_x_tail_quantity(where_x),
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { ref name },
+        } if name.eq_ignore_ascii_case("X") => parse_enters_where_x_tail_quantity(where_x),
+        count => {
+            let definition = parse_where_x_quantity_core(where_x)?;
+            if definition.contains_x() {
+                return None;
+            }
+            apply_where_x_quantity_expression(count, Some(where_x))
+        }
+    }
 }
 
 /// CR 122.6: the "equal to <quantity>" amount of an enters-with counter clause;
@@ -5031,6 +5119,23 @@ fn extract_enters_with_leading_if_gate(text: &str) -> (&str, EntersWithGate) {
         Some(cond) => (body, EntersWithGate::Parsed(cond)),
         None => (text, EntersWithGate::Unparsed),
     }
+}
+
+/// CR 107.1a: the rounding postmodifier of a fractional enters-with count,
+/// printed after the counter noun and its recipient ("half X +1/+1 counters on
+/// it, rounded up"). Same `[s] on <recipient>` head as
+/// `parse_enters_counter_for_each_suffix`; the text after the suffix (a where-X
+/// definition, the sentence end) belongs to the clause's other readers.
+fn parse_enters_counter_rounding_postmodifier(after_counter: &str) -> Option<RoundingMode> {
+    let (_, (_, _, _, rounding)) = (
+        opt(tag::<_, _, OracleError<'_>>("s")),
+        tag(" on "),
+        nom_primitives::parse_object_recipient_pronoun,
+        nom_quantity::parse_explicit_rounding_suffix,
+    )
+        .parse(after_counter)
+        .ok()?;
+    Some(rounding)
 }
 
 fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
@@ -5610,10 +5715,9 @@ fn parse_whenever_you_cast_enters_with(
     .ok()?;
 
     // Optional trailing "where X is [quantity]" clause. Delegate to
-    // `parse_enters_with_where_x_suffix` — the single authority for this tail
-    // grammar, already shared with the self-ETB `parse_enters_with_counters`
-    // path — so composite/offset quantities ("its mana value minus 4"; CR
-    // 107.1 arithmetic over a CR 202.3 mana-value reference) resolve here too,
+    // `parse_enters_with_where_x_suffix` so composite/offset quantities ("its
+    // mana value minus 4"; CR 107.1 arithmetic over a CR 202.3 mana-value
+    // reference) resolve here too,
     // not just atomic `QuantityRef`s. The previous atomic-only
     // `parse_quantity_ref` call silently failed (via `?`) on any composite
     // expression, misrouting the whole ability to the generic self-ETB
@@ -20396,6 +20500,592 @@ mod tests {
                     "supported arithmetic where-X suffix should parse as Offset, got {count:?}"
                 );
             }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    /// The `PutCounter` count of an enters-with replacement line, descending
+    /// through the "enters tapped" `SetTapState` head when present.
+    fn enters_with_count(text: &str) -> QuantityExpr {
+        let def = parse_replacement_line(text, "Test Creature")
+            .unwrap_or_else(|| panic!("expected an enters-with replacement for {text:?}"));
+        let mut execute = def.execute.expect("enters-with replacement has an execute");
+        if matches!(*execute.effect, Effect::SetTapState { .. }) {
+            execute = execute
+                .sub_ability
+                .expect("enters tapped chains its counter placement");
+        }
+        match *execute.effect {
+            Effect::PutCounter { count, .. } => count,
+            other => panic!("Expected PutCounter for {text:?}, got {other:?}"),
+        }
+    }
+
+    /// The where-X definition the bare-X reading binds: X itself (CR 107.3i).
+    fn bare_where_x_count() -> QuantityExpr {
+        let bare = enters_with_count(
+            "This creature enters with X +1/+1 counters on it, where X is the number of creatures you control.",
+        );
+        assert!(
+            matches!(
+                bare,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "bare where-X count should be the where-X quantity, got {bare:?}"
+        );
+        bare
+    }
+
+    /// CR 107.3 + CR 107.3i: "where X is …" defines X inside a multiplied
+    /// count; the multiplier survives on every enters-with subject shape, and
+    /// no cost-X leaf is left behind. SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_where_x_substitutes_into_multiplier() {
+        let bare = bare_where_x_count();
+        let twice = QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(bare.clone()),
+        };
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with twice X +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            twice
+        );
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with three times X +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            QuantityExpr::Multiply {
+                factor: 3,
+                inner: Box::new(bare.clone()),
+            }
+        );
+        let distributive = "Each other creature you control enters with an additional twice X +1/+1 counters on it, where X is the number of creatures you control.";
+        let def = parse_replacement_line(distributive, "Test Creature")
+            .expect("distributive enters-with parses");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(enters_with_count(distributive), twice);
+        assert_eq!(
+            enters_with_count(
+                "This creature enters tapped with twice X +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            twice
+        );
+        // Control: with no where-X clause, X is the X paid for the spell.
+        assert_eq!(
+            enters_with_count("This creature enters with twice X +1/+1 counters on it."),
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                }),
+            }
+        );
+    }
+
+    /// CR 107.1a + CR 107.3 + CR 107.3i: "half X …, rounded up/down, where X
+    /// is …" keeps the fraction and its rounding direction around the bound X.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_half_x_where_x_keeps_rounding() {
+        let bare = bare_where_x_count();
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with half X +1/+1 counters on it, rounded up, where X is the number of creatures you control.",
+            ),
+            QuantityExpr::DivideRounded {
+                inner: Box::new(bare.clone()),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            }
+        );
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with half X +1/+1 counters on it, rounded down, where X is the number of creatures you control.",
+            ),
+            QuantityExpr::DivideRounded {
+                inner: Box::new(bare),
+                divisor: 2,
+                rounding: RoundingMode::Down,
+            }
+        );
+    }
+
+    /// CR 107.1a + CR 107.3i: an equal-to count keeps the recipient's rounding
+    /// when its X leaves are bound. SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_equal_to_half_x_where_x_keeps_rounding() {
+        for (text, rounding) in [
+            (
+                "This creature enters with a number of +1/+1 counters on it, rounded up, equal to half X, where X is the number of creatures you control.",
+                RoundingMode::Up,
+            ),
+            (
+                "This creature enters with a number of +1/+1 counters on it, rounded down, equal to half X, where X is the number of creatures you control.",
+                RoundingMode::Down,
+            ),
+        ] {
+            assert_eq!(
+                enters_with_count(text),
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(bare_where_x_count()),
+                    divisor: 2,
+                    rounding,
+                }
+            );
+        }
+    }
+
+    /// CR 107.1a: a rounding postmodifier printed after the counter noun and
+    /// its recipient still sets the fraction's rounding direction; a count with
+    /// no fraction has nothing to round. SYNTHETIC: no printed card has this
+    /// shape.
+    #[test]
+    fn enters_with_half_x_counters_rounding_after_recipient() {
+        let half_cost_x = |rounding| QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            }),
+            divisor: 2,
+            rounding,
+        };
+        assert_eq!(
+            enters_with_count("This creature enters with half X +1/+1 counters on it, rounded up."),
+            half_cost_x(RoundingMode::Up)
+        );
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with half X +1/+1 counters on it, rounded down."
+            ),
+            half_cost_x(RoundingMode::Down)
+        );
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with half X +1/+1 counters on him, rounded up."
+            ),
+            half_cost_x(RoundingMode::Up)
+        );
+        assert_eq!(
+            enters_with_count("This creature enters with two +1/+1 counters on it, rounded up."),
+            QuantityExpr::Fixed { value: 2 }
+        );
+    }
+
+    /// CR 107.3 + CR 107.3i + CR 122.6: the bound X keeps an offset around it,
+    /// and an "equal to" amount over X binds the same way. SYNTHETIC: no
+    /// printed card has this shape.
+    #[test]
+    fn enters_with_where_x_substitutes_into_offset_and_equal_to() {
+        let bare = bare_where_x_count();
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with X plus one +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            QuantityExpr::Offset {
+                inner: Box::new(bare.clone()),
+                offset: 1,
+            }
+        );
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with a number of +1/+1 counters on it equal to twice X, where X is the number of creatures you control.",
+            ),
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(bare.clone()),
+            }
+        );
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with a number of +1/+1 counters on it equal to X, where X is the number of creatures you control.",
+            ),
+            bare
+        );
+    }
+
+    /// CR 107.3 + CR 107.3i: a where-X clause defines X; a count that prints
+    /// no X keeps its printed value. SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_where_x_leaves_count_without_x() {
+        assert_eq!(
+            enters_with_count(
+                "This creature enters with two +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            QuantityExpr::Fixed { value: 2 }
+        );
+    }
+
+    /// CR 107.3 + CR 107.3i: an unreadable where-X definition is unread text of
+    /// the clause, with or without an X in the count, so the line fails closed;
+    /// each readable twin parses, ruling out an upstream short-circuit.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_unreadable_where_x_fails_closed() {
+        for (unreadable, readable) in [
+            (
+                "This creature enters with two +1/+1 counters on it, where X is the mystery total.",
+                "This creature enters with two +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            (
+                "This creature enters with twice X +1/+1 counters on it, where X is the mystery total.",
+                "This creature enters with twice X +1/+1 counters on it, where X is the number of creatures you control.",
+            ),
+            (
+                "This creature enters with twice X +1/+1 counters on it, where X is the total life lost by your opponents this turn and draw a card.",
+                "This creature enters with twice X +1/+1 counters on it, where X is the total life lost by your opponents this turn.",
+            ),
+        ] {
+            assert!(
+                parse_replacement_line(readable, "Test Creature").is_some(),
+                "reach guard: {readable:?} should parse"
+            );
+            assert!(
+                parse_replacement_line(unreadable, "Test Creature").is_none(),
+                "unreadable where-X definition must fail closed: {unreadable:?}"
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: "where X is less than / greater than / equal to /
+    /// … or equal to <bound>" constrains a chosen X; it does not define X's
+    /// value, so an enters-with count cannot bind it and the line fails closed
+    /// (rather than publishing the cost X, or reading the "equal to" inside the
+    /// definition as the count). Each readable twin, whose definition is exact,
+    /// parses, ruling out an upstream short-circuit.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_chosen_x_comparator_where_x_fails_closed() {
+        const READABLE: &str = "the number of creatures you control.";
+        for (head, constraint) in [
+            (
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+                "less than the mystery total.",
+            ),
+            (
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+                "equal to two.",
+            ),
+            (
+                "This creature enters with X +1/+1 counters on it, where X is ",
+                "less than the mystery total.",
+            ),
+            (
+                "This creature enters with X +1/+1 counters on it, where X is ",
+                "greater than or equal to three.",
+            ),
+            (
+                "This creature enters with two +1/+1 counters on it, where X is ",
+                "less than the mystery total.",
+            ),
+            (
+                "This creature enters with two +1/+1 counters on it, where X is ",
+                "greater than or equal to three.",
+            ),
+        ] {
+            let readable = format!("{head}{READABLE}");
+            let constrained = format!("{head}{constraint}");
+            assert!(
+                parse_replacement_line(&readable, "Test Creature").is_some(),
+                "reach guard: {readable:?} should parse"
+            );
+            assert!(
+                parse_replacement_line(&constrained, "Test Creature").is_none(),
+                "a chosen-X comparator constraint defines no X and must fail closed: \
+                 {constrained:?}"
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: "where X is the [total] amount of mana paid this
+    /// way" is read by the shared where-X reader as the chosen X itself
+    /// (`Variable("X")`), and a composite over it ("two plus …") still depends
+    /// on X. A definition that depends on X defines no value, so an enters-with
+    /// count cannot bind it and the line fails closed (rather than publishing
+    /// the cost X as the count). Each readable twin, whose definition is exact,
+    /// parses, ruling out an upstream short-circuit.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_mana_paid_this_way_where_x_fails_closed() {
+        const READABLE: &str = "the number of creatures you control.";
+        let chosen_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        for (definition, read_as) in [
+            ("the total amount of mana paid this way.", chosen_x.clone()),
+            ("the amount of mana paid this way.", chosen_x.clone()),
+            (
+                "two plus the total amount of mana paid this way.",
+                QuantityExpr::Offset {
+                    inner: Box::new(chosen_x.clone()),
+                    offset: 2,
+                },
+            ),
+        ] {
+            assert_eq!(
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(definition),
+                Some(read_as),
+                "reach guard: the shared reader reads {definition:?} through the chosen X"
+            );
+            for head in [
+                "This creature enters with X +1/+1 counters on it, where X is ",
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+            ] {
+                let readable = format!("{head}{READABLE}");
+                let chosen = format!("{head}{definition}");
+                assert!(
+                    parse_replacement_line(&readable, "Test Creature").is_some(),
+                    "reach guard: {readable:?} should parse"
+                );
+                assert!(
+                    parse_replacement_line(&chosen, "Test Creature").is_none(),
+                    "a where-X definition that depends on X defines no X and must fail \
+                     closed: {chosen:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 107.3 + CR 122.6: an "equal to" inside the where-X definition belongs
+    /// to the definition, never to the clause's count. The definition below is
+    /// read by the shared where-X reader (`ObjectCount` with a power comparison),
+    /// and its trailing "equal to 2" must not become the count (`Fixed 2`): bare
+    /// X is the definition, and "twice X" keeps its multiplier around it.
+    /// (Definitions of the form "… with power equal to 2" are not read by the
+    /// shared where-X reader, so those lines fail closed and cannot witness this.)
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_where_x_definition_equal_to_is_not_the_count() {
+        for definition in [
+            "the number of creatures you control with power greater than or equal to 2",
+            "the number of creatures you control with power less than or equal to 2",
+        ] {
+            let defined =
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(definition)
+                    .unwrap_or_else(|| panic!("reach guard: {definition:?} should be readable"));
+            assert!(
+                matches!(
+                    defined,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ),
+                "reach guard: {definition:?} should read as an object count, got {defined:?}"
+            );
+            assert_eq!(
+                enters_with_count(&format!(
+                    "This creature enters with X +1/+1 counters on it, where X is {definition}."
+                )),
+                defined
+            );
+            assert_eq!(
+                enters_with_count(&format!(
+                    "This creature enters with twice X +1/+1 counters on it, where X is {definition}."
+                )),
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(defined.clone()),
+                }
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: a foreign possessive ("your Ring-bearer's
+    /// power/toughness") is not the entering permanent's own stat. The shared
+    /// where-X reader's printed-name possessive arm reads it as the source's
+    /// stat (reach guard below), so a composite count around X must not bind it
+    /// through that reader: the line fails closed. Each readable twin parses in
+    /// the same loop, ruling out an upstream short-circuit. The bare-X head
+    /// keeps the enters-with where-X reader, which declines these definitions
+    /// (probed: `parse_replacement_line` is `None`).
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_where_x_foreign_possessive_fails_closed() {
+        use crate::types::ability::ObjectScope;
+        const READABLE: &str = "the number of creatures you control.";
+        for (definition, source_stat) in [
+            (
+                "your Ring-bearer's power.",
+                QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            ),
+            (
+                "your Ring-bearer's toughness.",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Source,
+                },
+            ),
+        ] {
+            assert_eq!(
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(
+                    &definition.to_lowercase()
+                ),
+                Some(QuantityExpr::Ref { qty: source_stat }),
+                "reach guard: the shared reader reads {definition:?} as the source's own stat"
+            );
+            for head in [
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+                "This creature enters with half X +1/+1 counters on it, rounded up, where X is ",
+                "This creature enters with X +1/+1 counters on it, where X is ",
+            ] {
+                let readable = format!("{head}{READABLE}");
+                let possessive = format!("{head}{definition}");
+                assert!(
+                    parse_replacement_line(&readable, "Test Creature").is_some(),
+                    "reach guard: {readable:?} should parse"
+                );
+                assert!(
+                    parse_replacement_line(&possessive, "Test Creature").is_none(),
+                    "a foreign possessive is not this permanent's stat and must fail \
+                     closed: {possessive:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 107.3 + CR 122.6: #9662-adjacent gate-parity pins. A conjoined counter
+    /// list publishes its own entries, whose counts do not see the where-X
+    /// binding (#9662), so on a list line the where-X tail is only an
+    /// accept/decline gate — and that gate must stay the enters-with where-X
+    /// reader's, exactly as at base. The definitions below are read by the
+    /// possessive-free core where-X reader but NOT by the enters-with reader
+    /// (probed, asserted as reach guards), so both list heads — one whose head
+    /// count prints no X ("a +1/+1 counter"), one composite ("twice X") — must
+    /// fail closed (probed: `None`) rather than publish the X entry as the cost
+    /// X. The same heads with a definition the enters-with reader reads parse
+    /// (positive reach guard; their counts are #9662's and are not asserted).
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_counter_list_where_x_gate_matches_the_enters_reader() {
+        const HEADS: [&str; 2] = [
+            "This creature enters with a +1/+1 counter and X charge counters on it, where X is ",
+            "This creature enters with twice X +1/+1 counters and a lifelink counter on it, \
+             where X is ",
+        ];
+        const READABLE: &str = "the number of creatures you control.";
+        for head in HEADS {
+            let readable = format!("{head}{READABLE}");
+            assert!(
+                parse_replacement_line(&readable, "Test Creature").is_some(),
+                "reach guard: {readable:?} should parse"
+            );
+        }
+        type CoreReading = fn(&QuantityRef) -> bool;
+        let witnesses: [(&str, CoreReading); 3] = [
+            (
+                "the number of creatures that convoked this creature.",
+                |qty| matches!(qty, QuantityRef::ConvokedCreatureCount),
+            ),
+            ("the power of the exiled card.", |qty| {
+                matches!(qty, QuantityRef::PropertyAggregate(_))
+            }),
+            ("the number of times it was kicked.", |qty| {
+                matches!(qty, QuantityRef::KickerCount)
+            }),
+        ];
+        for (definition, core_reading) in witnesses {
+            let lower = definition.to_lowercase();
+            assert!(
+                matches!(
+                    parse_where_x_quantity_core(&lower),
+                    Some(QuantityExpr::Ref { ref qty }) if core_reading(qty)
+                ),
+                "reach guard: the core where-X reader reads {definition:?}"
+            );
+            assert_eq!(
+                parse_enters_where_x_tail_quantity(&lower),
+                None,
+                "reach guard: the enters-with where-X reader does not read {definition:?}"
+            );
+            for head in HEADS {
+                let line = format!("{head}{definition}");
+                assert!(
+                    parse_replacement_line(&line, "Test Creature").is_none(),
+                    "a counter list keeps the enters-with where-X gate and must fail \
+                     closed: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: a bare X count IS the where-X definition, read by
+    /// the enters-with where-X reader (the reading this clause always had), so
+    /// "the number of times you descended this turn" binds (probed value
+    /// below). The shared where-X reader does not read that definition (reach
+    /// guard), so the twice-X sibling, which binds through the shared reader,
+    /// fails closed (probed: `None`) — an intentional, honest decline rather
+    /// than a guess. SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_bare_x_keeps_the_enters_with_where_x_reader() {
+        const DESCENDED: &str = "the number of times you descended this turn.";
+        assert_eq!(
+            crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(DESCENDED),
+            None,
+            "reach guard: the shared where-X reader does not read {DESCENDED:?}"
+        );
+        assert_eq!(
+            enters_with_count(&format!(
+                "This creature enters with X +1/+1 counters on it, where X is {DESCENDED}"
+            )),
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: None,
+                    to: Some(Zone::Graveyard),
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Permanent],
+                        controller: None,
+                        properties: vec![
+                            FilterProp::NonToken,
+                            FilterProp::Owned {
+                                controller: ControllerRef::You,
+                            },
+                        ],
+                    }),
+                },
+            }
+        );
+        assert!(parse_replacement_line(
+            &format!(
+                "This creature enters with twice X +1/+1 counters on it, where X is {DESCENDED}"
+            ),
+            "Test Creature",
+        )
+        .is_none());
+    }
+
+    /// CR 107.3 + CR 614.1c: Scarlet Spider's printed Oracle line (verbatim
+    /// from AtomicCards.json) — a bare X count defined by "the mana value of
+    /// the returned creature" — enters with that mana value, gated on the
+    /// web-slinging cast (probed values).
+    #[test]
+    fn enters_with_where_x_scarlet_spider_printed_line() {
+        use crate::types::ability::ObjectScope;
+        let def = parse_replacement_line(
+            "Sensational Save — If Scarlet Spider was cast using web-slinging, he enters with X +1/+1 counters on him, where X is the mana value of the returned creature.",
+            "Scarlet Spider",
+        )
+        .expect("Scarlet Spider's enters-with line parses");
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            })
+        );
+        let execute = def.execute.expect("enters-with replacement has an execute");
+        match *execute.effect {
+            Effect::PutCounter { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }
+            ),
             other => panic!("Expected PutCounter, got {other:?}"),
         }
     }

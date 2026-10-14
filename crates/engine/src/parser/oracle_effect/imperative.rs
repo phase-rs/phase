@@ -17994,6 +17994,133 @@ mod tests {
         }
     }
 
+    /// CR 121.1 + CR 107.3c + CR 107.3i + CR 107.1a: the draw count position
+    /// binds a "where X is" definition at the X inside the count, keeping the
+    /// arithmetic and rounding around it; a count that prints no X is not bound.
+    /// Locks #9830's count-position binding (#9660); not revert-failing for this
+    /// change. SYNTHETIC: no printed card has these shapes.
+    #[test]
+    fn draw_count_slot_where_x_substitutes_into_count() {
+        use crate::parser::oracle_util::parse_count_slot;
+        use crate::types::ability::RoundingMode;
+
+        let bare_slot = parse_count_slot(
+            "X cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("bare where-X draw count parses");
+        let bare = bare_slot.count.clone();
+        assert!(
+            matches!(
+                bare,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "bare where-X count should be the where-X quantity, got {bare:?}"
+        );
+        assert_eq!(bare_slot.noun, "cards");
+        assert_eq!(bare_slot.where_x, Some(bare.clone()));
+
+        let twice = parse_count_slot(
+            "twice X cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("twice-X where-X draw count parses");
+        assert_eq!(
+            twice.count,
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(bare.clone()),
+            }
+        );
+        assert_eq!(twice.noun, "cards");
+        assert_eq!(twice.where_x, Some(bare.clone()));
+
+        let three = parse_count_slot(
+            "three times X cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("three-times-X where-X draw count parses");
+        assert_eq!(
+            three.count,
+            QuantityExpr::Multiply {
+                factor: 3,
+                inner: Box::new(bare.clone()),
+            }
+        );
+
+        for (text, rounding) in [
+            (
+                "half X cards, rounded up, where X is the number of creatures you control",
+                RoundingMode::Up,
+            ),
+            (
+                "half X cards, rounded down, where X is the number of creatures you control",
+                RoundingMode::Down,
+            ),
+        ] {
+            let half = parse_count_slot(text, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("half-X where-X draw count parses: {text}"));
+            assert_eq!(
+                half.count,
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(bare.clone()),
+                    divisor: 2,
+                    rounding,
+                },
+                "{text}"
+            );
+            assert_eq!(half.noun, "cards", "{text}");
+        }
+
+        let no_x = parse_count_slot(
+            "two cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("no-X draw count slot parses");
+        assert_eq!(no_x.count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(no_x.where_x, None);
+    }
+
+    /// CR 121.1 + CR 107.3c + CR 107.3i: the draw verb publishes the
+    /// multiplier around the where-X-bound X. Locks #9830's count-position
+    /// binding (#9660); not revert-failing for this change. SYNTHETIC.
+    #[test]
+    fn draw_where_x_tail_keeps_multiplier() {
+        let bare = "draw x cards, where x is the number of creatures you control";
+        let Some(NumericImperativeAst::Draw {
+            count: bare_count, ..
+        }) = parse_numeric_imperative_ast(bare, bare)
+        else {
+            panic!("reach guard: bare where-X draw parses");
+        };
+        assert!(
+            matches!(
+                bare_count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "bare where-X draw count should be the where-X quantity, got {bare_count:?}"
+        );
+
+        let text = "draw twice x cards, where x is the number of creatures you control";
+        match parse_numeric_imperative_ast(text, text) {
+            Some(NumericImperativeAst::Draw { count, up_to }) => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(bare_count),
+                    }
+                );
+                assert!(!up_to);
+            }
+            other => panic!("expected Draw imperative, got {other:?}"),
+        }
+    }
+
     /// A NON-fraction "cards equal to <ref>" draw count stays a plain
     /// `QuantityExpr::Ref` through the count position's equal-to chain.
     #[test]

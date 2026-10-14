@@ -11719,7 +11719,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 || effective_lower.contains("you may cast this spell for")
                 || effective_lower.contains("you may pay"));
         let covered_by_additional_cost = face.additional_cost.is_some()
-            && (lower.starts_with("as an additional cost ")
+            && (crate::parser::oracle_casting::additional_cost_line_text(stripped).is_some()
                 || effective_lower.starts_with("as an additional cost ")
                 || effective_lower.contains("behold"));
         // Enchant keyword lines ("Enchant creature", "Enchant land you control")
@@ -17035,6 +17035,80 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+    }
+
+    /// A face carrying Redemptor Dreadnought's parsed additional cost.
+    fn face_with_graveyard_exile_additional_cost(oracle: &str) -> CardFace {
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                )),
+            },
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+        });
+        face
+    }
+
+    /// CR 207.2d: an additional-cost line behind a flavor word is covered by
+    /// the face's additional cost, as the unlabeled line is.
+    #[test]
+    fn flavor_word_additional_cost_line_is_covered_by_the_additional_cost() {
+        const ORACLE: &str = "Fallen Warrior — As an additional cost to cast this spell, \
+                              you may exile a creature card from your graveyard.";
+        let face = face_with_graveyard_exile_additional_cost(ORACLE);
+
+        let findings = audit_card_lines(ORACLE, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "got {findings:?}"
+        );
+    }
+
+    /// Sibling of the row above: the unlabeled line is covered the same way.
+    #[test]
+    fn unlabeled_additional_cost_line_is_covered_by_the_additional_cost() {
+        const ORACLE: &str = "As an additional cost to cast this spell, \
+                              you may exile a creature card from your graveyard.";
+        let face = face_with_graveyard_exile_additional_cost(ORACLE);
+
+        let findings = audit_card_lines(ORACLE, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "got {findings:?}"
+        );
+    }
+
+    /// CR 702.186a + CR 702.186b: a cost behind the "∞" keyword label is gated
+    /// by it, so the face's ungated additional cost does not cover the line.
+    #[test]
+    fn infinity_labeled_additional_cost_line_is_not_covered_by_the_additional_cost() {
+        const ORACLE: &str = "∞ — As an additional cost to cast this spell, \
+                              you may exile a creature card from your graveyard.";
+        let face = face_with_graveyard_exile_additional_cost(ORACLE);
+
+        let findings = audit_card_lines(ORACLE, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "got {findings:?}"
+        );
     }
 
     /// Unrecognized spend-only lines (like "Spend only mana produced by basic lands to cast this spell")

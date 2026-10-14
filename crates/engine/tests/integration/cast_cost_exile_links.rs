@@ -8,11 +8,13 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::players::linked_exile_cards_for_source;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{CastCommit, GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, ExileLink, ExileLinkKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, ExileLink, ExileLinkKind, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -49,6 +51,9 @@ const ZOMBIFY: &str = "Return target creature card from your graveyard to the ba
 const EPHEMERATE: &str = "Exile target creature you control, then return it to the battlefield under its owner's control.\n\
 Rebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
 const RELEASE_TO_THE_WIND: &str = "Exile target nonland permanent. For as long as that card remains exiled, its owner may cast it without paying its mana cost.";
+const MURDER: &str = "Destroy target creature.";
+const COFFIN_PURGE: &str = "Exile target card from a graveyard.\n\
+Flashback {B} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 
 /// Synthetic building block: a permanent spell with an additional-cost exile and
 /// an activated "exiled with this creature" reader (CR 607.2q's class shape).
@@ -428,9 +433,9 @@ fn gorex_attack_trigger_reads_its_cast_cost_pile_after_gorex_leaves() {
 }
 
 /// Gorex(A) is exiled by Release to the Wind and recast from exile, either
-/// exiling B for its cost or declining the cost. Returns `(runner, gorex, a, b)`
-/// after the recast resolves.
-fn gorex_recast_from_exile(exile_b: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+/// exiling B for its cost or declining the cost. A {0} Murder waits in P0's
+/// hand. Returns `(runner, gorex, a, b, murder)` after the recast resolves.
+fn gorex_recast_from_exile(exile_b: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let gorex = add_gorex(&mut scenario);
@@ -446,6 +451,7 @@ fn gorex_recast_from_exile(exile_b: bool) -> (GameRunner, ObjectId, ObjectId, Ob
         true,
         RELEASE_TO_THE_WIND,
     );
+    let murder = add_free_spell(&mut scenario, "Murder", true, MURDER);
     let mut runner = scenario.build();
 
     runner
@@ -467,14 +473,14 @@ fn gorex_recast_from_exile(exile_b: bool) -> (GameRunner, ObjectId, ObjectId, Ob
     }
     // Reach guard: the recast resolved into a permanent.
     assert_eq!(zone(&runner, gorex), Zone::Battlefield);
-    (runner, gorex, a, b)
+    (runner, gorex, a, b, murder)
 }
 
 /// R8. CR 400.7 + CR 607.2q: Gorex recast from exile reads only the new
 /// spell's cost pile, never the departed Gorex's.
 #[test]
 fn gorex_recast_from_exile_reads_only_its_new_cost_pile() {
-    let (mut runner, gorex, a, b) = gorex_recast_from_exile(true);
+    let (mut runner, gorex, a, b, _) = gorex_recast_from_exile(true);
     // Gorex chooses at random, so the pile itself is the discriminator.
     assert_eq!(
         linked_pile(&runner, gorex),
@@ -593,6 +599,176 @@ fn cancelled_activation_keeps_the_permanents_cast_cost_pile() {
     );
 }
 
+/// Gorex on the battlefield with a {0} Murder and a {0} Coffin Purge in P0's
+/// hand.
+struct GorexBoard {
+    runner: GameRunner,
+    gorex: ObjectId,
+    pile: Vec<ObjectId>,
+    murder: ObjectId,
+    coffin_purge: ObjectId,
+}
+
+/// Cast Gorex exiling one graveyard creature card per name in `pile` for its
+/// cost, or declining the cost when `pile` is empty.
+fn gorex_board(pile: &[&str]) -> GorexBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gorex = add_gorex(&mut scenario);
+    let pile: Vec<ObjectId> = pile
+        .iter()
+        .map(|name| scenario.add_creature_to_graveyard(P0, name, 5, 5).id())
+        .collect();
+    let murder = add_free_spell(&mut scenario, "Murder", true, MURDER);
+    let coffin_purge = add_free_spell(&mut scenario, "Coffin Purge", true, COFFIN_PURGE);
+    let mut runner = scenario.build();
+
+    if pile.is_empty() {
+        runner.cast(gorex).decline_optional().resolve();
+    } else {
+        runner
+            .cast(gorex)
+            .accept_optional()
+            .pay_cost_with(&pile)
+            .resolve();
+    }
+    // Reach guard: the cast resolved into a permanent whose pile is its cost.
+    assert_eq!(zone(&runner, gorex), Zone::Battlefield);
+    assert_eq!(linked_pile(&runner, gorex), pile);
+    GorexBoard {
+        runner,
+        gorex,
+        pile,
+        murder,
+        coffin_purge,
+    }
+}
+
+/// Cast Murder on Gorex and pass priority until Murder has resolved, leaving
+/// Gorex's dies trigger as the only stack item.
+fn murder_gorex_until_its_dies_trigger(
+    runner: &mut GameRunner,
+    murder: ObjectId,
+    gorex: ObjectId,
+) -> CastCommit<'_> {
+    let mut committed = runner.cast(murder).target_objects(&[gorex]).commit();
+    for _ in 0..8 {
+        let stack = &committed.state().stack;
+        if stack.len() == 1 && matches!(stack[0].kind, StackEntryKind::TriggeredAbility { .. }) {
+            break;
+        }
+        committed
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve Murder");
+    }
+    // Reach guard: Gorex died and its dies trigger is the only stack item.
+    let stack = &committed.state().stack;
+    assert_eq!(stack.len(), 1);
+    assert!(matches!(
+        stack[0].kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    assert_eq!(stack[0].source_id, gorex);
+    assert_eq!(committed.state().objects[&gorex].zone, Zone::Graveyard);
+    committed
+}
+
+/// R11. CR 603.10a + CR 607.2q + CR 608.2c: Gorex's dies trigger returns the
+/// card exiled to pay its cost, and Gorex stays in the graveyard.
+#[test]
+fn gorex_dies_trigger_returns_a_card_exiled_for_its_cost() {
+    let mut board = gorex_board(&["Graveyard Giant A"]);
+    let (gorex, a, murder) = (board.gorex, board.pile[0], board.murder);
+    let runner = &mut board.runner;
+
+    runner.cast(murder).target_objects(&[gorex]).resolve();
+
+    assert_eq!(zone(runner, gorex), Zone::Graveyard);
+    assert_eq!(
+        zone(runner, a),
+        Zone::Hand,
+        "CR 608.2c: \"that card\" is the card chosen from among those exiled with Gorex"
+    );
+}
+
+/// R12. CR 608.2c: "choose a card at random" returns exactly one card of a
+/// two-card pile.
+#[test]
+fn gorex_dies_trigger_returns_exactly_one_card_of_its_pile() {
+    let mut board = gorex_board(&["Graveyard Giant A", "Graveyard Giant B"]);
+    let (gorex, murder) = (board.gorex, board.murder);
+    let pile = board.pile.clone();
+    let runner = &mut board.runner;
+    // Reach guard: both cards are exiled with Gorex.
+    assert_eq!(pile.len(), 2);
+
+    runner.cast(murder).target_objects(&[gorex]).resolve();
+
+    assert_eq!(zone(runner, gorex), Zone::Graveyard);
+    let zones: Vec<Zone> = pile.iter().map(|&card| zone(runner, card)).collect();
+    assert_eq!(
+        zones.iter().filter(|&&z| z == Zone::Hand).count(),
+        1,
+        "one card is chosen, got {zones:?}"
+    );
+    assert_eq!(
+        zones.iter().filter(|&&z| z == Zone::Exile).count(),
+        1,
+        "the other card stays exiled, got {zones:?}"
+    );
+}
+
+/// R13. CR 607.2a + CR 607.2q: a pile card the attack trigger already returned
+/// is no longer exiled with Gorex, so the dies trigger in the same combat
+/// returns the other one.
+#[test]
+fn gorex_dies_trigger_after_its_attack_trigger_returns_the_rest_of_the_pile() {
+    let mut board = gorex_board(&["Graveyard Giant A", "Graveyard Giant B"]);
+    let (gorex, murder) = (board.gorex, board.murder);
+    let pile = board.pile.clone();
+    let runner = &mut board.runner;
+
+    attack_with(runner, gorex);
+    resolve_stack_accepting(runner);
+    // Reach guard: the attack trigger returned exactly one card.
+    assert_eq!(
+        pile.iter()
+            .filter(|&&card| zone(runner, card) == Zone::Hand)
+            .count(),
+        1
+    );
+
+    runner.cast(murder).target_objects(&[gorex]).resolve();
+
+    assert_eq!(zone(runner, gorex), Zone::Graveyard);
+    for &card in &pile {
+        assert_eq!(zone(runner, card), Zone::Hand);
+    }
+}
+
+/// R14. CR 113.7a: Gorex's dies trigger resolves after Gorex leaves the
+/// graveyard and still returns the card exiled with it.
+#[test]
+fn gorex_dies_trigger_returns_its_card_after_gorex_leaves_the_graveyard() {
+    let mut board = gorex_board(&["Graveyard Giant A"]);
+    let (gorex, a, murder, coffin_purge) =
+        (board.gorex, board.pile[0], board.murder, board.coffin_purge);
+    let runner = &mut board.runner;
+
+    let mut committed = murder_gorex_until_its_dies_trigger(runner, murder, gorex);
+    committed
+        .cast(coffin_purge)
+        .target_objects(&[gorex])
+        .resolve();
+
+    assert_eq!(zone(runner, gorex), Zone::Exile);
+    assert_eq!(
+        zone(runner, a),
+        Zone::Hand,
+        "CR 113.7a: the trigger acts after its source left the graveyard"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Guards: readings that hold at base and with the design.
 // ---------------------------------------------------------------------------
@@ -668,7 +844,7 @@ fn countered_then_reanimated_gorex_has_no_pile() {
 /// the departed Gorex's pile is not its own.
 #[test]
 fn gorex_recast_from_exile_declining_its_cost_has_no_pile() {
-    let (mut runner, gorex, a, b) = gorex_recast_from_exile(false);
+    let (mut runner, gorex, a, b, _) = gorex_recast_from_exile(false);
 
     attack_with(&mut runner, gorex);
     // Reach guard: the attack trigger is on the stack.
@@ -762,4 +938,55 @@ fn cancelled_gorex_cast_pile_does_not_reach_the_next_cast() {
     resolve_stack_accepting(&mut runner);
 
     assert_ne!(zone(&runner, a), Zone::Hand);
+}
+
+// ---------------------------------------------------------------------------
+// Dies-trigger hostile fixtures: no pile, or a prior incarnation's pile.
+// ---------------------------------------------------------------------------
+
+/// G7. CR 609.3: with nothing exiled with Gorex, its dies trigger chooses
+/// nothing and Gorex stays in the graveyard.
+#[test]
+fn gorex_dies_trigger_with_an_empty_pile_moves_nothing() {
+    let mut board = gorex_board(&[]);
+    let (gorex, murder) = (board.gorex, board.murder);
+    let runner = &mut board.runner;
+
+    murder_gorex_until_its_dies_trigger(runner, murder, gorex).resolve();
+
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        zone(runner, gorex),
+        Zone::Graveyard,
+        "CR 609.3: \"that card\" names no card, so nothing moves"
+    );
+}
+
+/// G8. CR 400.7 + CR 607.2q: Gorex recast from exile declining its cost has no
+/// pile when it dies; the departed Gorex's card stays exiled.
+#[test]
+fn recast_gorex_dies_trigger_does_not_read_the_departed_gorexs_pile() {
+    let (mut runner, gorex, a, _, murder) = gorex_recast_from_exile(false);
+    // Reach guard: A is still exiled when the recast Gorex dies.
+    assert_eq!(zone(&runner, a), Zone::Exile);
+
+    runner.cast(murder).target_objects(&[gorex]).resolve();
+
+    assert_eq!(zone(&runner, a), Zone::Exile);
+    assert_eq!(zone(&runner, gorex), Zone::Graveyard);
+}
+
+/// G9. CR 400.7 + CR 607.2q: Gorex recast from exile paying with B returns B
+/// when it dies, never the departed Gorex's A.
+#[test]
+fn recast_gorex_dies_trigger_reads_only_its_new_cost_pile() {
+    let (mut runner, gorex, a, b, murder) = gorex_recast_from_exile(true);
+    // Reach guard: only B is exiled with the recast Gorex.
+    assert_eq!(linked_pile(&runner, gorex), vec![b]);
+
+    runner.cast(murder).target_objects(&[gorex]).resolve();
+
+    assert_eq!(zone(&runner, b), Zone::Hand);
+    assert_eq!(zone(&runner, a), Zone::Exile);
+    assert_eq!(zone(&runner, gorex), Zone::Graveyard);
 }

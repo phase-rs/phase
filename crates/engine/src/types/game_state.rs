@@ -1975,11 +1975,31 @@ pub struct AttachmentSnapshot {
 
 /// CR 603.10a + CR 607.2a: Snapshot of a single card linked as "exiled with"
 /// a source at the instant before that source leaves the battlefield.
+/// Readers that consult the live card gate on [`Self::is_still_exiled`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedExileSnapshot {
     pub exiled_id: ObjectId,
     pub owner: PlayerId,
     pub mana_value: u32,
+    /// CR 400.7: the exiled card's incarnation when the snapshot was captured. A
+    /// card that leaves exile is a new object, even if it is exiled again, so a
+    /// reader that consults the live card matches it only at this incarnation.
+    /// Legacy saves that predate this field decode to `LEGACY_INCARNATION`, which
+    /// no live object has (fail-closed, mirroring `CostPaidObjectSnapshot`).
+    #[serde(default = "crate::types::ability::legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+impl LinkedExileSnapshot {
+    /// CR 607.2a + CR 400.7: Whether this snapshot's card is still the same object
+    /// in exile. Readers that consult the live card gate on this; readers of the
+    /// frozen `owner`/`mana_value` read last known information (CR 608.2h) and do not.
+    pub fn is_still_exiled(&self, state: &GameState) -> bool {
+        state
+            .objects
+            .get(&self.exiled_id)
+            .is_some_and(|obj| obj.zone == Zone::Exile && obj.incarnation == self.incarnation)
+    }
 }
 
 /// CR 400.7 + CR 607.2a + CR 607.2b + CR 113.7a: The linked exiles a source had
@@ -23482,8 +23502,9 @@ declare_game_state! {
     /// (CR 400.7), but an ability that sacrifices its own source as a cost and
     /// then refers to "cards exiled with this permanent" (Rod of Absorption)
     /// must still see those cards at resolution. `linked_exile_cards_for_source`
-    /// consults this as its final fallback, filtered to cards still in exile, so
-    /// stale entries (cards that later left exile) contribute nothing.
+    /// consults this as its final fallback, filtered to cards still in exile as
+    /// the object the entry captured (CR 400.7), so a card that left exile
+    /// contributes nothing, even if it was exiled again.
     /// One entry per battlefield departure (a source can leave more than once in
     /// a step), each bounded to that departure's incarnations, so a later
     /// incarnation of the same id never reads it (CR 400.7).

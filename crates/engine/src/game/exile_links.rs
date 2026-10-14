@@ -244,8 +244,9 @@ pub(crate) fn links_for_reader(
 
 /// CR 607.2a + CR 607.2b + CR 113.7a + CR 400.7: The linked-exile LKI piles the
 /// incarnation `reader` may read (see `linked_exile_incarnation`), filtered to
-/// cards still in exile so stale entries (cards that later left exile)
-/// contribute nothing. `None` admits every entry (the source no longer exists).
+/// cards still in exile as the object the entry captured (CR 400.7), so a card
+/// that left exile contributes nothing, even if it was exiled again. `None`
+/// admits every entry (the source no longer exists).
 pub(crate) fn lki_snapshots_for_reader(
     state: &GameState,
     source_id: ObjectId,
@@ -258,12 +259,7 @@ pub(crate) fn lki_snapshots_for_reader(
         .flatten()
         .filter(move |lki| reader.is_none_or(|incarnation| lki.admits(incarnation)))
         .flat_map(|lki| &lki.snapshot)
-        .filter(|snap| {
-            state
-                .objects
-                .get(&snap.exiled_id)
-                .is_some_and(|obj| obj.zone == Zone::Exile)
-        })
+        .filter(|snap| snap.is_still_exiled(state))
 }
 
 /// CR 607.2a + CR 113.7a: Whether `exiled_id` was exiled by the acting
@@ -299,6 +295,7 @@ pub(crate) fn exiled_card_snapshot(
             // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a
             // split card records its combined mana value.
             mana_value: obj.effective_mana_value(),
+            incarnation: obj.incarnation,
         })
 }
 
@@ -459,7 +456,16 @@ fn record_departed_linked_exile(
     };
     let entries = state.linked_exile_lki.entry(source_id).or_default();
     match entries.iter_mut().find(|lki| lki.admits(creator)) {
-        Some(lki) if lki.snapshot.iter().any(|snap| snap.exiled_id == exiled_id) => false,
+        // CR 400.7: a card exiled again is a new object, so it is recorded even
+        // when an earlier incarnation of it is already in the pile (readers drop
+        // that stale entry).
+        Some(lki)
+            if lki.snapshot.iter().any(|snap| {
+                snap.exiled_id == snapshot.exiled_id && snap.incarnation == snapshot.incarnation
+            }) =>
+        {
+            false
+        }
         Some(lki) => {
             lki.snapshot.push(snapshot);
             true
@@ -2323,6 +2329,62 @@ mod tests {
         push_tracked_by_source(&mut state, card, source);
         assert!(!has_link(&state, card, source));
         assert!(!state.linked_exile_lki.contains_key(&source));
+    }
+
+    /// CR 400.7 + CR 607.2a: a card the departed incarnation exiles, which then
+    /// leaves exile and is exiled again by that same incarnation, is a new
+    /// object, so it is recorded again and its pile reads it.
+    #[test]
+    fn a_card_the_departed_incarnation_exiles_again_is_recorded_again() {
+        // Stamped 4, live 6.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Exile, &mut events);
+        push_tracked_by_source(&mut state, card, source);
+
+        let pile: Vec<ObjectId> =
+            crate::game::players::linked_exile_cards_for_source(&state, source)
+                .iter()
+                .map(|snap| snap.exiled_id)
+                .collect();
+        assert_eq!(pile, vec![card], "the card exiled again is in the pile");
+        assert!(
+            state.linked_exile_lki[&source]
+                .iter()
+                .any(|lki| lki.snapshot.contains(&snapshot_of(&state, card))),
+            "the LKI records the card as the object now in exile"
+        );
+    }
+
+    /// CR 400.7: a snapshot saved before snapshots carried an incarnation cannot
+    /// prove which object it named, so it decodes to the legacy sentinel and
+    /// never matches a live card (fail-closed, like `CostPaidObjectSnapshot`).
+    #[test]
+    fn a_legacy_linked_exile_snapshot_matches_no_live_card() {
+        let mut state = GameState::new_two_player(7);
+        let card = exile_card(&mut state);
+        let current = snapshot_of(&state, card);
+        assert!(
+            current.is_still_exiled(&state),
+            "positive: a captured snapshot names the card in exile"
+        );
+
+        let mut legacy = serde_json::to_value(&current).expect("the snapshot serializes");
+        legacy
+            .as_object_mut()
+            .expect("the snapshot is a JSON object")
+            .remove("incarnation")
+            .expect("the snapshot serializes its incarnation");
+        let legacy: LinkedExileSnapshot =
+            serde_json::from_value(legacy).expect("a legacy snapshot decodes");
+        assert_eq!(
+            legacy.incarnation,
+            crate::types::identifiers::LEGACY_INCARNATION
+        );
+        assert!(!legacy.is_still_exiled(&state));
     }
 
     /// CR 610.3 + CR 400.7 + CR 113.7a: an "until it leaves" exile made by an

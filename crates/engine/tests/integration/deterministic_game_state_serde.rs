@@ -1840,6 +1840,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                     exiled_id: ObjectId(11),
                     owner: PlayerId(0),
                     mana_value: 1,
+                    incarnation: 2,
                 }],
             }],
         ),
@@ -1853,6 +1854,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                         exiled_id: ObjectId(22),
                         owner: PlayerId(1),
                         mana_value: 2,
+                        incarnation: 5,
                     }],
                 },
                 LinkedExileLki {
@@ -1862,6 +1864,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                         exiled_id: ObjectId(23),
                         owner: PlayerId(0),
                         mana_value: 3,
+                        incarnation: 9,
                     }],
                 },
             ],

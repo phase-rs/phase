@@ -54,7 +54,8 @@ pub use candidates::{
     candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction, TacticalClass,
 };
 pub use combat_withdrawal::{
-    combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
+    activation_may_yield_combat_withdrawal, combat_withdrawal_fact_for_current_target,
+    CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{
     apply_ai_action_proposal, build_decision_context, build_decision_context_for_semantic_owner,
@@ -82,8 +83,9 @@ pub use payment_continuation::{
     witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
 };
 pub use prospective_mana::{
-    certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,
-    CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan, PactPlanState,
+    certify_fetch_then_cast, certify_pact_plan, controls_exact_fetchland, is_pact_payment_ability,
+    is_pact_payment_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan,
+    PactPlanState,
 };
 pub use swarm::{
     adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
