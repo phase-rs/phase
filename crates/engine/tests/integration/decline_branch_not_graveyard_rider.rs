@@ -4,8 +4,9 @@
 //! CR 608.2c: "The controller of the spell or ability follows its instructions
 //! in the order written." The "If you don't …" sentence after a "you may cast /
 //! play" instruction is followed only when that cast was not performed.
-//! CR 614.1a: only an effect that uses the word "instead" is a replacement
-//! effect, and the decline sentence does not. A spell that WAS cast this way
+//! CR 614.1a: effects that use the word "instead" are replacement effects. The
+//! decline sentence has no "instead" and none of the other replacement forms
+//! CR 614.1b-e list, so it replaces nothing. A spell that WAS cast this way
 //! therefore follows the default rules: it goes to its owner's graveyard as the
 //! final part of its resolution (CR 608.2n) or when it is countered (CR 701.6a).
 //!
