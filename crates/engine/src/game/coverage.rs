@@ -17093,6 +17093,24 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// CR 702.186a + CR 702.186b: a cost behind the "∞" keyword label is gated
+    /// by it, so the face's ungated additional cost does not cover the line.
+    #[test]
+    fn infinity_labeled_additional_cost_line_is_not_covered_by_the_additional_cost() {
+        const ORACLE: &str = "∞ — As an additional cost to cast this spell, \
+                              you may exile a creature card from your graveyard.";
+        let face = face_with_graveyard_exile_additional_cost(ORACLE);
+
+        let findings = audit_card_lines(ORACLE, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "got {findings:?}"
+        );
+    }
+
     /// Unrecognized spend-only lines (like "Spend only mana produced by basic lands to cast this spell")
     /// must not be swallowed by a generic "spend only " prefix check when SpendOnlyOnX does not match.
     ///

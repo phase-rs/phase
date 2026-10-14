@@ -7,6 +7,7 @@ use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::oracle::is_keyword_ability_label;
 use super::oracle_classifier::lower_starts_with;
 use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
 use super::oracle_modal::{split_short_label_prefix, FLAVOR_WORD_COST_LABEL_MAX_WORDS};
@@ -20,21 +21,37 @@ use crate::types::ability::{
 };
 use crate::types::mana::ManaColor;
 
+/// CR 118.8: the opener of an additional cost on this spell, the prefix
+/// `parse_additional_cost_line` reads a cost after.
+const THIS_SPELL_ADDITIONAL_COST_PREFIX: &str = "as an additional cost to cast this spell, ";
+
 /// CR 118.8 + CR 207.2c + CR 207.2d: The text of an "As an additional cost …"
 /// line, or `None` when the line is not one. An ability word or flavor word
-/// before the cost ("Fallen Warrior — As an additional cost to cast this
-/// spell, …") has no rules meaning, so the text after the label is returned.
+/// before a cost on this spell ("Fallen Warrior — As an additional cost to
+/// cast this spell, …") has no rules meaning, so the text after the label is
+/// returned.
 /// The label is not word-capped: the remainder is re-validated by the
 /// additional-cost opener itself, which is what tells a label from an
 /// ordinary em-dash sentence (see `FLAVOR_WORD_COST_LABEL_MAX_WORDS`).
 pub(crate) fn additional_cost_line_text(line: &str) -> Option<&str> {
-    let opens_additional_cost =
-        |text: &str| lower_starts_with(&text.to_lowercase(), "as an additional cost");
-    if opens_additional_cost(line) {
+    const OPENER: &str = "as an additional cost";
+    if lower_starts_with(&line.to_lowercase(), OPENER) {
         return Some(line);
     }
-    let (_, rest) = split_short_label_prefix(line, FLAVOR_WORD_COST_LABEL_MAX_WORDS)?;
-    opens_additional_cost(rest).then_some(rest)
+    let (label, rest) = split_short_label_prefix(line, FLAVOR_WORD_COST_LABEL_MAX_WORDS)?;
+    // CR 702.186a + CR 702.178a: a keyword-ability label ("∞", "Max speed")
+    // gates the text after it, so that text is never an ungated cost.
+    if is_keyword_ability_label(&label.to_lowercase()) {
+        return None;
+    }
+    // CR 118.8: after a label, only a cost on this spell is read. A labeled
+    // line that imposes a cost on other spells is left to the later line
+    // parsers, because `parse_additional_cost_line` reads no cost from it.
+    let rest_lower = rest.to_lowercase();
+    let costs_this_spell = tag::<_, _, OracleError<'_>>(THIS_SPELL_ADDITIONAL_COST_PREFIX)
+        .parse(rest_lower.as_str())
+        .is_ok();
+    costs_this_spell.then_some(rest)
 }
 
 /// Split a combined additional-cost line from its trailing self-spell cost
@@ -71,7 +88,7 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     // additional cost to cast creature spells, ..." — Chorus of the Conclave) is
     // not a cost on this object at all, so no cost may be stapled to its face.
     let (after_prefix, names_this_spell) =
-        tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
+        tag::<_, _, OracleError<'_>>(THIS_SPELL_ADDITIONAL_COST_PREFIX)
             .parse(lower)
             .map_or((lower, false), |(rest, _)| (rest, true));
     // Use TextPair for case-preserving parallel slicing, then strip trailing period.
@@ -1846,6 +1863,45 @@ Trample";
             "a prefix with a mana symbol is not a label"
         );
         assert_eq!(additional_cost_line_text("Trample"), None);
+    }
+
+    /// CR 702.186a + CR 702.178a + CR 118.8: a keyword-ability label is kept,
+    /// and after any label only a cost on this spell is read.
+    #[test]
+    fn additional_cost_line_text_keeps_keyword_labels_and_costs_on_other_spells() {
+        const COST: &str = "As an additional cost to cast this spell, discard a card.";
+        assert_eq!(
+            additional_cost_line_text(
+                "Threshold — As an additional cost to cast this spell, discard a card."
+            ),
+            Some(COST),
+            "an ability word with a mapped condition is still stripped"
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "Max speed — As an additional cost to cast this spell, discard a card."
+            ),
+            None
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "∞ — As an additional cost to cast this spell, discard a card."
+            ),
+            None
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "Rally — As an additional cost to cast creature spells, sacrifice a creature."
+            ),
+            None
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "As an additional cost to cast creature spells, you may pay any amount of mana."
+            ),
+            Some("As an additional cost to cast creature spells, you may pay any amount of mana."),
+            "an unlabeled line keeps its existing route"
+        );
     }
 
     #[test]

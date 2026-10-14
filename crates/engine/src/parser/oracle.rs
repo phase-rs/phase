@@ -3890,6 +3890,15 @@ fn keyword_prefix_activation_restriction(
     }
 }
 
+/// CR 702.186a + CR 702.178a: whether an em-dash label is a keyword ability
+/// ("∞", "Max speed") that gates the ability text after it. An ability word or
+/// flavor word (CR 207.2c, CR 207.2d) has no rules meaning and answers `false`.
+/// `label` is lowercase. The split is the one `keyword_prefix_activation_restriction`
+/// draws over `ability_word_to_condition`.
+pub(super) fn is_keyword_ability_label(label: &str) -> bool {
+    keyword_prefix_activation_restriction(ability_word_to_condition(label).as_ref()).is_some()
+}
+
 /// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
 /// CR 608.2c: Bridge an ability-word / "instead if" `StaticCondition` to its
 /// effect-resolution `AbilityCondition` form. Delegates to the single
