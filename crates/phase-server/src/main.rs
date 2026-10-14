@@ -84,14 +84,15 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, AiTransition, CreateGameError, FullRuntime, GameSession, HostingMode,
-    PreviewRefusal, SessionActionError, SessionManager,
+    ActionResult, AiRunOutcome, AiTransition, CreateGameError, DecisionSnapshot, FullRuntime,
+    GameSession, HostingMode, PreviewRefusal, SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join,
 };
 use server_core::takeback::RewindOption;
+use std::borrow::Cow;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
@@ -530,6 +531,20 @@ fn legal_actions_for_seat(
     }
 }
 
+/// Initial and reconnect snapshots reuse the decision already derived by AI,
+/// or derive it once when no AI transition preceded the broadcast.
+fn game_started_decision<'a>(
+    session: &GameSession,
+    ai_outcome: &'a AiRunOutcome,
+) -> Cow<'a, DecisionSnapshot> {
+    ai_outcome
+        .transitions
+        .last()
+        .and_then(|transition| transition.decision.as_ref())
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|| Cow::Owned(DecisionSnapshot::from_state(&session.state)))
+}
+
 /// Build the `GameStarted` message for a single seat.
 ///
 /// `events` carries the engine's start-of-game events (the d20 first-player
@@ -541,20 +556,21 @@ fn legal_actions_for_seat(
 /// `is_actor` gating used for `legal_actions`.
 fn build_game_started_message(
     session: &GameSession,
+    decision: &DecisionSnapshot,
     player: PlayerId,
     player_token: Option<String>,
     events: Vec<GameEvent>,
 ) -> ServerMessage {
-    let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
+    let legal_actions = &decision.legal_actions;
     let is_actor = server_core::is_acting(&session.state, player);
-    let auto_pass = engine_auto_pass_for_viewer(&session.state, player, &legal_actions);
+    let auto_pass = engine_auto_pass_for_viewer(&session.state, player, legal_actions);
     let end_continuous_effect_offers = if is_actor {
-        engine_end_continuous_effect_offers(&legal_actions)
+        engine_end_continuous_effect_offers(legal_actions)
     } else {
         Vec::new()
     };
     let mana_payment_shortcut_actions = if is_actor {
-        engine_mana_payment_shortcut_actions(&session.state, &by_object_all)
+        engine_mana_payment_shortcut_actions(&session.state, &decision.legal_actions_by_object)
     } else {
         Vec::new()
     };
@@ -588,17 +604,17 @@ fn build_game_started_message(
         your_player: player,
         opponent_name,
         player_names: session.display_names.clone(),
-        legal_actions: legal_actions_for_seat(&session.state, player, &legal_actions),
+        legal_actions: legal_actions_for_seat(&session.state, player, legal_actions),
         auto_pass_recommended: auto_pass,
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         spell_costs: if is_actor {
-            spell_costs_all
+            decision.spell_costs.clone()
         } else {
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            object_action_payloads(&by_object_all)
+            object_action_payloads(&decision.legal_actions_by_object)
         } else {
             HashMap::new()
         },
@@ -627,6 +643,7 @@ fn build_game_started_message(
 /// contest. Every seat receives the contest event (public; not actor-gated).
 fn build_game_started_messages(
     session: &mut GameSession,
+    decision: &DecisionSnapshot,
     joiner: Option<(PlayerId, &str)>,
 ) -> Vec<(PlayerId, ServerMessage)> {
     let start_events = std::mem::take(&mut session.start_events);
@@ -641,7 +658,7 @@ fn build_game_started_messages(
                 .map(|(_, token)| token.to_string());
             (
                 player,
-                build_game_started_message(session, player, token, start_events.clone()),
+                build_game_started_message(session, decision, player, token, start_events.clone()),
             )
         })
         .collect()
@@ -2323,7 +2340,9 @@ async fn attach_current_draft_match(
             let was_disconnected = !session.connected[player_index];
 
             reconnect_seat_while_session_locked(state, &mut session, &player_token).await?;
-            let game_started = build_game_started_message(&session, game_player, None, Vec::new());
+            let decision = DecisionSnapshot::from_state(&session.state);
+            let game_started =
+                build_game_started_message(&session, &decision, game_player, None, Vec::new());
             install_full_sender_while_state_locked(connections, &game_code, game_player, tx).await;
 
             (player_token, full_key, game_started, was_disconnected)
@@ -7021,12 +7040,15 @@ async fn broadcast_game_started(
             return;
         };
 
-        let ai_failure = session.run_ai().fault;
+        let ai_outcome = session.run_ai();
         persist_full_session_async(game_db, &mut session);
+        let decision = game_started_decision(&session, &ai_outcome);
+        let player_messages = build_game_started_messages(&mut session, &decision, joiner);
+        drop(decision);
         (
-            build_game_started_messages(&mut session, joiner),
+            player_messages,
             build_spectator_game_started_message(&session),
-            ai_failure,
+            ai_outcome.fault,
         )
     };
 
@@ -9420,6 +9442,17 @@ async fn handle_client_message(
                                         let player =
                                             session.player_for_token(&player_token).unwrap();
                                         let ai_outcome = session.run_ai();
+                                        let decision = game_started_decision(&session, &ai_outcome);
+                                        // Reconnect: no contest dice (the player must not
+                                        // re-see the first-player roll).
+                                        let game_started_msg = build_game_started_message(
+                                            &session,
+                                            &decision,
+                                            player,
+                                            None,
+                                            Vec::new(),
+                                        );
+                                        drop(decision);
                                         let ai_failure = ai_outcome.fault;
                                         let ai_result = ai_outcome
                                             .transitions
@@ -9430,14 +9463,6 @@ async fn handle_client_message(
                                         if ai_result.is_some() || ai_failure.is_some() {
                                             persist_full_session_async(game_db, &mut session);
                                         }
-                                        // Reconnect: no contest dice (the player must not
-                                        // re-see the first-player roll).
-                                        let game_started_msg = build_game_started_message(
-                                            &session,
-                                            player,
-                                            None,
-                                            Vec::new(),
-                                        );
                                         let pending_takeback_msg =
                                             session.pending_takeback_message().map(Box::new);
                                         let rewind_targets = session.rewind_options();
@@ -9907,16 +9932,23 @@ async fn handle_client_message(
                             return;
                         }
                     };
-                    let ai_failure = session.run_ai().fault;
+                    let ai_outcome = session.run_ai();
                     persist_full_session_async(game_db, &mut session);
+                    let decision = game_started_decision(&session, &ai_outcome);
                     // Initial start of a Play-vs-AI game: the human seat sees
                     // the first-player contest dice. Drain so they are not
                     // re-sent on reconnect.
                     let start_events = std::mem::take(&mut session.start_events);
-                    let game_started_msg =
-                        build_game_started_message(&session, PlayerId(0), None, start_events);
+                    let game_started_msg = build_game_started_message(
+                        &session,
+                        &decision,
+                        PlayerId(0),
+                        None,
+                        start_events,
+                    );
+                    drop(decision);
 
-                    (game_started_msg, ai_failure)
+                    (game_started_msg, ai_outcome.fault)
                 }; // session guard dropped
 
                 if let Err(error) = attach_full_seat(
