@@ -13843,6 +13843,15 @@ mod tests {
                 .any(rider_head)
     }
 
+    /// (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types, tail dropped)
+    type CounterRiderTailCase = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        bool,
+    );
+
     /// CR 608.2c + CR 614.1a: coverage reports a counter's exile-rider tail as a
     /// resolver gap exactly when the resolver drops it
     /// (`effects::counter_exile_rider_runs_tail`). Transcendent Dragon's
@@ -13853,8 +13862,7 @@ mod tests {
     #[test]
     fn counter_exile_rider_tail_the_resolver_drops_is_a_coverage_gap() {
         const TAG: &str = "structural:counter_exile_rider_tail_dropped";
-        // (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types, tail dropped)
-        let cards: [(&str, &str, &[&str], &[&str], bool); 9] = [
+        let cards: [CounterRiderTailCase; 9] = [
             (
                 "Transcendent Dragon",
                 TRANSCENDENT_DRAGON_ORACLE,
