@@ -597,10 +597,12 @@ fn ozai_free_grant_election_against_paid_sibling_determines_cost() {
         "the paid-elected cast must NOT be offered with an empty pool"
     );
     // Fund exactly {1}{G}; the paid election resolves and debits both mana.
-    runner.state_mut().players[0].mana_pool.mana.extend(vec![
+    for unit in [
         ManaUnit::new(ManaType::Colorless, ozai_b, false, vec![]),
         ManaUnit::new(ManaType::Green, ozai_b, false, vec![]),
-    ]);
+    ] {
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
     assert!(
         legal_actions(runner.state()).iter().any(
             |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == target_b),

@@ -3,7 +3,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{
+    quantity_expr_recipient_read, resolve_quantity_with_targets,
+    resolve_quantity_with_targets_and_recipient, RecipientRead,
+};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
@@ -549,7 +552,10 @@ pub(crate) fn resolve_with_host_override(
             None,
         ),
     };
-    let token_owner = resolve_token_owner(state, ability, owner_filter);
+    // CR 608.2b: a declared player whose target was illegal creates no token.
+    let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
+        return no_token(state, ability, events);
+    };
 
     // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
     // time. ParentTarget reads the first Object target (the for-each loop's
@@ -613,13 +619,7 @@ pub(crate) fn resolve_with_host_override(
 
     // CR 122.6a: Resolve ETB counter quantities before proposing — the event
     // carries fully-resolved counts, not quantity expressions.
-    let resolved_etb_counters: Vec<(CounterType, u32)> = etb_counters
-        .iter()
-        .map(|(ct, qty)| {
-            let n = resolve_quantity_with_targets(state, qty, ability).max(0) as u32;
-            (ct.clone(), n)
-        })
-        .collect();
+    let resolved_etb_counters = resolve_token_entry_counters(state, &etb_counters, ability);
 
     let spec = build_token_spec(
         &script_name,
@@ -656,7 +656,8 @@ pub(crate) fn resolve_with_host_override(
             }
         }
         ReplacementResult::Prevented => {
-            // Token creation was prevented entirely
+            // CR 609.3: nothing was created, so the previous result must not read as this one's.
+            state.last_created_token_ids = Vec::new();
         }
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
@@ -690,6 +691,72 @@ pub(crate) fn resolve_with_host_override(
         subject: None,
     });
 
+    Ok(())
+}
+
+/// CR 122.6 + CR 614.1c + CR 608.2h: Resolve a created token's "enters with N
+/// <type> counters" amounts. The token is the object given those counters as it
+/// enters (CR 122.6), so an amount that counts a population relative to "it" —
+/// "the number of OTHER creatures you control", "… attached to it" — reads the
+/// token as that referent (CR 608.2c), not the creating ability's source. The
+/// amounts are determined once, before any token of the batch exists
+/// (CR 608.2h, CR 614.12): the token is bound by the id `zones::create_object`
+/// would allocate next. Ids are allocated monotonically from
+/// `next_object_id`, so no existing object holds it, "other" excludes nothing
+/// already on the battlefield and nothing is attached to it — what an object
+/// not yet on the battlefield answers. It names a referent, not the token's
+/// eventual id.
+///
+/// Only identity reads (`RecipientRead::PopulationIdentity`) are bound. An
+/// amount that reads the recipient's characteristics or controller ("its
+/// power", `SharesQuality`) would read an id with no object behind it, while
+/// CR 614.12 asks for the permanent as it would exist on the battlefield; such
+/// amounts (as far as the classifier enumerates them), and amounts that read no
+/// recipient, resolve exactly as before. A recipient read the classifier does
+/// not enumerate (its `_` tail, e.g. `Intensity { scope: Recipient }`) is graded
+/// `Unread` and can ride along inside a composite with an identity read; no
+/// parsed card produces that shape today.
+///
+/// The single authority for both `resolve` and its read-only mirror
+/// `resolve_token_spec`, so the live resolution, the bulk-run gate and the
+/// CR 614.1a substitute spec cannot disagree.
+fn resolve_token_entry_counters(
+    state: &GameState,
+    enter_with_counters: &[(CounterType, QuantityExpr)],
+    ability: &ResolvedAbility,
+) -> Vec<(CounterType, u32)> {
+    let entering_token = ObjectId(state.next_object_id);
+    enter_with_counters
+        .iter()
+        .map(|(counter_type, qty)| {
+            let n = match quantity_expr_recipient_read(qty) {
+                RecipientRead::PopulationIdentity => {
+                    resolve_quantity_with_targets_and_recipient(state, qty, ability, entering_token)
+                }
+                RecipientRead::Unread | RecipientRead::Characteristics => {
+                    resolve_quantity_with_targets(state, qty, ability)
+                }
+            };
+            (counter_type.clone(), n.max(0) as u32)
+        })
+        .collect()
+}
+
+/// CR 609.3 "do as much as possible": resolve without creating a token.
+///
+/// Shared by every branch that finds nothing to copy so they emit an identical
+/// `EffectResolved` and clear `last_created_token_ids` the same way.
+pub(crate) fn no_token(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    state.last_created_token_ids = Vec::new();
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
     Ok(())
 }
 
@@ -2936,7 +3003,9 @@ fn try_resolve_copy_batch(
     // (CR 707.2) or another permanent does, is collected by member 1's
     // checkpoint or by the executor's per-member collection, which ends the
     // run at that member.
-    let owner = resolve_token_owner(state, ability, &TargetFilter::Controller);
+    let Some(owner) = resolve_token_owner(state, ability, &TargetFilter::Controller) else {
+        return false;
+    };
     if token_creation_needs_choice(
         state,
         &probe_spec,
@@ -3066,7 +3135,7 @@ pub(crate) fn resolve_token_spec(
     };
 
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
-    let token_owner = resolve_token_owner(state, ability, owner);
+    let token_owner = resolve_token_owner(state, ability, owner)?;
     let host_request = TokenHostRequest::from_binding(
         attach_to.is_some(),
         attach_to
@@ -3080,13 +3149,7 @@ pub(crate) fn resolve_token_spec(
         )
     });
 
-    let resolved_etb_counters: Vec<(CounterType, u32)> = enter_with_counters
-        .iter()
-        .map(|(ct, qty)| {
-            let n = resolve_quantity_with_targets(state, qty, ability).max(0) as u32;
-            (ct.clone(), n)
-        })
-        .collect();
+    let resolved_etb_counters = resolve_token_entry_counters(state, enter_with_counters, ability);
 
     let spec = build_token_spec(
         name,
@@ -3172,7 +3235,9 @@ pub(crate) fn boon_host_passes_projected_legality(
         return true;
     };
     let projection_id = ObjectId(state.next_object_id);
-    let token_owner = resolve_token_owner(state, ability, owner);
+    let Some(token_owner) = resolve_token_owner(state, ability, owner) else {
+        return true;
+    };
     let mut projection = GameObject::new(
         projection_id,
         CardId(0),
@@ -3343,6 +3408,12 @@ fn resolve_attach_host(
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
                 .map(target_ref_to_attach_target)
         }
+        // CR 608.2b + CR 608.2c: the declared player of the chain; an illegal or
+        // unannounced one names no host.
+        AttachHostAuthority::DeclaredPlayer(group) => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, group)
+                .map(AttachTarget::Player)
+        }
         AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),
         AttachHostAuthority::SpecificObject(id) => Some(AttachTarget::Object(id)),
         AttachHostAuthority::NoHost => None,
@@ -3374,6 +3445,9 @@ enum AttachHostAuthority {
     Pronoun,
     /// One numbered slot of the resolving chain's accumulated targets.
     ParentSlot(usize),
+    /// CR 608.2c: the player an earlier clause declared, read through the declared-group
+    /// authority.
+    DeclaredPlayer(crate::types::ability::ChosenGroupId),
     /// The ability's own source object.
     Source,
     /// An object the ability definition names outright.
@@ -3448,16 +3522,13 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
 
         TargetFilter::ParentTarget => AttachHostAuthority::Pronoun,
         TargetFilter::ParentTargetSlot { index } => AttachHostAuthority::ParentSlot(*index),
+        TargetFilter::DeclaredPlayer { group } => AttachHostAuthority::DeclaredPlayer(*group),
         TargetFilter::SelfRef => AttachHostAuthority::Source,
         TargetFilter::SpecificObject { id } => AttachHostAuthority::SpecificObject(*id),
 
-        // CR 115.1a: the remaining player-valued TARGET SLOTS, which
-        // `denotes_player_target` also claims. Kept as their own arm rather than
-        // folded into a guard so the variant list stays readable, and asserted
-        // to agree with that authority in `attach_host_authority_tests`.
-        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => {
-            AttachHostAuthority::SelectedPlayerTarget
-        }
+        // CR 115.1a: the remaining player-valued TARGET SLOT, which
+        // `denotes_player_target` also claims.
+        TargetFilter::Player => AttachHostAuthority::SelectedPlayerTarget,
 
         // Player-valued filters that are NOT target slots. CR 303.4 permits a
         // player host, but each of these names its player through a context
@@ -3485,6 +3556,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::Owner
+        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AllPlayers => AttachHostAuthority::NoHost,
 
         // Object references this path does not resolve. Each names its object
@@ -3567,7 +3639,7 @@ pub(crate) fn resolve_token_owner(
     state: &GameState,
     ability: &ResolvedAbility,
     owner_filter: &TargetFilter,
-) -> PlayerId {
+) -> Option<PlayerId> {
     // CR 115.1: Context-ref filters route through the central helper so chain
     // target propagation cannot leak the parent's Player target into a sub
     // CreateToken whose `owner: Controller`. The helper handles
@@ -3583,15 +3655,17 @@ pub(crate) fn resolve_token_owner(
     // *source* alongside the player `owner` slot, and resolving the source
     // object's controller as the token owner would be wrong. When no player
     // slot exists, the controller creates the token.
-    ability
-        .targets
-        .iter()
-        .rev()
-        .find_map(|target| match target {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .unwrap_or(ability.controller)
+    Some(
+        ability
+            .targets
+            .iter()
+            .rev()
+            .find_map(|target| match target {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .unwrap_or(ability.controller),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4115,25 +4189,37 @@ fn heartwood_ability() -> AbilityDefinition {
 /// "[−1]: Surveil 1." (CR 701.25a) and "[−3]: Draw a card." (CR 121.1).
 /// Engine-defined from the rule text, not parsed from the catalog row's printed
 /// text, so the printed reminder parenthetical never becomes ability text.
+/// Each ability carries CR 606.3 timing via `loyalty_ability`.
 fn jace_token_abilities() -> Vec<AbilityDefinition> {
     vec![
-        AbilityDefinition::new(
-            AbilityKind::Activated,
+        loyalty_ability(
+            -1,
             Effect::Surveil {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
             },
-        )
-        .cost(AbilityCost::Loyalty { amount: -1 }),
-        AbilityDefinition::new(
-            AbilityKind::Activated,
+        ),
+        loyalty_ability(
+            -3,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
             },
-        )
-        .cost(AbilityCost::Loyalty { amount: -3 }),
+        ),
     ]
+}
+
+/// CR 606.2 + CR 606.3: an engine-defined loyalty ability — a loyalty cost
+/// plus the sorcery-speed restriction ("any time they have priority and the
+/// stack is empty during a main phase of their turn"). The loyalty gate
+/// (`planeswalker::can_activate_loyalty_ability`) enforces CR 606.3's
+/// once-per-permanent-per-turn cap itself and delegates timing to
+/// `activation_restrictions`, so static permissions can override it. This is
+/// the registry counterpart of the parser's `apply_loyalty_restrictions`.
+fn loyalty_ability(amount: i32, effect: Effect) -> AbilityDefinition {
+    AbilityDefinition::new(AbilityKind::Activated, effect)
+        .cost(AbilityCost::Loyalty { amount })
+        .sorcery_speed()
 }
 
 /// CR 111.10: Predefined token abilities keyed by subtype.
@@ -6433,6 +6519,45 @@ mod tests {
         // The registry arm is keyed to the Jace subtype, not to planeswalker
         // subtypes in general.
         assert!(predefined_token_abilities("Chandra").is_empty());
+    }
+
+    /// CR 606.3: every loyalty ability the predefined-token registry builds
+    /// carries the sorcery-speed timing restriction, for every subtype the
+    /// token catalog can reach.
+    #[test]
+    fn predefined_token_loyalty_abilities_are_sorcery_speed() {
+        let subtypes: std::collections::BTreeSet<&str> =
+            crate::game::token_presets::known_token_presets()
+                .iter()
+                .flat_map(|preset| preset.body.subtypes.iter().map(String::as_str))
+                .collect();
+        let loyalty_abilities: Vec<(&str, AbilityDefinition)> = subtypes
+            .iter()
+            .flat_map(|subtype| {
+                predefined_token_abilities(subtype)
+                    .into_iter()
+                    .map(move |ability| (*subtype, ability))
+            })
+            .filter(|(_, ability)| {
+                ability
+                    .cost
+                    .as_ref()
+                    .is_some_and(crate::types::ability::is_loyalty_ability_cost)
+            })
+            .collect();
+        // Reach-guard: the Jace pair is in the set, so the check below cannot
+        // pass on an empty collection.
+        assert!(
+            loyalty_abilities.len() >= 2,
+            "expected at least the Jace token's two loyalty abilities, got {}",
+            loyalty_abilities.len()
+        );
+        for (subtype, ability) in &loyalty_abilities {
+            assert!(
+                ability.is_sorcery_speed(),
+                "{subtype} token loyalty ability {ability:?} lacks CR 606.3 timing"
+            );
+        }
     }
 
     #[test]
@@ -8953,6 +9078,81 @@ mod tests {
         );
     }
 
+    /// CR 602.1 + CR 602.1a: a catalog `rules_text` line of the shape
+    /// "[Cost]: [Effect]" is an ACTIVATED ability, so it must route to
+    /// `GrantAbility` with its cost and duration intact — never to a bare static
+    /// P/T grant. This is the ONE line whose routing actually changes: the other
+    /// 345 firing lines are already rejected by the `~ has/gets` subject test
+    /// before and after, and the fallback keeps them functional.
+    ///
+    /// Revert-to-red: without the static-line guard, `parse_static_line_multi`
+    /// claims the line first and the token gets
+    /// `Continuous { SelfRef, [AddPower 1, AddToughness -1] }` — `modifications`
+    /// is then empty and `static_definitions` carries the flattened grant.
+    #[test]
+    fn catalog_rules_text_costed_pump_line_grants_activated_ability() {
+        let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "{U}: Sinuous Striker gets +1/-1 until end of turn.",
+            "Sinuous Striker",
+        );
+        assert!(unparsed_lines.is_empty(), "{unparsed_lines:?}");
+        assert!(
+            !static_definitions
+                .iter()
+                .flat_map(|definition| definition.modifications.iter())
+                .any(|modification| matches!(
+                    modification,
+                    ContinuousModification::AddPower { .. }
+                        | ContinuousModification::AddToughness { .. }
+                )),
+            "no bare P/T static may claim the costed line: {static_definitions:?}"
+        );
+        assert_eq!(
+            modifications.len(),
+            1,
+            "exactly one granted ability, got {modifications:?}"
+        );
+        let ContinuousModification::GrantAbility { definition } = &modifications[0] else {
+            panic!("expected GrantAbility, got {:?}", modifications[0]);
+        };
+        assert_eq!(
+            definition.kind,
+            crate::types::ability::AbilityKind::Activated
+        );
+        assert_eq!(
+            definition.cost,
+            Some(crate::types::ability::AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Blue],
+                    generic: 0,
+                },
+            }),
+            "the {{U}} activation cost must be carried"
+        );
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*definition.effect
+        else {
+            panic!("expected Pump, got {:?}", definition.effect);
+        };
+        assert_eq!(
+            (power, toughness),
+            (
+                &crate::types::ability::PtValue::Fixed(1),
+                &crate::types::ability::PtValue::Fixed(-1)
+            ),
+            "expected +1/-1"
+        );
+        assert_eq!(target, &TargetFilter::SelfRef);
+        assert_eq!(
+            definition.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "the duration must be carried"
+        );
+    }
+
     /// Revert-to-red: removing the `card_name` threading in
     /// `catalog_rules_text_abilities` reverts this to `TriggerMode::Unknown`
     /// with the raw text, since the bare "galactus attacks..." subject
@@ -9888,7 +10088,9 @@ mod tests {
         record.core_types = vec![CoreType::Land];
         record.subtypes = vec!["Forest".to_string()];
         record.controller = land_controller;
+        record.arrival.controller = land_controller;
         record.owner = land_controller;
+        record.arrival.owner = land_controller;
         let event = GameEvent::ZoneChanged {
             object_id: land,
             from: Some(Zone::Hand),
@@ -9987,6 +10189,214 @@ mod tests {
             "counter must NOT land on Ka-Zar"
         );
     }
+
+    // ── #9657: a token's entry-counter quantity reads "it" as the token ──
+
+    /// A creature on the battlefield with power = toughness = `pt`.
+    fn entry_counter_creature(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        pt: i32,
+    ) -> ObjectId {
+        let id = create_object(state, CardId(0), owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(pt);
+        obj.toughness = Some(pt);
+        obj.base_power = Some(pt);
+        obj.base_toughness = Some(pt);
+        id
+    }
+
+    /// Source `S` (P0, 3/3), friend `F` (P0, 2/2) and an opponent creature
+    /// `O` (P1, 2/2) on the battlefield; the ability creates two 0/0 Ooze
+    /// tokens from `S` whose +1/+1 entry-counter amount is `rider`.
+    fn entry_counter_fixture(rider: QuantityExpr) -> (GameState, ResolvedAbility, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = entry_counter_creature(&mut state, PlayerId(0), "Source", 3);
+        entry_counter_creature(&mut state, PlayerId(0), "Friend", 2);
+        entry_counter_creature(&mut state, PlayerId(1), "Opponent Creature", 2);
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Ooze".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Creature".to_string(), "Ooze".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![(CounterType::Plus1Plus1, rider)],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        (state, ability, source)
+    }
+
+    /// Resolve the live `Effect::Token` path; the +1/+1 counters on each token.
+    fn live_entry_counters(state: &mut GameState, ability: &ResolvedAbility) -> Vec<u32> {
+        let mut events = Vec::new();
+        resolve(state, ability, &mut events).unwrap();
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            2,
+            "reach guard: both tokens of the batch were created"
+        );
+        state
+            .last_created_token_ids
+            .iter()
+            .map(|id| {
+                state.objects[id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// The read-only mirror's resolved entry counters.
+    fn mirror_entry_counters(
+        state: &GameState,
+        ability: &ResolvedAbility,
+    ) -> Vec<(CounterType, u32)> {
+        resolve_token_spec(state, ability)
+            .expect("Effect::Token resolves to a spec")
+            .0
+            .enter_with_counters
+    }
+
+    /// "the number of other creatures you control".
+    fn other_creatures_you_control() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+        }
+    }
+
+    /// CR 122.6 + CR 608.2c + CR 608.2h: "The token enters with X counters,
+    /// where X is the number of OTHER creatures you control" — "other" is
+    /// relative to the entering token, which is not yet on the battlefield, so
+    /// the source and the friend both count (2); the opponent's creature does
+    /// not (CR 109.5), and the batch's tokens do not count each other. BASE
+    /// read "other" relative to the source: 1.
+    #[test]
+    fn token_entry_counters_read_other_relative_to_the_entering_token() {
+        let (mut state, ability, _) = entry_counter_fixture(other_creatures_you_control());
+        assert_eq!(live_entry_counters(&mut state, &ability), vec![2, 2]);
+
+        let (state, ability, _) = entry_counter_fixture(other_creatures_you_control());
+        assert_eq!(
+            mirror_entry_counters(&state, &ability),
+            vec![(CounterType::Plus1Plus1, 2)]
+        );
+
+        // Sibling: a rider that reads no recipient resolves as before.
+        let creatures_you_control = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+        let (mut state, ability, _) = entry_counter_fixture(creatures_you_control.clone());
+        assert_eq!(live_entry_counters(&mut state, &ability), vec![2, 2]);
+        let (state, ability, _) = entry_counter_fixture(creatures_you_control);
+        assert_eq!(
+            mirror_entry_counters(&state, &ability),
+            vec![(CounterType::Plus1Plus1, 2)]
+        );
+    }
+
+    /// Scope boundary, not a rules claim: an entry-counter amount that reads
+    /// the recipient's characteristics ("its power") is not bound to the
+    /// not-yet-existing token — an id with no object behind it would read 0 —
+    /// so it resolves exactly as before (here the source's power, 3). No
+    /// printed token rider has this shape.
+    #[test]
+    fn token_entry_counters_keep_characteristic_reads_on_the_base_resolver() {
+        // Positive control: the binding arm is live on this fixture.
+        let (mut state, ability, _) = entry_counter_fixture(other_creatures_you_control());
+        assert_eq!(live_entry_counters(&mut state, &ability), vec![2, 2]);
+
+        let its_power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            },
+        };
+        let (state, ability, _) = entry_counter_fixture(its_power.clone());
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &its_power, &ability),
+            3,
+            "reference: the unbound resolver reads the source's power"
+        );
+        assert_eq!(
+            mirror_entry_counters(&state, &ability),
+            vec![(CounterType::Plus1Plus1, 3)]
+        );
+        let (mut state, ability, _) = entry_counter_fixture(its_power);
+        assert_eq!(live_entry_counters(&mut state, &ability), vec![3, 3]);
+    }
+
+    /// CR 301.5 + CR 111.1: "… attached to it" in a token's entry-counter
+    /// amount reads the entering token, to which nothing can be attached yet —
+    /// not the source, which carries an Equipment-like attachment here.
+    #[test]
+    fn token_entry_counters_attached_to_it_reads_the_entering_token() {
+        let attached_to_it = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                    FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Recipient,
+                    },
+                ])),
+            },
+        };
+        let with_gear = |rider: QuantityExpr| {
+            let (mut state, ability, source) = entry_counter_fixture(rider);
+            let gear = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Gear".to_string(),
+                Zone::Battlefield,
+            );
+            let gear_obj = state.objects.get_mut(&gear).unwrap();
+            gear_obj.card_types.core_types.push(CoreType::Artifact);
+            gear_obj.attached_to = Some(AttachTarget::Object(source));
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .attachments
+                .push(gear);
+            (state, ability)
+        };
+
+        let (state, ability) = with_gear(attached_to_it.clone());
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &attached_to_it, &ability),
+            1,
+            "reach guard: the attachment on the source is visible to the unbound resolver"
+        );
+        assert_eq!(
+            mirror_entry_counters(&state, &ability),
+            vec![(CounterType::Plus1Plus1, 0)]
+        );
+        let (mut state, ability) = with_gear(attached_to_it);
+        assert_eq!(live_entry_counters(&mut state, &ability), vec![0, 0]);
+    }
 }
 
 #[cfg(test)]
@@ -10061,6 +10471,7 @@ mod attach_host_authority_tests {
             TargetFilter::Neighbor {
                 direction: SeatDirection::Left,
             },
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
         ] {
             assert!(
                 filter.is_context_ref(),
@@ -10069,7 +10480,7 @@ mod attach_host_authority_tests {
             assert!(
                 !matches!(
                     classify_attach_host_authority(&filter),
-                    AttachHostAuthority::SelectedTarget
+                    AttachHostAuthority::SelectedTarget | AttachHostAuthority::SelectedPlayerTarget
                 ),
                 "{filter:?} is a context reference and must not inherit the ability's \
                  chosen targets as its attachment host"

@@ -4433,6 +4433,7 @@ mod tests {
         let choose_one = Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![conjure_ability("choose_one", Zone::Hand)],
+            villainous: false,
         };
         walk_effect(&choose_one, &mut names);
 
@@ -4515,6 +4516,7 @@ mod tests {
             target: TargetFilter::Any,
             source_rider: Some(CounterSourceRider::LosesAbilities {
                 static_def: Box::new(counter_static),
+                source_filter: None,
                 duration: Box::new(crate::types::ability::Duration::UntilHostLeavesPlay),
             }),
             countered_spell_zone: None,

@@ -6,7 +6,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use nom::character::complete::anychar;
-use nom::combinator::{not, success, value};
+use nom::combinator::{map_opt, not, success, value};
 use nom::multi::many1;
 
 /// Whose spells and abilities a "can be the target of spells and abilities …
@@ -5598,32 +5598,59 @@ pub(crate) fn descriptor_is_supertype(descriptor: &str) -> bool {
 }
 
 /// Nom-backed helper: split a subject string into (descriptor_core, controller)
-/// by trying to parse a trailing controller suffix. Only accepts the controller
-/// scopes that this static subject seam can actually resolve:
+/// by trying to parse a trailing controller suffix. A present-tense direct
+/// projection of `nom_target::parse_controller_phrase` that only accepts the
+/// controller scopes this static subject seam can actually resolve:
 ///
 /// - `ControllerRef::You` — "you control"
 /// - `ControllerRef::Opponent` — "your opponents control" / "you don't control"
 /// - `ControllerRef::EnchantedPlayer` — "enchanted player controls" (CR 303.4b)
-///
-/// `TargetPlayer` and `DefendingPlayer` are deliberately excluded because this
-/// call site builds a continuous static `TargetFilter` with no companion
-/// target-player authority or combat context.
-///
-/// Uses nom `alt`/`tag`/`value` combinators so the phrase set is maintained
-/// alongside the shared grammar rather than as raw suffix literals.
 fn parse_static_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
-    alt((
-        value(ControllerRef::You, tag("you control")),
-        value(ControllerRef::Opponent, tag("your opponents control")),
-        value(ControllerRef::Opponent, tag("you don't control")),
+    map_opt(nom_target::parse_controller_phrase, |phrase| {
+        match (phrase.subject, phrase.tense) {
+            (
+                nom_target::ControllerSubject::Direct(controller),
+                nom_target::ControllerTense::Present,
+            ) => admits_static_subject_controller(&controller, phrase.form).then_some(controller),
+            (nom_target::ControllerSubject::Direct(_), nom_target::ControllerTense::Past)
+            | (nom_target::ControllerSubject::Anaphoric(_), _) => None,
+        }
+    })
+    .parse(input)
+}
+
+/// The direct controllers, by clause form, a static subject's controller
+/// suffix admits.
+fn admits_static_subject_controller(
+    controller: &ControllerRef,
+    form: nom_target::ControllerForm,
+) -> bool {
+    match controller {
         // CR 303.4b + CR 702.5a: "enchanted player controls" — the controller
         // scope is the player the source Aura is attached to.
-        value(
-            ControllerRef::EnchantedPlayer,
-            tag("enchanted player controls"),
-        ),
-    ))
-    .parse(input)
+        ControllerRef::You | ControllerRef::EnchantedPlayer => true,
+        // "your opponents control" / "you don't control"; "an opponent
+        // controls" is not admitted.
+        ControllerRef::Opponent => match form {
+            nom_target::ControllerForm::Plural | nom_target::ControllerForm::Negated => true,
+            nom_target::ControllerForm::Singular | nom_target::ControllerForm::Passive => false,
+        },
+        // `TargetPlayer` and `DefendingPlayer` are deliberately excluded because
+        // this call site builds a continuous static `TargetFilter` with no
+        // companion target-player authority or combat context.
+        ControllerRef::TargetPlayer | ControllerRef::DefendingPlayer => false,
+        ControllerRef::ScopedPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => false,
+    }
 }
 
 /// Strip a trailing controller suffix from a subject string using the

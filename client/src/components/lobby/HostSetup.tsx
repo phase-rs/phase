@@ -11,7 +11,7 @@ import type {
   MatchType,
 } from "../../adapter/types";
 import { AI_DIFFICULTIES } from "../../constants/ai";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { FORMAT_REGISTRY, formatSuppliesDeck } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -41,6 +41,8 @@ import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { PileSourceChoice } from "../menu/PileSourceChoice";
+import { DEFAULT_PILE_CHOICE, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
 import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
@@ -507,9 +509,19 @@ export function HostSetup({
     selectedFormat: formatConfig.format,
     selectedMatchType: effectiveMatchType,
   });
-  const defaultAiDeck = aiDeckCatalog.candidates[0]
-    ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
-    : null;
+  // A supplied-deck format's AI seats submit nothing, so no catalog deck is needed.
+  const defaultAiDeck = formatSuppliesDeck(formatConfig.format)
+    ? suppliedAiDeckChoice().choice
+    : aiDeckCatalog.candidates[0]
+      ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
+      : null;
+  const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  // A pile is picked for one format; any format change returns to the default pile.
+  const [pileFormat, setPileFormat] = useState(formatConfig.format);
+  if (pileFormat !== formatConfig.format) {
+    setPileFormat(formatConfig.format);
+    setPile(DEFAULT_PILE_CHOICE);
+  }
   // No AI seats in a Discord game: its seats are promised to the Discord
   // players, and an all-AI table would never register the requested code.
   const aiSeatsSupported =
@@ -784,6 +796,7 @@ export function HostSetup({
           startWhenFull,
           ranked: false,
           roomName: resolvedRoomName,
+          pile: pile.source,
           ...(seed ? { requestedCode: seed.code } : {}),
         },
         // `null` in P2P — this submit chose no server, and the parent then
@@ -901,7 +914,8 @@ export function HostSetup({
     || isSubmitting
     || isResolvingFormat
     || hostingStatus !== "idle"
-    || (effectiveAiSeats.length > 0 && !defaultAiDeck);
+    || (effectiveAiSeats.length > 0 && !defaultAiDeck)
+    || !pile.legal;
 
   return (
     <form
@@ -1000,6 +1014,14 @@ export function HostSetup({
                 {t("hostSetup.customFormatHostingUnavailable")}
               </p>
             )}
+
+            <div className="sm:col-span-2 empty:hidden">
+              <PileSourceChoice
+                format={formatConfig.format}
+                value={pile.source}
+                onChange={setPile}
+              />
+            </div>
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
               <IntegerField

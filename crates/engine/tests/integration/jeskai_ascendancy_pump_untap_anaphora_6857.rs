@@ -339,7 +339,7 @@ fn motivated_pony_untaps_only_the_attacking_creatures_it_pumped() {
     runner
         .state_mut()
         .battlefield_entries_this_turn
-        .push(BattlefieldEntryRecord {
+        .push_back(BattlefieldEntryRecord {
             object_id: ObjectId(9_999),
             name: "Food".to_string(),
             core_types: vec![CoreType::Artifact],

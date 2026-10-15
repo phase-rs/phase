@@ -12,9 +12,8 @@
 //! USER DIRECTIVE (memory: real-game fixtures, not synthetic): this fixture LOADS a real
 //! 4-player complete-deck saved game-state dump and drives from it — NOT a synthetic
 //! `GameScenario` (synthetic tests went green while the live 4p game failed). The dump is the
-//! real game: 4 seats at 40 life, full ~91-92-card libraries, 10 permanents, the intact
-//! `last_loop_action_sequence` recast context (`Recast{from_zone: Hand, uses_buyback: Used}`,
-//! `convoke: Convoke`), and `loop_detection: Interactive`. The dump was captured AT the offer,
+//! real game: 4 seats at 40 life, full ~91-92-card libraries, 10 permanents, and
+//! `loop_detection: Interactive`. The dump was captured AT the offer,
 //! which is strictly more faithful than a build-fresh reconstruction (it IS the failing moment).
 //! `deck_pools` (registration metadata the accept→materialize drive never reads) is trimmed from
 //! the committed fixture; the real decks remain fully present as in-play library objects.
@@ -33,9 +32,7 @@ use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::{
     create_object_from_card_face, load_and_hydrate_decks, resolve_deck_list, DeckList,
 };
-use engine::game::derived_views::{
-    derive_views, CollapseCertainty, FamilyCollapseState, UnboundedFamily,
-};
+use engine::game::derived_views::{derive_views, FamilyCollapseState, UnboundedFamily};
 use engine::game::engine::{apply, start_game};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
@@ -96,6 +93,47 @@ static OFFER_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         "../fixtures/combo_infinite_pile_4p_offer.json.gz"
     ))
 });
+
+/// The dump's offer, re-reached live: the captured offer carries no confirmed period, so it is
+/// declined and one more real Sprout Swarm cycle (buyback, convoking an untapped Saproling) brings
+/// the offer back with its period.
+pub(crate) fn offer_state() -> GameState {
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    apply(&mut state, P0, GameAction::DeclineShortcut).expect("P0 declines the captured offer");
+    let fodder = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.name == "Saproling" && o.controller == P0 && !o.tapped)
+        })
+        .min_by_key(|id| id.0)
+        .expect("an untapped Saproling to convoke");
+    let sprout = state
+        .objects
+        .values()
+        .find(|o| o.name == "Sprout Swarm" && o.zone == Zone::Hand)
+        .map(|o| o.id)
+        .expect("Sprout Swarm is in P0's hand");
+    let outcome = GameRunner::from_state(state)
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder])
+        .commit()
+        .resolve();
+    let state = outcome.state().clone();
+    assert!(
+        matches!(&state.waiting_for, WaitingFor::LoopShortcut { proposer, period, .. }
+            if *proposer == P0 && !period.is_empty()),
+        "the live cycle re-reaches P0's offer with its period, got {:?}",
+        state.waiting_for
+    );
+    state
+}
 
 /// The real live game state, captured at ordinary priority with Witherbloom UNTAPPED — the
 /// failing-playtest configuration where the object-growth offer did NOT surface (the untapped,
@@ -171,8 +209,7 @@ fn drive_all_accept_n(state: &mut GameState, n: u32) {
 
 #[test]
 fn real_4p_object_growth_accept_writes_infinite_pile() {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
 
     // Precondition: the loaded state IS the real object-growth offer, recast context intact.
     assert!(
@@ -180,18 +217,19 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
         "fixture precondition: at the CR 732.2a LoopShortcut offer for P0, got {:?}",
         state.waiting_for
     );
-    assert!(
-        !state.last_loop_action_sequence.is_empty(),
-        "the offer must carry the intact recast context the pile re-derive drives"
-    );
 
-    // The non-circular oracle: exactly the 4 tapped vanilla Saprolings P0 controls in the
-    // real game (MEASURED — the render path is collapsed/staggered ∞, not single-member).
+    // The non-circular oracle: exactly the 5 tapped vanilla Saprolings P0 controls once the
+    // live cycle convoked one more (the render path is collapsed/staggered ∞, not single-member).
     let oracle = p0_tapped_vanilla_saprolings(&state);
     assert_eq!(
         oracle.len(),
-        4,
-        "measured: P0 controls 4 tapped Saprolings in the real game state"
+        5,
+        "P0 controls 5 tapped Saprolings at the live offer"
+    );
+    let untapped = p0_untapped_saprolings(&state);
+    assert!(
+        !untapped.is_empty(),
+        "reach: P0 controls untapped Saprolings"
     );
 
     drive_all_accept(&mut state);
@@ -219,7 +257,7 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
     );
 
     // (i) untapped P0 Saprolings excluded.
-    for id in [406u64, 408, 409, 410].map(ObjectId) {
+    for id in untapped {
         assert!(
             !pile.contains(&id),
             "untapped P0 Saproling {id:?} must not be in the ∞ pile"
@@ -360,8 +398,8 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
 // USER DIRECTIVE (memory: combo-detector-must-fire-in-real-games / real-game-fixtures-not-
 // synthetic): the acceptance bar for this fix is that a REAL 4-player game with an UNTAPPED
 // green cost-reducer actually surfaces the CR 732.2a object-growth offer in live play. This
-// LOADS the user's ACTUAL failed-playtest dump (turn-2, ordinary priority, Witherbloom UNTAPPED,
-// `last_loop_action_sequence` armed for Sprout Swarm 402) and drives the REAL cast through the
+// LOADS the user's ACTUAL failed-playtest dump (turn-2, ordinary priority, Witherbloom UNTAPPED)
+// and drives the REAL cast through the
 // harness `apply()` path. Pre-fix (lowest-ObjectId Canonical detection replay) the offer was
 // SUPPRESSED — the replay tapped the lower-id Witherbloom (a stable-partition permanent) instead
 // of a fodder Saproling, drifting `loop_states_cover_modulo_fodder_growth`'s `tapped` compare.
@@ -781,8 +819,7 @@ fn real_4p_basalt_power_artifact_refills_colorless_only() {
     let count_of = |color: ManaType| {
         state.players[p0_idx]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .filter(|u| u.color == color)
             .count()
     };
@@ -816,111 +853,6 @@ fn real_4p_basalt_power_artifact_refills_colorless_only() {
 // matched mana NEGATIVE discriminator.
 
 /// Every battlefield Saproling P0 controls (tapped or not) — the mint oracle.
-/// PR-7 v4 (CR 732.2a) — the OBSERVED-growth DRIVE path: a loop whose growing axis is observed is
-/// collapsed by ONE `DriveSequence` that REPLAYS the captured period N times through real `apply()`
-/// at the boundary (observers fire each cycle), NOT a batched N×δ. Real 4p offer dump → real accept
-/// → graft the `DriveSequence` the observed accept route emits over the REAL captured recast period
-/// → real boundary → `apply(SubmitPayAmount{3})`. The replay re-casts the real Sprout Swarm buyback
-/// period 3× and mints exactly 3 real Saproling tokens (one per driven cycle), and the collapsed
-/// axes cash out.
-///
-/// This drives the `drive_persistent_axis_collapse` production seam through the real `apply()`
-/// pipeline — the serde round-trip test only proves the stash payload survives; the routing unit
-/// test only proves the accept route CHOOSES DriveSequence. REVERT-PROBE (discriminating): stub the
-/// `drive_persistent_axis_collapse(..)` call in the `DriveSequence` submit arm to a no-op ⇒ 0 tokens
-/// mint ⇒ assertion (1) FLIPS (base + 0 ≠ base + 3). MEASURED: N=3 ⇒ +3 Saprolings.
-#[test]
-fn real_4p_observed_drive_sequence_replays_captured_period_n_times() {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
-    let seq = state.last_loop_action_sequence.clone();
-    assert!(
-        !seq.is_empty(),
-        "the offer carries the real recast period the DriveSequence replays"
-    );
-    drive_all_accept_n(&mut state, 3);
-
-    // An OBSERVED loop's accept registers ONE DriveSequence over every `DeferredAccrual` axis the
-    // loop marked (`engine::analysis::resource::ResourceAxis::unbounded_mark_kind`) instead of the
-    // batched Tokens/Counters/Life. Emulate that route: drop the batched token stash the accept
-    // wrote for THIS (unobserved) fixture and graft the DriveSequence the observed route would
-    // emit, carrying the SAME ∞ axes the token loop marked. That reuse stays PRODUCTION-FAITHFUL
-    // for this dump because every axis it marks is `DeferredAccrual` — production would have
-    // filtered nothing out of it.
-    let collapsed_axes: Vec<_> = state
-        .unbounded_resources
-        .get(&P0)
-        .expect("the accepted loop marked P0's ∞ axes")
-        .iter()
-        .cloned()
-        .collect();
-    state.pending_unbounded_materialization.clear();
-    state.register_pending_materialization(
-        P0,
-        PersistentAxisMaterialization::DriveSequence {
-            sequence: seq,
-            collapsed_axes: collapsed_axes.clone(),
-        },
-    );
-
-    // W2 — THE CERTAINTY-VS-FAMILY DISCRIMINATOR. This stash is a `DriveSequence`, the one
-    // materialization kind with NO non-push exit, so its `tokens` family is `Committed` — while
-    // `unbounded-token-wire.json`, whose SAME `tokens` family comes from a BATCHED `Tokens` stash,
-    // is `Conditional`. Same family, same seat, opposite certainty: the badge is deciding on the
-    // stash KIND, not on the axis it names.
-    let tokens_state = derive_views(&state, None)
-        .unbounded_families
-        .into_iter()
-        .find(|f| f.player == P0 && f.family == UnboundedFamily::Tokens)
-        .map(|f| f.state);
-    assert_eq!(
-        tokens_state,
-        Some(FamilyCollapseState::Scheduled {
-            certainty: CollapseCertainty::Committed,
-            prompted: Some(P0),
-        }),
-        "a DriveSequence replays real cycles and cannot park, so its tokens family is Committed \
-         (∞→N) — contrast the batched Tokens stash behind unbounded-token-wire.json, which is \
-         Conditional (∞→?)"
-    );
-
-    drive_priority_to_next_boundary(&mut state);
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
-                if player == P0
-        ),
-        "the boundary prompts P0 for the DriveSequence LoopCollapse count, got {:?}",
-        state.waiting_for
-    );
-
-    let saps_before = p0_saproling_ids(&state).len();
-    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 3 })
-        .expect("P0 submits the finite DriveSequence collapse count");
-
-    // (1) DISCRIMINATOR: the DriveSequence REPLAYED the captured recast period 3× through real
-    //     apply(), minting exactly 3 real Saproling tokens (one per driven cycle).
-    assert_eq!(
-        p0_saproling_ids(&state).len(),
-        saps_before + 3,
-        "SubmitPayAmount{{3}} replays the captured period 3× ⇒ 3 real Saprolings (stub drive ⇒ 0)"
-    );
-    // (2) the collapsed ∞ axes cash out; Priority restored.
-    assert!(
-        collapsed_axes.iter().all(|ax| !state
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|a| a.contains(ax))),
-        "the DriveSequence collapses its ∞ axes"
-    );
-    assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "the boundary fixpoint restores Priority, got {:?}",
-        state.waiting_for
-    );
-}
-
 fn p0_saproling_ids(state: &GameState) -> BTreeSet<ObjectId> {
     state
         .battlefield
@@ -971,8 +903,7 @@ fn drive_priority_to_next_boundary(state: &mut GameState) {
 fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
     use engine::analysis::resource::ResourceAxis;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     assert!(
         matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
         "fixture precondition: at the CR 732.2a LoopShortcut offer for P0, got {:?}",
@@ -999,8 +930,8 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
     let before = p0_saproling_ids(&state);
     assert_eq!(
         before.len(),
-        8,
-        "MEASURED: P0 controls 8 Saprolings pre-collapse (4 tapped ∞-pile + 4 untapped)"
+        9,
+        "P0 controls 9 Saprolings pre-collapse (5 tapped ∞-pile + 4 untapped)"
     );
 
     drive_priority_to_next_boundary(&mut state);
@@ -1091,8 +1022,7 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
 /// LoopCollapse-prompt precondition + `minted == 1000`) prove it isn't vacuous.
 #[test]
 fn loop_collapse_large_mint_does_not_overflow_small_stack() {
-    let mut state: GameState =
-        serde_json::from_str(&OFFER_STATE).expect("the real 4p offer dump must deserialize");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, 1000);
     let before = p0_saproling_ids(&state).len();
     drive_priority_to_next_boundary(&mut state);
@@ -2035,8 +1965,7 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
     use engine::types::counter::CounterType;
     use engine::types::game_state::CounterGrowth;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, 5);
 
     // Graft a beneficial +1/+1 counter axis (UNOBSERVED on this board) and a life axis (OBSERVED)
@@ -2126,7 +2055,7 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
             .get(&P0)
             .is_some_and(|a| a.contains(&ResourceAxis::Life(P0))),
         "the declined life axis stays ∞-marked for manual play (CR 732.1b — the shortcut \
-         system determines how the loop is broken; see BoundaryHold::ObservedGrowth)"
+         system determines how the loop is broken; see ObservedGrowth)"
     );
     assert!(
         !state
@@ -2152,7 +2081,7 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
 /// firewall per-axis and DECLINES the batched COUNTER collapse when an observer appeared, leaving
 /// the ∞ axis for manual play — unambiguously sound. CR 732.1a/1b FRAME THAT DECLINE: the engine
 /// is the table's shortcut system and determines how the elided loop is broken; the full statement
-/// lives on `engine_resolution_choices::BoundaryHold::ObservedGrowth`.
+/// lives on `engine_resolution_choices::ObservedGrowth`.
 ///
 /// MATCHED PAIR with `real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_life`
 /// (no counter observer ⇒ the counter batches 5×2): the SAME grafted +1/+1 counter loop, WITH a
@@ -2175,8 +2104,7 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
     use engine::types::game_state::CounterGrowth;
     use engine::types::triggers::TriggerMode;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, 5);
 
     // Graft a +1/+1 counter axis (UNOBSERVED at accept — MEASURED counter_growth_is_observed=false).
@@ -2271,26 +2199,21 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
     }
 
     // M2-a — the accept→boundary window, read off the PRE-BOUNDARY capture. THE MED-2 ENGINE
-    // DISCRIMINATOR: while the collapse is merely staged the badge must already say the promise is
-    // conditional, because this very fixture is the case where it will not be kept.
-    // MUTATION: `Counters => None` in `possible_hold` ⇒ `Scheduled(Committed)` ⇒ RED.
+    // DISCRIMINATOR: while the collapse is merely staged the badge must already say it is
+    // scheduled, because this very fixture is the case where it will not be kept.
     // This sits AFTER the WRITE so a mutation that reds it can still regenerate the golden —
     // M2-d(b) depends on that.
     assert!(
         pre_boundary_families.iter().any(|f| f.player == P0
             && f.family == UnboundedFamily::Counters
-            && f.state
-                == FamilyCollapseState::Scheduled {
-                    certainty: CollapseCertainty::Conditional,
-                    prompted: Some(P0),
-                }),
-        "in the accept→boundary window the counters family is Scheduled(Conditional) — a batched \
-         Counters collapse can still be declined, so ∞→? not ∞→N; got {pre_boundary_families:?}"
+            && f.state == FamilyCollapseState::Scheduled { prompted: Some(P0) }),
+        "in the accept→boundary window the counters family is Scheduled — a batched Counters \
+         collapse can still be declined, so ∞→?; got {pre_boundary_families:?}"
     );
 
     // M2-b — the POST-decline frame. The axis is still ∞ (assertion (1) below pins the store) but
     // the stash is gone, so the badge stops promising anything at all.
-    // MUTATION: make `scheduled_display_axes` read `unbounded_resources` instead of the stash ⇒
+    // MUTATION: make `accepted_collapse_axes` read `unbounded_resources` instead of the stash ⇒
     // the declined family stays `Scheduled` ⇒ RED here AND in the regenerated golden.
     // Also AFTER the WRITE, for the same reason.
     assert!(
@@ -2325,7 +2248,7 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
                 ObjectClass::Creature
             ))),
         "the declined counter axis stays ∞-marked for manual play (CR 732.1b — the shortcut \
-         system determines how the loop is broken; see BoundaryHold::ObservedGrowth)"
+         system determines how the loop is broken; see ObservedGrowth)"
     );
     // (2) POSITIVE reach-guard: the Tokens axis STILL mints N (tokens honor observers via real ETB
     //     events, so they always proceed) — proves the submit ran and the negative is non-vacuous.
@@ -2371,8 +2294,7 @@ fn collapse_axis_at_boundary(state: &mut GameState) -> LoopCollapseAxis {
 /// behavior leaves T2 green — T1/T3/T4 are the discriminators that catch that revert.)
 #[test]
 fn loop_collapse_prompt_labels_token_axis_tokens() {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept(&mut state);
     // Reach-guard: the accept stashed the token materialization (non-vacuity anchor).
     assert!(
@@ -2397,8 +2319,7 @@ fn loop_collapse_prompt_labels_counter_axis_counters() {
     use engine::types::counter::CounterType;
     use engine::types::game_state::CounterGrowth;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept(&mut state);
     let creature = *p0_saproling_ids(&state)
         .iter()
@@ -2427,8 +2348,7 @@ fn loop_collapse_prompt_labels_counter_axis_counters() {
 /// REVERT-PROBE: `from_materializations` → `return LoopCollapseAxis::Tokens;` ⇒ FLIPS.
 #[test]
 fn loop_collapse_prompt_labels_life_axis_life() {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept(&mut state);
     state.pending_unbounded_materialization.clear();
     state.register_pending_materialization(
@@ -2455,8 +2375,7 @@ fn loop_collapse_prompt_labels_multi_axis_mixed() {
     use engine::types::counter::CounterType;
     use engine::types::game_state::CounterGrowth;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept(&mut state);
     let creature = *p0_saproling_ids(&state)
         .iter()
@@ -2497,8 +2416,7 @@ fn census_boundary(axis: LoopCollapseAxis, bound: u32) -> (GameState, ObjectId) 
     use engine::types::counter::CounterType;
     use engine::types::game_state::CounterGrowth;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, bound);
     let creature = *p0_saproling_ids(&state)
         .iter()
@@ -2706,8 +2624,7 @@ fn an_applier_written_beat_still_stacks_the_entered_phases_triggers() {
     const N: u32 = 3;
     const GAIN: i32 = 7;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, N);
     assert_eq!(
         collapse_axis_at_boundary(&mut state),
@@ -2799,8 +2716,7 @@ fn an_applier_prompt_at_the_collapse_exit_is_not_overwritten() {
 
     // (grafted, expects_aura_prompt)
     for grafted in [true, false] {
-        let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-            .expect("the real 4p offer dump must deserialize into the current GameState");
+        let mut state = offer_state();
         drive_all_accept_n(&mut state, 2);
         let fodder = *p0_saproling_ids(&state)
             .iter()
@@ -2979,19 +2895,14 @@ fn an_applier_prompt_at_the_collapse_exit_is_not_overwritten() {
 }
 
 /// UNIT (CR 732.2a): `LoopCollapseAxis::from_materializations` maps each stash shape to its
-/// label — including the LOAD-BEARING observed-growth `DriveSequence → axis` path (the Kilo
-/// combo pushes a single `DriveSequence` with `Counter(Other, Other)`, NOT a batched
-/// `Counters` item; a derivation that ignored `DriveSequence` would mislabel Kilo `Mixed`).
+/// label.
 ///
 /// REVERT-PROBE: `from_materializations` → `return LoopCollapseAxis::Tokens;` ⇒ every
-/// non-Tokens assertion FLIPS. Removing the `DriveSequence` arm ⇒ the two drive-sequence
-/// assertions FLIP to Mixed.
+/// assertion FLIPS.
 #[test]
 fn loop_collapse_axis_from_materializations_maps_each_shape() {
-    use engine::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
     use engine::types::counter::CounterType;
     use engine::types::game_state::CounterGrowth;
-    use engine::types::mana::ManaType;
 
     let counters = [PersistentAxisMaterialization::Counters(vec![
         CounterGrowth {
@@ -3012,31 +2923,6 @@ fn loop_collapse_axis_from_materializations_maps_each_shape() {
     assert_eq!(
         LoopCollapseAxis::from_materializations(&life),
         LoopCollapseAxis::Life
-    );
-
-    // LOAD-BEARING: the observed-growth DriveSequence carrying the Kilo counter axis maps
-    // to Counters (not Mixed) — the single-DriveSequence shape the flagship combo pushes.
-    let drive_counter = [PersistentAxisMaterialization::DriveSequence {
-        sequence: vec![],
-        collapsed_axes: vec![ResourceAxis::Counter(
-            CounterClass::Other,
-            ObjectClass::Other,
-        )],
-    }];
-    assert_eq!(
-        LoopCollapseAxis::from_materializations(&drive_counter),
-        LoopCollapseAxis::Counters,
-        "the flagship Kilo DriveSequence(Counter) labels Counters, not Mixed"
-    );
-
-    // The Tokens mapping via the DriveSequence path (a TokensCreated observed loop).
-    let drive_tokens = [PersistentAxisMaterialization::DriveSequence {
-        sequence: vec![],
-        collapsed_axes: vec![ResourceAxis::TokensCreated],
-    }];
-    assert_eq!(
-        LoopCollapseAxis::from_materializations(&drive_tokens),
-        LoopCollapseAxis::Tokens
     );
 
     // Two distinct axes → Mixed.
@@ -3061,19 +2947,6 @@ fn loop_collapse_axis_from_materializations_maps_each_shape() {
         LoopCollapseAxis::from_materializations(&[]),
         LoopCollapseAxis::Mixed
     );
-
-    // A non-materializable DriveSequence axis contributes no label → Mixed (defensive).
-    // No accept can build this stash post-`ResourceAxis::unbounded_mark_kind` — production filters
-    // `Mana(_)` out of `collapsed_axes`. The case is retained because `from_materializations` reads
-    // whatever is STORED, including a reloaded pre-fix save or a future stash producer.
-    let drive_mana = [PersistentAxisMaterialization::DriveSequence {
-        sequence: vec![],
-        collapsed_axes: vec![ResourceAxis::Mana(ManaType::Colorless)],
-    }];
-    assert_eq!(
-        LoopCollapseAxis::from_materializations(&drive_mana),
-        LoopCollapseAxis::Mixed
-    );
 }
 
 /// [MED] (CR 732.2a defense-in-depth): the `Tokens` boundary-mint arm must early-return when the
@@ -3081,10 +2954,9 @@ fn loop_collapse_axis_from_materializations_maps_each_shape() {
 /// the paused `pending_copy_token_resolution` instead of advancing the phase / overwriting
 /// `waiting_for = Priority`.
 ///
-/// DELIBERATELY FIREWALL-UNREACHABLE: the offer firewall (`game/engine.rs`'s
-/// `drive_loop_action_iteration`, whose exhaustive fail-closed `_ => Err(RecastAbort)` arm has no
-/// replacement-/target-choice branch) guarantees a certified shortcut's per-cycle fodder mint cannot
-/// pause, so this state cannot arise in real play. The test constructs it directly — installing an
+/// DELIBERATELY UNREACHABLE IN PLAY: the confirmer's replay refuses a prompt no recorded answer
+/// answers (`OfferRefusal::UnanswerablePrompt`), so a certified shortcut's per-cycle fodder mint
+/// cannot pause. The test constructs it directly — installing an
 /// OPTIONAL token-creation replacement (CR 616.1 single optional candidate → `replace_event` returns
 /// `NeedsChoice` from `game/replacement.rs`'s `replacement_is_optional` single-candidate branch) on a P0
 /// battlefield object AFTER accept — to exercise the defensive guard. (Two IDENTICAL replacements
@@ -3109,8 +2981,7 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
     use engine::types::replacements::ReplacementEvent;
     use std::sync::Arc;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, 3);
 
     // Install an OPTIONAL token-count-doubling replacement ("you may create twice that many tokens
@@ -3166,19 +3037,14 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
     // scheduled, and the old row flag made the HUD promise "a finite amount will be chosen". This
     // very test then proves that the mint parks and NOTHING is chosen. `Conditional` is what makes
     // the badge honest here.
-    // MUTATION: `Tokens => None` in `possible_hold` ⇒ this reports Scheduled(Committed) ⇒ RED.
     assert!(
         derive_views(&state, None)
             .unbounded_families
             .iter()
             .any(|f| f.player == P0
                 && f.family == UnboundedFamily::Tokens
-                && f.state
-                    == FamilyCollapseState::Scheduled {
-                        certainty: CollapseCertainty::Conditional,
-                        prompted: Some(P0),
-                    }),
-        "pre-submit: an accepted Tokens collapse is Scheduled(Conditional) — its boundary mint can \
+                && f.state == FamilyCollapseState::Scheduled { prompted: Some(P0) }),
+        "pre-submit: an accepted Tokens collapse is Scheduled — its boundary mint can \
          park on a replacement choice, which is exactly what happens below; got {:?}",
         derive_views(&state, None).unbounded_families
     );
@@ -3222,7 +3088,7 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
     );
     // M2-c, post-pause — the badge stops promising. This stands alone as a WRONG-AUTHORITY
     // detector (a badge reading `unbounded_resources` instead of the stash would still say
-    // `Scheduled` here); it is deliberately NOT an argument that `Tokens` is `Committed`.
+    // `Scheduled` here).
     // `take_pending_materialization` removes the WHOLE controller list, so a declined `Counters`
     // axis reports `Unscheduled` at this point identically — the symmetry is the point.
     assert!(
@@ -3294,8 +3160,7 @@ fn med_mixed_counter_tokens_pause_commits_finite_counter_and_keeps_only_tokens_u
     use engine::types::replacements::ReplacementEvent;
     use std::sync::Arc;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     drive_all_accept_n(&mut state, 4);
 
     // Graft an UNOBSERVED +1/+1 counter axis onto a P0 Saproling — the same single-authority
@@ -3449,8 +3314,8 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 /// [LOW-3] E2E: accepting a REAL UNOBSERVED life-growth loop drives the accept-time production
 /// routing in `materialize_object_growth_shortcut` (engine.rs) into the BATCHED `Life` branch —
 /// the branch every prior Counters/Life collapse test GRAFTS via `register_pending_materialization`
-/// (bypassing the real δ-capture + `life_growth_is_observed` decision). The OBSERVED (DriveSequence)
-/// counter route is already covered by `kilo_accept_collapses_at_boundary_to_exactly_n_counters`
+/// (bypassing the real δ-capture + `life_growth_is_observed` decision). The OBSERVED counter
+/// route, performed at the take, is covered by `kilo_accept_delivers_exactly_n_counters_at_the_take`
 /// (kilo_live_offer_from_real_dump.rs); this closes the UNOBSERVED batched gap.
 ///
 /// CONSTRUCTION (self-contained, no dump): a synthetic creature with an off-stack mana ability
@@ -3463,9 +3328,8 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 /// ⇒ the accept routes to the BATCHED `Life` stash.
 ///
 /// REVERT-FAILING assertion: break the routing predicate — force the observed branch, or drop the
-/// `else`/`if !life.is_empty()` batched registration in `materialize_object_growth_shortcut` — and
-/// the produced stash shape changes (a `DriveSequence`, or an empty stash) ⇒ the batched-`Life`
-/// assertion FLIPS. Non-vacuity reach-guards: the recorded 3-step period, the surfaced offer, and
+/// batched `Life` registration in `materialize_object_growth_shortcut` — and the stash empties
+/// (the take performs the period instead) ⇒ the batched-`Life` assertion FLIPS. Non-vacuity reach-guards: the recorded 3-step period, the surfaced offer, and
 /// the non-empty post-accept stash all gate the shape assertion.
 #[test]
 fn low3_unobserved_life_growth_accept_registers_batched_life() {
@@ -3495,14 +3359,6 @@ fn low3_unobserved_life_growth_accept_registers_batched_life() {
         "the unobserved life loop must register a BATCHED Life stash (per_cycle_delta captured), \
          got {stash:?}"
     );
-    // DISCRIMINATOR: an UNOBSERVED loop BATCHES — it must NOT register a DriveSequence (that is the
-    // observed route; forcing the observed branch flips this).
-    assert!(
-        !stash
-            .iter()
-            .any(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
-        "an unobserved life loop batches; it must not register a DriveSequence, got {stash:?}"
-    );
     // The life axis is ∞-marked (the mana axis is too; both are real unbounded axes here).
     assert!(
         runner
@@ -3528,8 +3384,7 @@ fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
     for amount in [1u32, 0] {
         let mut runner = low3_life_engine_accepted(Low3BoardEtbTrigger::Absent);
 
-        // Reach-guard: the stash under test is the PRODUCTION batched `Life` item, not a graft and
-        // not the beat-writing replay route.
+        // Reach-guard: the stash under test is the PRODUCTION batched `Life` item, not a graft.
         let stash = runner
             .state()
             .pending_unbounded_materialization
@@ -3541,12 +3396,6 @@ fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
                 |m| matches!(m, PersistentAxisMaterialization::Life { player, .. } if *player == P0)
             ),
             "reach-guard: the accept must route a batched Life stash for P0, got {stash:?}"
-        );
-        assert!(
-            !stash
-                .iter()
-                .any(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
-            "reach-guard: a DriveSequence would rescue the beat incidentally, defeating the arm"
         );
 
         let state = runner.state_mut();
@@ -3598,9 +3447,8 @@ fn low3_batched_life_collapse_ends_where_a_seat_can_act_at_both_ends() {
 ///
 /// `CastPresent` is the hostile arm for `cast_sourced`, the one route disjunct with NO axis-shaped
 /// conjunct. It makes `board_has_functioning_cast_trigger` TRUE, which flips this same mana+life
-/// loop onto the `Replay` route — producing the only MIXED-axis (`Mana` + `Life`) `DriveSequence`
-/// registration reachable on a production path today. One arm rather than a parallel enum: the
-/// question is "which board graft", and the arms are leaf-level variants of it.
+/// loop onto the `Replay` route, so the take performs the period. One arm rather than a parallel
+/// enum: the question is "which board graft", and the arms are leaf-level variants of it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Low3BoardEtbTrigger {
     Absent,
@@ -3638,6 +3486,13 @@ fn low3_board_etb_life_trigger() -> TriggerDefinition {
 /// runner. Shared so both arms inherit the same non-vacuity reach-guards (3-step period, surfaced
 /// offer) — the only difference between them is `etb`.
 fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
+    let mut runner = low3_life_engine_offered(etb);
+    low3_accept(&mut runner, 1);
+    runner
+}
+
+/// [`low3_life_engine_accepted`] stopped at the surfaced offer.
+fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
     use engine::game::mana_abilities::is_mana_ability;
     use engine::types::ability::TapStateChange;
 
@@ -3739,13 +3594,18 @@ fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
     low3_activate_and_settle(&mut runner, engine_id, life_idx);
     low3_activate_and_settle(&mut runner, engine_id, untap_idx);
 
-    // Reach-guard: the 3-step period recorded (non-vacuous — a shorter seq would be a different
-    // loop / a drive artifact).
+    // Reach-guard: the window traced the 3-play period (a shorter one is a different loop).
+    let plays = engine::game::play_trace_view(runner.state())
+        .map(|view| {
+            view.entries
+                .into_iter()
+                .filter(|entry| matches!(entry.kind, engine::game::EntryKind::Play { .. }))
+                .count()
+        })
+        .unwrap_or(0);
     assert_eq!(
-        runner.state().last_loop_action_sequence.len(),
-        3,
-        "the certified period is the 3-step [mana, gain-life, untap] sequence, got {:?}",
-        runner.state().last_loop_action_sequence
+        plays, 3,
+        "the window traced the 3-play [mana, gain-life, untap] period"
     );
     // Reach-guard: the CR 732.2a offer surfaced for P0.
     assert!(
@@ -3753,11 +3613,14 @@ fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
         "the unobserved life engine must surface a LoopShortcut offer for P0, got {:?}",
         runner.state().waiting_for
     );
+    runner
+}
 
-    // Accept through the REAL APNAP pipeline → materialize_object_growth_shortcut routing.
+/// Accept the surfaced offer at `Fixed(n)` through the REAL APNAP pipeline.
+fn low3_accept(runner: &mut GameRunner, n: u32) {
     runner
         .act(GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(1),
+            count: IterationCount::Fixed(n),
             template: None,
         })
         .expect("P0 declares the shortcut");
@@ -3766,7 +3629,6 @@ fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
             response: ShortcutResponse::Accept,
         })
         .expect("the single opponent accepts");
-    runner
 }
 
 /// PINS the `token_profile.is_some()` conjunct of `life_etb_sourced` (engine.rs) — the conjunct the
@@ -3786,7 +3648,7 @@ fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
 /// ETB trigger — mana engines included — down the concrete replay.
 ///
 /// REVERT-PROBE (RUN): delete `&& token_profile.is_some()` from `life_etb_sourced` ⇒ this test's
-/// batched-`Life` assertion FAILS (the stash becomes a lone `DriveSequence`). The sibling
+/// batched-`Life` assertion FAILS (the take performs the period and stashes nothing). The sibling
 /// `Absent`-arm test stays green under that same deletion, which is precisely why this arm exists.
 #[test]
 fn low3_mana_only_life_growth_stays_batched_despite_board_etb_trigger() {
@@ -3813,7 +3675,7 @@ fn low3_mana_only_life_growth_stays_batched_despite_board_etb_trigger() {
         "reach-guard: the mana-only loop must stash no Tokens axis, got {stash:?}"
     );
     // DISCRIMINATOR: with the ETB trigger present and the loop token-less, the route stays BATCHED.
-    // Drop `token_profile.is_some()` from `life_etb_sourced` and this flips to a DriveSequence.
+    // Drop `token_profile.is_some()` from `life_etb_sourced` and the take performs instead.
     assert!(
         stash.iter().any(|m| matches!(
             m,
@@ -3823,425 +3685,29 @@ fn low3_mana_only_life_growth_stays_batched_despite_board_etb_trigger() {
         "a token-less life loop must stay on the BATCHED Life route even with a board ETB trigger, \
          got {stash:?}"
     );
-    assert!(
-        !stash
-            .iter()
-            .any(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
-        "a token-less life loop must not route to the concrete replay, got {stash:?}"
-    );
 }
 
-// ═════════ CR 732.2a: PER-AXIS COLLAPSE ACCOUNTABILITY — the mixed-axis replay rows ═════════
-//
-// The rig below is the only PRODUCTION-PATH construction of a MIXED ∞-mark set on the `Replay`
-// route: the same mana+life Lifedynamo loop plus one bare functioning cast trigger, so
-// `cast_sourced` — the one route disjunct with no axis-shaped conjunct — carries it onto the
-// replay while `batched = [Life{P0,1}]` keeps the `!batched.is_empty()` guard satisfied. Its two
-// marked axes have TWO DIFFERENT termination authorities, which is the whole point:
-//   * `Life(P0)` — CR 732.2c. Nothing has been gained yet, so applying the accepted
-//     materialization is what ends the mark.
-//   * `Mana(Colorless)` — CR 500.5 + CR 106.4. The pool is ALREADY at the infinite cap
-//     (`mana_payment::refill_infinite_mana` re-tops it off this very store), so the mark is a
-//     capability being exercised and the step/phase end owns its expiry.
-// A wholesale `collapsed_axes` copy would let the collapse act as a second authority over a mark
-// it does not own; `ResourceAxis::unbounded_mark_kind` closes that per axis.
-
-/// **On a MIXED `{Mana, Life}` loop routed to `Replay`, the registered
-/// `DriveSequence.collapsed_axes` names `Life(P0)` and NOT `Mana(_)`.** A blanket "empty
-/// `collapsed_axes`" implementation passes the `Mana` half and FAILS the `Life` half; the
-/// converse blanket — never filtering — is the revert probe: restore `collapsed_axes:
-/// proposal.unbounded.clone()` at the `Replay` arm of `materialize_object_growth_shortcut` ⇒ the
-/// exact-set assertion below reads `[Mana(Colorless), Life(P0)]` ⇒ RED.
-///
-/// Each reach-guard carries a reason. (a) The store really holds BOTH axes — otherwise pre- and
-/// post-fix `collapsed_axes` are identical and the probe cannot flip. (b) The grafted `SpellCast`
-/// def is ACTIVE (asserted in [`low3_life_engine_accepted`]'s `CastPresent` arm), attributing the
-/// `Replay` route to `cast_sourced` rather than to a future `counter_observed` / `life_observed`
-/// / `life_etb_sourced` flip. (c) Exactly one registered item, and it is a `DriveSequence`, so
-/// the row fails loudly instead of becoming unreachable. (d) is a second discriminator with its
-/// own revert direction, stated at its assertion.
+/// The debug infinite-mana take's per-cycle pool walk does not grow with its count.
 #[test]
-fn low3_mixed_axis_replay_collapses_only_the_deferred_life_axis() {
-    use engine::analysis::resource::ResourceAxis;
-    use engine::game::derived_views::UnboundedResourceView;
-    use engine::types::mana::ManaType;
-
-    let runner = low3_life_engine_accepted(Low3BoardEtbTrigger::CastPresent);
-
-    // ── (a) REACH-GUARD / DISCRIMINATION: the store holds BOTH axes ──
-    let marked: &BTreeSet<ResourceAxis> = runner
-        .state()
-        .unbounded_resources
-        .get(&P0)
-        .expect("the accept marks P0's ∞ axes");
-    assert!(
-        marked.contains(&ResourceAxis::Mana(ManaType::Colorless))
-            && marked.contains(&ResourceAxis::Life(P0)),
-        "reach-guard: this rig's whole discriminating power is that the ∞-mark set is MIXED — \
-         without a Mana(_) axis the pre-fix and post-fix collapsed sets coincide and the revert \
-         probe cannot flip; got {marked:?}"
-    );
-
-    // ── (c) REACH-GUARD / REACHABILITY: the cast disjunct really took the Replay route ──
-    let stash = runner
-        .state()
-        .pending_unbounded_materialization
-        .get(&P0)
-        .expect("the accept registers a materialization");
-    assert_eq!(
-        stash.len(),
-        1,
-        "reach-guard: the replay route registers exactly ONE item (the routes are exclusive per \
-         accept), got {stash:?}"
-    );
-    let PersistentAxisMaterialization::DriveSequence {
-        sequence,
-        collapsed_axes,
-    } = &stash[0]
-    else {
-        panic!(
-            "reach-guard: the cast-trigger board must route to the concrete replay, got {stash:?}"
-        )
-    };
-    assert_eq!(
-        sequence.len(),
-        3,
-        "reach-guard: the DriveSequence carries the real 3-step [mana, gain-life, untap] period"
-    );
-
-    // ── DISCRIMINATOR: the accountable set is the DEFERRED axis only ──
-    assert_eq!(
-        collapsed_axes,
-        &vec![ResourceAxis::Life(P0)],
-        "CR 732.2c: the collapse is accountable for the growth it DELIVERS. `Life(P0)` is deferred \
-         and lands here; `Mana(Colorless)` is a standing capability whose ∞ ends at CR 500.5 + CR \
-         106.4. Pre-fix this read [Mana(Colorless), Life(P0)] — restoring \
-         `proposal.unbounded.clone()` reds exactly this line. Got {collapsed_axes:?}"
-    );
-
-    // ── (d) the SECOND discriminator, with its own revert direction: the mana ∞ row survives the
-    // accept→boundary window on conjunct 2 ALONE (`object_growth_backing` answers `None`, never
-    // `Some(false)`, for `Mana(_)`), because conjunct 1 no longer holds it up. Move `Mana(_)` out
-    // of that `None` arm to `Some(false)` ⇒ both conjuncts TRUE ⇒ the `continue` fires ⇒ the row
-    // disappears ⇒ RED. Without (d) this production-reachable state has NO coverage: the only
-    // suite row rendering a mana row under a scheduled collapse
-    // (`loop_shortcut_mana_engine::scheduled_drive_still_renders_the_already_spendable_mana_badge`)
-    // is a deliberate superset production can no longer construct. CR 500.5 + CR 106.4 own this
-    // axis's expiry, not the collapse. ──
-    let views = derive_views(runner.state(), Some(P0));
-    assert!(
-        views.unbounded_resources.contains(&UnboundedResourceView {
-            player: P0,
-            axis: ResourceAxis::Mana(ManaType::Colorless),
-        }),
-        "the standing mana ∞ row must still project while the DeferredAccrual collapse is merely \
-         scheduled, got {:?}",
-        views.unbounded_resources
-    );
-}
-
-/// **Applying that collapse ENDS `Life(P0)` and PRESERVES `Mana(Colorless)`** — the
-/// multi-authority hostile fixture at function level: one loop, two axes, two termination
-/// authorities, so a "preserve everything" bug and a "remove everything" bug fail on OPPOSITE
-/// halves and neither blanket survives. REVERT-FAILING ASSERTION: restore
-/// `proposal.unbounded.clone()` ⇒ `axes_to_remove` strips both axes ⇒ P0's axis set empties ⇒ the
-/// entry is dropped ⇒ `get(&P0)` is `None` ⇒ RED on BOTH halves.
-///
-/// LEVEL STATED HONESTLY: this row calls the boundary clear DIRECTLY rather than driving a full
-/// CR 500.5 boundary, because `turns::drain_pending_phase_transition_progress` has already
-/// removed a NON-DEBUG seat's `Mana(_)` axes before the collapse prompt — a full-boundary row on
-/// a non-debug seat would be vacuous on the mana half.
-/// `low3_mixed_axis_boundary_preserves_debug_infinite_mana` drives the live victim end to end;
-/// both levels are kept.
-#[test]
-fn low3_mixed_axis_collapse_clears_life_and_preserves_mana() {
-    use engine::analysis::resource::ResourceAxis;
-    use engine::types::mana::ManaType;
-
-    let mut runner = low3_life_engine_accepted(Low3BoardEtbTrigger::CastPresent);
-
-    // Reach-guard: both axes marked and one DriveSequence stashed — see
-    // `low3_mixed_axis_replay_collapses_only_the_deferred_life_axis` for why this is about
-    // discrimination rather than fixture shape.
-    let stash = runner
-        .state()
-        .pending_unbounded_materialization
-        .get(&P0)
-        .expect("the accept registers a materialization")
-        .clone();
-    assert!(
-        matches!(
-            stash.as_slice(),
-            [PersistentAxisMaterialization::DriveSequence { .. }]
-        ),
-        "reach-guard: the seam under test is the DriveSequence route, got {stash:?}"
-    );
-    assert!(
-        runner
-            .state()
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|a| a.contains(&ResourceAxis::Mana(ManaType::Colorless))
-                && a.contains(&ResourceAxis::Life(P0))),
-        "reach-guard: both axes are marked before the clear, so both halves below are real \
-         questions"
-    );
-
-    // THE SEAM: the axis-scoped boundary clear, called with the REAL post-accept stash.
-    runner
-        .state_mut()
-        .clear_collapsed_materializations(P0, &stash);
-
-    let after = runner
-        .state()
-        .unbounded_resources
-        .get(&P0)
-        .expect(
-            "CR 500.5 + CR 106.4: the standing Mana(_) capability keeps P0's entry alive. Pre-fix \
-             this was `None` — the collapse dropped the WHOLE entry, ending a mark it does not own",
-        )
-        .clone();
-    assert!(
-        after.contains(&ResourceAxis::Mana(ManaType::Colorless)),
-        "PRESERVED: the shortcut collapse is not an authority over a standing mana capability; \
-         CR 500.5 + CR 106.4 end it at the step/phase end. Got {after:?}"
-    );
-    assert!(
-        !after.contains(&ResourceAxis::Life(P0)),
-        "ENDED: CR 732.2c — the accepted materialization delivered the life growth, so it owns \
-         that mark's termination. This half fails any 'preserve everything' bug. Got {after:?}"
-    );
-}
-
-/// **The named LIVE victim, driven end to end through the production consumption path.** A seat
-/// established by a REAL `DebugAction::SetInfiniteMana` toggle crosses a real CR 500.5 boundary,
-/// surfaces a real `PayableResource::LoopCollapse` prompt and submits a real `SubmitPayAmount`;
-/// afterwards `unbounded_resources[&P0]` still contains `Mana(Colorless)` and no longer
-/// `Life(P0)`. The seat must stay a debug one: `turns::drain_pending_phase_transition_progress`'
-/// CR 500.5 loop-mana clear filters `!state.debug_infinite_mana.contains(pid)`, so only there do
-/// `Mana(_)` axes SURVIVE to the prompt and only there is the mana half non-vacuous.
-///
-/// REVERT-FAILING ASSERTION: restore `proposal.unbounded.clone()` ⇒ `axes_to_remove` strips both
-/// axes ⇒ `get(&P0)` is `Some(_)` WITHOUT `Mana(Colorless)` ⇒ RED. Not `is_none()`:
-/// `SetInfiniteMana` set-unions all six `INFINITE_MANA_AXES` into the entry, so it survives
-/// holding the other five.
-#[test]
-fn low3_mixed_axis_boundary_preserves_debug_infinite_mana() {
-    use engine::analysis::resource::ResourceAxis;
+fn debug_infinite_mana_take_pool_walk_is_flat_per_cycle() {
     use engine::types::actions::DebugAction;
-    use engine::types::mana::ManaType;
 
-    // (1) the accept happens on an UNMODIFIED board.
-    let mut runner = low3_life_engine_accepted(Low3BoardEtbTrigger::CastPresent);
-
-    // (2) harness switch, not game state under test.
-    runner.state_mut().debug_mode = true;
-
-    // (3) the toggle runs AFTER the accept, so it cannot perturb detection, routing or the offer.
-    // (Independently safe even earlier: `debug_infinite_mana` is documented INTENTIONALLY EXCLUDED
-    // from `PartialEq`, `normalize_for_loop` and `loop_fingerprint`, so CR 104.4b loop equality
-    // cannot see it.)
-    runner
-        .act(GameAction::Debug(DebugAction::SetInfiniteMana {
-            player_id: P0,
-            enabled: true,
-        }))
-        .expect(
-            "the debug infinite-mana toggle is submittable — Debug bypasses WaitingFor dispatch",
-        );
-
-    // (4a) REACH-GUARD: the carve-out seat is really established by the toggle.
-    assert!(
-        runner.state().debug_infinite_mana.contains(&P0),
-        "reach-guard: without the carve-out seat the CR 500.5 clear removes the mana axes before \
-         the prompt and this row is vacuous on its mana half"
-    );
-    // (4b) REACH-GUARD / DISCRIMINATION: ⊇, not equality — step (3) set-unions five more mana
-    // axes. If the mana axis were already cleared at the prompt, `axes_to_remove` would be
-    // {Mana, Life} pre-fix and {Life} post-fix, BOTH would empty the entry and drop the key, the
-    // revert probe could not flip, and the row would go RED on both arms — which reads as "the fix
-    // is broken" when it means "the fixture is broken". This guard makes that failure legible.
-    assert!(
+    crate::loop_shortcut::assert_take_pool_walk_is_flat(32, |n| {
+        let mut runner = low3_life_engine_offered(Low3BoardEtbTrigger::CastPresent);
+        runner.state_mut().debug_mode = true;
         runner
-            .state()
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|a| a.contains(&ResourceAxis::Mana(ManaType::Colorless))
-                && a.contains(&ResourceAxis::Life(P0))),
-        "reach-guard: the mixed ∞ set must still hold BOTH axes at the prompt, got {:?}",
-        runner.state().unbounded_resources.get(&P0)
-    );
-
-    // (5) the real CR 500.5 boundary.
-    drive_priority_to_next_boundary(runner.state_mut());
-    // (4c) REACH-GUARD: the boundary really surfaced the collapse prompt for P0. Fails loudly
-    // instead of passing fast if the phase advanced with no prompt.
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::PayAmountChoice {
-                player,
-                resource: PayableResource::LoopCollapse { .. },
-                ..
-            } if player == P0
-        ),
-        "reach-guard: the CR 500.5 boundary must prompt P0 for the collapse count, got {:?}",
-        runner.state().waiting_for
-    );
-    // (4d) REACH-GUARD / ROUTE ATTRIBUTION. MEASURED, not assumed: with the `cast_sourced`
-    // disjunct deleted this rig registers a BATCHED `Life` item instead, `axes_to_remove` is
-    // `{Life(P0)}` either way, and BOTH assertions at the end of this row still pass — so guards
-    // (a)-(c) alone do NOT pin the route. Without this guard the row would go on passing while it
-    // had silently stopped exercising the `DriveSequence` apply arm and its axis-scoped cash-out,
-    // which is the seam it exists to drive.
-    assert!(
-        matches!(
-            runner
-                .state()
-                .pending_unbounded_materialization
-                .get(&P0)
-                .map(Vec::as_slice),
-            Some([PersistentAxisMaterialization::DriveSequence { .. }])
-        ),
-        "reach-guard: the stash the boundary is about to apply must be the DriveSequence this fix \
-         changed, got {:?}",
-        runner.state().pending_unbounded_materialization.get(&P0)
-    );
-
-    // (6) a real submit. `amount: 1` deliberately: the DriveSequence arm replays real cycles
-    // through `apply()` and the replay is uncapped and cubic, so N=1 keeps the row cheap while
-    // exercising exactly the same apply → axis-scoped cash-out path. This row asserts AXIS
-    // BOOKKEEPING, not growth arithmetic.
-    apply(
-        runner.state_mut(),
-        P0,
-        GameAction::SubmitPayAmount { amount: 1 },
-    )
-    .expect("P0 submits the collapse count at the CR 500.5 boundary");
-
-    // (7) the bookkeeping, after the production cash-out.
-    let after = runner
-        .state()
-        .unbounded_resources
-        .get(&P0)
-        .expect(
-            "the debug seat's mana capability keeps P0's entry alive across the collapse — pre-fix \
-             the entry survived too, but WITHOUT Mana(Colorless), which is the RED this row's \
-             revert probe produces",
-        )
-        .clone();
-    assert!(
-        after.contains(&ResourceAxis::Mana(ManaType::Colorless)),
-        "CR 500.5 + CR 106.4 own this axis: the collapse must PRESERVE the debug infinite-mana \
-         capability that `turns::drain_pending_phase_transition_progress` deliberately excludes \
-         from its own clear. Got {after:?}"
-    );
-    assert!(
-        !after.contains(&ResourceAxis::Life(P0)),
-        "CR 732.2c: the collapse the boundary just applied delivered the life growth, so it ends \
-         that mark. This half fails any 'preserve everything' bug. Got {after:?}"
-    );
+            .act(GameAction::Debug(DebugAction::SetInfiniteMana {
+                player_id: P0,
+                enabled: true,
+            }))
+            .expect("the debug infinite-mana toggle is submittable");
+        engine::game::perf_counters::reset();
+        low3_accept(&mut runner, n);
+        runner.state().clone()
+    });
 }
 
-/// **The CONSUMING AUTHORITY re-filters any stash it is handed, whatever that stash names.** The
-/// writer-side filter in `materialize_object_growth_shortcut` means no stash THIS build registers
-/// can carry `Mana(_)`, so the reader-side `retain` in `clear_collapsed_materializations` removes
-/// nothing on a same-build stash and every sibling row stays GREEN when it is deleted. This row
-/// is the only one that reds, and the property is ARCHITECTURAL: the consumer owes the invariant
-/// for ANY stash, because `ResourceAxis`'s exhaustive `match` build-breaks on a new AXIS but
-/// never on a new REGISTRATION SITE.
-///
-/// The `Mana(_)`-bearing stash comes from a `serde_json` round trip, which is NOT a cross-version
-/// save-compatibility claim. The boundary clear is called DIRECTLY on a NON-DEBUG seat, so what
-/// it pins is not production-reachable there — the live victim is the debug-seat row above — and
-/// calling it directly isolates the consumer's re-filter from the route that produced the stash.
-/// REVERT, against the READER side rather than the writer side: delete the `retain` ⇒ P0's axis
-/// set empties ⇒ `get(&P0)` is `None` ⇒ RED.
-#[test]
-fn low3_prefix_save_stash_cannot_strip_a_standing_capability() {
-    use engine::analysis::resource::ResourceAxis;
-    use engine::types::mana::ManaType;
-
-    let mut runner = low3_life_engine_accepted(Low3BoardEtbTrigger::CastPresent);
-
-    // The real post-accept stash — already filtered to the deferred axis by this build's writer.
-    let live = runner
-        .state()
-        .pending_unbounded_materialization
-        .get(&P0)
-        .expect("the accept registers a materialization")
-        .clone();
-    let [PersistentAxisMaterialization::DriveSequence { sequence, .. }] = live.as_slice() else {
-        panic!("reach-guard: the seam under test is the DriveSequence route, got {live:?}");
-    };
-
-    // Rebuild it as a PRE-FIX build wrote it (`proposal.unbounded.clone()`, both axes) and take it
-    // through a real save/load — the only reachable producer of such a stash under this build.
-    let prefix_written = vec![PersistentAxisMaterialization::DriveSequence {
-        sequence: sequence.clone(),
-        collapsed_axes: vec![
-            ResourceAxis::Mana(ManaType::Colorless),
-            ResourceAxis::Life(P0),
-        ],
-    }];
-    let loaded: Vec<PersistentAxisMaterialization> = serde_json::from_str(
-        &serde_json::to_string(&prefix_written).expect("the stash serializes"),
-    )
-    .expect("the round-tripped stash deserializes under this build");
-
-    // (a) REACH-GUARD: both axes are marked, so both halves below are real questions.
-    assert!(
-        runner
-            .state()
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|a| a.contains(&ResourceAxis::Mana(ManaType::Colorless))
-                && a.contains(&ResourceAxis::Life(P0))),
-        "reach-guard: both axes must be marked before the clear, got {:?}",
-        runner.state().unbounded_resources.get(&P0)
-    );
-    // (b) PREMISE PIN / ANTI-VACUITY: the LOADED stash equals what was written, FIELD FOR FIELD.
-    // Whole-value equality rather than a `collapsed_axes.contains` check, so this also discharges
-    // the `sequence` half of the two "round-trip verified" doc claims this type carries
-    // (`types::game_state` on `DriveSequence` and on `pending_unbounded_materialization`), neither
-    // of which had a backing test before this row — a lossy field inside `LoopActionContext` would
-    // otherwise round-trip badly and go unnoticed. A future `#[serde(skip)]` on `collapsed_axes`
-    // deserializes to an empty `Vec` and reds HERE, instead of letting the assertions below pass
-    // for the wrong reason.
-    assert_eq!(
-        loaded, prefix_written,
-        "premise: the stash round-trips intact, so the clear below really receives one that still \
-         names the standing axis in `collapsed_axes`"
-    );
-
-    // THE SEAM, fed the pre-fix stash.
-    runner
-        .state_mut()
-        .clear_collapsed_materializations(P0, &loaded);
-
-    let after = runner
-        .state()
-        .unbounded_resources
-        .get(&P0)
-        .expect(
-            "the standing Mana(_) capability keeps P0's entry alive even when a PRE-FIX stash \
-             names it — the consuming authority re-filters. Without the reader-side `retain` \
-             this is `None`",
-        )
-        .clone();
-    assert!(
-        after.contains(&ResourceAxis::Mana(ManaType::Colorless)),
-        "CR 500.5 + CR 106.4 own this axis's expiry regardless of what a persisted stash claims. \
-         Got {after:?}"
-    );
-    assert!(
-        !after.contains(&ResourceAxis::Life(P0)),
-        "CR 732.2c: the deferred half is still delivered and still ends. This fails any \
-         'preserve everything' overcorrection. Got {after:?}"
-    );
-}
-
-// ───────── CR 732.2a + CR 603.6a: an ETB-SOURCED life axis routes to the concrete replay ─────────
+// ───────── CR 732.2a + CR 603.6a: an ETB-SOURCED life axis performs at the take ─────────
 //
 // MEASURED DEFECT (real 4p Sprout Swarm dump `.fb-dumps/witherbloom-sprout-lumaret-works-slow`,
 // engine UNMODIFIED, `combofb_probe e no_spear_accept`): P0's board carried Bogwater Lumaret
@@ -4330,8 +3796,8 @@ fn create_life_gainer(state: &mut GameState, owner: PlayerId, name: &str) -> Obj
     id
 }
 
-/// A coarse label per registered materialization — the ROUTE oracle. `DriveSequence` is the
-/// concrete replay; `Tokens`/`Counters`/`Life` are the batched N×δ collapse.
+/// A coarse label per registered materialization — the ROUTE oracle. `Tokens`/`Counters`/`Life`
+/// are the batched N×δ collapse; none means the take performed the period.
 fn route_labels(state: &GameState, player: PlayerId) -> Vec<String> {
     state
         .pending_unbounded_materialization
@@ -4339,9 +3805,6 @@ fn route_labels(state: &GameState, player: PlayerId) -> Vec<String> {
         .map(|v| {
             v.iter()
                 .map(|m| match m {
-                    PersistentAxisMaterialization::DriveSequence { .. } => {
-                        "DriveSequence".to_string()
-                    }
                     PersistentAxisMaterialization::Tokens(_) => "Tokens".to_string(),
                     PersistentAxisMaterialization::Counters(_) => "Counters".to_string(),
                     PersistentAxisMaterialization::Life {
@@ -4363,7 +3826,7 @@ fn life_of(state: &GameState, player: PlayerId) -> i32 {
         .life
 }
 
-/// Resolve everything the collapse left on the stack — the step that EXPOSED the double-count
+/// Resolve everything the take left on the stack — the step that EXPOSED the double-count
 /// (the batched route's 50 leftover token-ETB triggers paid the life a second time on the drain).
 fn drain_stack(state: &mut GameState) {
     for _ in 0..8192 {
@@ -4378,22 +3841,16 @@ fn drain_stack(state: &mut GameState) {
     panic!("drain_stack: the stack did not empty within 8192 passes");
 }
 
-/// Drive the accepted loop to its boundary, collapse at `n`, drain the stack, and return the
-/// number of Saprolings minted — the whole production tail in one place.
-fn collapse_at(state: &mut GameState, n: u32) -> usize {
+/// Take the offer at `n`, assert the take performed it, drain the stack, and return the number of
+/// Saprolings minted — the whole production tail in one place.
+fn take_at(state: &mut GameState, n: u32) -> usize {
     let saps_before = p0_saproling_ids(state).len();
-    drive_priority_to_next_boundary(state);
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
-                if player == P0
-        ),
-        "the boundary must prompt P0 for the LoopCollapse count, got {:?}",
-        state.waiting_for
+    drive_all_accept_n(state, n);
+    assert_eq!(
+        route_labels(state, P0),
+        Vec::<String>::new(),
+        "the take performs the period and stashes nothing"
     );
-    apply(state, P0, GameAction::SubmitPayAmount { amount: n })
-        .expect("P0 submits the finite loop-collapse count");
     drain_stack(state);
     p0_saproling_ids(state).len() - saps_before
 }
@@ -4401,14 +3858,13 @@ fn collapse_at(state: &mut GameState, n: u32) -> usize {
 /// R6b-converge (CR 732.2a + CR 603.6a): the two collapse ROUTES must land on the SAME life total.
 ///
 /// ARM 1 (ETB-observer board): a real parsed "whenever another creature you control enters, you
-/// gain 1 life" trigger on a P0 permanent. The accept must register `DriveSequence` — NOT the
-/// batched pair — and collapsing at N=5 must pay the life exactly ONCE, measured ACROSS the
-/// collapse *and* the stack drain (the drain is where the double-count surfaced: 596 → 646).
+/// gain 1 life" trigger on a P0 permanent. The take must perform the period — NOT register the
+/// batched pair — and taking N=5 must pay the life exactly ONCE, measured ACROSS the take *and*
+/// the stack drain (the drain is where the double-count surfaced: 596 → 646).
 ///
-/// REVERT-PROBE (discriminating, RUN): drop the `life_etb_sourced` conjunct from the route
-/// decision in `materialize_object_growth_shortcut` ⇒ the route flips to
-/// `["Tokens", "Life(PlayerId(0),1)"]` and the life total over-counts by exactly N (the batched
-/// +N at the collapse plus the N real token ETBs on the drain).
+/// REVERT-PROBE (discriminating): drop the `life_etb_sourced` conjunct from
+/// `PeriodGrowth::collapse_is_replay` ⇒ the take registers `["Tokens", "Life(PlayerId(0),1)"]`
+/// instead of performing.
 ///
 /// MUST-NOT-FLIP, ARM 2: the same dump with NO life gainer grows no life axis (MEASURED:
 /// `unbounded == {TokensCreated}`) and must still register the batched `Tokens`.
@@ -4417,8 +3873,7 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
     const N: u32 = 5;
 
     // ── ARM 2 (must-NOT-flip): no life axis ⇒ the pure token loop still BATCHES. ──
-    let mut plain: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut plain = offer_state();
     strip_life_conditional_cost_static(&mut plain);
     drive_all_accept_n(&mut plain, N);
     assert_eq!(
@@ -4427,27 +3882,20 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
         "a pure token loop with NO life axis keeps the batched Tokens route"
     );
 
-    // ── ARM 1 (primary): an ETB-sourced life axis ⇒ the concrete replay, paid exactly once. ──
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE).unwrap();
+    // ── ARM 1 (primary): an ETB-sourced life axis ⇒ performed at the take, paid exactly once. ──
+    let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
     let etb_life = innkeeper_etb_life_trigger(&state);
     let host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
     graft_trigger(&mut state, host, etb_life);
 
-    drive_all_accept_n(&mut state, N);
-    assert_eq!(
-        route_labels(&state, P0),
-        vec!["DriveSequence".to_string()],
-        "an ETB-sourced life axis routes to the concrete replay (revert 4a ⇒ [Tokens, Life(..,1)])"
-    );
-
     let life_before = life_of(&state, P0);
-    let minted = collapse_at(&mut state, N);
+    let minted = take_at(&mut state, N);
 
     // (1) POSITIVE reach-guard: the collapse actually ran and minted N real tokens.
     assert_eq!(
         minted, N as usize,
-        "the collapse mints exactly N real Saprolings"
+        "the take mints exactly N real Saprolings"
     );
     // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. The
     //     batched route pays N at the collapse AND N again when the real ETBs drain ⇒ 2N.
@@ -4460,21 +3908,18 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
 }
 
 /// MIXED-CAUSE (CR 732.2a): TWO ETB life gainers on P0's board ⇒ a batched route would carry
-/// `per_cycle_delta == 2`. The route must flip to the concrete replay for the WHOLE axis, and a
-/// materialization MUST still be registered (M5 reach-guard: an empty registration would make
-/// every downstream assertion vacuous).
+/// `per_cycle_delta == 2`. The take must perform the period for the WHOLE axis.
 ///
 /// This is why the fix is a ROUTE decision and not a registration-cancelling suppressor: a
 /// suppressor keyed on "an ETB source exists" would drop the whole `Life` registration and
 /// under-apply. Here it would pay N instead of 2N.
 ///
-/// REVERT-PROBE (discriminating, RUN): drop the `life_etb_sourced` conjunct ⇒ the route flips to
-/// `["Tokens", "Life(PlayerId(0),2)"]` and the total becomes 4N (2N batched + 2N on the drain).
+/// REVERT-PROBE (discriminating): drop the `life_etb_sourced` conjunct ⇒ the take registers
+/// `["Tokens", "Life(PlayerId(0),2)"]` instead of performing.
 #[test]
 fn mixed_cause_life_axis_routes_to_replay() {
     const N: u32 = 5;
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
     let etb_life = innkeeper_etb_life_trigger(&state);
     let first = create_life_gainer(&mut state, P0, "Grafted Innkeeper A");
@@ -4482,20 +3927,8 @@ fn mixed_cause_life_axis_routes_to_replay() {
     let second = create_life_gainer(&mut state, P0, "Grafted Innkeeper B");
     graft_trigger(&mut state, second, etb_life);
 
-    drive_all_accept_n(&mut state, N);
-    let labels = route_labels(&state, P0);
-    assert!(
-        !labels.is_empty(),
-        "M5 reach-guard: the route-flipped accept must register SOMETHING, got {labels:?}"
-    );
-    assert_eq!(
-        labels,
-        vec!["DriveSequence".to_string()],
-        "a mixed-cause life axis routes wholesale to the concrete replay, got {labels:?}"
-    );
-
     let life_before = life_of(&state, P0);
-    let minted = collapse_at(&mut state, N);
+    let minted = take_at(&mut state, N);
 
     assert_eq!(
         minted, N as usize,
@@ -4519,8 +3952,7 @@ fn mixed_cause_life_axis_routes_to_replay() {
 #[test]
 fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
     const N: u32 = 5;
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
     let etb_life = innkeeper_etb_life_trigger(&state);
 
@@ -4535,21 +3967,9 @@ fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
     let p1_host = create_life_gainer(&mut state, P1, "Grafted Soul Warden");
     graft_trigger(&mut state, p1_host, soul_warden);
 
-    drive_all_accept_n(&mut state, N);
-    let labels = route_labels(&state, P0);
-    assert!(
-        !labels.is_empty(),
-        "reach-guard: the accept must register a materialization, got {labels:?}"
-    );
-    assert_eq!(
-        labels,
-        vec!["DriveSequence".to_string()],
-        "the ETB-sourced axis routes to the replay even with a foreign gainer present"
-    );
-
     let p0_before = life_of(&state, P0);
     let p1_before = life_of(&state, P1);
-    let minted = collapse_at(&mut state, N);
+    let minted = take_at(&mut state, N);
 
     assert_eq!(
         minted, N as usize,
@@ -4577,8 +3997,8 @@ fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
 /// shape (CR 603.2c). Collapsing at N now produces N SEPARATE same-turn token batches (one per
 /// replayed cycle), so the total is right only if BOTH fixes hold:
 ///
-/// * 4a (route): the ETB-sourced axis must take the concrete replay. Reverting it re-introduces
-///   the batched `Life` on top of the real entries ⇒ amplified over-count.
+/// * 4a (route): the ETB-sourced axis must be performed at the take. Reverting it registers the
+///   batched `Life` instead.
 /// * 4b (index): each replayed cycle's entry must carry its OWN zone-change index. Reverting it
 ///   leaves every entry on the `0` placeholder, so `batched_zone_change_already_collected` keys
 ///   all N batches to `(def, 0)` and only the FIRST fires ⇒ the trigger-count assertion fails.
@@ -4587,23 +4007,15 @@ fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
 #[test]
 fn combined_batched_etb_gainer_fires_once_per_replayed_cycle() {
     const N: u32 = 5;
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
     let mut batched_gainer = innkeeper_etb_life_trigger(&state);
     batched_gainer.batched = true;
     let host = create_life_gainer(&mut state, P0, "Grafted Batched Innkeeper");
     graft_trigger(&mut state, host, batched_gainer);
 
-    drive_all_accept_n(&mut state, N);
-    assert_eq!(
-        route_labels(&state, P0),
-        vec!["DriveSequence".to_string()],
-        "4a: a batched ETB life gainer still routes the axis to the concrete replay"
-    );
-
     let life_before = life_of(&state, P0);
-    let minted = collapse_at(&mut state, N);
+    let minted = take_at(&mut state, N);
 
     // POSITIVE reach-guard: N cycles really replayed.
     assert_eq!(minted, N as usize, "the replay minted one token per cycle");
@@ -4636,8 +4048,7 @@ fn lifelink_etb_damage_life_axis_routes_to_replay() {
     // 3 opponents in this 4p pod × 1 damage each, all dealt by one lifelink source per entry.
     const LIFELINK_PER_CYCLE: i32 = 3;
 
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
-        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let mut state = offer_state();
     strip_life_conditional_cost_static(&mut state);
 
     // The real parsed battlefield-entry trigger CONDITION from this dump's pool, with only its
@@ -4663,22 +4074,9 @@ fn lifelink_etb_damage_life_axis_routes_to_replay() {
     }
     graft_trigger(&mut state, host, ping);
 
-    drive_all_accept_n(&mut state, N);
-    let labels = route_labels(&state, P0);
-    assert!(
-        !labels.is_empty(),
-        "reach-guard: the accept must register a materialization, got {labels:?}"
-    );
-    assert_eq!(
-        labels,
-        vec!["DriveSequence".to_string()],
-        "a LIFELINK-sourced ETB life axis routes to the concrete replay \
-         (an Effect::GainLife shape test ⇒ [Tokens, Life(..,3)]), got {labels:?}"
-    );
-
     let p0_before = life_of(&state, P0);
     let p1_before = life_of(&state, P1);
-    let minted = collapse_at(&mut state, N);
+    let minted = take_at(&mut state, N);
 
     assert_eq!(
         minted, N as usize,
@@ -4698,5 +4096,50 @@ fn lifelink_etb_damage_life_axis_routes_to_replay() {
         life_of(&state, P0) - p0_before,
         N as i32 * LIFELINK_PER_CYCLE,
         "the CR 702.15b lifelink gain is paid ONCE (batched route ⇒ double)"
+    );
+}
+
+/// CR 702.51a + CR 732.2a: the confirmer pays a recorded convoke with the tap set the replayed
+/// board offers, so the Sprout Swarm period whose recorded convoke tapped the one-shot Witherbloom
+/// confirms from its offer frame.
+#[test]
+fn the_confirmer_rebinds_a_recorded_convoke_to_the_replayed_board() {
+    let state = {
+        let mut state: GameState = serde_json::from_str(&UNTAPPED_PRECAST_STATE).expect(
+            "the real untapped-precast 4p dump must deserialize into the current GameState",
+        );
+        state
+            .objects
+            .get_mut(&ObjectId(405))
+            .expect("Saproling 405")
+            .tapped = false;
+        let witherbloom = state
+            .objects
+            .get_mut(&ObjectId(401))
+            .expect("Witherbloom 401");
+        witherbloom.color = vec![ManaColor::Green, ManaColor::Black];
+        witherbloom.base_color = vec![ManaColor::Green, ManaColor::Black];
+        state
+    };
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner
+        .cast(ObjectId(402))
+        .accept_optional()
+        .convoke_with(&[ObjectId(401)])
+        .commit()
+        .resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::LoopShortcut { .. }),
+        "reach: the base offers at this frame"
+    );
+    let mut frame = runner.state().clone();
+    frame.waiting_for = WaitingFor::Priority {
+        player: engine::game::scenario::P0,
+    };
+    let verdicts = engine::game::period_confirm::confirm_for_tests(&frame);
+    assert!(!verdicts.is_empty(), "reach: the trace names a span here");
+    assert!(
+        verdicts.iter().any(|(_, verdict)| verdict.is_ok()),
+        "a span confirms with its convoke rebound: {verdicts:?}"
     );
 }

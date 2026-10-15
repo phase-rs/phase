@@ -4862,18 +4862,6 @@ pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
         state.current_triggered_mana_override.is_none(),
         "the active inline-mana override must not survive a public boundary"
     );
-
-    if let Ok(current) = ResolutionStateWire::from_game_state(state.clone()).to_value() {
-        let object = current
-            .as_object()
-            .expect("resolution wire serialization is always an object");
-        for field in legacy_resolution_wire_fields() {
-            assert!(
-                !object.contains_key(*field),
-                "current resolution frames must not co-reside with legacy runtime field {field}"
-            );
-        }
-    }
 }
 
 /// v1-only continuation fields. Runtime state never carries these names after
@@ -7797,7 +7785,7 @@ mod tests {
                 controller: PlayerId(0),
                 source_id: ObjectId(131),
                 branches: Vec::new(),
-                parent_targets: Vec::new(),
+                parent_occurrences: Default::default(),
                 context: Box::new(SpellContext::default()),
                 continuation: None,
                 replacement_applied: HashSet::new(),
@@ -8626,6 +8614,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            delivery_boundary: None,
         });
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);

@@ -87,6 +87,7 @@ import {
 // the store's runtime graph, though — the `serverMetrics` import below reaches
 // it anyway (see there).
 import type { DirectorySource } from "../services/serverDirectory";
+import type { PileSource } from "../services/pileSource";
 // A VALUE import, and with it a real runtime edge: `serverMetrics` value-imports
 // `directoryUrl` from `serverDirectory`, which closes back on this store TWICE
 // — directly (`serverDirectory.ts:23` imports `useMultiplayerStore`) and via
@@ -1520,6 +1521,8 @@ export interface HostingSettings {
   /** Pre-minted `[A-Z0-9]{6}` game code from a Discord link. Absent → the
    *  broker/server mints one. */
   requestedCode?: string;
+  /** The host's pile for a `HostPile` format; absent = the default pile. */
+  pile?: PileSource;
 }
 
 /** Snapshot of the host's session config, captured at startHosting time.

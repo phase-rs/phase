@@ -98,6 +98,10 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             mana_value: 0,
             controller: PlayerId(0),
             owner: PlayerId(0),
+            arrival: engine::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             from_zone: Some(Zone::Hand),
             cast_from_zone: None,
             played_from_zone: None,

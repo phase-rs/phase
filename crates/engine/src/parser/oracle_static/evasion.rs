@@ -1,11 +1,13 @@
 // CR 509.1b — combat restriction / evasion statics.
 
-#[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
+use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
+#[allow(unused_imports)]
+use crate::types::ability::AttachmentReferent;
 
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
@@ -181,7 +183,7 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
 /// - `~` — the normalized source name → [`TargetFilter::SelfRef`] (Cloud doubling
 ///   "a triggered ability of ~").
 /// - "an Equipment attached to it" — here "it" is anaphoric on the doubler's own
-///   source, so it is the source-relative [`FilterProp::AttachedToSource`] set.
+///   source, so it is the source-relative [`FilterProp::AttachedTo { to: AttachmentReferent::Source }`] set.
 ///   `parse_type_phrase_folding` maps "attached to it" to `AttachedToRecipient` (an
 ///   enchanted-creature host), which is the wrong referent in a doubler, so this
 ///   clause is hand-built.
@@ -192,7 +194,9 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
             TargetFilter::Typed(
                 TypedFilter::default()
                     .subtype("Equipment".to_string())
-                    .properties(vec![FilterProp::AttachedToSource]),
+                    .properties(vec![FilterProp::AttachedTo {
+                        to: AttachmentReferent::Source,
+                    }]),
             ),
             alt((
                 tag("an equipment attached to it"),
@@ -3051,17 +3055,30 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
     //     tax to "attacking-you" creatures — already implicit in the affected
     //     filter for the attack side.
     let (input, per_affected) = opt(alt((
-        tag_no_case::<_, _, OracleError<'_>>(" for each of those creatures"),
-        tag_no_case::<_, _, OracleError<'_>>(
-            " for each creature they control that's attacking you or a planeswalker you control",
+        value(
+            (),
+            tag_no_case::<_, _, OracleError<'_>>(" for each of those creatures"),
         ),
-        tag_no_case::<_, _, OracleError<'_>>(
-            " for each creature they control that's attacking a planeswalker you control",
+        value(
+            (),
+            preceded(
+                (
+                    tag_no_case(" for each creature "),
+                    controller_phrase_among_mixed_case(&[ControllerPhrase::THEY_CONTROL]),
+                    tag_no_case(" that's attacking "),
+                ),
+                // Longest first: "you" is a prefix of "you or a planeswalker …".
+                alt((
+                    tag_no_case("you or a planeswalker you control"),
+                    tag_no_case("a planeswalker you control"),
+                    tag_no_case("you"),
+                )),
+            ),
         ),
-        tag_no_case::<_, _, OracleError<'_>>(
-            " for each creature they control that's attacking you",
+        preceded(
+            tag_no_case(" for each attacking creature "),
+            controller_phrase_among_mixed_case(&[ControllerPhrase::THEY_CONTROL]),
         ),
-        tag_no_case::<_, _, OracleError<'_>>(" for each attacking creature they control"),
     )))
     .parse(input)?;
 
@@ -3708,5 +3725,111 @@ mod assign_damage_pronoun_tests {
             "you may have ~ assign its combat damage to any target",
         )
         .is_none());
+    }
+}
+
+/// Structural-marker site: the combat tax's per-affected-creature tail reads
+/// "they control" as a marker; the tax subject already names the creatures.
+#[cfg(test)]
+mod structural_marker_tests {
+    use super::*;
+    use crate::types::ability::UnlessPayScaling;
+
+    #[test]
+    fn combat_tax_per_affected_marker() {
+        let parse = |tail: &str| {
+            let text =
+                format!("creatures can't attack you unless their controller pays {{2}}{tail}");
+            let (rest, tax) = parse_combat_tax_body(&text).expect("combat tax body");
+            (rest.to_string(), tax.scaling)
+        };
+        for defender in [
+            "you or a planeswalker you control",
+            "a planeswalker you control",
+            "you",
+        ] {
+            assert_eq!(
+                parse(&format!(
+                    " for each creature they control that's attacking {defender}"
+                )),
+                (String::new(), UnlessPayScaling::PerAffectedCreature),
+                "{defender:?}"
+            );
+        }
+        assert_eq!(
+            parse(" for each attacking creature they control"),
+            (String::new(), UnlessPayScaling::PerAffectedCreature)
+        );
+        // A declined controller phrase leaves the per-affected tail unread, so the
+        // text reaches the generic "for each <quantity>" reader instead: either it
+        // counts the named creatures once, or nothing reads the tail.
+        let attacking_creatures = |controller: ControllerRef| UnlessPayScaling::PerQuantityRef {
+            quantity: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(controller)
+                        .properties(vec![FilterProp::Attacking { defender: None }]),
+                ),
+            },
+        };
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            let tail = format!(" for each creature {declined} that's attacking you");
+            assert_eq!(
+                parse(&tail),
+                (tail.clone(), UnlessPayScaling::Flat),
+                "{tail:?}"
+            );
+        }
+        for (declined, expected) in [
+            (
+                "you control",
+                (String::new(), attacking_creatures(ControllerRef::You)),
+            ),
+            (
+                "the chosen player controls",
+                (
+                    String::new(),
+                    attacking_creatures(ControllerRef::SourceChosenPlayer),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                parse(&format!(" for each attacking creature {declined}")),
+                expected,
+                "{declined:?}"
+            );
+        }
+        for declined in ["that player controls", "controlled by that player"] {
+            let tail = format!(" for each attacking creature {declined}");
+            assert_eq!(
+                parse(&tail),
+                (tail.clone(), UnlessPayScaling::Flat),
+                "{tail:?}"
+            );
+        }
+    }
+
+    /// The combat-tax body reads original-case text, so a capitalized controller
+    /// phrase scales exactly as its lowercase spelling does.
+    #[test]
+    fn combat_tax_per_affected_marker_mixed_case() {
+        for tail in [
+            " For Each Creature They Control That's Attacking You",
+            " for each attacking creature They Control",
+        ] {
+            let text =
+                format!("Creatures can't attack you unless their controller pays {{2}}{tail}");
+            let (rest, tax) = parse_combat_tax_body(&text).expect("combat tax body");
+            assert_eq!(
+                (rest, tax.scaling),
+                ("", UnlessPayScaling::PerAffectedCreature),
+                "{tail:?}"
+            );
+        }
     }
 }

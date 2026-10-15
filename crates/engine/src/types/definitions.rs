@@ -70,8 +70,26 @@ impl<T: Clone> Definitions<T> {
     }
 
     /// Keep only definitions matching `f`.
-    pub fn retain<F: FnMut(&T) -> bool>(&mut self, f: F) {
-        Arc::make_mut(&mut self.0).retain(f);
+    ///
+    /// `f` is called exactly once per definition, in order. When `f` keeps
+    /// every definition the backing `Arc` is left untouched, so a list shared
+    /// with a cloned state stays shared.
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, mut f: F) {
+        let Some(first_removed) = self.0.iter().position(|x| !f(x)) else {
+            return;
+        };
+        let mut index = 0;
+        Arc::make_mut(&mut self.0).retain(|x| {
+            let keep = if index < first_removed {
+                true
+            } else if index == first_removed {
+                false
+            } else {
+                f(x)
+            };
+            index += 1;
+            keep
+        });
     }
 
     /// Positional mutable access — crate-visible so effects that need to
@@ -228,5 +246,68 @@ mod tests {
         assert_eq!(d.len(), 2);
         assert_eq!(d[0], 2);
         assert_eq!(d[1], 4);
+    }
+
+    /// A `retain` keep-predicate over the integer fixtures.
+    type RetainPredicate = fn(&i32) -> bool;
+
+    /// The removal shapes the `retain` tests below sweep: nothing, first,
+    /// middle, last, everything, and a mixed pattern.
+    fn retain_cases() -> Vec<(&'static str, RetainPredicate)> {
+        vec![
+            ("none removed", |_| true),
+            ("first removed", |x| *x != 1),
+            ("middle removed", |x| *x != 3),
+            ("last removed", |x| *x != 5),
+            ("all removed", |_| false),
+            ("odd removed", |x| x % 2 == 0),
+        ]
+    }
+
+    /// A `retain` that removes nothing must not unshare the backing `Arc`.
+    #[test]
+    fn retain_without_removal_keeps_the_arc_shared() {
+        let mut d: Definitions<i32> = Definitions::from(vec![1, 2, 3, 4, 5]);
+        assert!(d.len() >= 5);
+        let before = d.clone();
+        d.retain(|_| true);
+        assert!(Arc::ptr_eq(&d.0, &before.0));
+        assert_eq!(d, before);
+
+        // Reach-guard: a removing `retain` on the same fixture does unshare,
+        // and leaves the clone untouched.
+        d.retain(|x| *x != 3);
+        assert!(!Arc::ptr_eq(&d.0, &before.0));
+        assert_eq!(before.len(), 5);
+        assert_eq!(d.len(), 4);
+    }
+
+    /// `retain` calls its predicate exactly once per element, in order.
+    #[test]
+    fn retain_calls_the_predicate_once_per_element_in_order() {
+        for (label, keep) in retain_cases() {
+            let mut d: Definitions<i32> = Definitions::from(vec![1, 2, 3, 4, 5]);
+            let mut calls = Vec::new();
+            d.retain(|x| {
+                calls.push(*x);
+                keep(x)
+            });
+            assert_eq!(calls, vec![1, 2, 3, 4, 5], "{label}");
+        }
+    }
+
+    /// `retain` leaves exactly what `Vec::retain` leaves.
+    #[test]
+    fn retain_matches_vec_retain() {
+        let mut shrunk = 0;
+        for (label, keep) in retain_cases() {
+            let mut reference = vec![1, 2, 3, 4, 5];
+            reference.retain(keep);
+            let mut d: Definitions<i32> = Definitions::from(vec![1, 2, 3, 4, 5]);
+            d.retain(keep);
+            assert_eq!(*d.0, reference, "{label}");
+            shrunk += usize::from(reference.len() < 5);
+        }
+        assert!(shrunk >= 5, "only {shrunk} cases removed anything");
     }
 }

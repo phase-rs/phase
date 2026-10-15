@@ -586,9 +586,6 @@
     "pendingCheaper": "El próximo hechizo cuesta {{amount}} menos",
     "companion": "Compañero",
     "unboundedTooltip": "{{resource}} ilimitado (∞)",
-    "unboundedScheduledTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; se elegirá una cantidad finita",
-    "unboundedScheduledYouTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; tú indicarás la cantidad",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; esto puede seguir siendo ilimitado",
     "unboundedConditionalYouTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; esto puede seguir siendo ilimitado y, si no, tú indicarás la cantidad",
     "unboundedMixedTooltip": "{{resource}} ilimitado (∞) — parte de este grupo tiene un colapso pendiente; parte sigue siendo ilimitada",
@@ -671,6 +668,7 @@
     "libraryCount_one": "Biblioteca ({{count}} carta)",
     "libraryCount_other": "Biblioteca ({{count}} cartas)",
     "playFromTop": "Juega {{name}} desde la parte superior de la biblioteca",
+    "activateFromTop": "Activa {{name}} desde la parte superior de la biblioteca",
     "topOfLibrary": "la parte superior de la biblioteca",
     "indicatorOpponentPrefix": "Op ",
     "graveyardLower": "cementerio",
@@ -678,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "No hay cartas en {{zone}}",
     "castFromZone": "Lanzar desde {{zone}}: {{name}}",
+    "activateFromZone": "Activar desde {{zone}}: {{name}}",
     "viewCount": "Ver {{count}}",
     "castableCount": "{{zone}} — {{count}} lanzables"
   },
@@ -898,6 +897,7 @@
     },
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
+    "keepCurrentTarget": "Conservar este objetivo",
     "skip": "Omitir",
     "opponentChoice": "(elección del oponente)",
     "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
@@ -2407,7 +2407,8 @@
     "confirm": "Confirmar",
     "badgeNewTarget": "Nuevo objetivo",
     "slotLabel": "Objetivo {{index}}: {{current}} → {{chosen}}",
-    "unselected": "sin cambios"
+    "unselected": "sin cambios",
+    "keep": "Conservar"
   },
   "separatePiles": {
     "chooserName": "Jugador {{number}}",

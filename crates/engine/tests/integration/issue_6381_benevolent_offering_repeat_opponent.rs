@@ -13,7 +13,7 @@
 //! instead of 2 life per creature they control.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ChoiceType, ControllerRef, Effect, TargetFilter, TypedFilter};
+use engine::types::ability::{ChoiceType, Effect, PlayerFilter, QuantityExpr, TargetFilter};
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -233,11 +233,11 @@ fn intellectual_offering_draws_three_for_caster_and_chosen_opponent() {
 }
 
 /// Intellectual Offering shares Benevolent Offering's "Choose an opponent.
-/// You and that player each <body>." shape, so it exercises the SAME
-/// `try_parse_compound_subject_each` fix: "that player" must rebind to the
+/// You and that player each <body>." shape: "that player" names the
 /// resolution-scoped chosen player (`ChosenPlayer { index }`), not the
-/// unrelated vote/fan-out `ScopedPlayer` axis. Locks in that the whole
-/// "Offering" cycle — not just Benevolent Offering — benefits.
+/// unrelated vote/fan-out `ScopedPlayer` axis. The clause binds through the
+/// coordinated player set: ONE `Draw` whose recipient is the seat
+/// (`ScopedPlayer`), scoped to `AnyOf[Controller, ChosenPlayer { index: 0 }]`.
 ///
 /// AST-shape companion to `intellectual_offering_draws_three_for_caster_and_chosen_opponent`
 /// above; kept as a SHAPE test (see the `card-test` skill) because it pins
@@ -262,57 +262,59 @@ fn intellectual_offering_second_draw_binds_to_chosen_opponent() {
         "head must be Choose(Opponent), got {:?}",
         ability.effect
     );
-    let first_draw = ability.sub_ability.as_ref().expect("first Draw node");
-    assert!(
-        matches!(
-            first_draw.effect.as_ref(),
-            Effect::Draw {
-                target: TargetFilter::OriginalController,
-                ..
-            }
-        ),
-        "the caster's draw must target OriginalController, got {:?}",
-        first_draw.effect
+    let draw = ability
+        .sub_ability
+        .as_ref()
+        .expect("the coordinated Draw node");
+    assert_eq!(
+        *draw.effect,
+        Effect::Draw {
+            target: TargetFilter::ScopedPlayer,
+            count: QuantityExpr::Fixed { value: 3 },
+        },
+        "each seat draws three cards for itself"
     );
-    let second_draw = first_draw.sub_ability.as_ref().expect("second Draw node");
+    assert_eq!(
+        draw.player_scope,
+        Some(PlayerFilter::AnyOf {
+            filters: vec![
+                PlayerFilter::Controller,
+                PlayerFilter::ChosenPlayer { index: 0 }
+            ],
+        }),
+        "the caster and the chosen opponent are the two seats"
+    );
+    let next = draw
+        .sub_ability
+        .as_ref()
+        .expect("the second paragraph follows the coordinated Draw");
     assert!(
         matches!(
-            second_draw.effect.as_ref(),
-            Effect::Draw {
-                target: TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::ChosenPlayer { index: 0 }),
-                    ..
-                }),
+            next.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
                 ..
             }
-        ),
-        "the chosen opponent's draw must bind to ChosenPlayer{{index: 0}}, not ScopedPlayer, got {:?}",
-        second_draw.effect
+        ) && next.player_scope.is_none(),
+        "one Draw, not two halves: the next link is the second paragraph's \
+         unscoped Choose(Opponent), got {:?} scoped {:?}",
+        next.effect,
+        next.player_scope
     );
 }
 
-/// Regression guard for the fix above, restated by #6965. `inject_subject_target`'s
-/// `GainLife` arm must NOT rebind the recipient when the detected subject isn't a
-/// genuine player reference — Angel of Destiny's "you and that player each gain that
-/// much life" is a compound subject `rewrite_recipient_on_link` has no arm for
-/// (Token/Draw/Discard/Mill/Pump/GenericEffect only).
+/// Regression guard for the fix above, restated by #6965, now closed by the
+/// coordinated player set. Angel of Destiny's "you and that player each gain that
+/// much life" names the damaged player through the trigger's relative antecedent
+/// (`TriggeringPlayer`), so the clause binds ONE `GainLife` scoped to
+/// `AnyOf[Controller, TriggeringPlayer]` — both the controller and the damaged
+/// player gain that much life (CR 119.3). It must never be laundered into a
+/// half-applied `GainLife { player: Controller }` that only the caster benefits
+/// from.
 ///
-/// This used to assert the clause survived as `GainLife { player: Controller }`, and
-/// the comment conceded the gap in the same breath: the damaged player never gained
-/// life. That is a half-applied effect the caster benefits from, and it counted as
-/// SUPPORTED in coverage — the silent-misparse class #6965 exists to remove. It only
-/// reached `GainLife` at all because the unbindable subject fell open. With the
-/// fail-open gone the clause is an honest `unbound_subject` gap: still not playable,
-/// but now visible to coverage instead of masquerading as a working trigger.
-///
-/// The original intent is preserved and strengthened — the point was that a subject
-/// the parser cannot resolve must never be laundered into a concrete recipient. An
-/// `Unimplemented` gap satisfies that more completely than a `Controller` default did.
-///
-/// Forward-red: binding "that player" to the damage-event player will red this test,
-/// which is the intended prompt to assert the real two-recipient shape.
+/// The cast/combat half is `coordinated_player_subjects::angel_of_destiny_*`.
 #[test]
-fn angel_of_destiny_compound_subject_fails_closed_rather_than_half_applying() {
+fn angel_of_destiny_both_players_gain_that_much_life() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let creature = scenario
@@ -336,22 +338,16 @@ fn angel_of_destiny_compound_subject_fails_closed_rather_than_half_applying() {
         .execute
         .as_ref()
         .expect("DamageDone trigger must have an execute body");
-    let Effect::Unimplemented { name, description } = execute.effect.as_ref() else {
-        panic!(
-            "`you and that player each gain that much life` must fail closed rather than \
-             bind half the clause to a recipient it cannot name, got {:?}",
-            execute.effect
-        );
-    };
-    assert_eq!(
-        name, "unbound_subject",
-        "the gap must name the SUBJECT as the unbound part — a different name means the \
-         clause failed somewhere else and this test stopped covering the fail-closed path"
-    );
     assert!(
-        description
-            .as_deref()
-            .is_some_and(|text| text.contains("that player")),
-        "reach-guard: the gap must quote the conjunct it could not bind, got {description:?}"
+        matches!(execute.effect.as_ref(), Effect::GainLife { .. }),
+        "`you and that player each gain that much life` must bind its body, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.player_scope,
+        Some(PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, PlayerFilter::TriggeringPlayer],
+        }),
+        "the controller and the damaged player each gain that much life"
     );
 }

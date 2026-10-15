@@ -36,6 +36,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{GameState, LookGrant, PendingContinuation, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::statics::CastFrequency;
@@ -112,7 +113,7 @@ pub fn resolve(
     // cards using the seeded RNG. Clamp to [1, pool size].
     let look = (look_count.max(1) as usize).min(nonland.len());
     let candidates: Vec<ObjectId> = nonland
-        .choose_multiple(&mut state.rng, look)
+        .choose_multiple(state.rng.draw(RandomDraw::Outcome), look)
         .copied()
         .collect();
 

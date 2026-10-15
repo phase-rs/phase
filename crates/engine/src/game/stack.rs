@@ -62,6 +62,10 @@ pub(super) fn begin_resolving_stack_entry(
 }
 
 /// Settles the active resolution carrier after its owning resolution completes.
+///
+/// Every resolution end — resolved, an intervening-if or CR 608.2b no-op, or an
+/// abandoned family — routes through here, so this is where the resolving
+/// stack object finally ceases to exist (CR 608.2n).
 pub(super) fn finish_resolving_stack_entry(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
@@ -72,6 +76,13 @@ pub(super) fn finish_resolving_stack_entry(
     // occurrence, including ones parked across replacement choices.
     state.return_result_frames.clear();
     state.active_return_result_occurrence = None;
+    // CR 701.20a + CR 608.2n: a reveal-caused triggered ability keeps its card
+    // revealed until it leaves the stack, which a resolving ability does only
+    // as the final part of its resolution — after any pause for a choice, not
+    // when it was popped to begin resolving.
+    if let Some(entry) = entry.as_ref() {
+        state.release_stack_bound_reveals(entry.id);
+    }
     debug_assert!(
         firing.is_none()
             || entry
@@ -95,15 +106,39 @@ pub(super) fn finish_resolving_stack_entry(
 /// reads here as a pruned slot. No printed card combines that re-seeding with
 /// a `ParentTargetSlot` consumer; writing the seeded copy back into the carrier
 /// would make the two agree.
-fn record_illegal_target_slots(state: &mut GameState, validated: Option<&mut ResolvedAbility>) {
+///
+/// CR 608.2b: the declared slots the check did not judge (holes of the
+/// validated declared view that are not illegal ? a `PassThrough` occurrence)
+/// are recorded separately in `unjudged_target_slots`: they supply no
+/// information, but neither storage nor the fizzle verdict changes.
+fn record_illegal_target_slots(
+    state: &mut GameState,
+    judged_and_validated: Option<(
+        &ResolvedAbility,
+        &ResolvedAbility,
+        &[Option<crate::game::targeting::DeclaredSlotBinding>],
+    )>,
+) {
     if let Some(root) = state
         .resolving_stack_entry
         .as_mut()
         .and_then(StackEntry::ability_mut)
     {
-        root.illegal_target_slots = validated.map_or_else(Vec::new, |validated| {
-            illegal_declared_target_slots(root, validated)
-        });
+        let (illegal, unjudged) = judged_and_validated.map_or_else(
+            || (Vec::new(), Vec::new()),
+            |(judged, validated, view)| {
+                let illegal = illegal_declared_target_slots(root, judged, validated);
+                let unjudged = view
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, binding)| binding.is_none() && !illegal.contains(slot))
+                    .map(|(slot, _)| slot)
+                    .collect();
+                (illegal, unjudged)
+            },
+        );
+        root.illegal_target_slots = illegal;
+        root.unjudged_target_slots = unjudged;
     }
 }
 
@@ -506,6 +541,18 @@ pub(crate) struct PoppedStackEntry {
     pub trigger_firing: Option<TriggerFiring>,
 }
 
+/// Empties the stack together with every per-entry table [`PoppedStackEntry`] carries, the bulk
+/// counterpart of [`remove_stack_entry_at_unobserved`]: a new per-entry table joins both.
+///
+/// It neither journals the removal (CR 733) nor records delayed-trigger outcomes, so it is only
+/// for throwaway comparison copies.
+pub(crate) fn clear_stack_with_entry_tables(state: &mut GameState) {
+    state.stack.clear();
+    state.stack_paid_facts.clear();
+    state.stack_trigger_event_batches.clear();
+    state.stack_trigger_firings.clear();
+}
+
 /// Takes the firing classification coupled to a stack entry.
 ///
 /// Current scheduler pushes always install a row for triggered entries. Older
@@ -570,11 +617,12 @@ fn remove_stack_entry_at_unobserved(
             cause,
         })
         .expect("resolved stack removal must have a live journal cause");
-    // CR 701.20a: a triggered ability caused by revealing a card keeps that
-    // card revealed only until it leaves the stack — resolved, countered,
-    // fizzled, or drained. The release is its own journaled information edit,
-    // so replay applies it after this removal without re-deriving it.
-    state.release_stack_bound_reveals(entry.id);
+    // CR 701.20a: the reveal lease is NOT released here. A non-resolving
+    // removal (countered, drained, rolled back) ends it at once — see
+    // `remove_nonresolving_stack_entry_at` and `pop_nonresolving_top_stack_entry`
+    // — but the CR 405.5 resolution pop only begins resolution: the ability
+    // leaves the stack as the final part of that resolution (CR 608.2n), which
+    // `finish_resolving_stack_entry` settles.
 
     Some(PoppedStackEntry {
         entry,
@@ -624,11 +672,22 @@ pub(super) fn remove_nonresolving_stack_entry_at(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) -> Option<PoppedStackEntry> {
     let popped = remove_stack_entry_at_unobserved(state, index)?;
+    release_departed_entry_reveals(state, &popped);
     record_departed_stack_spell(state, &popped.entry);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
     Some(popped)
+}
+
+/// CR 701.20a: "If revealing a card causes a triggered ability to trigger, the
+/// card remains revealed until that triggered ability leaves the stack." An
+/// entry removed WITHOUT resolving (countered, drained, rolled back) has left
+/// the stack for good, so its lease ends with the removal. The release is its
+/// own journaled information edit, so replay applies it after the removal
+/// without re-deriving it.
+fn release_departed_entry_reveals(state: &mut GameState, popped: &PoppedStackEntry) {
+    state.release_stack_bound_reveals(popped.entry.id);
 }
 
 /// CR 405.2: removes the topmost object from the stack.
@@ -637,6 +696,10 @@ pub(super) fn remove_nonresolving_stack_entry_at(
 /// index N-1 — kept because the resolution and drain callers have no index to
 /// pass and reading `remove_stack_entry_at_unobserved(state, state.stack.len() - 1)` at
 /// each of them would obscure that they are simply resolving the top object.
+///
+/// Releases no CR 701.20a reveal lease: the resolution caller hands the entry
+/// to the carrier, whose `finish_resolving_stack_entry` releases it, and the
+/// drain caller goes through [`pop_nonresolving_top_stack_entry`].
 pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
     remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
 }
@@ -647,6 +710,7 @@ pub(super) fn pop_nonresolving_top_stack_entry(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) -> Option<PoppedStackEntry> {
     let popped = pop_top_stack_entry(state)?;
+    release_departed_entry_reveals(state, &popped);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
@@ -972,7 +1036,15 @@ fn deliver_resolved_spell_off_stack(
         // redirect INTO exile still records correctly.
         if spell_in_zone(state, spell_id, Zone::Exile) {
             if let Some(link_source) = stack_exile_link_source {
-                super::exile_links::push_tracked_by_source(state, spell_id, link_source);
+                // CR 607.2b + CR 113.7a: exiled with the Rod that stamped the
+                // rider, which may have left since (CR 400.7).
+                super::exile_links::push_with_kind_as(
+                    state,
+                    spell_id,
+                    link_source.object_id,
+                    Some(link_source.incarnation),
+                    ExileLinkKind::TrackedBySource,
+                );
             }
             // CR 603.7a + CR 702.170c: the exile-instead
             // replacement has now actually been APPLIED (the
@@ -1003,7 +1075,7 @@ fn deliver_resolved_spell_off_stack(
                     state,
                     spell_id,
                     spell_controller,
-                    stack_exile_link_source.unwrap_or(spell_id),
+                    stack_exile_link_source.map_or(spell_id, |source| source.object_id),
                     rider,
                     events,
                 );
@@ -1196,7 +1268,10 @@ fn top_pending_trigger_has_no_legal_required_targets(
 
 /// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
 /// exile-instead marker for Rod of Absorption's resolving-spell rider.
-fn stack_exile_linked_source(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
+fn stack_exile_linked_source(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
     state
         .objects
         .get(&object_id)
@@ -1395,6 +1470,7 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
+    let rederived: Option<Option<TriggerCondition>>;
     let triggered = match &entry.kind {
         StackEntryKind::TriggeredAbility {
             condition,
@@ -1402,19 +1478,28 @@ pub(crate) fn bind_resolution_scope(
             subject_match_count,
             die_result,
             ..
-        } => Some(TriggeredResolutionScope {
-            condition: condition.as_ref(),
-            controller: entry.controller,
-            trigger_source: entry
-                .ability()
-                .and_then(|ability| ability.trigger_source.as_ref()),
-            trigger_definition: entry
-                .ability()
-                .and_then(|ability| ability.trigger_definition_ref.as_ref()),
-            trigger_event: trigger_event.as_ref(),
-            subject_match_count: *subject_match_count,
-            die_result: *die_result,
-        }),
+        } => {
+            // CR 603.4 + CR 608.2b: a stored recheck of a payload carrying declared players is
+            // derived again now, so a carried player who has since left names no one.
+            rederived = condition
+                .as_ref()
+                .and(entry.ability())
+                .filter(|ability| !ability.context.outer_declared_players.is_empty())
+                .map(|ability| super::triggers::delayed_intervening_if(state, ability));
+            Some(TriggeredResolutionScope {
+                condition: rederived.as_ref().unwrap_or(condition).as_ref(),
+                controller: entry.controller,
+                trigger_source: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_source.as_ref()),
+                trigger_definition: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_definition_ref.as_ref()),
+                trigger_event: trigger_event.as_ref(),
+                subject_match_count: *subject_match_count,
+                die_result: *die_result,
+            })
+        }
         _ => None,
     };
     bind_triggered_resolution_scope(state, triggered, trigger_event_batch)
@@ -2073,7 +2158,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && !bestow_reverted_at_resolution
             && !mutate_reverted_at_resolution
         {
-            let mut validated = validate_targets_in_chain(state, ability);
+            let (validated, validated_view) =
+                crate::game::ability_utils::validate_targets_in_chain_with_view(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
             // CR 608.2b + CR 101.1: the ability's own text ("This ability still resolves if
             // its target becomes illegal") can override non-resolution. Targets are still
@@ -2136,8 +2222,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.resolution_source_relatch = None;
                 return;
             }
-            record_illegal_target_slots(state, Some(&mut validated));
-            let _ = illegal_declared_target_slots(ability, &mut validated);
+            // CR 608.2b: validation already stamped each node's local illegal
+            // positions; the carrier receives the chain-numbered stamp.
+            record_illegal_target_slots(state, Some((ability, &validated, &validated_view)));
             execute_effect(state, &validated, events);
         } else {
             record_illegal_target_slots(state, None);
@@ -4251,12 +4338,15 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
@@ -4497,12 +4587,15 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -4723,12 +4816,15 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -5058,6 +5154,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: a_force_block_attacker,
         target_incarnations: a_target_incarnations,
         controller: a_controller,
@@ -5123,10 +5220,12 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
-        selected_target_incarnations: a_selected_target_incarnations,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
+        unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
     } = a;
     let ResolvedAbility {
@@ -5141,6 +5240,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: b_force_block_attacker,
         target_incarnations: b_target_incarnations,
         controller: b_controller,
@@ -5206,10 +5306,12 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
-        selected_target_incarnations: b_selected_target_incarnations,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
+        unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
     } = b;
 
@@ -5225,12 +5327,13 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // keeps this manual comparison in agreement with the type's derived
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
-        && a_selected_target_incarnations == b_selected_target_incarnations
+        && a.aligned_target_pins() == b.aligned_target_pins()
         // CR 608.2b: the resolution legality stamp participates for the same
         // reason — agreement with the derived `PartialEq`.
         && a_activation_cost_reduction == b_activation_cost_reduction
         && a_activation_record == b_activation_record
         && a_illegal_target_slots == b_illegal_target_slots
+        && a_unjudged_target_slots == b_unjudged_target_slots
         && a_illegal_local_target_slots == b_illegal_local_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
@@ -5742,6 +5845,7 @@ mod tests {
     use crate::game::game_object::BackFaceData;
     use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
+    use crate::types::ability::{AttachSelection, AttachmentReferent, FilterProp};
     use crate::types::ability::{
         CastingPermission, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, Effect,
         ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
@@ -5760,6 +5864,138 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 608.2b (typed composition, not printed Oracle): an unjudged
+    /// `PassThrough` occurrence supplies no information to an application
+    /// reader either. Chain: `TargetOnly(C)` (slot 0) -> an `Attach` node whose
+    /// `[C]` is an unclaimed tail (slot 1) -> `TargetOnly(G)` (slot 2, an
+    /// independently legal creature, so the chain resolves) -> an untargeted
+    /// `DestroyAll(Equipment attached to <declared slot>)`. With C's actual
+    /// declaration illegal, reading the tail's slot 1 destroys nothing, while
+    /// reading G's slot 2 on the same chain destroys G's Equipment (reach: the
+    /// chain resolves and the reader works). Control: with C legal, reading
+    /// C's own slot 0 destroys C's Equipment.
+    #[test]
+    fn untargeted_reader_gets_no_information_from_an_unjudged_tail() {
+        let artifact = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let creature_filter = || TargetFilter::Typed(TypedFilter::creature());
+        // (C's declaring filter, slot read, [C's Equipment destroyed, G's destroyed])
+        let cases = [
+            (artifact(), 1, [false, false]),
+            (artifact(), 2, [false, true]),
+            (creature_filter(), 0, [true, false]),
+        ];
+        for (root_filter, read_slot, destroyed) in cases {
+            let label = format!("read slot {read_slot}, destroyed {destroyed:?}");
+            let mut state = setup();
+            let permanent = |state: &mut GameState, name: &str, core: CoreType| {
+                let id = create_object(
+                    state,
+                    CardId(1),
+                    PlayerId(1),
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(core);
+                if core == CoreType::Artifact {
+                    obj.card_types.subtypes.push("Equipment".to_string());
+                }
+                id
+            };
+            let c = permanent(&mut state, "Creature C", CoreType::Creature);
+            let g = permanent(&mut state, "Creature G", CoreType::Creature);
+            let c_equipment = permanent(&mut state, "Equipment E", CoreType::Artifact);
+            let g_equipment = permanent(&mut state, "Equipment F", CoreType::Artifact);
+            crate::game::effects::attach::attach_to(&mut state, c_equipment, c);
+            crate::game::effects::attach::attach_to(&mut state, g_equipment, g);
+            let spell = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Probe".to_string(),
+                Zone::Stack,
+            );
+            let destroy = ResolvedAbility::new(
+                Effect::DestroyAll {
+                    target: TargetFilter::Typed(
+                        TypedFilter::default()
+                            .subtype("Equipment".to_string())
+                            .properties(vec![FilterProp::AttachedTo {
+                                to: AttachmentReferent::DeclaredTarget { slot: read_slot },
+                            }]),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                spell,
+                PlayerId(0),
+            );
+            let mut keep_alive = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: creature_filter(),
+                },
+                vec![TargetRef::Object(g)],
+                spell,
+                PlayerId(0),
+            );
+            keep_alive.sub_ability = Some(Box::new(destroy));
+            let mut attach = ResolvedAbility::new(
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::ParentTarget,
+                    selection: AttachSelection::Targeted,
+                },
+                vec![TargetRef::Object(c)],
+                spell,
+                PlayerId(0),
+            );
+            attach.sub_ability = Some(Box::new(keep_alive));
+            let mut root = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: root_filter,
+                },
+                vec![TargetRef::Object(c)],
+                spell,
+                PlayerId(0),
+            );
+            root.sub_ability = Some(Box::new(attach));
+            root.capture_target_incarnations_recursive(&state);
+            assert_eq!(
+                crate::game::ability_utils::declared_targets_in_chain(&root).len(),
+                3,
+                "{label}: reach: C, the Attach tail and G occupy slots 0, 1 and 2"
+            );
+            state.stack.push_back(StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(3),
+                    ability: Some(Box::new(root)),
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+            let zone = |gone: bool| {
+                if gone {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            };
+            assert_eq!(
+                [
+                    state.objects[&c_equipment].zone,
+                    state.objects[&g_equipment].zone
+                ],
+                [zone(destroyed[0]), zone(destroyed[1])],
+                "{label}: [C's Equipment, G's Equipment]"
+            );
+        }
     }
 
     #[test]
@@ -16043,8 +16279,13 @@ mod tests {
 #[cfg(test)]
 mod stack_bound_reveal_release_tests {
     //! CR 603.3d + CR 701.20a: the uncommitted-trigger pop releases the popped
-    //! entry's reveal lease, and only when it actually popped.
-    use super::pop_uncommitted_pending_trigger_entry;
+    //! entry's reveal lease, and only when it actually popped. CR 608.2n: the
+    //! resolution pop leaves the lease to the carrier's finish.
+    use super::{
+        begin_resolving_stack_entry, finish_resolving_stack_entry,
+        pop_nonresolving_top_stack_entry, pop_top_stack_entry,
+        pop_uncommitted_pending_trigger_entry,
+    };
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
@@ -16122,6 +16363,59 @@ mod stack_bound_reveal_release_tests {
         );
         assert!(state.stack.is_empty(), "reach guard: popped");
         assert!(!state.holds_stack_bound_reveal(card));
+        assert!(state.stack_bound_reveals.is_empty());
+    }
+
+    /// CR 701.20a + CR 608.2n: the CR 405.5 resolution pop only begins
+    /// resolution, so the lease survives it and ends when the carrier finishes;
+    /// a non-resolving drain of the top entry (CR 724.1b) ends it at once.
+    #[test]
+    fn only_the_carrier_finish_or_a_nonresolving_pop_releases_the_lease() {
+        let mut state = GameState::new_two_player(3);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Leased".into(),
+            Zone::Hand,
+        );
+
+        let resolving = trigger_entry(&mut state, source);
+        state.grant_stack_bound_reveal(resolving, &[card]);
+        let popped = pop_top_stack_entry(&mut state).expect("reach guard: popped");
+        assert_eq!(popped.entry.id, resolving, "reach guard: the leased entry");
+        assert!(
+            state.holds_stack_bound_reveal(card),
+            "the resolution pop keeps the lease"
+        );
+        begin_resolving_stack_entry(&mut state, popped.entry, popped.trigger_firing)
+            .expect("reach guard: carrier installed");
+        assert!(state.holds_stack_bound_reveal(card), "still resolving");
+        finish_resolving_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        assert!(!state.holds_stack_bound_reveal(card), "finish releases it");
+        assert!(state.stack_bound_reveals.is_empty());
+
+        let drained = trigger_entry(&mut state, source);
+        state.grant_stack_bound_reveal(drained, &[card]);
+        pop_nonresolving_top_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("reach guard: drained");
+        assert!(
+            !state.holds_stack_bound_reveal(card),
+            "the drain releases it"
+        );
         assert!(state.stack_bound_reveals.is_empty());
     }
 }

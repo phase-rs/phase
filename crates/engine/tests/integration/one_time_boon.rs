@@ -2366,23 +2366,20 @@ fn swiftspear_sequential_boons_bind_each_grant_to_its_own_spell() {
 /// Verbatim Oracle text (`client/public/card-data.json`, key `the valeyard`).
 const VALEYARD: &str = "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)\nWhile voting, you may vote an additional time.";
 
-/// V9c: a two-instance ChooseOneOf pause carries the stored trigger context
-/// through the pending frame into the second branch.
+/// V9c (CR 608.2d vs CR 701.55): Swiftspear's "choice of prowess or haste"
+/// is an ORDINARY choice, not a villainous-choice instruction — The
+/// Valeyard's extra-instance static (CR 701.55c) doubles only "faces a
+/// villainous choice", so the boon choice resolves ONCE: exactly one
+/// branch prompt, and only the selected keyword is granted. (Pre-fix, the
+/// shared choice authority doubled every `ChooseOneOf` and this test
+/// required two prompts.)
 ///
-/// P1 controls The Valeyard, so P0 faces the boon choice twice: the base
-/// instance plus one additional instance back-to-back through
-/// `PendingChooseOneOf`. The first answer takes prowess, the second haste; the
-/// bear holds both, so the second branch is event-bound too. If
-/// `resume_pending` dropped the carry, the second branch's `TriggeringSource`
-/// would resolve to nothing, the haste grant would install nothing, and the
-/// bear would hold prowess only.
-///
-/// The doubling vehicle is incidental: on this path the Valeyard static doubles
-/// every ChooseOneOf its opponent faces, which is exactly the multi-chooser
-/// pause under test; the assertions target the trigger-context carry only. The
-/// villainous None-carry path is covered by the existing villainous tests.
+/// The second-instance continuation itself is exercised by the explicitly
+/// synthetic `villainous_second_instance_continuation_preserves_trigger_context`
+/// in `game::effects::choose_one_of` — no printed card pairs a villainous
+/// instruction with a boon-style trigger context.
 #[test]
-fn swiftspear_doubled_choice_binds_both_branches_to_triggering_spell() {
+fn swiftspear_ordinary_choice_not_doubled_by_valeyard() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Draw A"]);
@@ -2402,10 +2399,7 @@ fn swiftspear_doubled_choice_binds_both_branches_to_triggering_spell() {
     drain_stack(&mut runner);
     assert_eq!(held_boons(&runner), vec![P0]);
     runner.cast(bear).commit();
-    // Answer the two back-to-back instances DIFFERENTLY so each branch's
-    // binding is observable: prowess on the first, haste on the second. (Two
-    // prowess grants would not stack — keywords are a set — so same-answer
-    // assertions could not tell one binding from two.)
+    // Exactly ONE branch prompt is expected: answer it with prowess.
     let mut instances = 0;
     for _ in 0..200 {
         if runner.state().stack.is_empty()
@@ -2419,16 +2413,14 @@ fn swiftspear_doubled_choice_binds_both_branches_to_triggering_spell() {
             } => {
                 assert_eq!(*player, P0, "the boon holder chooses");
                 instances += 1;
-                let needle = if instances == 1 { "prowess" } else { "haste" };
                 let index = branches
                     .iter()
                     .position(|branch| {
-                        branch
-                            .description
-                            .as_deref()
-                            .is_some_and(|description| description.to_lowercase().contains(needle))
+                        branch.description.as_deref().is_some_and(|description| {
+                            description.to_lowercase().contains("prowess")
+                        })
                     })
-                    .unwrap_or_else(|| panic!("a {needle} branch must exist"));
+                    .unwrap_or_else(|| panic!("a prowess branch must exist"));
                 runner
                     .act(GameAction::ChooseBranch { index })
                     .expect("choosing the branch must succeed");
@@ -2444,8 +2436,8 @@ fn swiftspear_doubled_choice_binds_both_branches_to_triggering_spell() {
         }
     }
     assert_eq!(
-        instances, 2,
-        "the Valeyard must double the faced choice: exactly two branch prompts"
+        instances, 1,
+        "the Valeyard must NOT double an ordinary choice: exactly one branch prompt"
     );
     assert!(
         held_boons(&runner).is_empty(),
@@ -2453,11 +2445,11 @@ fn swiftspear_doubled_choice_binds_both_branches_to_triggering_spell() {
     );
     assert!(
         runner.state().objects[&bear].has_keyword(&Keyword::Prowess),
-        "reach guard: the first instance grants prowess the same turn"
+        "the selected keyword is granted the same turn"
     );
     assert!(
-        runner.state().objects[&bear].has_keyword(&Keyword::Haste),
-        "the second instance must bind the triggering spell too: haste is granted"
+        !runner.state().objects[&bear].has_keyword(&Keyword::Haste),
+        "the unselected branch must NOT grant: one prompt, one keyword"
     );
 
     // The prowess half still fires on a later noncreature cast.

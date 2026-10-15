@@ -44,7 +44,7 @@ use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
 use engine::types::events::GameEvent;
 use engine::types::format::{
-    validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
+    validate_starting_life_bounds, DeckCopyLimit, DeckSupply, FormatConfig, GameFormat,
 };
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
@@ -1130,6 +1130,19 @@ fn best_of_three_ceiling_or_bo1(format: Option<GameFormat>) -> MatchType {
     format.map_or(MatchType::Bo1, GameFormat::best_of_three_ceiling)
 }
 
+/// Who supplies `format`'s deck; the lobby offers a pile choice only for `HostPile`.
+#[wasm_bindgen(js_name = deckSupplyForFormat)]
+pub fn deck_supply_for_format(format: JsValue) -> JsValue {
+    to_js(&deck_supply_or_player_built(
+        serde_wasm_bindgen::from_value::<GameFormat>(format).ok(),
+    ))
+}
+
+/// An undecodable format answers `PlayerBuilt`, so the client asks for a deck.
+fn deck_supply_or_player_built(format: Option<GameFormat>) -> DeckSupply {
+    format.map_or(DeckSupply::PlayerBuilt, GameFormat::deck_supply)
+}
+
 /// Whether the named card can serve as this format's command-zone leader.
 /// Reads the engine's MTGJSON-derived `CardFace` leadership fields and
 /// format-specific deck-validation predicates.
@@ -1686,7 +1699,7 @@ pub fn initialize_multiplayer_host_game(
 /// driven from a native `#[cfg(test)]` module — the shells around it take
 /// `JsValue`s and return through `to_js`, which calls the real `JSON.parse`
 /// binding and panics outside a wasm32 runtime (see the note at the
-/// `ai_scoring_rng_bridge_tests` module). Pure extraction: no behaviour change.
+/// `ai_scoring_rng_bridge_tests` module).
 fn validate_deck_list_seats(
     db: &CardDatabase,
     deck_list: &DeckList,
@@ -1694,61 +1707,39 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
-    // Fixed-deck formats (Momir's Madness) supply the deck from the engine for
-    // every seat, so the client submits empty decks — there is nothing
-    // client-side to validate. `load_and_hydrate_decks` fills each seat's
-    // library with the engine-owned fixed deck. Gate on the engine predicate,
-    // never a format literal.
-    if !format_config.format.supplies_fixed_deck() {
-        for (seat, deck) in [
-            ("Player".to_string(), &deck_list.player),
-            ("AI opponent".to_string(), &deck_list.opponent),
-        ] {
-            if let Err(reasons) = validate_name_deck_for_format_full(
-                db,
-                &deck.main_deck,
-                &deck.sideboard,
-                &deck.commander,
-                &deck.companion,
-                &deck.planar_deck,
-                &deck.scheme_deck,
-                &deck.signature_spell,
-                &deck_list.draft_set_codes,
-                format_config,
-                match_type,
-                player_count,
-            ) {
-                return Some(
-                    reasons
-                        .into_iter()
-                        .map(|reason| format!("{seat} deck: {reason}"))
-                        .collect(),
-                );
-            }
-        }
-        for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
-            let seat = format!("AI player {}", idx + 2);
-            if let Err(reasons) = validate_name_deck_for_format_full(
-                db,
-                &deck.main_deck,
-                &deck.sideboard,
-                &deck.commander,
-                &deck.companion,
-                &deck.planar_deck,
-                &deck.scheme_deck,
-                &deck.signature_spell,
-                &deck_list.draft_set_codes,
-                format_config,
-                match_type,
-                player_count,
-            ) {
-                return Some(
-                    reasons
-                        .into_iter()
-                        .map(|reason| format!("{seat} deck: {reason}"))
-                        .collect(),
-                );
-            }
+    let seats = [
+        ("Player".to_string(), &deck_list.player),
+        ("AI opponent".to_string(), &deck_list.opponent),
+    ]
+    .into_iter()
+    .chain(
+        deck_list
+            .ai_decks
+            .iter()
+            .enumerate()
+            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
+    );
+    for (seat, deck) in seats {
+        if let Err(reasons) = validate_name_deck_for_format_full(
+            db,
+            &deck.main_deck,
+            &deck.sideboard,
+            &deck.commander,
+            &deck.companion,
+            &deck.planar_deck,
+            &deck.scheme_deck,
+            &deck.signature_spell,
+            &deck_list.draft_set_codes,
+            format_config,
+            match_type,
+            player_count,
+        ) {
+            return Some(
+                reasons
+                    .into_iter()
+                    .map(|reason| format!("{seat} deck: {reason}"))
+                    .collect(),
+            );
         }
     }
     None
@@ -2287,8 +2278,8 @@ fn handle_debug_create_card_inner(
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     match with_state(|state| {
-        // Single-player WASM: the human is always PlayerId(0). Scope web-slinging
-        // costs to the human's own hand even on this raw/unfiltered path.
+        // The local human is always PlayerId(0). `wrap` filters the state for
+        // that seat and scopes web-slinging costs to its hand.
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             state,
             Some(PlayerId(0)),
@@ -2299,10 +2290,10 @@ pub fn get_game_state() -> JsValue {
     }
 }
 
-/// Filtered-viewer variant of `get_game_state`. Runs the viewer filter
-/// first (hides opponent hand/library per standard multiplayer redaction),
-/// then derives views over the filtered state so the wire shape is
-/// identical to `get_game_state` regardless of filter path.
+/// Variant of `get_game_state` that takes the viewer seat as an argument.
+/// Runs the viewer filter first (hides opponent hand/library per standard
+/// multiplayer redaction), then wraps the result in the same
+/// `ClientGameStateRef` envelope `get_game_state` returns.
 #[wasm_bindgen]
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     match with_state(|state| {
@@ -2647,7 +2638,7 @@ mod viewer_priority_tests {
             viewer_transition_snapshot(&state, &opponent_filtered, opponent, &events);
         assert_eq!(opponent_snapshot.events, Vec::<GameEvent>::new());
         assert_eq!(
-            opponent_snapshot.snapshot.state.state.objects[&card].name,
+            opponent_snapshot.snapshot.state.state().objects[&card].name,
             "Hidden Card"
         );
 
@@ -2655,7 +2646,7 @@ mod viewer_priority_tests {
         let owner_snapshot = viewer_transition_snapshot(&state, &owner_filtered, owner, &events);
         assert_eq!(owner_snapshot.events, events);
         assert_eq!(
-            owner_snapshot.snapshot.state.state.objects[&card].name,
+            owner_snapshot.snapshot.state.state().objects[&card].name,
             "Hidden Exile"
         );
 
@@ -3070,7 +3061,7 @@ fn resume_multiplayer_host_state_inner(
             .validate_for_player_count(player_count)?;
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
-        state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
+        state.rng = engine::types::game_state::GameRng::seed_from_u64(fresh_seed);
         state.rng_word_pos = 0;
         Ok(())
     })?;
@@ -3727,7 +3718,7 @@ fn scored_candidates_inner(
     // shuffle performs, and so does `export_game_state_json`. Overwrite all three,
     // exactly as `resume_multiplayer_host_state` does.
     state.rng_seed = rng_seed;
-    state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
+    state.rng = engine::types::game_state::GameRng::seed_from_u64(rng_seed);
     state.rng_word_pos = 0;
 
     let config = create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
@@ -4967,11 +4958,13 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(0),
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
                 },
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(1),
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
@@ -6432,14 +6425,23 @@ mod rng_restore_bridge_tests {
         // Seed a live game and consume randomness as gameplay would.
         let mut state = GameState::new_two_player(0x51A7_C0DE);
         for _ in 0..9 {
-            state.rng.next_u32();
+            state
+                .rng
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u32();
         }
         GAME_STATE.with(|cell| cell.set(Some(state)));
 
         // The four values the live stream will produce next, captured from a
         // clone taken at the pre-export offset.
         let mut expected = with_state(|s| s.rng.clone()).unwrap();
-        let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
+        let expected_draws: Vec<u32> = (0..4)
+            .map(|_| {
+                expected
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u32()
+            })
+            .collect();
 
         // Serialize through the real bridge entry point (captures rng_word_pos).
         let json = export_game_state_json().unwrap();
@@ -6449,7 +6451,9 @@ mod rng_restore_bridge_tests {
         // origin (nine draws back), never matching `expected_draws`.
         with_state_mut(|s| {
             for _ in 0..3 {
-                s.rng.next_u32();
+                s.rng
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u32();
             }
         })
         .unwrap();
@@ -6459,8 +6463,16 @@ mod rng_restore_bridge_tests {
 
         // The restored stream must resume at the exported offset and produce the
         // continuation captured before export.
-        let restored_draws: Vec<u32> =
-            with_state_mut(|s| (0..4).map(|_| s.rng.next_u32()).collect()).unwrap();
+        let restored_draws: Vec<u32> = with_state_mut(|s| {
+            (0..4)
+                .map(|_| {
+                    s.rng
+                        .draw(engine::types::game_state::RandomDraw::Outcome)
+                        .next_u32()
+                })
+                .collect()
+        })
+        .unwrap();
         assert_eq!(
             restored_draws, expected_draws,
             "restored stream must resume where export left off, not rewind to origin"
@@ -6652,9 +6664,17 @@ mod ai_scoring_rng_bridge_tests {
         let mut expected = ChaCha20Rng::seed_from_u64(WORKER_SEED);
         let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
 
-        let live_draws: Vec<u32> =
-            with_state_mut(|state| (0..4).map(|_| state.rng.next_u32()).collect::<Vec<_>>())
-                .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+        let live_draws: Vec<u32> = with_state_mut(|state| {
+            (0..4)
+                .map(|_| {
+                    state
+                        .rng
+                        .draw(engine::types::game_state::RandomDraw::Outcome)
+                        .next_u32()
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
 
         assert_eq!(
             live_draws, expected_draws,
@@ -6681,9 +6701,17 @@ mod ai_scoring_rng_bridge_tests {
         clear_game_state();
         restore_game_state(&json).expect("a scored worker's export must be restorable");
 
-        let restored_draws: Vec<u32> =
-            with_state_mut(|state| (0..4).map(|_| state.rng.next_u32()).collect::<Vec<_>>())
-                .expect("GAME_STATE must be initialized after restore");
+        let restored_draws: Vec<u32> = with_state_mut(|state| {
+            (0..4)
+                .map(|_| {
+                    state
+                        .rng
+                        .draw(engine::types::game_state::RandomDraw::Outcome)
+                        .next_u32()
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("GAME_STATE must be initialized after restore");
 
         assert_eq!(
             restored_draws, expected_draws,
@@ -6710,8 +6738,10 @@ mod ai_scoring_rng_bridge_tests {
         plant_restored_worker_state();
 
         // Literally the pre-fix line, applied to the restored state.
-        with_state_mut(|state| state.rng = ChaCha20Rng::seed_from_u64(WORKER_SEED))
-            .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+        with_state_mut(|state| {
+            state.rng = engine::types::game_state::GameRng::seed_from_u64(WORKER_SEED)
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
 
         with_state_mut(|state| {
             engine::game::library::resolve_and_apply_library_shuffle(
@@ -6952,6 +6982,7 @@ mod deck_list_seat_validation_tests {
     use engine::database::CardDatabase;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::custom_format::CustomFormatId;
     use engine::types::mana::ManaColor;
     use std::collections::BTreeMap;
 
@@ -7090,19 +7121,100 @@ mod deck_list_seat_validation_tests {
         );
     }
 
-    /// Second hostile fixture — the paired negative for the one branch the
-    /// extraction moves. `supplies_fixed_deck()` is `matches!(self,
-    /// GameFormat::Momir)`, so `CommanderDraft` enters the block (proven by the
-    /// row above) and `Momir` skips it entirely: a fixed-deck format supplies
-    /// every seat's deck from the engine, so there is nothing client-side to
-    /// validate.
+    fn plains_seat(n: usize) -> PlayerDeckList {
+        PlayerDeckList {
+            main_deck: n_plains(n),
+            ..Default::default()
+        }
+    }
+
+    /// `pile` on one seat (0 = player, 1 = opponent, 2 = the extra AI seat), every other seat empty.
+    fn pile_on_seat(seat: usize, pile: PlayerDeckList) -> DeckList {
+        let mut seats = [
+            PlayerDeckList::default(),
+            PlayerDeckList::default(),
+            PlayerDeckList::default(),
+        ];
+        seats[seat] = pile;
+        let [player, opponent, ai] = seats;
+        DeckList {
+            player,
+            opponent,
+            ai_decks: vec![ai],
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn a_fixed_deck_format_skips_seat_validation_entirely() {
+    fn dandan_validates_every_seat_and_admits_empty_seats() {
         let db = test_db();
+        let check = |list: &DeckList, config: &FormatConfig| {
+            validate_deck_list_seats(&db, list, config, None, 2)
+        };
+        let dandan = FormatConfig::dandan();
+        assert_eq!(check(&pile_on_seat(0, plains_seat(80)), &dandan), None);
         assert_eq!(
-            validate_deck_list_seats(&db, &three_seat_list(&[]), &FormatConfig::momir(), None, 4),
+            check(&pile_on_seat(0, PlayerDeckList::default()), &dandan),
+            None
+        );
+        for (seat, label) in [(0, "Player"), (1, "AI opponent"), (2, "AI player 2")] {
+            assert_eq!(
+                check(&pile_on_seat(seat, plains_seat(79)), &dandan),
+                Some(vec![format!(
+                    "{label} deck: Dand\u{e2}n deck must have exactly 80 cards (found 79)"
+                )]),
+            );
+        }
+        let refused = check(
+            &pile_on_seat(0, PlayerDeckList::default()),
+            &FormatConfig::standard(),
+        )
+        .expect("Standard refuses an empty deck");
+        assert!(refused[0].starts_with("Player deck:"), "{refused:?}");
+    }
+
+    #[test]
+    fn momir_admits_empty_seats_and_validates_a_submitted_deck() {
+        let db = test_db();
+        let momir = FormatConfig::momir();
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &pile_on_seat(0, PlayerDeckList::default()),
+                &momir,
+                None,
+                2
+            ),
             None,
         );
+        let refused =
+            validate_deck_list_seats(&db, &pile_on_seat(0, plains_seat(60)), &momir, None, 2)
+                .expect("a non-snow Momir deck is refused");
+        assert!(
+            refused[0].starts_with("Player deck: Momir's Madness"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn deck_supply_reads_the_format_axis_and_fails_to_player_built() {
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Standard)),
+            DeckSupply::PlayerBuilt
+        );
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Custom(CustomFormatId(1)))),
+            DeckSupply::PlayerBuilt
+        );
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Momir)),
+            DeckSupply::EngineFixed
+        );
+        assert_eq!(
+            deck_supply_or_player_built(Some(GameFormat::Dandan)),
+            DeckSupply::HostPile
+        );
+        assert_eq!(deck_supply_or_player_built(None), DeckSupply::PlayerBuilt);
     }
 
     fn n_plains(n: usize) -> Vec<String> {

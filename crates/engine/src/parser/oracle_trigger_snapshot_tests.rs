@@ -825,6 +825,47 @@ fn trigger_you_lose_the_game() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
+/// CR 607.2d: "When the chosen player loses the game" (Shinryu, Transcendent
+/// Rival) reads the player persisted by the card's linked choice.
+#[test]
+fn trigger_the_chosen_player_loses_the_game() {
+    let def = parse_trigger_line(
+        "When the chosen player loses the game, you win the game.",
+        "Shinryu, Transcendent Rival",
+    );
+    assert_eq!(def.mode, TriggerMode::LosesGame, "got {:?}", def.mode);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+}
+
+/// The loses-the-game actor list is closed: a subject it doesn't recognise
+/// ("another player", Sengir, the Dark Baron) or a verb that doesn't agree
+/// with the subject stays an unrecognised trigger rather than borrowing a
+/// neighbouring player scope.
+#[test]
+fn trigger_loses_the_game_unrecognised_actor_fails_closed() {
+    // Positive reach guard: the same parser path accepts the supported actor,
+    // so the rejections below can't pass because every line is unrecognised.
+    let accepted = parse_trigger_line(
+        "When the chosen player loses the game, you win the game.",
+        "SomeCard",
+    );
+    assert_eq!(accepted.mode, TriggerMode::LosesGame);
+    assert_eq!(
+        accepted.valid_target,
+        Some(TargetFilter::SourceChosenPlayer)
+    );
+
+    for line in [
+        "Whenever another player loses the game, you gain 5 life.",
+        "When the chosen player lose the game, you win the game.",
+        "When the chosen opponent loses the game, you win the game.",
+    ] {
+        let def = parse_trigger_line(line, "SomeCard");
+        assert_ne!(def.mode, TriggerMode::LosesGame, "{line}");
+        assert_eq!(def.valid_target, None, "{line}");
+    }
+}
+
 /// CR 701.38: "Whenever players finish voting" triggers once per vote resolution.
 /// Cards: Model of Unity, Erestor of the Council, Grudge Keeper.
 #[test]

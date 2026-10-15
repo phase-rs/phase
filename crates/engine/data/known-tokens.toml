@@ -33144,6 +33144,31 @@ scryfall_oracle_id = "445f23a7-2a2a-4fa5-9810-560501e08748"
 preset_id = "24eb5aaf-70f4-5d91-8762-0c027557b192"
 
 [[token]]
+id = "2511f6ea-5698-56d9-b96d-fd1917eaf4a8"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "9"
+released_at = "2027-04-09"
+type_line = "Token Creature — Missing"
+
+[token.body]
+display_name = "Mindless-One"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Missing"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "21d44eef-8dbc-4f2f-9be3-d6c43d4b405c"
+scryfall_oracle_id = "1a0d84f7-d7fd-4794-b6ca-565fc111d701"
+preset_id = "2511f6ea-5698-56d9-b96d-fd1917eaf4a8"
+
+[[token]]
 id = "2549f082-332d-5da3-a920-fb2d0fdf3632"
 category = "Creature"
 fidelity = "Full"
@@ -65516,6 +65541,140 @@ scryfall_oracle_id = "8653c69b-99a9-4881-a14c-68ba928c34d5"
 preset_id = "4d6fd4f9-afa8-5996-a766-89c7b5909751"
 
 [[token]]
+id = "4d898e29-351c-5524-b56a-75ceed720223"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Acererak the Archlich",
+    "Aphemia, the Cacophony",
+    "Archdemon of Unx",
+    "Army of the Damned",
+    "Assemble the Rank and Vile",
+    "Awaken the Erstwhile",
+    "Bone Miser",
+    "Boneclad Necromancer",
+    "Bridge from Below",
+    "Captive Audience",
+    "Cellar Door",
+    "Cemetery Reaper",
+    "Cradle of the Accursed",
+    "Cryptbreaker",
+    "Cryptcaller Chariot",
+    "Curse of Disturbance",
+    "Curse of Shallow Graves",
+    "Dark Salvation",
+    "Death Tyrant",
+    "Diregraf Colossus",
+    "Doomed Dissenter",
+    "Drana's Chosen",
+    "Dread Summons",
+    "Drunau Corpse Trawler",
+    "Dunes of the Dead",
+    "Dying to Serve",
+    "Embalmed Ascendant",
+    "Empty the Pits",
+    "Endless Ranks of the Dead",
+    "Feast or Famine",
+    "Field of the Dead",
+    "From Under the Floorboards",
+    "Ghoulcaller Gisa",
+    "Ghoulcaller's Accomplice",
+    "Gisa's Bidding",
+    "Graf Harvest",
+    "Grave Titan",
+    "Gravedig",
+    "Graveyard Marshal",
+    "Grim Reaper's Scythe",
+    "Grixis Slavedriver",
+    "Havengul Runebinder",
+    "Headless Rider",
+    "Hildibrand Manderville // Gentleman's Rise",
+    "Hour of Promise",
+    "Hour of Victory",
+    "Invasion of Innistrad // Deluge of the Dead",
+    "Kalitas, Traitor of Ghet",
+    "Lair of the Ashen Idol",
+    "Liliana's Devotee",
+    "Liliana's Mastery",
+    "Liliana's Reaver",
+    "Liliana, Death's Majesty",
+    "Liliana, Dreadhorde General",
+    "Liliana, Heretical Healer // Liliana, Defiant Necromancer",
+    "Liliana, the Last Hope",
+    "Liliana, the Last Hope Emblem",
+    "Maalfeld Twins",
+    "Magus of the Bridge",
+    "Midnight Ritual",
+    "Moan of the Unhallowed",
+    "Necromancer's Covenant",
+    "Necromancer's Stockpile",
+    "Necromaster Dragon",
+    "Necromentia",
+    "Necrotic Hex",
+    "Never // Return",
+    "Nevinyrral, Urborg Tyrant",
+    "Noosegraf Mob",
+    "Null Caller",
+    "Oath of Liliana",
+    "Oglor, Devoted Assistant",
+    "Open the Graves",
+    "Overseer of the Damned",
+    "Rakshasa Gravecaller",
+    "Rank Officer",
+    "Reap the Seagraf",
+    "Rise from the Tides",
+    "Risen Necroregent",
+    "Rotlung Reanimator",
+    "Rotted Ones, Lay Siege",
+    "Sarcomancy",
+    "Shamble Back",
+    "Sidisi, Brood Tyrant",
+    "Skull Skaab",
+    "Stir the Sands",
+    "Suspicious Shambler",
+    "Syphon Flesh",
+    "The Book of Vile Darkness",
+    "The Fourth Sphere",
+    "The Necrobloom",
+    "Thomil, the Destroyer",
+    "Tobias, Doomed Conqueror",
+    "Tormod, the Desecrator",
+    "Tymaret Calls the Dead",
+    "Undead Alchemist",
+    "Undead Servant",
+    "Unscythe, Killer of Kings",
+    "Varina, Lich Queen",
+    "Vile Rebirth",
+    "Wakedancer",
+    "Wand of Orcus",
+    "Waste Not",
+    "Wight",
+    "Xathrid Necromancer",
+    "Zahur, Glory's Past",
+    "Zombie Infestation",
+]
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "10"
+released_at = "2027-04-09"
+type_line = "Token Creature — Zombie"
+
+[token.body]
+display_name = "Zombie"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "5e16386a-d478-475b-8e9b-edef62cae02b"
+scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
+preset_id = "4d898e29-351c-5524-b56a-75ceed720223"
+
+[[token]]
 id = "4d9f640b-caf7-50df-8538-9d516c0f9847"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
@@ -91761,6 +91920,38 @@ scryfall_oracle_id = "180881c9-5ae7-4810-a17a-06b5994a48a1"
 preset_id = "68fddd02-839b-556e-abc3-c1ec59dcf867"
 
 [[token]]
+id = "68ff6437-ab9e-5fc6-812a-4a9ea70662d9"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "8"
+released_at = "2027-04-09"
+type_line = "Token Enchantment Creature — Spirit Sorcerer"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Spirit Sorcerer Token"
+power = 3
+toughness = 3
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = [
+    "Spirit",
+    "Sorcerer",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[token.token_image_ref]
+scryfall_id = "3b9c4950-9890-4977-87a0-6eba840e1f66"
+scryfall_oracle_id = "9c3c0e04-b222-4bc9-adbe-a3b37cc8c44e"
+preset_id = "68ff6437-ab9e-5fc6-812a-4a9ea70662d9"
+
+[[token]]
 id = "69130850-421b-513c-a689-31b3e7b2e49a"
 fidelity = "Full"
 source_card_names = [
@@ -117210,6 +117401,34 @@ scryfall_id = "cae61a9d-39fc-4c25-adec-d578d57c2903"
 scryfall_id = "a4cd989d-e274-4058-876f-3c20f28def0d"
 scryfall_oracle_id = "b2224843-8274-4872-a7ca-2adf69cc066b"
 preset_id = "81684c2e-dac4-5a01-8043-979f261b7960"
+
+[[token]]
+id = "8178df93-47e0-59a4-946d-4d3a740c7f77"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "12"
+released_at = "2027-04-09"
+type_line = "Token Creature — Giant"
+
+[token.body]
+display_name = "Giant"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Giant"]
+supertypes = []
+colors = [
+    "Red",
+    "Blue",
+]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "0689b1b8-84be-4cc8-be4b-4461fefa885b"
+scryfall_oracle_id = "22be49fa-33a6-47fa-9bfc-f06e044d3cdc"
+preset_id = "8178df93-47e0-59a4-946d-4d3a740c7f77"
 
 [[token]]
 id = "818314a8-e3ad-595d-8913-2c1df4e162af"
@@ -164957,6 +165176,35 @@ scryfall_oracle_id = "bfa57f61-3811-43da-b73e-90e3e5b0b2c2"
 preset_id = "b73ea419-17f3-538f-a806-124a03513cf3"
 
 [[token]]
+id = "b73fc05b-1b5f-5843-9386-261cd34f06c9"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "3"
+released_at = "2027-04-09"
+type_line = "Token Creature — Angel"
+rules_text = "Flying, vigilance"
+
+[token.body]
+display_name = "Angel"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[token.token_image_ref]
+scryfall_id = "481ff636-8343-4eb2-93cf-48b94c9ecfdb"
+scryfall_oracle_id = "9d256142-cae2-45d2-ab8f-5b390b403481"
+preset_id = "b73fc05b-1b5f-5843-9386-261cd34f06c9"
+
+[[token]]
 id = "b753c514-001a-5b68-8410-63ccf2c36ed1"
 category = "Creature"
 fidelity = "Full"
@@ -197534,6 +197782,65 @@ scryfall_id = "2790a23d-00ff-47b7-badd-9dd68042bb99"
 scryfall_id = "4853f6f5-476d-4109-a1c6-f98f4d332db3"
 scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
 preset_id = "da17551b-098e-5199-a273-1d85aa31c2af"
+
+[[token]]
+id = "da34eaa9-643f-5fcd-b5ad-50c02f9038d7"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ambassador Oak",
+    "Battle for Bretagard",
+    "Dwynen's Elite",
+    "Elderleaf Mentor",
+    "Elfsworn Giant",
+    "Elven Ambush",
+    "Elven Bow",
+    "Elvish Promenade",
+    "Elvish Warmaster",
+    "Exquisite Huntmaster",
+    "Eyeblight Cullers",
+    "Flourishing Defenses",
+    "Galadhrim Ambush",
+    "Gilt-Leaf Ambush",
+    "Hunting Triad",
+    "Imperious Perfect",
+    "Lathril, Blade of the Elves",
+    "Lys Alana Huntmaster",
+    "Nadier, Agent of the Duskenel",
+    "Nath of the Gilt-Leaf",
+    "Presence of Gond",
+    "Prowess of the Fair",
+    "Return Upon the Tide",
+    "Skemfar Elderhall",
+    "Sylvan Offering",
+    "Thorn Lieutenant",
+    "Tyvar Kell",
+    "Windswift Slice",
+    "Wolverine Riders",
+]
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "11"
+released_at = "2027-04-09"
+type_line = "Token Creature — Elf Warrior"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "72ac66e9-4b4b-4540-b310-e7b3dc04c305"
+scryfall_oracle_id = "dac8a765-6845-4b57-bb79-4ec463436f92"
+preset_id = "da34eaa9-643f-5fcd-b5ad-50c02f9038d7"
 
 [[token]]
 id = "da3796c8-1666-58fd-b962-3e960cd28bdd"

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 
 use rand::Rng;
@@ -75,6 +76,7 @@ pub(crate) fn complete_discard_to_graveyard(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
+        enter_with_choices: None,
         discard_frame,
         performed_by: None,
         applied,
@@ -539,7 +541,18 @@ pub fn resolve(
         // a card") does not inherit the parent's chosen player and discard from
         // the wrong hand. `resolve_player_for_context_ref` skips `ability.targets`
         // when the filter is a context-ref and falls back to `ability.controller`.
-        let discard_player = super::resolve_player_for_context_ref(state, ability, &target_filter);
+        // CR 608.2b: a declared player whose target was illegal discards nothing.
+        let Some(discard_player) =
+            super::resolve_player_for_context_ref(state, ability, &target_filter)
+        else {
+            // CR 608.2b: a missing player discards nothing; the completion marker is what publishes the zero count.
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        };
 
         // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
         // opponent's spell or ability can't force the protected player to
@@ -876,7 +889,10 @@ pub(crate) fn discard_at_random(
         if remaining.is_empty() {
             break;
         }
-        let index = state.rng.random_range(0..remaining.len());
+        let index = state
+            .rng
+            .draw(RandomDraw::Outcome)
+            .random_range(0..remaining.len());
         let obj_id = remaining.swap_remove(index);
         let object = state
             .objects

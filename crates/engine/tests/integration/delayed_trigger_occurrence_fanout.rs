@@ -1268,10 +1268,7 @@ fn attack_intervening_if_reads_each_narrowed_attacker() {
 fn red_mana(runner: &GameRunner, player: PlayerId) -> usize {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.color == engine::types::mana::ManaType::Red)
-        .count()
+        .count_color(engine::types::mana::ManaType::Red)
 }
 
 /// CR 603.2 + CR 603.7b: Reckless Blaze's "a creature you control dealt

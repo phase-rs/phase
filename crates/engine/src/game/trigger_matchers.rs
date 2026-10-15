@@ -894,6 +894,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -7584,6 +7585,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7597,6 +7599,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7637,6 +7640,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7650,6 +7654,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7692,6 +7697,7 @@ mod tests {
                     crate::types::events::ActivationTriggerState::CollectedAtActivation {
                         observers,
                     },
+                stack_entry: None,
             };
             assert!(!match_ability_activated(
                 &collected, &trigger, &context, &state
@@ -7788,6 +7794,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7819,6 +7826,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7831,6 +7839,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7862,6 +7871,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7895,6 +7905,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7929,6 +7940,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7978,6 +7990,7 @@ mod tests {
                     kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                     departed_source_lki: None,
                     trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                    stack_entry: None,
                 };
                 assert_eq!(
                     match_loyalty_ability_activated(&event, &trigger, &context, state),
@@ -8064,6 +8077,7 @@ mod tests {
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                stack_entry: None,
             };
             let matches = |state: &GameState, player, source| {
                 match_loyalty_ability_activated(
@@ -8777,6 +8791,10 @@ mod tests {
                 core_types: vec![CoreType::Artifact],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 is_token: false,
                 ..ZoneChangeRecord::test_minimal(
                     nontoken_artifact,
@@ -8802,6 +8820,10 @@ mod tests {
                 core_types: vec![CoreType::Artifact],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 is_token: true,
                 ..ZoneChangeRecord::test_minimal(munitions, None, Zone::Battlefield)
             }),
@@ -9360,6 +9382,10 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(own_card, Some(Zone::Graveyard), Zone::Battlefield)
             }),
         };
@@ -9378,6 +9404,10 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(
                     opponent_card,
                     Some(Zone::Graveyard),
@@ -9404,6 +9434,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(
                     opponent_creature,
                     Some(Zone::Battlefield),
@@ -17205,6 +17239,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
             }),
         };
@@ -17229,6 +17267,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(own_milled, Some(Zone::Library), Zone::Graveyard)
             }),
         };
@@ -17254,6 +17296,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(
                     opp_dying,
                     Some(Zone::Battlefield),
@@ -17282,6 +17328,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
             }),
         };
@@ -17562,6 +17612,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
             }),
         };
@@ -17585,6 +17639,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
             }),
         };
@@ -18751,6 +18809,10 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 core_types: vec![CoreType::Creature],
                 owner: pile_owner,
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: pile_owner,
+                    controller: reanimator,
+                },
                 controller: reanimator,
                 ..ZoneChangeRecord::test_minimal(entrant, Some(Zone::Graveyard), Zone::Battlefield)
             }),

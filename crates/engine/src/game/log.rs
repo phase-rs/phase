@@ -2656,6 +2656,7 @@ mod tests {
         let mut record = ZoneChangeRecord::test_minimal(foretold, Some(Zone::Hand), Zone::Exile);
         record.name = "Secret Foretell".to_string();
         record.owner = PlayerId(1);
+        record.arrival.owner = PlayerId(1);
         let entries = resolve_log_entries(
             &[
                 GameEvent::ZoneChanged {
@@ -3486,6 +3487,7 @@ mod tests {
         let mut record =
             crate::types::game_state::ZoneChangeRecord::test_minimal(object_id, Some(from), to);
         record.owner = owner;
+        record.arrival.owner = owner;
         record.turn_zone_change_index = turn_zone_change_index;
         GameEvent::ZoneChanged {
             object_id,
@@ -3920,6 +3922,7 @@ mod tests {
             kind: Default::default(),
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: None,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -3942,6 +3945,7 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Mana,
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: None,
         };
         assert_eq!(lines(&[mana]), 0);
     }

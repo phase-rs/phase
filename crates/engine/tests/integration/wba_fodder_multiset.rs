@@ -8,7 +8,7 @@
 //! `derived_fodder_class` is a before/after DIFF, so its `k` is the OBSERVED count, already
 //! including the doubler's multiplication. Batching `k·N` would apply it twice: elision `2k·N`
 //! against performance `k·N`. The route guard (`analysis::resource::token_growth_is_observed`,
-//! gated on `k > 1`) sends exactly those periods to `DriveSequence`, where each cycle's
+//! gated on `k > 1`) makes the take perform exactly those periods, where each cycle's
 //! replacement applies once, by performance. Every arm runs on the REAL 4-player
 //! `sprout_witherbloom_realistic_lands_4p` dump through the production restore chokepoint and the
 //! public `GameRunner`/`apply()` boundary, ONE OBJECT away from the shipped-green board.
@@ -122,43 +122,33 @@ fn registered(state: &GameState) -> &[PersistentAxisMaterialization] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// The route the accept took, observed through the registered stash discriminant — the same
-/// observable `loop_shortcut_cast_route`'s `route_of` uses, because `LoopCollapseRoute` is private
-/// to `game::engine` and cannot be named from an external test crate.
-fn assert_replay_route(state: &GameState, why: &str) {
-    let stash = registered(state);
-    assert!(
-        !stash.is_empty(),
-        "{why}: P0's accept registered NOTHING — any route claim after this is vacuous"
+/// The take performed the period: P0 holds the performed Saprolings and nothing is registered.
+fn assert_replay_route(state: &GameState, saprolings: usize, why: &str) {
+    assert_eq!(
+        count_saprolings(state, P0),
+        saprolings,
+        "{why}: the take performs its cycles"
     );
     assert!(
-        stash
+        registered(state).is_empty(),
+        "{why}: expected the take to perform the period, got {:?}",
+        registered(state)
             .iter()
-            .all(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
-        "{why}: expected the concrete replay, got {:?}",
-        stash.iter().map(discriminant_name).collect::<Vec<_>>()
+            .map(discriminant_name)
+            .collect::<Vec<_>>()
     );
 }
 
 fn assert_batched_route(state: &GameState, why: &str) {
-    let stash = registered(state);
     assert!(
-        !stash.is_empty(),
-        "{why}: P0's accept registered NOTHING — any route claim after this is vacuous"
-    );
-    assert!(
-        stash
-            .iter()
-            .all(|m| !matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
-        "{why}: expected the batched route, got {:?}",
-        stash.iter().map(discriminant_name).collect::<Vec<_>>()
+        !registered(state).is_empty(),
+        "{why}: P0's accept registered NOTHING — expected the batched route"
     );
 }
 
 /// Exhaustive, no wildcard: a future persistent axis must be named here deliberately.
 fn discriminant_name(m: &PersistentAxisMaterialization) -> &'static str {
     match m {
-        PersistentAxisMaterialization::DriveSequence { .. } => "DriveSequence",
         PersistentAxisMaterialization::Tokens(_) => "Tokens",
         PersistentAxisMaterialization::Counters(_) => "Counters",
         PersistentAxisMaterialization::Life { .. } => "Life",
@@ -291,9 +281,11 @@ fn doubled_board_routes_to_replay_undoubled_board_stays_batched() {
     let mut doubled_board = load_realistic_dump();
     graft_doubler(&mut doubled_board, P0);
     let mut doubled = offer_state(doubled_board);
-    declare_and_accept_all(&mut doubled, 100);
+    let offered = count_saprolings(&doubled, P0);
+    declare_and_accept_all(&mut doubled, 2);
     assert_replay_route(
         &doubled,
+        offered + 2 * 2,
         "A-3: a replacement-sourced k == 2 must NOT be batched — the mint would re-run the \
          doubler and apply it twice (#7045)",
     );
@@ -330,19 +322,18 @@ fn opponent_controlled_doubler_does_not_move_p0_route() {
 }
 
 /// **Elision ≡ performance on a board whose `k` is REPLACEMENT-sourced.** Arm P: four REAL
-/// cycles, declining each offer. Arm E: one real cycle, then accept and name N = 3 at the CR
-/// 500.5 boundary. Both cover 1 + 3 cycles and must land on the same board. The DISCRIMINATING
+/// cycles, declining each offer. Arm E: one real cycle, then accept N = 3, performed at the take.
+/// Both cover 1 + 3 cycles and must land on the same board. The DISCRIMINATING
 /// QUANTITY is how many times the `Times{factor: 2}` replacement applies: once per cycle in both
 /// arms. A batched arm would propose `per_cycle_delta * N = 6` and let the doubler multiply it to
 /// 12 — the factor-of-k divergence the route conjunct prevents.
 ///
-/// SEED CONFOUNDER: `seed_representative_fodder` runs on BOTH routes, but only when the period
+/// SEED CONFOUNDER: `seed_representative_fodder` runs on the mark route, but only when the period
 /// taps a fodder and the board has NO tapped fodder yet. P0 already controls a TAPPED Saproling
 /// here, asserted below as a named precondition, so it cannot fire on either arm.
 ///
 /// REVERT PROBE: delete the `token_growth_needs_replay` disjunct at the `game::engine` route seam
-/// ⇒ arm E takes the batched route, the mint proposes 2·3 = 6, the doubler re-applies, and arm E
-/// lands 12 against arm P's 6 ⇒ RED by exactly a factor of k = 2.
+/// ⇒ arm E takes the batched route and the take delivers nothing ⇒ RED.
 #[test]
 fn doubled_board_elision_equals_performance() {
     const N: u32 = 3;
@@ -388,15 +379,13 @@ fn doubled_board_elision_equals_performance() {
         2,
         "arm E reach-guard: the priming cycle is the SAME real cycle arm P performs"
     );
+    let ids_before: Vec<ObjectId> = elision.battlefield.iter().copied().collect();
     declare_and_accept_all(&mut elision, N);
     assert_replay_route(
         &elision,
+        performed,
         "A-3: the replacement-sourced k == 2 period must take the concrete replay",
     );
-    drive_to_collapse_boundary(&mut elision);
-    let ids_before: Vec<ObjectId> = elision.battlefield.iter().copied().collect();
-    apply(&mut elision, P0, GameAction::SubmitPayAmount { amount: N })
-        .expect("P0 submits the finite loop-collapse count");
     let elided = count_saprolings(&elision, P0);
 
     // ── THE FIDELITY ASSERTION ──

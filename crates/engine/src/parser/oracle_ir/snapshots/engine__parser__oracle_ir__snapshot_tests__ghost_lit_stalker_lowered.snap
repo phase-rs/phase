@@ -16,6 +16,7 @@ expression: "&lowered"
           "type": "Player"
         }
       },
+      "declares_chosen_group": 2147483648,
       "cost": {
         "type": "Composite",
         "costs": [
@@ -60,6 +61,7 @@ expression: "&lowered"
           "type": "Player"
         }
       },
+      "declares_chosen_group": 2147483649,
       "cost": {
         "type": "Composite",
         "costs": [

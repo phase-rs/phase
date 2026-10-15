@@ -723,7 +723,7 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     )
     .parse(lower)
     .is_ok()
-        && (scan_contains(lower, "from your graveyard")
+        && (super::oracle_static::is_graveyard_cast_permission_lead(lower)
             || (scan_contains(lower, "from your hand") && scan_contains(lower, "without paying"))
             // CR 401.5 + CR 118.9 + CR 601.2a: "you may [play|cast] X from the
             // top of your library" — top-of-library cast permission class
@@ -1101,7 +1101,7 @@ pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
 ///
 /// Shared by `is_replacement_pattern_head_scoped` and
 /// `is_enters_with_counter_replacement_line` so the two cannot drift.
-fn has_enters_with_counter_tokens(lower: &str) -> bool {
+pub(crate) fn has_enters_with_counter_tokens(lower: &str) -> bool {
     (scan_contains(lower, "enters")
         || scan_contains(lower, "escapes")
         || scan_contains(lower, "enter with")

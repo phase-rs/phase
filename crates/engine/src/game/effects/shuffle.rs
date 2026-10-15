@@ -3,6 +3,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -41,7 +42,7 @@ pub fn resolve(
             ..
         } = state;
         let pile = tracked_object_sets.get_mut(&id).map(|set| {
-            set.shuffle(rng);
+            set.shuffle(rng.draw(RandomDraw::Placement));
             set.clone()
         });
         if let Some(pile) = pile {
@@ -68,12 +69,21 @@ pub fn resolve(
             {
                 Some(TargetRef::Player(player)) => player,
                 Some(TargetRef::Object(_)) => {
-                    super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                    let Some(player) =
+                        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                    else {
+                        return Ok(());
+                    };
+                    player
                 }
                 None => return Ok(()),
             }
         }
-        _ => super::resolve_player_for_context_ref(state, ability, &shuffle_target),
+        // CR 608.2b: a declared player whose target was illegal names no library.
+        _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
+            Some(player) => player,
+            None => return Ok(()),
+        },
     };
 
     // CR 701.24a: the target player must exist before any shuffle logic runs.
@@ -443,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             resolved_player,
-            PlayerId(1),
+            Some(PlayerId(1)),
             "Visions's shuffle must resolve to the targeted opponent, not the caster (filter was {shuffle_filter:?})"
         );
 

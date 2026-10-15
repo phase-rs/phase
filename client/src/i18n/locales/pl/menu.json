@@ -364,5 +364,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Stos",
+    "default": "Domyślny stos"
   }
 }

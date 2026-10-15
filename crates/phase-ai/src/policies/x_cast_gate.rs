@@ -1534,6 +1534,7 @@ mod tests {
                     count: x_expr(),
                     target: TargetFilter::Controller,
                 })],
+                villainous: false,
             })],
         );
         assert_not_reject(&verdict_for_cast(&state, choice_object, choice_card));

@@ -194,7 +194,7 @@ fn announce_own(fixture: &mut AttackFixture, index: usize) {
     assert_eq!(entry.source_id, fixture.source);
     let ability = entry.ability().expect("actual announced trigger");
     assert_eq!(ability.targets, vec![TargetRef::Object(fixture.own[index])]);
-    assert!(ability.selected_target_pin_is_current(fixture.own[index], fixture.runner.state()));
+    assert!(ability.target_occurrence_is_current(0, fixture.runner.state()));
 }
 
 fn choose_own(fixture: &mut AttackFixture, index: usize) {
@@ -928,8 +928,9 @@ fn arcane_proxy_cast_etb_preserves_zoned_target_acquisition() {
     };
     assert_eq!(ability.targets, vec![TargetRef::Object(ceiling)]);
     assert!(ability
-        .selected_target_incarnations
+        .target_pins
         .iter()
+        .flatten()
         .any(|pin| pin.object_id == ceiling
             && pin.incarnation == runner.state().objects[&ceiling].incarnation));
     assert!(matches!(
@@ -1029,8 +1030,9 @@ fn narset_attack_preserves_zoned_target_acquisition() {
     };
     assert_eq!(ability.targets, vec![TargetRef::Object(opposing)]);
     assert!(ability
-        .selected_target_incarnations
+        .target_pins
         .iter()
+        .flatten()
         .any(|pin| pin.object_id == opposing
             && pin.incarnation == runner.state().objects[&opposing].incarnation));
     assert!(matches!(
@@ -1659,7 +1661,7 @@ fn independent_player_your_menu_case(oracle: &str) {
     assert_eq!(entry.source_id, spell);
     let node = entry.ability().unwrap().sub_ability.as_ref().unwrap();
     assert_eq!(node.targets, vec![TargetRef::Object(selected)]);
-    assert!(node.selected_target_pin_is_current(selected, runner.state()));
+    assert!(node.target_occurrence_is_current(0, runner.state()));
     finish(&mut runner);
     // CR 701.13a + CR 608.2c: only the announced card moves; P1 draws independently.
     assert_eq!(runner.state().objects[&selected].zone, Zone::Exile);

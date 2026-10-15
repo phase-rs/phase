@@ -412,7 +412,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | Label | Pattern | Router | Module |
 |-------|---------|--------|--------|
 | `14` | Line empty after reminder-text + "X can't be 0." stripping (stamps `min_x_value` on the previous ability first) | skip | `oracle.rs` |
-| `8b (early)` | "As an additional cost to cast this spell …" (non-Defiler) — must precede static classifiers that match embedded "this spell costs {N} less" tails | `parse_additional_cost_line()` → `result.additional_cost` | `oracle_casting.rs` |
+| `8b (early)` | "As an additional cost to cast this spell …" (non-Defiler), optionally behind an ability or flavor word (`additional_cost_line_text`) — must precede static classifiers that match embedded "this spell costs {N} less" tails | `parse_additional_cost_line()` → `result.additional_cost` | `oracle_casting.rs` |
 | `0` | Semicolon-separated keyword line ("Defender; reach"); colon guard excludes activated abilities | per-part keyword extraction | `oracle.rs` |
 | `1` | Modal block: "Choose one —" header + mode lines, or Spree + `+` lines (consumes multiple lines) | `parse_oracle_block()` + `lower_oracle_block()` | `oracle_modal.rs` |
 | — | "Equip {cost}" / "Equip — {cost}" (not "Equipped …"); "Crew N" with trailing cadence sentence | `try_parse_equip()`, `parse_crew_keyword()` | `oracle.rs` |

@@ -1427,8 +1427,9 @@ mod tests {
     /// "Until end of turn, ? and ?", or a relinked dependent sentence), so it
     /// becomes an explicit gap either way, never a guessed lifetime.
     ///
-    /// The parser doesn't produce the continuation-to-the-Saga shape today (it
-    /// drops a same-sentence grant), so it is built from Victory's own parsed
+    /// The parser doesn't produce the continuation-to-the-Saga shape today (a
+    /// same-sentence grant after a P/T multiply fails its clause closed), so it is
+    /// built from Victory's own parsed
     /// chain: the grant clause relinked as a continuation, as the parser links
     /// World War Hulk III's "? and it gains trample".
     #[test]

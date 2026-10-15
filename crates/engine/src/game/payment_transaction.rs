@@ -846,6 +846,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                villainous: false,
             },
         );
         state
@@ -1022,6 +1023,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                villainous: false,
             },
         );
         state
@@ -1680,6 +1682,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                villainous: false,
             },
         );
         state

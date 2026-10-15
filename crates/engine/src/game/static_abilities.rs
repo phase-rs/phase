@@ -2200,7 +2200,8 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
                         // CR 109.4: TargetOpponent fails closed identically here.
                         crate::types::ability::ControllerRef::TargetPlayer
-                        | crate::types::ability::ControllerRef::TargetOpponent => false,
+                        | crate::types::ability::ControllerRef::TargetOpponent
+                        | crate::types::ability::ControllerRef::DeclaredPlayer { .. } => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         // Engine constraint: a static ability has no trigger
                         // event window, so the damage recipient's controller is

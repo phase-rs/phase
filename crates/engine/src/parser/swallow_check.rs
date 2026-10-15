@@ -33,7 +33,7 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
     ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
     DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
     ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
@@ -1523,9 +1523,15 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// The shape set is the runtime rider classifier's in
 /// `game::effects::cast_from_zone` — the single authority the resolver itself
 /// reads, so a parser-side copy cannot drift from what the resolver consumes.
-/// This function adds only the sub-ability walk around it.
+/// This function adds only the sub-ability walk around it. An outcome-gated
+/// decline link ("If you don't, put it into your hand") is not a rider
+/// (CR 608.2c), so it suppresses nothing.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    crate::game::effects::cast_from_zone::graveyard_destination_rider(&def.effect).is_some()
+    crate::game::effects::cast_from_zone::graveyard_destination_rider(
+        &def.effect,
+        def.condition.as_ref(),
+    )
+    .is_some()
         || def
             .sub_ability
             .as_deref()
@@ -3159,6 +3165,14 @@ fn detect_dynamic_qty(
     //              "for each creature", but it is a typed scaling mode on
     //              `StaticCondition::UnlessPay`, not a `QuantityExpr`.
     if evidence.any::<UnlessPayScaling>(|s| matches!(s, UnlessPayScaling::PerAffectedCreature)) {
+        return;
+    }
+    //   CR 118.12a  "unless … pays {cost} for each <kind> counter on <self>" lowers to
+    //              `AbilityCost::PerCounter`, whose multiplier is the counter kind the variant
+    //              carries — there is no `QuantityExpr` for the probes above to see.
+    //              Unanchored is safe: `AbilityCost` is internally tagged and `PerCounter`
+    //              names no variant of any other enum.
+    if evidence.any::<AbilityCost>(|c| matches!(c, AbilityCost::PerCounter { .. })) {
         return;
     }
     //   CR 608.2c + CR 701.38  "For each player who chose <choice>" vote bodies resolve
@@ -6025,7 +6039,7 @@ fn detect_damage_subject_conjunction(
 /// the resulting `AbilityDefinition` before it is appended to the chain.
 ///
 /// Only the cascade variables whose loss would represent silent dropping
-/// are included. Internal bookkeeping variables (`anchor_subject`,
+/// are included. Internal bookkeeping variables (`carried_player`,
 /// `chunk_actor`, etc.) that feed other captures are excluded — their
 /// loss is observable only through the *terminal* slot they affect, and
 /// that terminal slot is what the diff checks.
@@ -6161,10 +6175,10 @@ mod tests {
     use crate::parser::swallow_evidence::UnitEvidence;
 
     use super::{
-        any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_target_replacement,
-        def_tree_has_unimplemented, detect_replacement,
-        dynamic_markers_are_all_recorded_unrecognized, effect_has_internal_optionality,
-        trigger_tree_has_optional, twice_is_activation_limit,
+        any_ability_has_unimplemented, def_tree_has_cast_graveyard_redirect_rider,
+        def_tree_has_optional, def_tree_has_target_replacement, def_tree_has_unimplemented,
+        detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
+        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_effect::gap_diagnosis::{
@@ -6173,14 +6187,16 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
-        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, ZoneChoiceCandidateSource,
-        ZoneOwner,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, Chooser, Comparator,
+        ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
+        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
+        ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::{Keyword, WardCost};
     use crate::types::mana::{ManaCost, ManaSpellGrant};
@@ -6415,25 +6431,63 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// `Condition_AsLongAs` reports the rejected "as long as" guard.
     #[test]
     fn condition_as_long_as_swallow_carries_the_rejected_guard() {
-        // Torrent of Lava (MIR). The guard is bounded at the clause break, so it must not
-        // run on into the quoted granted ability that follows it.
+        // Gobsmacked (UNF). Its static-route line keeps a swallowed guard. The guard
+        // is bounded at the clause break (the comma), so it must not run on into
+        // "enchanted permanent can't attack or block".
         let parsed = parse_named(
+            "Enchant nonland permanent\nAs this Aura enters, choose a person outside the \
+             game.\nAs long as you can see the chosen person from your seat, enchanted \
+             permanent can't attack or block, and its activated abilities can't be activated.",
+            "Gobsmacked",
+            &["Enchantment"],
+        );
+        let warning = only_swallow(&parsed, "Condition_AsLongAs");
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "you can see the chosen person from your seat".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+
+        // Torrent of Lava (MIR): its "~ is on the stack" gate cannot be carried, so the
+        // route lands the line as a line-owned `Effect::unimplemented` and the
+        // per-unit suppression leaves no `Condition_AsLongAs` warning beside it.
+        let torrent = parse_named(
             "Torrent of Lava deals X damage to each creature without flying.\nAs long as \
              Torrent of Lava is on the stack, each creature has \"{T}: Prevent the next 1 \
              damage that would be dealt to this creature by Torrent of Lava this turn.\"",
             "Torrent of Lava",
             &["Sorcery"],
         );
-        let warning = only_swallow(&parsed, "Condition_AsLongAs");
-
-        // Removing the `trailing_guard` arm this phase adds turns this `None`: measured,
-        // the scanner has no "as long as" arm at base at all.
-        assert_eq!(
-            warning.gap(),
-            Some(&ClauseGap::Condition {
-                guard: "torrent of lava is on the stack".to_string()
+        // Reach-guard: the second line is the honest gap, owned by its line.
+        const TORRENT_GATED_LINE: &str = "As long as ~ is on the stack, each creature has \"{T}: Prevent the next 1 damage that would be dealt to ~ by ~ this turn.\"";
+        assert!(
+            torrent.abilities.iter().any(|a| {
+                a.description.as_deref() == Some(TORRENT_GATED_LINE)
+                    && a.effect.unimplemented_description().is_some()
             }),
-            "full warning: {warning:?}"
+            "{:#?}",
+            torrent.abilities
+        );
+        assert!(
+            torrent.replacements.is_empty(),
+            "{:#?}",
+            torrent.replacements
+        );
+        assert!(
+            swallows_for(&torrent, "Condition_AsLongAs").is_empty(),
+            "{:?}",
+            torrent.parse_warnings
+        );
+        // The first line's damage ability is still present.
+        assert!(
+            torrent
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::DamageAll { .. })),
+            "{:#?}",
+            torrent.abilities
         );
     }
 
@@ -6587,13 +6641,19 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // One verbatim-Oracle corpus card per corpus-present non-phrase detector. Several
         // also fire a phrase-bearing detector; those records are filtered out below, so a
         // card carrying both is fine.
+        //
+        // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
+        // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
+        // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
+        // below stays at nine — a detector that stops firing here needs a different corpus
+        // card, never a shrunken set.
         let fixtures: &[(&str, &str, &[&str])] = &[
             ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
             ("Dementia Sliver", "All Slivers have \"{T}: Choose a card name. Target opponent reveals a card at random from their hand. If that card has the chosen name, that player discards it. Activate only during your turn.\"", &["Creature"]),
             ("Disorder", "Disorder deals 2 damage to each white creature and each player who controls a white creature.", &["Sorcery"]),
             ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
             ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
-            ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
+            ("Savage Punch", "Target creature you control fights target creature you don't control.\nFerocious — The creature you control gets +2/+2 until end of turn before it fights if you control a creature with power 4 or greater.", &["Sorcery"]),
             ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
@@ -7200,36 +7260,55 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         use crate::types::replacements::ReplacementEvent;
         use crate::types::ContinuousModification;
 
+        // CR 615.1a: Bronze Horse's gate parses, but its shield is scoped to
+        // "spells that target it", a source subject no filter expresses. The line
+        // fails closed as a line-owned `Effect::unimplemented` — the known gap —
+        // rather than shipping a shield that prevents damage from every source.
         let bronze = parse_named(
             "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
             "Bronze Horse",
             &["Artifact", "Creature"],
         );
         assert!(
-            !bronze
+            bronze.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            )),
+            "Bronze Horse's shield line must report its source-scope gap: {:#?}",
+            bronze.abilities
+        );
+        assert!(
+            bronze
                 .replacements
                 .iter()
-                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
-            "Bronze Horse replacement must parse without Unimplemented"
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "no unscoped Bronze Horse shield may be built: {:#?}",
+            bronze.replacements
+        );
+
+        // CR 611.3: a gated "as long as" prevention is a CONTINUOUS shield — the
+        // exact `Prevention { .. }` assertion (no `PreventionOneShot`) pins the
+        // one-shot classification from leaking onto a duration-bound "as long
+        // as" shield: if an implementation misclassified this line as
+        // `PreventionOneShot` ("the next time" single opportunity, CR 615.3), the
+        // assertion fails.
+        let baldric = parse_named(
+            "As long as you have a full party, prevent all damage that would be dealt to equipped creature.",
+            "Multiclass Baldric",
+            &["Artifact", "Equipment"],
         );
         let as_long_as = "as long as";
-        // CR 611.3: Bronze Horse's "as long as" prevention is a CONTINUOUS
-        // shield — the exact `Prevention { .. }` assertion (no
-        // `PreventionOneShot`) pins the one-shot classification from leaking
-        // onto a duration-bound "as long as" shield: if an implementation
-        // misclassified this card as `PreventionOneShot` ("the next time"
-        // single opportunity, CR 615.3), the assertion fails.
         assert!(
-            bronze.replacements.iter().any(|r| {
+            baldric.replacements.iter().any(|r| {
                 r.event == ReplacementEvent::DamageDone
-                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.condition.is_some()
                     && matches!(r.shield_kind, ShieldKind::Prevention { .. })
                     && r.description
                         .as_deref()
                         .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))
             }),
             "expected gated damage-prevention replacement, got {:#?}",
-            bronze.replacements
+            baldric.replacements
         );
         // CR 615.3: the Awe Strike class — "the next time [target creature]
         // would deal damage this turn, prevent that damage" — is the one-shot
@@ -7267,30 +7346,6 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "the one-shot spell sentence must NOT lower to a replacement definition, got {:#?}",
             one_shot.replacements
         );
-        // KNOWN GAP, pinned deliberately. Bronze Horse DOES report a swallowed
-        // `Condition_AsLongAs` — and did so in the shipped card data long before this
-        // change (verified against the pre-cutover full-pool export). The assertions
-        // above are why: the "as long as you control another creature" gate survives
-        // only inside `description` (a String), and is never lifted into a typed
-        // condition on the replacement. So the condition really is swallowed and the
-        // detector is right.
-        //
-        // This test previously asserted the OPPOSITE and passed — vacuously. It parses
-        // with an empty MTGJSON keyword list, so the "Trample" line fell through to an
-        // `Effect::Unimplemented`, which tripped the CARD-WIDE Unimplemented gate and
-        // silenced all fourteen detectors on the whole card. The green was the gate,
-        // not the parse. Per-unit suppression scopes that gate to the "Trample" line
-        // alone, so line 1 is now audited and the pre-existing gap is visible.
-        //
-        // Flip this assertion when the "as long as" gate is lifted into a typed
-        // replacement condition; until then it is a tripwire, not an endorsement.
-        assert!(
-            has_swallowed_detector(&bronze, "Condition_AsLongAs"),
-            "Bronze Horse's as-long-as gate is description-only, never typed: the swallow \
-             is real. Warnings: {:?}",
-            bronze.parse_warnings
-        );
-
         let helm = parse_named(
             "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
             "Champion's Helm",
@@ -7511,6 +7566,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![create],
+                villainous: false,
             },
         );
         let Effect::ChooseOneOf { branches, .. } = modal.effect.as_ref() else {
@@ -8373,7 +8429,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         let parsed = parse_named(
             "{G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
              If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.\n\
-             Draw a card if the moon is bright.",
+             Tap target creature if the moon is bright.",
             "Oviya, Automech Artisan",
             &["Creature"],
         );
@@ -8514,7 +8570,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     fn represented_tiered_counter_pair_does_not_hide_unrelated_if() {
         let tiered_line = "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
         let parsed = parse_named(
-            &format!("{tiered_line}\nDraw a card if the moon is bright."),
+            &format!("{tiered_line}\nTap target creature if the moon is bright."),
             "Thunderous Velocipede",
             &["Artifact"],
         );
@@ -8668,7 +8724,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         let parsed = parse_named(
             "Return target creature card from your graveyard to the battlefield. \
              If a Hero enters this way, it enters with two additional +1/+1 counters on it.\n\
-             Draw a card if the moon is bright.",
+             Tap target creature if the moon is bright.",
             "Heroic Return Compound Fixture",
             &["Instant"],
         );
@@ -9149,7 +9205,9 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         ));
 
         // Hostile: the extra sentence mentions "countered this way" but is a different
-        // " instead" clause, not the redirect shape -> must still warn.
+        // " instead" clause, not the redirect shape. The gain-life count position cannot
+        // read "life instead of drawing a card", so the sentence fails closed — stronger
+        // than the `Replacement_Instead` warning it used to raise.
         let second_countered_instead = parse_named(
             &format!(
                 "{memory_lapse_text} If it was countered this way, you gain 2 life instead of \
@@ -9158,18 +9216,16 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "Memory Lapse",
             &["Instant"],
         );
-        assert!(no_unimplemented(&second_countered_instead));
         assert!(
             matches!(counter_zone(&second_countered_instead), Some(Some(_))),
             "second-countered-instead fixture: expected Counter with countered_spell_zone"
         );
-        assert!(has_swallowed_detector(
-            &second_countered_instead,
-            "Replacement_Instead"
-        ));
+        assert!(!no_unimplemented(&second_countered_instead));
 
         // Hostile: same sentence — the redirect is followed by an unmodelled tail, so the
-        // shape must be anchored to the end of the sentence and keep the warning.
+        // shape must be anchored to the end of the sentence and must not discharge it. The
+        // tail's gain-life count position cannot read "life instead of drawing a card", so
+        // it fails closed — stronger than the warning it used to raise.
         let same_sentence_tail = parse_named(
             "Counter target spell. If that spell is countered this way, put it on top of its \
              owner's library instead of into that player's graveyard and you gain 2 life \
@@ -9177,15 +9233,11 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "Memory Lapse",
             &["Instant"],
         );
-        assert!(no_unimplemented(&same_sentence_tail));
         assert!(
             matches!(counter_zone(&same_sentence_tail), Some(Some(_))),
             "same-sentence-tail fixture: expected Counter with countered_spell_zone"
         );
-        assert!(has_swallowed_detector(
-            &same_sentence_tail,
-            "Replacement_Instead"
-        ));
+        assert!(!no_unimplemented(&same_sentence_tail));
 
         // Hostile: an " instead" sentence that ENDS with the redirect shape but carries an
         // unmodelled head must not be discharged — the shape is anchored to the start of
@@ -11004,6 +11056,139 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
+    /// A self-sacrifice carrying the given unless cost, paid by its controller.
+    fn self_sacrifice_unless(cost: AbilityCost) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        )
+        .unless_pay(UnlessPayModifier {
+            cost,
+            payer: TargetFilter::Controller,
+        })
+    }
+
+    /// CR 118.12a: "unless you pay {1} for each +1/+1 counter on it" lowers to
+    /// `AbilityCost::PerCounter`, whose multiplier is the counter kind — no
+    /// `QuantityExpr` exists for the quantity probes to see, so the detector credits
+    /// the variant. The control is parser-independent: the same text with a flat
+    /// `{1}` (the multiplier swallowed) must still warn.
+    #[test]
+    fn dynamic_qty_credits_per_counter_unless_cost() {
+        let cleaned = "at the beginning of your upkeep, put a +1/+1 counter on this creature, \
+                       then sacrifice this creature unless you pay {1} for each +1/+1 counter \
+                       on it.";
+        let per_counter = parsed_with_ability(self_sacrifice_unless(AbilityCost::PerCounter {
+            counter: CounterType::Plus1Plus1,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }),
+        }));
+        let flat = parsed_with_ability(self_sacrifice_unless(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        }));
+        let per_counter_evidence = UnitEvidence::of(&per_counter);
+        let flat_evidence = UnitEvidence::of(&flat);
+        // Reach guard: the fixture raises the dynamic marker for both units, so the
+        // verdicts below are about the carrier, not a marker gate that never engaged.
+        assert!(!super::active_dynamic_markers(cleaned, &per_counter_evidence).is_empty());
+        assert!(!super::active_dynamic_markers(cleaned, &flat_evidence).is_empty());
+
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &per_counter,
+            &per_counter_evidence,
+            &mut diagnostics,
+        );
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "a PerCounter unless cost represents the per-counter multiplier: {diagnostics:?}"
+        );
+
+        let mut flat_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &flat,
+            &flat_evidence,
+            &mut flat_diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&flat_diagnostics).len(),
+            1,
+            "a flat unless cost swallows the per-counter multiplier and must warn: \
+             {flat_diagnostics:?}"
+        );
+    }
+
+    /// Full-parse twin of `dynamic_qty_credits_per_counter_unless_cost`: the printed
+    /// per-counter unless cards (verbatim Oracle text, MTGJSON keyword names passed)
+    /// carry `PerCounter` and gain no `DynamicQty` warning.
+    #[test]
+    fn dynamic_qty_silent_for_printed_per_counter_unless_cards() {
+        let cards: [(&str, &str, &[&str], &[&str]); 2] = [
+            (
+                "Energy Vortex",
+                "As this enchantment enters, choose an opponent.\n\
+                 At the beginning of your upkeep, remove all vortex counters from this \
+                 enchantment.\n\
+                 At the beginning of the chosen player's upkeep, this enchantment deals 3 \
+                 damage to that player unless they pay {1} for each vortex counter on this \
+                 enchantment.\n\
+                 {X}: Put X vortex counters on this enchantment. Activate only during your \
+                 upkeep.",
+                &[],
+                &["Enchantment"],
+            ),
+            (
+                "Phantasmal Sphere",
+                "Flying\n\
+                 At the beginning of your upkeep, put a +1/+1 counter on this creature, then \
+                 sacrifice this creature unless you pay {1} for each +1/+1 counter on it.\n\
+                 When this creature leaves the battlefield, target opponent creates an X/X \
+                 blue Orb creature token with flying, where X is the number of +1/+1 counters \
+                 on this creature.",
+                &["Flying"],
+                &["Creature"],
+            ),
+        ];
+        for (name, text, keywords, types) in cards {
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &keywords
+                    .iter()
+                    .map(|k| (*k).to_string())
+                    .collect::<Vec<_>>(),
+                &types.iter().map(|t| (*t).to_string()).collect::<Vec<_>>(),
+                &[],
+            );
+            // Reach guards: the unit carries the per-counter cost, and no
+            // `Unimplemented` lets `check_swallowed_clauses` skip it.
+            assert!(
+                UnitEvidence::of(&parsed)
+                    .any::<AbilityCost>(|c| matches!(c, AbilityCost::PerCounter { .. })),
+                "{name}: the unless cost must be PerCounter"
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: no Unimplemented may short-circuit the detectors"
+            );
+            assert!(
+                swallows_for(&parsed, "DynamicQty").is_empty(),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
     /// One `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`
     /// carrier — the parsed representation of the Atraxa per-card-type pick.
     fn distinct_card_types_choose() -> AbilityDefinition {
@@ -12028,25 +12213,77 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     #[test]
-    fn duration_until_eot_dragon_egg_reports_known_gap() {
+    fn duration_until_eot_dragon_egg_token_grant_carries_the_duration() {
         let parsed = parse_named(
             "Defender\n\
              When this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"",
             "Dragon Egg",
             &["Creature"],
         );
-        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
-        // horse_and_champions_helm` for the full explanation. Dragon Egg reports a
-        // swallowed `Duration_UntilEndOfTurn`, and did so in the shipped card data long
-        // before this change: the "until end of turn" lives inside the *token's granted*
-        // activated ability, and the duration evidence walker does not descend into a
-        // token grant. The test asserted the opposite and passed only because its empty
-        // MTGJSON keyword list turned the "Defender" line into an `Effect::Unimplemented`,
-        // tripping the card-wide gate that silenced every detector on the card.
+        // CR 602.1 + CR 602.1a + CR 611.2a: Dragon Egg's token clause is an ACTIVATED
+        // `{R}` pump +1/+0 on the token itself, lasting until end of turn — so the
+        // duration IS a real AST carrier at key `duration` inside the unit tree and
+        // `any_duration(UntilEndOfTurn)` is satisfied. No gap.
+        //
+        // At BASE there was no granted activated ability at all: `push_parsed_statics`
+        // took `parse_static_line_multi`'s early return and emitted
+        // `Continuous { SelfRef, [AddPower 1, AddToughness 0] }`, cost and duration
+        // dropped outright — which is why the phrase had no carrier and the detector
+        // fired. (Not because the walk is blind to token grants: the duration
+        // detector's own reach is serde-derived and covers
+        // `Effect::Token.static_abilities → GrantTrigger → trigger.execute`.)
+        //
+        // Reach guard: the dies unit parsed through to a granted activated ability
+        // carrying cost + duration, with no `Effect::Unimplemented` in that unit (an
+        // Unimplemented ability would make the absence assertion below vacuous via the
+        // per-unit suppression gate).
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Dragon Egg's dies trigger must parse")
+            .execute
+            .as_deref()
+            .expect("the dies trigger must have an execute chain");
         assert!(
-            has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
-            "pre-existing gap: the duration evidence walker does not descend into a \
-             token's granted ability. Warnings: {:?}",
+            !def_tree_has_unimplemented(execute),
+            "reach: the token unit must parse with zero Unimplemented: {execute:#?}"
+        );
+        let Effect::Token {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("reach: expected Effect::Token, got {:?}", execute.effect);
+        };
+        let granted = static_abilities
+            .iter()
+            .flat_map(|definition| definition.modifications.iter())
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("reach: the token must carry a granted ability: {static_abilities:#?}")
+            });
+        assert_eq!(granted.kind, AbilityKind::Activated);
+        assert_eq!(
+            granted.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Red],
+                    generic: 0,
+                },
+            }),
+            "reach: the {{R}} cost must be carried"
+        );
+        assert_eq!(
+            granted.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "reach: the duration must be carried"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
+            "the granted activated ability carries the duration, so the phrase is \
+             represented, not swallowed. Warnings: {:?}",
             parsed.parse_warnings
         );
     }
@@ -14213,6 +14450,64 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         // the guard above cannot be passing by rejecting everything.
         assert_eq!(classify_conjunct("each opponent"), ConjunctShape::Player);
         assert_eq!(classify_conjunct("each player"), ConjunctShape::Player);
+    }
+
+    /// CR 608.2c: a `CastFromZone` whose sub link is the "If you don't, put it
+    /// into your hand" decline branch carries no graveyard-redirect rider; the
+    /// same link with no condition does (paired positive).
+    #[test]
+    fn decline_link_under_cast_from_zone_is_not_a_graveyard_redirect_rider() {
+        let cast_with = |link: AbilityDefinition| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CastFromZone {
+                    target: TargetFilter::Any,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+            )
+            .sub_ability(link)
+        };
+        let to_hand = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+        };
+        assert!(
+            def_tree_has_cast_graveyard_redirect_rider(&cast_with(to_hand())),
+            "reach: the unconditioned link is the hand-redirect rider"
+        );
+        let declined = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            }),
+        };
+        assert!(!def_tree_has_cast_graveyard_redirect_rider(&cast_with(
+            to_hand().condition(declined)
+        )));
     }
 
     /// Klement, Life Acolyte (HBG): the boon-granted trigger carries an

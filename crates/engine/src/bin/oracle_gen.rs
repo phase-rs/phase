@@ -402,6 +402,17 @@ impl LocalizedFace {
 
 /// Map an MTGJSON `foreignData.language` (full English language name) to the
 /// supported UI locale code, or `None` for languages we don't ship.
+///
+/// MUST stay in lockstep with `LOCALE_MAP` in
+/// `scripts/gen-scryfall-locale-images.sh`, which keys the sibling localized art
+/// maps (`scryfall-images.v2.<lng>.json`). A code present in one and not the
+/// other ships localized art with English text, or the reverse.
+///
+/// `Chinese Simplified` covers the printings Wizards produced in Simplified
+/// Chinese; that run ended at Bloomburrow (2024-02-23 announcement), so sets from
+/// 2024-08 onward contribute nothing here and the frontend's per-field fallback
+/// keeps those cards English. `Chinese Traditional` is deliberately absent: no
+/// Traditional UI catalog ships.
 fn locale_code(language: &str) -> Option<&'static str> {
     match language {
         "Spanish" => Some("es"),
@@ -410,6 +421,7 @@ fn locale_code(language: &str) -> Option<&'static str> {
         "Italian" => Some("it"),
         "Japanese" => Some("ja"),
         "Portuguese (Brazil)" => Some("pt"),
+        "Chinese Simplified" => Some("zh"),
         _ => None,
     }
 }
@@ -2177,6 +2189,50 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The locale map is duplicated by necessity — this process cannot read the
+    /// shell script, and the shell script cannot read this — so the contract has
+    /// to be pinned on both sides rather than left to a comment.
+    ///
+    /// `scripts/gen-scryfall-locale-images.sh` mirrors this list as `LOCALE_MAP`
+    /// and carries the matching assertion for the codes it can see. The failure
+    /// this prevents is asymmetric and silent: a locale present here but not
+    /// there ships Chinese card *text* with English card *art* for the same card,
+    /// because the two halves are fetched from different files.
+    #[test]
+    fn locale_code_covers_exactly_the_shipped_card_content_locales() {
+        let mapped: Vec<&str> = [
+            "Spanish",
+            "French",
+            "German",
+            "Italian",
+            "Japanese",
+            "Portuguese (Brazil)",
+            "Chinese Simplified",
+        ]
+        .into_iter()
+        .filter_map(locale_code)
+        .collect();
+
+        assert_eq!(
+            mapped,
+            vec!["es", "fr", "de", "it", "ja", "pt", "zh"],
+            "locale_code must map exactly the locales the image map also serves"
+        );
+    }
+
+    /// Wizards stopped printing Simplified Chinese cards at Bloomburrow, so the
+    /// corpus ends there. Pinning the reason keeps a future reader from treating
+    /// the missing recent sets as a bug in this mapping.
+    #[test]
+    fn traditional_chinese_is_not_mapped_because_no_traditional_ui_catalog_ships() {
+        assert_eq!(locale_code("Chinese Traditional"), None);
+        // Polish is the other deliberate absence: MTGJSON carries zero Polish
+        // foreignData records and Scryfall rejects `lang:pl` outright.
+        assert_eq!(locale_code("Polish"), None);
+        assert_eq!(locale_code("Russian"), None);
+        assert_eq!(locale_code("Korean"), None);
+    }
 
     #[test]
     fn parser_trace_args_require_a_complete_unique_pair() {

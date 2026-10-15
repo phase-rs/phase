@@ -19,7 +19,7 @@
 //! token apply path (`token_copy::drive_copy_token_batches`) so the replacement
 //! pipeline and token construction are never duplicated.
 
-use crate::game::effects::token::resolve_token_owner;
+use crate::game::effects::token::{no_token, resolve_token_owner};
 use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
 use crate::game::game_object::DisplaySource;
@@ -33,6 +33,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::PendingCopyTokenBatch;
+use crate::types::game_state::RandomDraw;
 use crate::types::mana::ManaCost;
 use crate::types::proposed_event::CopyTokenSpec;
 use rand::Rng;
@@ -100,7 +101,10 @@ pub fn resolve(
             if candidates == 0 {
                 return no_token(state, ability, events);
             }
-            let index = state.rng.random_range(0..candidates);
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..candidates);
             db.faces_in_scan_order()
                 .filter(eligible)
                 .nth(index)
@@ -129,7 +133,9 @@ pub fn resolve(
     // change: loop the step-5 draw `count` times, consuming `state.rng` in
     // order for determinism, and enqueue one `PendingCopyTokenBatch { count: 1 }`
     // per pick.
-    let token_owner = resolve_token_owner(state, ability, &owner_filter);
+    let Some(token_owner) = resolve_token_owner(state, ability, &owner_filter) else {
+        return no_token(state, ability, events);
+    };
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
 
     // 8. Emit the copy through the SHARED replacement + apply path. The drain
@@ -164,24 +170,6 @@ pub fn resolve(
         events,
     );
 
-    Ok(())
-}
-
-/// CR 609.3 "do as much as possible": resolve without creating a token.
-///
-/// Shared by every branch that finds nothing to copy so they emit an identical
-/// `EffectResolved` and clear `last_created_token_ids` the same way.
-fn no_token(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    state.last_created_token_ids = Vec::new();
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
     Ok(())
 }
 

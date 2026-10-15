@@ -60,6 +60,8 @@ fn retains_variable_x(value: &Value) -> bool {
 struct Parsed {
     tree: Value,
     has_where_x_gap: bool,
+    /// The first trigger's own effect is an `Unimplemented` gap, whatever its name.
+    trigger_effect_is_gap: bool,
 }
 
 fn parse(oracle: &str, name: &str, types: &[&str]) -> Parsed {
@@ -79,9 +81,11 @@ fn parse(oracle: &str, name: &str, types: &[&str]) -> Parsed {
         }
     }
     let has_where_x_gap = gap(&tree);
+    let trigger_effect_is_gap = tree["triggers"][0]["execute"]["effect"]["type"] == "Unimplemented";
     Parsed {
         tree,
         has_where_x_gap,
+        trigger_effect_is_gap,
     }
 }
 
@@ -159,8 +163,11 @@ fn constraint_tail_placeholder_bind_survives_the_totality_guard() {
 // THE GUARD ITSELF — an X that cannot be bound must RED, never fabricate.
 // ---------------------------------------------------------------------------
 
-/// CR 107.3c — the guard's positive witness: a where-X definition the parser cannot
-/// REPRESENT must red, never fabricate.
+/// CR 107.3c — an unrepresentable where-X reds (now at the count entry): a where-X
+/// definition the parser cannot REPRESENT must red, never fabricate. The where-X lowering
+/// guard's own positive witnesses are
+/// `oracle_effect/tests.rs::exile_from_top_until_with_an_unrepresentable_x_is_a_gap` and
+/// `oracle_effect/reveal_this_way_tests.rs::kami_war_o_kagachi_where_x_has_no_proven_producer`.
 ///
 /// HISTORY, so this pin is not misread: it originally asserted that `Effect::Surveil` was
 /// one of the unenumerated `QuantityExpr` carriers, and that the red came from the
@@ -171,7 +178,9 @@ fn constraint_tail_placeholder_bind_survives_the_totality_guard() {
 /// The invariant being pinned is therefore "an unrepresentable where-X reds", NOT "an
 /// unenumerated variant reds" — enumeration is necessary but not sufficient for green, and
 /// pinning the transient marker rather than the invariant would have let this test keep
-/// passing while quietly meaning something else.
+/// passing while quietly meaning something else. The gap now comes from the count
+/// entry's where-X binder (`oracle_util::parse_count_slot`), ahead of the lowering pass,
+/// so the assertion keys on the trigger's own effect being a gap, not on its name.
 #[test]
 fn unrepresentable_where_x_expression_reds_instead_of_fabricating() {
     let parsed = parse(
@@ -182,9 +191,9 @@ fn unrepresentable_where_x_expression_reds_instead_of_fabricating() {
     );
 
     assert!(
-        parsed.has_where_x_gap,
+        parsed.trigger_effect_is_gap,
         "CR 107.3c: 'the number of opponents being attacked' is not a representable quantity, \
-         so the where-X slot cannot be bound and the totality guard must report the gap. \
+         so the where-X slot cannot be bound and the attack trigger's effect must be a gap. \
          Leaving Variable(\"X\") here surveils 0 at runtime while rendering as fully supported \
          — a fabrication invisible to both the red-count ledger and the zero-raw-text \
          invariant. Tree: {:?}",
@@ -214,7 +223,7 @@ fn unrepresentable_where_x_expression_reds_instead_of_fabricating() {
         &["Creature"],
     );
     assert!(
-        !representable.has_where_x_gap,
+        !representable.has_where_x_gap && !representable.trigger_effect_is_gap,
         "control: a REPRESENTABLE where-X expression on the same effect must bind green. A gap \
          here means the guard is redding every where-X face wholesale, so the red above proves \
          nothing about expression coverage. Tree: {:?}",

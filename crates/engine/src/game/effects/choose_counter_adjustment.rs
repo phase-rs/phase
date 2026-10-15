@@ -136,6 +136,7 @@ pub fn resolve(
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches,
+            villainous: false,
         },
         vec![TargetRef::Object(target_id)],
         ability.source_id,

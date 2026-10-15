@@ -27,11 +27,13 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
-import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
+import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeck, touchDeckPlayed } from "../constants/storage";
+import { formatSuppliesDeck } from "../data/formatRegistry";
+import { DEFAULT_PILE_SOURCE, pileSeatDeck, pileSourceParam } from "../services/pileSource";
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
-import { expandParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import {
   classifyCompatResult,
@@ -79,6 +81,11 @@ const BUILD_UPDATE_DEADLINE_MS = 15_000;
 type BuildUpdateDialog =
   | { status: "updating" }
   | { status: "manual"; link: ActionableBotLink; arrival: number };
+
+/** The player builds no deck for this format (engine-fixed or host-supplied pile). */
+function isSuppliedFormat(format: GameFormat | undefined): boolean {
+  return format !== undefined && formatSuppliesDeck(format);
+}
 
 function parseViewParam(value: string | null): MultiplayerView {
   if (value === "host-setup" || value === "deck-select") return value;
@@ -253,6 +260,8 @@ function MultiplayerPageContent({
   const compatibilityPlayerCount = useMultiplayerStore(
     (s) => s.compatibilityPlayerCount,
   );
+  // The host-setup form's pile picker is the deck control for a supplied-deck format.
+  const hostFormatSupplied = isSuppliedFormat(storeFormatConfig?.format);
   // Live deck-vs-format compatibility state, rendered as a chip under the
   // Active Deck banner on host-setup. `idle` suppresses the chip entirely
   // (no deck, no format, or not on host-setup). Evaluation runs through
@@ -275,17 +284,23 @@ function MultiplayerPageContent({
       server?: string;
     } | null;
     if (!state?.deckRejected) return;
-    showToast(state.reason ?? t("page.deckRejected"));
-    setPendingAction({
+    const action: PendingAction = {
       type: "join",
       code: state.joinCode ?? "",
       format: (state.format as GameFormat) ?? undefined,
       origin:
         (typeof state.server === "string" ? adHocLobbySource(state.server) : null)
         ?? hostingLobbySource(useMultiplayerStore.getState()),
-    });
-    setView("deck-select");
+    };
     navigate(location.pathname, { replace: true, state: null });
+    // A supplied-deck format takes the empty submission, so a rejected join re-dials with it.
+    if (isSuppliedFormat(action.format)) {
+      void executeAction(action);
+      return;
+    }
+    showToast(state.reason ?? t("page.deckRejected"));
+    setPendingAction(action);
+    setView("deck-select");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Guarantee a lobby anchor. The lobby browses, joins and spectates through
@@ -326,7 +341,7 @@ function MultiplayerPageContent({
       return;
     }
     const format = storeFormatConfig?.format;
-    if (!format) {
+    if (!format || isSuppliedFormat(format)) {
       setLiveCheck({ status: "idle" });
       return;
     }
@@ -437,6 +452,17 @@ function MultiplayerPageContent({
     return expandParsedDeck(deck);
   }, []);
 
+  // A supplied-deck format never reads the active deck: the host submits the pile seat's deck.
+  const hostDeck = useCallback(
+    (settings: HostSettings) => {
+      const format = settings.formatConfig.format;
+      return formatSuppliesDeck(format)
+        ? pileSeatDeck(format, settings.pile ?? DEFAULT_PILE_SOURCE)
+        : Promise.resolve(expandDeck());
+    },
+    [expandDeck],
+  );
+
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
   const lookupJoinTargetFromStore = useMultiplayerStore((s) => s.lookupJoinTarget);
 
@@ -520,6 +546,16 @@ function MultiplayerPageContent({
     [refreshToLatestBuild, resolveGuestFromStore, showToast, t],
   );
 
+  const navigateDirectP2PJoin = useCallback(
+    (roomCode: string, format?: GameFormat) => {
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      const formatParam = format ? `&format=${encodeURIComponent(format)}` : "";
+      navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}${formatParam}`);
+    },
+    [navigate],
+  );
+
   // Declared above `executeAction` so the deck-select → re-dispatch
   // path can route LobbyOnly joins through the broker too.
   const joinP2PRoom = useCallback(
@@ -527,18 +563,17 @@ function MultiplayerPageContent({
       code: string,
       origin: LobbySource,
       initialPassword?: string,
+      format?: GameFormat,
     ): Promise<boolean> => {
       const roomCode = await resolveP2PDialTarget(code, origin, initialPassword);
       if (roomCode === null) return false;
-      const gameId = crypto.randomUUID();
-      useGameStore.setState({ gameId });
-      navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
+      navigateDirectP2PJoin(roomCode, format);
       return true;
     },
-    [navigate, resolveP2PDialTarget],
+    [navigateDirectP2PJoin, resolveP2PDialTarget],
   );
 
-  // Execute a pending action (host or join) with the currently active deck.
+  // Execute a pending action (host or join) with the active deck, or with none for a supplied-deck format.
   //
   // Before routing, we validate the active deck against the chosen format
   // via the engine's `evaluateDeckCompatibility` (the only authority on
@@ -548,38 +583,20 @@ function MultiplayerPageContent({
   // side after the room is already open.
   const executeAction = useCallback(
     async (action: PendingAction): Promise<boolean> => {
-      const deckName = localStorage.getItem(ACTIVE_DECK_KEY);
-      if (!deckName) {
-        showToast(t("page.selectDeckFirst"));
-        return false;
-      }
-
-      const parsedDeck = loadActiveDeck();
-      if (!parsedDeck) {
-        showToast(t("page.couldNotLoadDeck"));
-        return false;
-      }
-
       const validationFormat: GameFormat | undefined =
         action.type === "host"
           ? action.settings.formatConfig.format
           : action.format;
-
-      if (validationFormat) {
+      const supplied = isSuppliedFormat(validationFormat);
+      const checkDeck = async (deck: ParsedDeck, format: GameFormat): Promise<string | null | false> => {
         try {
-          const compat = await evaluateDeckCompatibility(parsedDeck, {
-            selectedFormat: validationFormat,
+          const compat = await evaluateDeckCompatibility(deck, {
+            selectedFormat: format,
             playerCount: action.type === "host" ? action.settings.formatConfig.max_players : undefined,
           });
-          if (compat.selected_format_compatible === false) {
-            const reason =
-              compat.selected_format_reasons[0]
-              ?? t("page.deckNotLegal", { format: validationFormat });
-            showToast(reason);
-            setPendingAction(action);
-            setView("deck-select");
-            return false;
-          }
+          return compat.selected_format_compatible === false
+            ? (compat.selected_format_reasons[0] ?? t("page.deckNotLegal", { format }))
+            : null;
         } catch (err) {
           showToast(
             err instanceof Error
@@ -588,12 +605,48 @@ function MultiplayerPageContent({
           );
           return false;
         }
+      };
+
+      if (!supplied) {
+        const deckName = localStorage.getItem(ACTIVE_DECK_KEY);
+        if (!deckName) {
+          showToast(t("page.selectDeckFirst"));
+          return false;
+        }
+
+        const parsedDeck = loadActiveDeck();
+        if (!parsedDeck) {
+          showToast(t("page.couldNotLoadDeck"));
+          return false;
+        }
+
+        if (validationFormat) {
+          const refusal = await checkDeck(parsedDeck, validationFormat);
+          if (refusal === false) return false;
+          if (refusal !== null) {
+            showToast(refusal);
+            setPendingAction(action);
+            setView("deck-select");
+            return false;
+          }
+        }
+
+        void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, deckName), "run-unguarded");
+      } else if (action.type === "host" && action.settings.pile?.type === "SavedDeck") {
+        // An unreadable pile is not checked here; the host-deck read below reports it.
+        const pile = loadSavedDeck(action.settings.pile.name);
+        if (pile) {
+          const refusal = await checkDeck(pile, action.settings.formatConfig.format);
+          if (refusal === false) return false;
+          if (refusal !== null) {
+            showToast(refusal);
+            return false;
+          }
+        }
       }
 
-      void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, deckName), "run-unguarded");
-
       if (action.type === "host") {
-        const deck = expandDeck();
+        const deck = await hostDeck(action.settings);
         if (!deck) {
           showToast(t("page.couldNotLoadDeck"));
           return false;
@@ -624,8 +677,10 @@ function MultiplayerPageContent({
             formatConfig: action.settings.formatConfig,
           });
           useGameStore.setState({ gameId });
+          const pileName = action.settings.pile ? pileSourceParam(action.settings.pile) : null;
+          const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";
           navigate(
-            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}&source=multiplayer`,
+            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}&source=multiplayer${pileParam}`,
           );
           return true;
         }
@@ -678,16 +733,16 @@ function MultiplayerPageContent({
         }
       } else {
         const { code, password, context, origin } = action;
+        // The room's format rides a supplied-deck join so the guest submits nothing.
+        const joinFormat = supplied ? action.format : undefined;
 
         if (origin !== null && (context?.is_p2p === true || action.isP2P === true)) {
-          return joinP2PRoom(code, origin, password);
+          return joinP2PRoom(code, origin, password, joinFormat);
         }
 
         const p2pCode = parseRoomCode(code);
         if (p2pCode && code.trim().length === 5) {
-          const gameId = crypto.randomUUID();
-          useGameStore.setState({ gameId });
-          navigate(`/game/${gameId}?mode=p2p-join&code=${p2pCode}`);
+          navigateDirectP2PJoin(p2pCode, joinFormat);
           return true;
         }
 
@@ -711,22 +766,25 @@ function MultiplayerPageContent({
         if (password) {
           params.set("password", password);
         }
+        if (joinFormat) {
+          params.set("format", joinFormat);
+        }
         navigate(`/game/${gameId}?${params.toString()}`);
       }
 
       return true;
     },
-    [expandDeck, startHosting, startP2PHostingSession, navigate, showToast, joinP2PRoom, t],
+    [hostDeck, startHosting, startP2PHostingSession, navigate, navigateDirectP2PJoin, showToast, joinP2PRoom, t],
   );
 
-  // Host setup complete → execute immediately if deck exists, otherwise prompt
+  // Host setup complete → execute immediately if a deck exists or the format supplies it, otherwise prompt
   const handleHostSetupComplete = useCallback(
     async (settings: HostSettings, serverUrl: string | null): Promise<boolean> => {
       const action: PendingAction = {
         type: "host", settings, serverUrl,
         connectionMode: serverUrl === null ? "p2p" : "server",
       };
-      if (activeDeckName) {
+      if (activeDeckName || isSuppliedFormat(settings.formatConfig.format)) {
         return executeAction(action);
       }
       setPendingAction(action);
@@ -893,6 +951,12 @@ function MultiplayerPageContent({
       // Raw 5-character room codes are direct PeerJS joins with no server
       // metadata to query. Preserve the old flow and skip lookup entirely.
       if (!format && !context && directP2PCode && trimmedCode.length === 5) {
+        // The room's format is unknowable before dialling: a deckless guest dials
+        // with an empty submission and the host's guest gate answers it.
+        if (!activeDeckName) {
+          navigateDirectP2PJoin(directP2PCode);
+          return;
+        }
         setPendingAction({
           type: "join",
           code,
@@ -949,10 +1013,14 @@ function MultiplayerPageContent({
         origin,
         context,
       };
+      if (isSuppliedFormat(action.format)) {
+        void executeAction(action);
+        return;
+      }
       setPendingAction(action);
       setView("deck-select");
     },
-    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
+    [activeDeckName, executeAction, lookupJoinTargetFromStore, handleJoinDraftFromLobby, navigateDirectP2PJoin, showToast, t],
   );
 
   // Guest join from a Discord link. A room the host has not opened yet (or has
@@ -1170,7 +1238,7 @@ function MultiplayerPageContent({
             meaningless at the lobby level because no format is chosen yet;
             joining a table picks the deck against the host's format via
             the deck-select view. */}
-        {view === "host-setup" && activeDeckName && (
+        {view === "host-setup" && !hostFormatSupplied && activeDeckName && (
           <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[10px] border border-white/10 bg-black/20 px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
             <div className="min-w-0">
               <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
@@ -1199,12 +1267,12 @@ function MultiplayerPageContent({
           </div>
         )}
 
-        {view === "host-setup" && activeDeckName && liveCheck.status !== "idle" && (
+        {view === "host-setup" && !hostFormatSupplied && activeDeckName && liveCheck.status !== "idle" && (
           <DeckLegalityChip check={liveCheck} />
         )}
 
         {/* No deck warning — host-setup only, for the same reason as above. */}
-        {view === "host-setup" && !activeDeckName && (
+        {view === "host-setup" && !hostFormatSupplied && !activeDeckName && (
           <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[10px] border border-amber-400/20 bg-amber-500/[0.07] px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
             <span className="text-xs text-amber-200">
               {t("page.noDeckWarning")}
@@ -1331,17 +1399,17 @@ function MultiplayerPageContent({
             const { action } = brokerOfflinePrompt;
             setBrokerOfflinePrompt(null);
             if (action.type === "host") {
-              const deck = expandDeck();
-              if (!deck) {
-                showToast(t("page.couldNotLoadDeck"));
-                return;
-              }
-              void startP2PHostingSession(action.settings, deck, {
-                brokerUrl: null,
-                roomName: action.settings.roomName,
-              }).then((ok) => {
-                if (ok) navigate("/");
-              });
+              void (async () => {
+                const deck = await hostDeck(action.settings);
+                if (!deck) {
+                  showToast(t("page.couldNotLoadDeck"));
+                  return;
+                }
+                if (await startP2PHostingSession(action.settings, deck, {
+                  brokerUrl: null,
+                  roomName: action.settings.roomName,
+                })) navigate("/");
+              })();
             }
           }}
         />

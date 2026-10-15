@@ -12,8 +12,9 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
 import {
-  playOrCastActionsForObject,
+  isPlayOrCastAction,
   resolveSingleActionDispatch,
+  zoneSurfaceActionsForObject,
 } from "../../viewmodel/cardActionChoice.ts";
 import { isLibraryCardRevealedToViewer, resolvePileSeat } from "../../viewmodel/gameStateView.ts";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
@@ -107,6 +108,9 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   });
   const topCardName = visibleTopObject?.name ?? null;
 
+  const topObject = useGameStore((s) =>
+    topObjectId == null ? undefined : s.gameState?.objects[topObjectId],
+  );
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
@@ -120,17 +124,18 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const isMyLibrary = pileSeat === myPileSeat;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
-  // CR 401.5 + CR 118.9 + CR 305.9: cast/play-action surfacing is engine-
-  // authoritative — the entry exists in `legalActionsByObject` only when the
-  // engine has already validated the TopOfLibraryCastPermission filter, mana,
-  // timing, and (for `PlayLand`) the land-drop slot. The frontend renders
-  // the reported actions, never computes them. Future Sight / Bolas's
-  // Citadel / Magus of the Future surface `PlayLand` here; Mystic Forge /
-  // Realmwalker surface the `CastSpell` family.
+  // CR 401.5 + CR 118.9 + CR 305.9 + CR 702.170f: top-card action surfacing
+  // is engine-authoritative — the entry exists in `legalActionsByObject` only
+  // when the engine has already validated the permission filter, mana, timing,
+  // and (for `PlayLand`) the land-drop slot. The frontend renders the reported
+  // actions, never computes them. Future Sight / Bolas's Citadel / Magus of
+  // the Future surface `PlayLand` here; Mystic Forge / Realmwalker surface the
+  // `CastSpell` family; Fblthp, Lost on the Range surfaces the plot
+  // `ActivateAbility`.
   const playActions = useMemo(() => {
     if (!isMyLibrary || !hasPriority || topObjectId == null) return [];
-    return playOrCastActionsForObject(legalActionsByObject, topObjectId);
-  }, [isMyLibrary, hasPriority, topObjectId, legalActionsByObject]);
+    return zoneSurfaceActionsForObject(legalActionsByObject, topObject, topObjectId);
+  }, [isMyLibrary, hasPriority, topObject, topObjectId, legalActionsByObject]);
 
   const canPlay = playActions.length > 0;
 
@@ -138,13 +143,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     if (playActions.length === 0 || topObjectId == null) return;
     // #506: one authority for the lone-action decision. Multiple options (e.g.
     // cast normal + alt-cost) defer to the shared ability-choice modal.
-    const auto = resolveSingleActionDispatch(
-      playActions,
-      useGameStore.getState().gameState?.objects[topObjectId],
-    );
+    const auto = resolveSingleActionDispatch(playActions, topObject);
     if (auto) void dispatchAction(auto);
     else setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
-  }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
+  }, [playActions, topObject, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
   if (count === 0) return null;
 
@@ -159,7 +161,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const topHoverProps =
     isPeeking && topObjectId != null ? hoverProps(topObjectId as ObjectId) : undefined;
   const libraryLabel = t("zone.libraryCount", { count });
-  const playLabel = t("zone.playFromTop", { name: topCardName ?? t("zone.topOfLibrary") });
+  const playLabel = t(
+    playActions.every(isPlayOrCastAction) ? "zone.playFromTop" : "zone.activateFromTop",
+    { name: topCardName ?? t("zone.topOfLibrary") },
+  );
   const w = size?.width ?? "var(--card-w)";
   const h = size?.height ?? "var(--card-h)";
 

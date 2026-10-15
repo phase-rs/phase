@@ -439,6 +439,7 @@ fn life_loss_rider() -> ReplacementDefinition {
                         player: TargetFilter::Controller,
                     },
                 )],
+                villainous: false,
             },
         ))
 }

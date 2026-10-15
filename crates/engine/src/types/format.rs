@@ -144,8 +144,9 @@ pub enum GameFormat {
     /// pool, there is no ban list, no copy limit and no main-deck minimum.
     /// Two commanders only where partner families admit the pair.
     FreeformCommander,
-    /// Dandân (Secret Lair Dandân): two players draw from one fixed 80-card pile and
-    /// share one graveyard, in a best-of-one match. It departs from CR 400.1
+    /// Dandân (Secret Lair Dandân): two players draw from one 80-card pile (the
+    /// Secret Lair list by default, host-supplied otherwise) and share one
+    /// graveyard, in a best-of-one match. It departs from CR 400.1
     /// (shared library and graveyard), CR 108.3 / CR 110.2 (a card's owner is the
     /// player who took it into their hand), CR 121.2c (simultaneous draws are dealt
     /// one card at a time) and CR 103.5 (a free mulligan by revealing a hand); its
@@ -600,14 +601,26 @@ pub enum FreeRevealMulligan {
     },
 }
 
-/// CR 108.3 / CR 110.2 / CR 400.3: who owns a card that enters a hand from a
-/// shared zone.
+/// CR 108.3 / CR 110.2 / CR 400.3: who owns a card a player takes into hand
+/// from a shared zone, casts, or plays as a land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandEntryOwnership {
+pub enum EntryOwnership {
     /// CR 108.3 / CR 400.3: the card keeps its owner.
     OwnerKept,
-    /// The player whose hand the card enters becomes its owner.
-    ReceiverOwns,
+    /// The player who takes, casts, or plays the card becomes its owner.
+    ActorOwns,
+}
+
+/// Who supplies a format's deck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeckSupply {
+    /// Each player builds or selects their own deck.
+    PlayerBuilt,
+    /// The engine supplies one fixed deck; a player submits nothing.
+    EngineFixed,
+    /// One pile is played; the host may submit it, and an empty submission
+    /// plays the engine's default pile.
+    HostPile,
 }
 
 /// Whether a mulligan changes anything.
@@ -729,10 +742,10 @@ pub struct FormatConfig {
     /// re-list commander-style formats client-side.
     pub uses_commander: bool,
     /// Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`):
-    /// true when the format's deck is fixed and supplied automatically by the
-    /// engine, so the player builds/selects nothing. True only for Momir's
-    /// Madness. The frontend consumes this directly to bypass deck-selection
-    /// gates — it must never re-list fixed-deck formats client-side.
+    /// true when the engine supplies the format's deck or a default for it, so
+    /// the player builds nothing (Momir's Madness, Dandân). The frontend
+    /// consumes this directly to bypass deck-selection gates — it must never
+    /// re-list such formats client-side.
     #[serde(default)]
     pub supplies_fixed_deck: bool,
     /// Engine-derived, stored per-format sideboard policy (CR 100.4/100.4a).
@@ -1885,7 +1898,7 @@ impl GameFormat {
             // CR 103.5c's Brawl clause nor the Commander Rules Committee's
             // supplementary rule.
             | GameFormat::Freeform => false,
-            // Exhaustive rather than `matches!`, matching `supplies_fixed_deck`'s
+            // Exhaustive rather than `matches!`, matching `deck_supply`'s
             // and `has_unrepresentable_auxiliary_deck_component`'s style: a
             // future built-in must force a deliberate `true`/`false` choice
             // here.
@@ -2044,17 +2057,22 @@ impl GameFormat {
         }
     }
 
-    /// Whether this format's deck is fixed by the format rules and supplied
-    /// automatically by the engine — the player never builds or selects one.
-    /// True for Momir's Madness, whose deck is the fixed 60-card snow-basic
-    /// list (`deck_loading::momir_fixed_deck_names`), and for Dandân, whose 80-card
-    /// pile is fixed by the format; `load_and_hydrate_decks` synthesizes Momir's
-    /// for every seat. The frontend consumes the derived
+    /// Whether the engine supplies this format's deck or a default for it, so
+    /// the player builds no deck. The frontend consumes the derived
     /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
-    /// and must never re-list fixed-deck formats client-side.
+    /// and must never re-list such formats client-side.
     pub fn supplies_fixed_deck(self) -> bool {
+        self.deck_supply() != DeckSupply::PlayerBuilt
+    }
+
+    /// Who supplies this format's deck: Momir's Madness loads the fixed 60-card
+    /// snow-basic list (`deck_loading::momir_fixed_deck_names`) for every seat,
+    /// and Dandân plays one 80-card pile, the host's submission or the default
+    /// list (`deck_loading::dandan_default_pile_names`).
+    pub fn deck_supply(self) -> DeckSupply {
         match self {
-            GameFormat::Momir | GameFormat::Dandan => true,
+            GameFormat::Momir => DeckSupply::EngineFixed,
+            GameFormat::Dandan => DeckSupply::HostPile,
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Commander
@@ -2080,11 +2098,11 @@ impl GameFormat {
             // CR 903.13e: the drafted cards become the player's card pool and
             // they build a deck from it, so the engine supplies nothing.
             | GameFormat::CommanderDraft
-            | GameFormat::Planechase => false,
-            // No custom-format use case for an engine-supplied fixed deck
-            // exists today — a real one would need its own design, analogous
-            // to Momir's Madness.
-            GameFormat::Custom(_) => false,
+            | GameFormat::Planechase => DeckSupply::PlayerBuilt,
+            // No custom-format use case for an engine-supplied deck exists
+            // today — a real one would need its own design, analogous to
+            // Momir's Madness.
+            GameFormat::Custom(_) => DeckSupply::PlayerBuilt,
         }
     }
 
@@ -2137,7 +2155,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander => false,
-            // Exhaustive rather than `matches!`, matching `supplies_fixed_deck`'s
+            // Exhaustive rather than `matches!`, matching `deck_supply`'s
             // style: a future built-in that grants its own deck_loading.rs
             // auxiliary component must force a deliberate `true`/`false` choice
             // here, not silently default to unrepresented. No custom-format use
@@ -2251,11 +2269,11 @@ impl GameFormat {
         }
     }
 
-    /// CR 108.3 / CR 110.2 / CR 400.3: who owns a card that enters a hand from
-    /// a shared zone.
-    pub fn hand_entry_ownership(self) -> HandEntryOwnership {
+    /// CR 108.3 / CR 110.2 / CR 400.3: who owns a card a player takes into
+    /// hand from a shared zone, casts, or plays as a land.
+    pub fn entry_ownership(self) -> EntryOwnership {
         match self {
-            GameFormat::Dandan => HandEntryOwnership::ReceiverOwns,
+            GameFormat::Dandan => EntryOwnership::ActorOwns,
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Commander
@@ -2281,7 +2299,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander
-            | GameFormat::Custom(_) => HandEntryOwnership::OwnerKept,
+            | GameFormat::Custom(_) => EntryOwnership::OwnerKept,
         }
     }
 
@@ -3312,8 +3330,9 @@ impl FormatConfig {
         }
     }
 
-    /// Dandân: a fixed 80-card pile, 20 life (CR 103.4), two players, no
-    /// sideboard and no command zone.
+    /// Dandân: one 80-card pile, the Secret Lair list by default and
+    /// host-supplied otherwise, 20 life (CR 103.4), two players, no sideboard
+    /// and no command zone.
     pub fn dandan() -> Self {
         FormatConfig {
             format: GameFormat::Dandan,
@@ -5420,16 +5439,13 @@ mod tests {
             }
         );
 
-        let (deviating, stock_count) = splits(
-            &all,
-            GameFormat::hand_entry_ownership,
-            HandEntryOwnership::OwnerKept,
-        );
+        let (deviating, stock_count) =
+            splits(&all, GameFormat::entry_ownership, EntryOwnership::OwnerKept);
         assert_eq!(deviating, only_dandan);
         assert!(stock_count > 0);
         assert_eq!(
-            GameFormat::Dandan.hand_entry_ownership(),
-            HandEntryOwnership::ReceiverOwns
+            GameFormat::Dandan.entry_ownership(),
+            EntryOwnership::ActorOwns
         );
 
         let (deviating, stock_count) = splits(

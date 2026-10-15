@@ -925,7 +925,7 @@ fn cast_strive_modal(body: &str, generic: usize) -> (usize, Zone, i32, i64) {
         .resolve();
     let state = outcome.state();
     (
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         state.objects[&creature].zone,
         state.players[1].life - life_before,
         outcome.hand_drawn(P0),

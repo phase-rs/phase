@@ -704,22 +704,29 @@ fn x_mana_unsupported_siblings_refuse_before_count_payment() {
             vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
         );
         let mut runner = scenario.build();
-        runner
-            .act(GameAction::ActivateAbility {
-                source_id: source,
-                ability_index: 0,
-            })
-            .unwrap();
-        assert!(matches!(
-            runner
-                .state()
-                .pending_cast
-                .as_ref()
-                .unwrap()
-                .activation_residual,
-            ActivationResidual::XMana
-        ));
-        assert_x_guard_refuses(&mut runner, label);
+        // CR 118.3 + CR 601.2h: an unmodeled sacrifice sibling that competes
+        // with the fixed creature leg for the same creatures fails closed at
+        // the activation gate, before the X guard is reached.
+        let overlaps_count_leg = matches!(label, "unbounded sacrifice" | "unresolved choice");
+        let started = runner.act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        });
+        if overlaps_count_leg {
+            assert!(started.is_err(), "{label}");
+        } else {
+            started.unwrap();
+            assert!(matches!(
+                runner
+                    .state()
+                    .pending_cast
+                    .as_ref()
+                    .unwrap()
+                    .activation_residual,
+                ActivationResidual::XMana
+            ));
+            assert_x_guard_refuses(&mut runner, label);
+        }
         assert!(runner.state().stack.is_empty(), "{label}");
         assert_eq!(
             runner.state().objects[&source].zone,
@@ -1615,26 +1622,34 @@ fn x_mana_mixed_requirement_life_tap_and_exile_shapes_refuse_atomically() {
                     vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
                 );
                 let mut runner = scenario.build();
-                runner
-                    .act(GameAction::ActivateAbility {
-                        source_id: source,
-                        ability_index: 0,
-                    })
-                    .unwrap();
-                assert!(
-                    matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
-                    "{label}/{reversed}/{nested}"
-                );
-                assert!(matches!(
-                    runner
-                        .state()
-                        .pending_cast
-                        .as_ref()
-                        .unwrap()
-                        .activation_residual,
-                    ActivationResidual::XMana
-                ));
-                assert_x_guard_refuses(&mut runner, &format!("{label}/{reversed}/{nested}"));
+                // CR 118.3 + CR 601.2h: an unmodeled sacrifice sibling that
+                // competes with the fixed creature leg fails closed at the
+                // activation gate, before the X guard is reached.
+                let overlaps_count_leg =
+                    matches!(label, "unbounded sacrifice" | "aggregate sacrifice");
+                let started = runner.act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                });
+                if overlaps_count_leg {
+                    assert!(started.is_err(), "{label}/{reversed}/{nested}");
+                } else {
+                    started.unwrap();
+                    assert!(
+                        matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
+                        "{label}/{reversed}/{nested}"
+                    );
+                    assert!(matches!(
+                        runner
+                            .state()
+                            .pending_cast
+                            .as_ref()
+                            .unwrap()
+                            .activation_residual,
+                        ActivationResidual::XMana
+                    ));
+                    assert_x_guard_refuses(&mut runner, &format!("{label}/{reversed}/{nested}"));
+                }
                 assert!(
                     runner.state().stack.is_empty(),
                     "{label}/{reversed}/{nested}"

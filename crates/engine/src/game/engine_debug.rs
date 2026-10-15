@@ -907,6 +907,7 @@ fn enter_battlefield_with_etb(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
+        enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
         applied: HashSet::new(),
@@ -1795,8 +1796,7 @@ mod tests {
 
         let ids: Vec<u64> = state.players[0]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .map(|u| u.pip_id.0)
             .collect();
         assert_eq!(ids.len(), 3, "three AddMana entries → three pool units");

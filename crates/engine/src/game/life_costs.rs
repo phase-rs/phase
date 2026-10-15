@@ -269,6 +269,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                villainous: false,
             },
         );
         state

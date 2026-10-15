@@ -56,10 +56,10 @@ pub(crate) enum DocumentRelationIr {
     },
     /// CR 102.1 + CR 608.2c: A mass-`MustAttack` coerce clause over
     /// the active player (`coerce`, Siren's Call) pairs with a sibling delayed
-    /// punisher (`punisher`) whose "that player controls" anaphor defaulted to
-    /// `You`. Applying the relation rebinds the punisher's destroyed-set
-    /// controller to the active player (and folds the CR 302.6 / CR 508.1a
-    /// continuous-control exemption sibling into the set predicate).
+    /// punisher (`punisher`) whose "that player controls" anaphor the coerce
+    /// clause's document antecedent bound to `ActivePlayer` at parse time.
+    /// Applying the relation folds the CR 302.6 / CR 508.1a continuous-control
+    /// exemption sibling into the punisher's destroyed-set predicate.
     ActivePlayerPunisher {
         coerce: OracleItemId,
         punisher: OracleItemId,

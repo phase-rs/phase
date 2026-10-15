@@ -586,9 +586,6 @@
     "pendingCheaper": "A próxima mágica custa {{amount}} a menos",
     "companion": "Companheiro",
     "unboundedTooltip": "{{resource}} ilimitado (∞)",
-    "unboundedScheduledTooltip": "{{resource}} ilimitado (∞) — colapso pendente; será escolhida uma quantidade finita",
-    "unboundedScheduledYouTooltip": "{{resource}} ilimitado (∞) — colapso pendente; você indicará a quantidade",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "{{resource}} ilimitado (∞) — colapso pendente; isto pode continuar ilimitado",
     "unboundedConditionalYouTooltip": "{{resource}} ilimitado (∞) — colapso pendente; isto pode continuar ilimitado e, caso contrário, você indicará a quantidade",
     "unboundedMixedTooltip": "{{resource}} ilimitado (∞) — parte deste grupo tem um colapso pendente; parte continua ilimitada",
@@ -671,6 +668,7 @@
     "libraryCount_one": "Grimório ({{count}} carta)",
     "libraryCount_other": "Grimório ({{count}} cartas)",
     "playFromTop": "Jogue {{name}} do topo do grimório",
+    "activateFromTop": "Ative {{name}} do topo do grimório",
     "topOfLibrary": "topo do grimório",
     "indicatorOpponentPrefix": "Op ",
     "graveyardLower": "cemitério",
@@ -678,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Nenhuma carta em {{zone}}",
     "castFromZone": "Conjurar de {{zone}}: {{name}}",
+    "activateFromZone": "Ativar de {{zone}}: {{name}}",
     "viewCount": "Ver {{count}}",
     "castableCount": "{{zone}} — {{count}} conjuráveis"
   },
@@ -898,6 +897,7 @@
     },
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
+    "keepCurrentTarget": "Manter Este Alvo",
     "skip": "Pular",
     "opponentChoice": "(à escolha do oponente)",
     "chooseNewTarget": "Escolha o novo alvo da mágica",
@@ -2407,7 +2407,8 @@
     "confirm": "Confirmar",
     "badgeNewTarget": "Novo alvo",
     "slotLabel": "Alvo {{index}}: {{current}} → {{chosen}}",
-    "unselected": "inalterado"
+    "unselected": "inalterado",
+    "keep": "Manter"
   },
   "separatePiles": {
     "chooserName": "Jogador {{number}}",

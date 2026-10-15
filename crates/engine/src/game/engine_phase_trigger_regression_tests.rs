@@ -864,7 +864,7 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         "paying {{1}} must place one +1/+1 counter on the lone Shrine"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "the {{1}} must actually be paid on accept"
     );
@@ -3142,6 +3142,7 @@ fn choose_one_of_enters_branch_choice_state() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![draw_ability(1), draw_ability(2)],
+            villainous: false,
         },
         vec![],
         source_id,
@@ -3186,7 +3187,7 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         source_id,
         branches: vec![branch_gain, branch_lose],
         branch_descriptions: vec!["Gain 3 life.".to_string(), "Lose 3 life.".to_string()],
-        parent_targets: vec![],
+        parent_occurrences: Default::default(),
         context: Default::default(),
         continuation: None,
         replacement_applied: Default::default(),
@@ -3225,6 +3226,7 @@ fn choose_one_of_each_opponent_prompts_apnap_and_branch_targets_faced_player() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![branch_target_player_loses_life.clone(), draw_ability(1)],
+            villainous: false,
         },
         vec![],
         source_id,
@@ -3318,6 +3320,7 @@ fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, draw_ability(1)],
+            villainous: false,
         },
         vec![],
         source_id,
@@ -3382,6 +3385,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, token_branch],
+            villainous: false,
         },
         vec![],
         source_id,
@@ -3624,7 +3628,8 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-    assert!(state.battlefield.contains(&siege_id));
+    // CR 614.12a: the anchor word is chosen before the Siege enters.
+    assert!(!state.battlefield.contains(&siege_id));
     match resolve.waiting_for {
         WaitingFor::NamedChoice {
             free_entry: None,
@@ -3637,7 +3642,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
             assert_eq!(source.prompt.identity.reference.object_id, siege_id);
             assert_eq!(
                 source.binding,
-                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
             );
             assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
         }
@@ -3652,6 +3657,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     )
     .unwrap();
 
+    assert!(state.battlefield.contains(&siege_id));
     assert_eq!(state.objects[&siege_id].chosen_label(), Some("Temur"));
 }
 

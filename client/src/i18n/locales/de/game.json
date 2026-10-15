@@ -586,9 +586,6 @@
     "pendingCheaper": "Nächster Zauber kostet {{amount}} weniger",
     "companion": "Gefährte",
     "unboundedTooltip": "Unbegrenzt: {{resource}} (∞)",
-    "unboundedScheduledTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; eine endliche Anzahl wird gewählt",
-    "unboundedScheduledYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; du nennst die Anzahl",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben",
     "unboundedConditionalYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben, und andernfalls nennst du die Anzahl",
     "unboundedMixedTooltip": "Unbegrenzt: {{resource}} (∞) — ein Teil dieser Gruppe hat eine ausstehende Auflösung; ein Teil bleibt unbegrenzt",
@@ -671,6 +668,7 @@
     "libraryCount_one": "Bibliothek ({{count}} Karte)",
     "libraryCount_other": "Bibliothek ({{count}} Karten)",
     "playFromTop": "{{name}} von oben aus der Bibliothek spielen",
+    "activateFromTop": "{{name}} von oben aus der Bibliothek aktivieren",
     "topOfLibrary": "oberste Karte der Bibliothek",
     "indicatorOpponentPrefix": "Geg ",
     "graveyardLower": "Friedhof",
@@ -678,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Keine Karten in {{zone}}",
     "castFromZone": "Aus {{zone}} wirken: {{name}}",
+    "activateFromZone": "Aus {{zone}} aktivieren: {{name}}",
     "viewCount": "{{count}} ansehen",
     "castableCount": "{{zone}} — {{count}} wirkbar"
   },
@@ -898,6 +897,7 @@
     },
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
+    "keepCurrentTarget": "Dieses Ziel behalten",
     "skip": "Überspringen",
     "opponentChoice": "(nach Wahl des Gegners)",
     "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
@@ -2407,7 +2407,8 @@
     "confirm": "Bestätigen",
     "badgeNewTarget": "Neues Ziel",
     "slotLabel": "Ziel {{index}}: {{current}} → {{chosen}}",
-    "unselected": "unverändert"
+    "unselected": "unverändert",
+    "keep": "Behalten"
   },
   "separatePiles": {
     "chooserName": "Spieler {{number}}",

@@ -1571,12 +1571,13 @@ pub struct GameObject {
 
     /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
     /// is exiled instead of being put into its owner's graveyard as it resolves,
-    /// and the resulting exile is recorded as "exiled with" the stored source.
+    /// and the resulting exile is recorded as "exiled with" the stored source
+    /// incarnation, the object whose ability stamped the rider (CR 400.7).
     /// Set by `Effect::ExileResolvingSpellInsteadOfGraveyard` (Rod of
     /// Absorption's "exile it instead of putting it into a graveyard as it
     /// resolves" rider); consumed by the stack-resolution router.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exile_from_stack_linked_source: Option<ObjectId>,
+    pub exile_from_stack_linked_source: Option<ObjectIncarnationRef>,
 
     /// CR 603.7a + CR 614.1a + CR 702.170c: While set alongside the
     /// exile-instead rider, the stack-resolution router applies the "If you do,
@@ -1683,7 +1684,7 @@ pub struct GameObject {
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
-/// (types/game_state.rs) — the §5.2c 137-field partition. `GameObject` deliberately
+/// (types/game_state.rs). `GameObject` deliberately
 /// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
 /// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
 /// destructure: adding a field breaks the build until it is classified into a
@@ -2834,6 +2835,10 @@ impl GameObject {
             mana_value: self.effective_mana_value(),
             controller: self.controller,
             owner: self.owner,
+            arrival: crate::types::game_state::ArrivalIdentity {
+                owner: self.owner,
+                controller: self.controller,
+            },
             from_zone: from,
             cast_from_zone: self.cast_from_zone,
             played_from_zone: self.played_from_zone,
@@ -3628,6 +3633,18 @@ impl GameObject {
         self.mana_spent_source_snapshots.clear();
     }
 
+    /// True when at least one cast-payment stamp holds a non-default value,
+    /// i.e. exactly when [`Self::clear_cast_payment_stamps`] would change this
+    /// object. Sweeps use it to skip objects the clear would not touch; the
+    /// two functions must name the same fields.
+    pub fn has_cast_payment_stamps(&self) -> bool {
+        self.mana_spent_to_cast
+            || self.colors_spent_to_cast != ColoredManaCount::default()
+            || self.mana_spent_to_cast_amount != 0
+            || self.phyrexian_life_paid != 0
+            || !self.mana_spent_source_snapshots.is_empty()
+    }
+
     /// Check if this object has a specific keyword, using discriminant-based matching.
     pub fn has_keyword(&self, keyword: &Keyword) -> bool {
         super::keywords::has_keyword(self, keyword)
@@ -4004,9 +4021,10 @@ impl GameObject {
         }
     }
 
-    /// CR 702.66a: Delve may exile only a card from its owner's graveyard.
-    pub fn is_delve_eligible(&self, player: PlayerId) -> bool {
-        self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
+    /// CR 702.66a: Delve may exile only a card from the graveyard the caster reads.
+    pub fn is_delve_eligible(&self, state: &GameState, player: PlayerId) -> bool {
+        state.object_in_players_zone(self, Zone::Graveyard, player)
+            && self.is_represented_by_a_card()
     }
 
     /// CR 714.2: Every chapter number this Saga's chapter abilities are keyed
@@ -4292,6 +4310,65 @@ mod tests {
             });
     }
 
+    /// `has_cast_payment_stamps` is the exact "would change something"
+    /// predicate of `clear_cast_payment_stamps`: true for each stamp field set
+    /// alone, false on a fresh object and after the clear.
+    #[test]
+    fn has_cast_payment_stamps_tracks_every_field_the_clear_resets() {
+        let fresh = || {
+            GameObject::new(
+                ObjectId(1),
+                CardId(1),
+                PlayerId(0),
+                "Stamped".to_string(),
+                Zone::Stack,
+            )
+        };
+        assert!(!fresh().has_cast_payment_stamps());
+
+        /// Sets one payment stamp on an object.
+        type Stamper = fn(&mut GameObject);
+        let stampers: Vec<(&str, Stamper)> = vec![
+            ("mana_spent_to_cast", |obj| obj.mana_spent_to_cast = true),
+            ("colors_spent_to_cast", |obj| {
+                obj.colors_spent_to_cast
+                    .add(crate::types::mana::ManaColor::Green, 1)
+            }),
+            ("mana_spent_to_cast_amount", |obj| {
+                obj.mana_spent_to_cast_amount = 3
+            }),
+            ("phyrexian_life_paid", |obj| obj.phyrexian_life_paid = 2),
+            ("mana_spent_source_snapshots", |obj| {
+                let lki = obj.snapshot_for_mana_spent();
+                obj.mana_spent_source_snapshots.push(
+                    crate::types::game_state::ManaSpentSourceSnapshot {
+                        source_id: obj.id,
+                        lki,
+                    },
+                );
+            }),
+        ];
+        assert_eq!(stampers.len(), 5);
+        for (field, stamp) in stampers {
+            let mut obj = fresh();
+            stamp(&mut obj);
+            assert!(obj.has_cast_payment_stamps(), "{field} alone must count");
+            obj.clear_cast_payment_stamps();
+            assert!(
+                !obj.has_cast_payment_stamps(),
+                "{field} must be reset by the clear"
+            );
+            assert_cast_payment_stamps_default(&obj, field);
+        }
+
+        let mut all = fresh();
+        stamp_cast_payment(&mut all);
+        assert!(all.has_cast_payment_stamps());
+        all.clear_cast_payment_stamps();
+        assert!(!all.has_cast_payment_stamps());
+    }
+
+    /// Asserts every cast-payment stamp of `obj` holds its default value.
     fn assert_cast_payment_stamps_default(obj: &GameObject, context: &str) {
         assert!(!obj.mana_spent_to_cast, "{context}: bool must be default");
         assert!(

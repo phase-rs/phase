@@ -989,6 +989,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -4935,6 +4936,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -7456,8 +7458,7 @@ fn count_mana_added_from(events: &[GameEvent], source: ObjectId) -> usize {
 fn pips_produced_by(state: &GameState, source: ObjectId) -> usize {
     state.players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.source_id == source)
         .count()
 }
@@ -10584,8 +10585,7 @@ impl DelveWitness {
     fn markers(&self) -> Vec<ObjectId> {
         self.runner.state().players[0]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .filter(|unit| unit.is_convoke_payment())
             .map(|unit| unit.source_id)
             .collect()

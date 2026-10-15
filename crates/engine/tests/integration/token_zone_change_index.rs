@@ -1471,7 +1471,12 @@ fn declined_copy_replacement_records_the_token_entry_without_parking_it() {
     // The Embalm token entered under its OWN identity, once per ledger. It is a 0/0 Shapeshifter
     // copy of Vizier with no copy target chosen, so CR 704.5f puts it into the graveyard right
     // after — the ENTRY still happened and is still recorded, which is the point.
-    let entry = runner.state().battlefield_entries_this_turn.to_vec();
+    let entry = runner
+        .state()
+        .battlefield_entries_this_turn
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
         entry.len(),
         1,
@@ -2899,4 +2904,37 @@ fn t8_counter_paused_copy_alone_into_an_empty_ledger_fires_once() {
 fn t8_incubate_resume_alone_into_an_empty_ledger_fires_once() {
     let (_runner, run) = drive_s2(false);
     assert_single_entry_control(&run);
+}
+
+/// The batched-trigger set a real token entry fills is shared, not copied, by a state copy.
+#[test]
+fn mister_fantastic_batched_trigger_set_is_shared_across_state_copies() {
+    use engine::game::perf_counters::take_cost_snapshot;
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Mister Fantastic, Reed Richards", Zone::Battlefield, db);
+    let swarm = scenario.add_real_card(P0, "Sprout Swarm", Zone::Hand, db);
+    for _ in 0..2 {
+        scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    runner.cast(swarm).resolve();
+    let state = runner.state();
+    assert!(
+        !state.batched_zone_change_trigger_fired.is_empty(),
+        "reach: the Saproling's entry fired Mister Fantastic's batched trigger"
+    );
+
+    let before = take_cost_snapshot();
+    let _copy = state.clone();
+    let copied = take_cost_snapshot().since(before);
+    assert_eq!(copied.state_copies, 1, "reach: one state copy was taken");
+    assert_eq!(
+        copied.history_map_entries_unshared, 0,
+        "a state copy shares the batched-trigger set"
+    );
 }

@@ -27,7 +27,7 @@ describe("MenuSelect", () => {
     expect(screen.getByRole("option", { name: "One" })).toHaveFocus();
     fireEvent.click(screen.getByRole("option", { name: "Offline" }));
     expect(onSelect).not.toHaveBeenCalled();
-    fireEvent.keyDown(window, { key: "ArrowUp" });
+    fireEvent.keyDown(screen.getByRole("option", { name: "One" }), { key: "ArrowUp" });
     expect(screen.getByRole("option", { name: "Two" })).toHaveFocus();
     fireEvent.click(screen.getByRole("option", { name: "Two" }));
     expect(onSelect).toHaveBeenCalledWith("two");
@@ -62,12 +62,40 @@ describe("MenuSelect", () => {
     renderMenu();
     fireEvent.click(screen.getByRole("button", { name: "Load deck..." }));
     const options = screen.getAllByRole("option");
-    fireEvent.keyDown(window, { key: "ArrowDown" });
+    fireEvent.keyDown(options[0], { key: "ArrowDown" });
     expect(options[1]).toHaveFocus();
-    fireEvent.keyDown(window, { key: "ArrowDown" });
+    fireEvent.keyDown(options[1], { key: "ArrowDown" });
     expect(options[0]).toHaveFocus();
-    fireEvent.keyDown(window, { key: "ArrowUp" });
+    fireEvent.keyDown(options[0], { key: "ArrowUp" });
     expect(options[1]).toHaveFocus();
+  });
+
+  it("leaves an unrelated focused control alone while the menu is open", () => {
+    const onSelect = vi.fn();
+    render(
+      <>
+        <MenuSelect label="Load deck..." items={items} onSelect={onSelect} />
+        <button type="button">Other control</button>
+      </>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load deck..." }));
+    const options = screen.getAllByRole("option");
+    fireEvent.keyDown(options[0], { key: "ArrowDown" });
+    expect(options[1]).toHaveFocus();
+
+    const otherControl = screen.getByRole("button", { name: "Other control" });
+    otherControl.focus();
+    const outsideArrow = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(otherControl, outsideArrow);
+
+    expect(otherControl).toHaveFocus();
+    expect(outsideArrow.defaultPrevented).toBe(false);
+    expect(screen.getByRole("listbox", { name: "Load deck..." })).toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("closes on Escape and restores focus to the trigger", () => {

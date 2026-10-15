@@ -581,6 +581,13 @@ pub enum ProposedEvent {
         /// delivered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enter_as_copy: Option<Box<CopyTokenSpec>>,
+        /// CR 614.12a + CR 614.12: the answers to the entrant's own "As ~ enters,
+        /// choose …" replacements, made before it enters. They ride the event so
+        /// later replacement passes match the entering permanent as it would
+        /// exist with its choices, and delivery installs them on the new object
+        /// after CR 400.7's reset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_with_choices: Option<Box<EntryChoices>>,
         /// CR 701.9a + CR 614.1: Preserves an operation-owned discard frame
         /// through the inner hand-to-destination move and any replacement
         /// choices. Unrelated zone changes omit it from the wire.
@@ -592,8 +599,8 @@ pub enum ProposedEvent {
         /// event through replacement and CR 616.1 pause/resume so delivery can
         /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
         /// `None` for moves no player performs (rules processes, raw movers).
-        /// A Hand delivery out of a shared zone also reads it as the taker who
-        /// becomes the card's owner under `HandEntryOwnership::ReceiverOwns`.
+        /// Under `EntryOwnership::ActorOwns` delivery also reads it as the
+        /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
@@ -957,6 +964,22 @@ fn default_produce_mana_count() -> u32 {
     1
 }
 
+/// CR 614.12a: the answers to an entrant's own as-enters choices, carried by
+/// its battlefield entry (`ProposedEvent::ZoneChange::enter_with_choices`).
+/// Boxed there because it is rarely populated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EntryChoices(pub Vec<crate::types::ability::ChosenAttribute>);
+
+impl EntryChoices {
+    /// The carried choices of an entry (`[]` when it carries none).
+    pub fn of(choices: &Option<Box<EntryChoices>>) -> &[crate::types::ability::ChosenAttribute] {
+        choices
+            .as_deref()
+            .map_or(&[], |choices| choices.0.as_slice())
+    }
+}
+
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
@@ -975,6 +998,7 @@ impl ProposedEvent {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: ChainReferentIntent::default(),
             enter_as_copy: None,
+            enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
             applied: HashSet::new(),

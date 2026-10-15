@@ -39,9 +39,10 @@ use crate::game::functioning_abilities::game_functioning_statics;
 use crate::game::layers::transient_effect_is_live;
 use crate::game::{casting, casting_costs, keywords, turn_control};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
-    Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition,
-    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachmentReferent,
+    ContinuousModification, Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr,
+    ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
@@ -50,7 +51,7 @@ use crate::types::definitions::Definitions;
 use crate::types::game_state::{
     CastPaymentMode, CastingPermissionIndex, GameState, PendingCast, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
@@ -833,11 +834,14 @@ impl LegalityKey {
     }
 }
 
-/// SORTED mode indices recorded for `id` in a `(ObjectId, mode_index)` set.
-fn sorted_modes(set: &HashSet<(ObjectId, usize)>, id: ObjectId) -> Vec<usize> {
+/// SORTED mode indices recorded for `source` in a `(source, mode_index)` set.
+fn sorted_modes(
+    set: &HashSet<(ObjectIncarnationRef, usize)>,
+    source: ObjectIncarnationRef,
+) -> Vec<usize> {
     let mut v: Vec<usize> = set
         .iter()
-        .filter(|(oid, _)| *oid == id)
+        .filter(|(recorded, _)| *recorded == source)
         .map(|(_, m)| *m)
         .collect();
     v.sort_unstable();
@@ -956,6 +960,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::Another
         | FilterProp::OtherThanTriggerObject
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         // CR 701.15b: A live designation may come from a TCE or printed source
         // outside the candidate fingerprint.
@@ -963,9 +968,11 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
-        | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+        // CR 601.2c: reads the declared target slot's object — another object by id.
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::HasKeywordKind { .. }
@@ -1427,8 +1434,13 @@ fn legality_equivalence_key(
                 .copied()
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(source_id);
-            key.chosen_modes_turn = sorted_modes(&state.modal_modes_chosen_this_turn, *source_id);
-            key.chosen_modes_game = sorted_modes(&state.modal_modes_chosen_this_game, *source_id);
+            // CR 400.7: an activated ability's mode history is the live source's.
+            let history_source =
+                crate::game::ability_utils::live_modal_history_source(state, *source_id);
+            key.chosen_modes_turn =
+                sorted_modes(&state.modal_modes_chosen_this_turn, history_source);
+            key.chosen_modes_game =
+                sorted_modes(&state.modal_modes_chosen_this_game, history_source);
             key.is_attacking = crate::game::restrictions::is_source_attacking(state, *source_id);
             key.is_blocking = crate::game::restrictions::is_source_blocking(state, *source_id);
             key.is_blocked = crate::game::restrictions::is_source_blocked(state, *source_id);

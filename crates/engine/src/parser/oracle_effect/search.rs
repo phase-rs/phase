@@ -14,7 +14,8 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
     distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
-    parse_target, parse_target_disjunction, parse_type_phrase_folding, parse_zone_word,
+    parse_target, parse_target_disjunction, parse_target_with_ctx, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -799,7 +800,8 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
         return filter;
     }
 
-    let (parsed_filter, remainder) = parse_type_phrase_folding(type_text);
+    let (parsed_filter, remainder) =
+        parse_type_phrase_folding_with_ctx(type_text, &mut ctx.clone_player_antecedents());
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
         let linked_reference = last_shared_quality_reference_in_filter(&parsed_filter);
@@ -1598,7 +1600,8 @@ fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -
         return TargetFilter::Typed(TypedFilter::default().subtype(capitalize(type_word)));
     }
 
-    let (filter, _) = parse_type_phrase_folding(type_word);
+    let (filter, _) =
+        parse_type_phrase_folding_with_ctx(type_word, &mut ctx.clone_player_antecedents());
     if !matches!(filter, TargetFilter::Any) {
         return filter;
     }
@@ -2417,7 +2420,8 @@ fn parse_search_filter_suffixes(
             tag::<_, _, OracleError<'_>>("with the same name as ").parse(remaining)
         {
             if tag::<_, _, OracleError<'_>>("target ").parse(rest).is_ok() {
-                let (target, after_target) = parse_target(rest);
+                let (target, after_target) =
+                    parse_target_with_ctx(rest, &mut ctx.clone_player_antecedents());
                 if !matches!(target, TargetFilter::Any) {
                     suffix.properties.push(FilterProp::SameNameAsParentTarget);
                     remaining = after_target.trim_start();

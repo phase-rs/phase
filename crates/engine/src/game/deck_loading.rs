@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -391,9 +392,9 @@ pub fn momir_fixed_deck_names() -> Vec<String> {
     names
 }
 
-/// The Dandân fixed decklist as printed name and copy count: the 80-card pile
-/// every game loads as its one shared library.
-const DANDAN_DECKLIST: [(&str, usize); 23] = [
+/// The Dandân default decklist as printed name and copy count: the 80-card
+/// pile a game loads as its one shared library when the host submits none.
+const DANDAN_DEFAULT_PILE: [(&str, usize); 23] = [
     ("Dandân", 10),
     ("Island", 20),
     ("Memory Lapse", 8),
@@ -419,10 +420,10 @@ const DANDAN_DECKLIST: [(&str, usize); 23] = [
     ("Svyelunite Temple", 2),
 ];
 
-/// The Dandân decklist as a flat name list (80 cards). Single source for the
-/// auto-supplied pile across every transport.
-pub fn dandan_fixed_deck_names() -> Vec<String> {
-    DANDAN_DECKLIST
+/// The Dandân default decklist as a flat name list (80 cards). Single source
+/// for the default pile across every transport.
+pub fn dandan_default_pile_names() -> Vec<String> {
+    DANDAN_DEFAULT_PILE
         .iter()
         .flat_map(|&(name, copies)| std::iter::repeat_n(name.to_string(), copies))
         .collect()
@@ -512,10 +513,10 @@ pub fn default_scheme_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
         .collect()
 }
 
-/// One seat's payload holding exactly the named main deck and nothing else.
-fn fixed_seat_payload(db: &CardDatabase, names: &[String]) -> PlayerDeckPayload {
+/// One seat's payload holding exactly this main deck and nothing else.
+fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
     PlayerDeckPayload {
-        main_deck: resolve_names(db, names),
+        main_deck,
         sideboard: Vec::new(),
         commander: Vec::new(),
         companion: Vec::new(),
@@ -529,17 +530,25 @@ fn fixed_seat_payload(db: &CardDatabase, names: &[String]) -> PlayerDeckPayload 
     }
 }
 
-/// Build the auto-supplied Dandân `DeckPayload`: the one 80-card pile on
-/// `pile_seat`, the seat that holds the shared library, and an empty payload
-/// for every other seat. Only the submitted seat structure is preserved.
-fn dandan_fixed_deck_payload(
+/// Build the Dandân `DeckPayload`: the one 80-card pile on `pile_seat`, the
+/// seat that holds the shared library, and an empty payload for every other
+/// seat. Of the submission only the pile seat's main deck and the seat
+/// structure are kept.
+fn dandan_pile_payload(
     db: &CardDatabase,
     submitted: &DeckPayload,
     pile_seat: PlayerId,
 ) -> DeckPayload {
+    // CR 103.3: the pile seat's submitted main deck, else the default list, becomes the shared library.
+    let submitted_pile = &payload_for_player(submitted, pile_seat).main_deck;
+    let pile = if submitted_pile.is_empty() {
+        resolve_names(db, &dandan_default_pile_names())
+    } else {
+        submitted_pile.clone()
+    };
     let seat_payload = |seat: PlayerId| {
         if seat == pile_seat {
-            fixed_seat_payload(db, &dandan_fixed_deck_names())
+            main_deck_only_payload(pile.clone())
         } else {
             PlayerDeckPayload::default()
         }
@@ -561,7 +570,7 @@ fn dandan_fixed_deck_payload(
 /// *contents* are ignored; only its seat structure (AI seat count and per-seat
 /// difficulties) is preserved so the correct number of players is created.
 fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckPayload {
-    let fixed_seat = || fixed_seat_payload(db, &momir_fixed_deck_names());
+    let fixed_seat = || main_deck_only_payload(resolve_names(db, &momir_fixed_deck_names()));
     DeckPayload {
         player: fixed_seat(),
         opponent: fixed_seat(),
@@ -1236,18 +1245,30 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.all_creature_types = sorted;
 
     if !state.planar_deck.is_empty() {
-        crate::util::im_ext::shuffle_vector(&mut state.planar_deck, &mut state.rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut state.planar_deck,
+            state.rng.draw(RandomDraw::Placement),
+        );
     }
     if !state.scheme_deck.is_empty() {
-        crate::util::im_ext::shuffle_vector(&mut state.scheme_deck, &mut state.rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut state.scheme_deck,
+            state.rng.draw(RandomDraw::Placement),
+        );
     }
 
     // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
-        crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
-        crate::util::im_ext::shuffle_vector(&mut player.contraption_deck, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
+        crate::util::im_ext::shuffle_vector(
+            &mut player.attraction_deck,
+            rng.draw(RandomDraw::Placement),
+        );
+        crate::util::im_ext::shuffle_vector(
+            &mut player.contraption_deck,
+            rng.draw(RandomDraw::Placement),
+        );
     }
 }
 
@@ -1271,7 +1292,7 @@ fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> 
         .iter()
         .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
         .collect::<Vec<_>>();
-    faces.shuffle(&mut state.rng);
+    faces.shuffle(state.rng.draw(RandomDraw::Placement));
     faces
 }
 
@@ -1312,14 +1333,14 @@ pub fn load_and_hydrate_decks(
     } else {
         payload
     };
-    // Dandân loads its one fixed pile into the shared library's holder seat;
-    // with no db we fall back to whatever was submitted, as Momir does.
+    // Dandân loads its one pile (the submitted one, else the default) into the
+    // shared library's holder seat; with no db we fall back to whatever was
+    // submitted, as Momir does.
     let dandan_payload;
     let payload = if state.format_config.format == crate::types::format::GameFormat::Dandan {
         match db {
             Some(card_db) => {
-                dandan_payload =
-                    dandan_fixed_deck_payload(card_db, payload, state.canonical_seat());
+                dandan_payload = dandan_pile_payload(card_db, payload, state.canonical_seat());
                 &dandan_payload
             }
             None => payload,

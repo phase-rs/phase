@@ -17,8 +17,8 @@ use super::primitives::{
 };
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    AggregateFunction, AttackerBlockStatus, Comparator, ControllerRef, FilterProp, ObjectProperty,
-    PtStat, PtValueScope, QuantityExpr, SourceExclusion,
+    AggregateFunction, AttackerBlockStatus, Comparator, FilterProp, ObjectProperty, PtStat,
+    PtValueScope, QuantityExpr, SourceExclusion,
 };
 use crate::types::card_type::CoreType;
 #[cfg(test)]
@@ -126,58 +126,6 @@ pub fn parse_zone_word(input: &str) -> OracleResult<'_, Zone> {
         value(Zone::Library, tag("a library")),
         value(Zone::Library, tag("their library")),
         value(Zone::Stack, tag("the stack")),
-    ))
-    .parse(input)
-}
-
-/// Parse a zone owner/controller qualifier following a zone filter.
-///
-/// Matches "you control", "an opponent controls", "your opponents control",
-/// "you don't control", "target player controls", "defending player controls".
-pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
-    alt((
-        value(ControllerRef::You, tag("you control")),
-        value(ControllerRef::Opponent, tag("an opponent controls")),
-        value(ControllerRef::Opponent, tag("your opponents control")),
-        value(ControllerRef::Opponent, tag("you don't control")),
-        // CR 109.4 + CR 115.1: "target player controls" — the filter controller
-        // is the player chosen as a target of the enclosing ability. The
-        // consumer must surface a companion TargetFilter::Player target slot
-        // (see `collect_target_slots` in `game/ability_utils.rs`) so the player
-        // is selected as part of target declaration.
-        value(ControllerRef::TargetPlayer, tag("target player controls")),
-        // CR 109.4 + CR 102.2 / CR 102.3: "target opponent controls" — filter
-        // controller is the opponent chosen as a target. Consumer surfaces an
-        // opponent-only companion slot (see `companion_target_player_legal_targets`
-        // in `game/ability_utils.rs`). Runtime read identical to TargetPlayer.
-        value(
-            ControllerRef::TargetOpponent,
-            tag("target opponent controls"),
-        ),
-        // CR 508.5 / CR 508.5a: "defending player controls" — the controller
-        // scope is the defending player (or that player's planeswalker
-        // controller / battle protector) the attacking creature is attacking.
-        // Resolved per attacker at runtime by
-        // `combat::defending_player_for_attacker`. Shares no prefix with the
-        // arms above, so dispatch order is not load-bearing.
-        value(
-            ControllerRef::DefendingPlayer,
-            tag("defending player controls"),
-        ),
-        // CR 303.4b + CR 702.5a: "enchanted player controls" — the controller
-        // scope is the player the source Aura is attached to. Resolved at
-        // runtime by reading `source.attached_to.as_player()`. Powers the
-        // Curse cycle (Trespasser's Curse, Curse of Clinging Webs, etc.).
-        value(
-            ControllerRef::EnchantedPlayer,
-            tag("enchanted player controls"),
-        ),
-        // CR 102.1: "the active player controls" — the turn player. Shares no
-        // prefix with the arms above, so dispatch order is not load-bearing.
-        value(
-            ControllerRef::ActivePlayer,
-            tag("the active player controls"),
-        ),
     ))
     .parse(input)
 }
@@ -1448,33 +1396,6 @@ mod tests {
             }
             _ => panic!("expected Counters"),
         }
-    }
-
-    #[test]
-    fn test_parse_zone_controller() {
-        let (rest, c) = parse_zone_controller("you control forever").unwrap();
-        assert_eq!(c, ControllerRef::You);
-        assert_eq!(rest, " forever");
-
-        let (rest2, c2) = parse_zone_controller("you don't control").unwrap();
-        assert_eq!(c2, ControllerRef::Opponent);
-        assert_eq!(rest2, "");
-    }
-
-    // CR 508.5 / CR 508.5a: "defending player controls" scopes the filter
-    // controller to the defending player for attack-trigger targets (Kogla,
-    // The Tarrasque, ~42 cards). Class-level combinator behavior, not one card.
-    #[test]
-    fn test_parse_zone_controller_defending_player() {
-        let (rest, c) = parse_zone_controller("defending player controls").unwrap();
-        assert_eq!(c, ControllerRef::DefendingPlayer);
-        assert_eq!(rest, "");
-
-        // Remainder preservation: the new arm consumes only the qualifier and
-        // does not over-consume trailing text.
-        let (rest2, c2) = parse_zone_controller("defending player controls and ").unwrap();
-        assert_eq!(c2, ControllerRef::DefendingPlayer);
-        assert_eq!(rest2, " and ");
     }
 
     #[test]

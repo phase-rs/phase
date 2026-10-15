@@ -68,7 +68,7 @@ fn thassas_oracle_keeps_selected_card_on_top_and_randomizes_rest() {
     let chosen = looked_at[1];
     let mut expected_rest = vec![looked_at[0], looked_at[2]];
     let mut expected_rng = runner.state().rng.clone();
-    expected_rest.shuffle(&mut expected_rng);
+    expected_rest.shuffle(expected_rng.draw(engine::types::game_state::RandomDraw::Placement));
     runner
         .act(GameAction::SelectCards {
             cards: vec![chosen],
@@ -101,7 +101,7 @@ fn thassas_oracle_allows_no_top_card_and_randomizes_every_looked_at_card() {
 
     let mut expected_rest = looked_at.to_vec();
     let mut expected_rng = runner.state().rng.clone();
-    expected_rest.shuffle(&mut expected_rng);
+    expected_rest.shuffle(expected_rng.draw(engine::types::game_state::RandomDraw::Placement));
     runner
         .act(GameAction::SelectCards { cards: vec![] })
         .expect("declining Thassa's optional top card resolves");

@@ -48,12 +48,14 @@ use crate::types::zones::Zone;
 /// instead of re-deriving a battlefield scan.
 pub use crate::game::engine_replacement::find_copy_targets;
 pub(crate) use candidates::power_threshold_witness;
+pub(crate) use candidates::retarget_response_exists;
 pub use candidates::{
     balanced_pile_partition, candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction, TacticalClass,
 };
 pub use combat_withdrawal::{
-    combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
+    activation_may_yield_combat_withdrawal, combat_withdrawal_fact_for_current_target,
+    CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{
     apply_ai_action_proposal, build_decision_context, build_decision_context_for_semantic_owner,
@@ -81,8 +83,9 @@ pub use payment_continuation::{
     witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
 };
 pub use prospective_mana::{
-    certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,
-    CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan, PactPlanState,
+    certify_fetch_then_cast, certify_pact_plan, controls_exact_fetchland, is_pact_payment_ability,
+    is_pact_payment_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan,
+    PactPlanState,
 };
 pub use swarm::{
     adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
@@ -2975,6 +2978,7 @@ fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
+        | WaitingFor::ManaAbilityManaPayment { player, .. }
         | WaitingFor::UnlessPayment { player, .. } => Some(*player),
         _ => None,
     }
@@ -6777,6 +6781,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
@@ -7334,6 +7339,7 @@ mod tests {
         for waiting_for in [
             WaitingFor::MulliganDecision {
                 pending: vec![MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(0),
                     mulligan_count: 1,
                     phase: MulliganDecisionPhase::BottomCards {

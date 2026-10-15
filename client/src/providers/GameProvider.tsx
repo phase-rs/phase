@@ -48,6 +48,7 @@ import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
+import { emptySeatDeck, pileSeatDeck, pileSourceFromParam, type PileSource } from "../services/pileSource";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
 import { loadGameStrict } from "../services/gamePersistence";
@@ -401,62 +402,39 @@ function pickOpponentDeck(
   }) ?? catalog[0];
 }
 
-// Placeholder decklist for fixed-deck formats (Momir's Madness): the player
-// builds nothing, and the engine synthesizes the real deck for every seat. The
-// builders below ignore its contents for such formats.
+// The empty decklist a seat submits when it has no deck to send.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
-function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
-  const expanded = expandParsedDeck(deck);
-  const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
-  return {
-    player,
-    opponent: {
-      main_deck: [],
-      sideboard: [],
-      commander: [],
-      planar_deck: [],
-      scheme_deck: [],
-      signature_spell: [],
-      companion: [],
-      sticker_sheets: [],
-      bracket_tier: "core",
-    },
-    ai_decks: [],
-    ai_difficulties: [],
-  };
+function emptySeat(): ExpandedDeckWithTier {
+  return { ...emptySeatDeck(), bracket_tier: "core" };
+}
+
+function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload {
+  return { player, opponent: emptySeat(), ai_decks: [], ai_difficulties: [] };
 }
 
 async function buildLocalAiDeckList(
   t: TFunction,
   deck: ParsedDeck | null,
   playerCount: number,
-  formatConfig?: FormatConfig,
-  selectedMatchType?: MatchType,
-  playerBracket?: CommanderBracket | null,
+  formatConfig: FormatConfig | undefined,
+  selectedMatchType: MatchType | undefined,
+  playerBracket: CommanderBracket | null,
+  pileSource: PileSource,
 ): Promise<DeckListPayload> {
-  // Fixed-deck formats (Momir's Madness) supply the deck for every seat from the
-  // engine, so there is no AI deck catalog to draw from — submit empty seats and
-  // let `load_and_hydrate_decks` synthesize the identical fixed deck per player.
+  // Supplied-deck formats have no AI deck catalog: the pile seat submits the
+  // host's pile (empty for the default or an engine-fixed deck) and every other
+  // seat submits nothing, leaving the engine to load the shared or fixed deck.
   if (formatConfig && formatSuppliesDeck(formatConfig.format)) {
     const { aiSeats, cedhMode } = usePreferencesStore.getState();
     const opponentCount = Math.max(1, playerCount - 1);
-    const emptySeat = (): ExpandedDeckWithTier => ({
-      main_deck: [],
-      sideboard: [],
-      commander: [],
-      planar_deck: [],
-      scheme_deck: [],
-      signature_spell: [],
-      companion: [],
-      sticker_sheets: [],
-      bracket_tier: "core",
-    });
+    const pile = await pileSeatDeck(formatConfig.format, pileSource);
+    if (!pile) throw new Error(t("multiplayer:page.couldNotLoadDeck"));
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
       effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
     );
     return {
-      player: emptySeat(),
+      player: { ...pile, bracket_tier: "core" },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
       ai_difficulties: aiDifficulties,
@@ -654,6 +632,8 @@ export interface GameProviderProps {
    * origin, which fall back to the hosting server via `detectServerUrl()`.
    */
   serverUrl?: string;
+  /** The saved-deck name the host picked as a `HostPile` format's pile; absent = the default pile. */
+  pile?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -682,6 +662,7 @@ export function GameProvider({
   source,
   draftId,
   serverUrl: originUrl,
+  pile,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -881,11 +862,11 @@ export function GameProvider({
     }
 
     if (isP2P) {
-      const parsedDeck = loadActiveDeck();
-      // Fixed-deck formats (Momir's Madness) supply the deck from the engine for
-      // host and guests alike, so no active deck is required to host/join.
-      const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
-      if (!parsedDeck && !suppliesDeck) {
+      // A supplied-deck format reads no active deck; the host's guest gate, not
+      // the guest, decides whether a guest's submission fits the room.
+      const suppliedFormat = formatConfig && formatSuppliesDeck(formatConfig.format) ? formatConfig.format : null;
+      const parsedDeck = suppliedFormat ? null : loadActiveDeck();
+      if (mode === "p2p-host" && !parsedDeck && !suppliedFormat) {
         onNoDeckRef.current?.();
         return;
       }
@@ -928,12 +909,6 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = buildPlayerOnlyDeckList(
-          parsedDeck ?? EMPTY_PARSED_DECK,
-          loadActiveDeckBracket(),
-        );
-        signal.throwIfAborted();
-
         // Resources that may need undoing on abort/error. `broker` is
         // closed unconditionally when set; `serverGameCode` gates the
         // compensating `unregister` call — we only un-do a registration
@@ -943,6 +918,25 @@ export function GameProvider({
         let hostPeerHandle: { destroy: () => void } | null = null;
 
         try {
+          let player: ExpandedDeckWithTier;
+          if (!suppliedFormat) {
+            player = {
+              ...expandParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
+              bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+            };
+          } else if (mode === "p2p-host") {
+            const pileDeck = await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile));
+            if (!pileDeck) {
+              if (!signal.aborted) onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
+              return;
+            }
+            player = { ...pileDeck, bracket_tier: "core" };
+          } else {
+            player = emptySeat();
+          }
+          const deckList = buildPlayerOnlyDeckList(player);
+          signal.throwIfAborted();
+
           if (mode === "p2p-host") {
             // Browser P2P hosts always own seat zero. Do this before claiming
             // a pre-game adapter: its one-shot identity event may already have
@@ -1230,11 +1224,9 @@ export function GameProvider({
 
     if (isOnline || isReconnect) {
       const parsedDeck = isSpectate ? null : loadActiveDeck();
-      const deck = isSpectate
-        ? { main_deck: [], sideboard: [] }
-        : parsedDeck
-          ? parsedDeckToDeckData(parsedDeck)
-          : { main_deck: [], sideboard: [] };
+      // A guest of a supplied-deck room submits nothing; the room's format rides the join URL.
+      const suppliedJoin = Boolean(joinCode) && formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
+      const deck = parsedDeck && !suppliedJoin ? parsedDeckToDeckData(parsedDeck) : emptySeatDeck();
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
@@ -1740,6 +1732,7 @@ export function GameProvider({
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              pileSourceFromParam(pile),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1809,6 +1802,7 @@ export function GameProvider({
           formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
+          pileSourceFromParam(pile),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1895,6 +1889,7 @@ export function GameProvider({
                 formatConfig,
                 matchConfig?.match_type,
                 loadActiveDeckBracket(),
+                pileSourceFromParam(pile),
               );
             } catch (deckErr) {
               if (!cancelled) {
@@ -1913,7 +1908,7 @@ export function GameProvider({
           nativeAdapter = new WebSocketAdapter(
             "native-engine",
             "host",
-            deckList?.player ?? { main_deck: [], sideboard: [] },
+            deckList?.player ?? emptySeatDeck(),
             undefined,
             undefined,
             undefined,
@@ -2147,7 +2142,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl, pile]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

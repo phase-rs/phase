@@ -125,7 +125,7 @@ fn sanitarium_skeleton_not_activatable_from_battlefield() {
         "reach-guard: the card is on the battlefield"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         3,
         "reach-guard: {{2}}{{B}} is floating, so affordability cannot be the \
          reason the ability is withheld"

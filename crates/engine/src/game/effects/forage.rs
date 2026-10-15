@@ -188,6 +188,7 @@ pub(crate) fn resolve(
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches,
+                    villainous: false,
                 },
                 vec![TargetRef::Player(controller)],
                 ability.source_id,

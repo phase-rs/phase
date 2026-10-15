@@ -839,8 +839,13 @@ pub enum GameAction {
         amount: u32,
     },
     /// CR 115.7: Choose new target(s) for a spell or ability on the stack.
+    /// One entry per addressed position of `WaitingFor::RetargetChoice`:
+    /// `None` leaves that target unchanged with its announced incarnation
+    /// (CR 115.7d: "leave any number of the targets unchanged, even if those
+    /// targets would be illegal"); `Some(t)` chooses `t`. A bare target (the
+    /// pre-nullable wire form) decodes as `Some`.
     RetargetSpell {
-        new_targets: Vec<TargetRef>,
+        new_targets: Vec<Option<TargetRef>>,
     },
     /// CR 701.48a: Learn — choose to rummage (discard a card, draw a card) or skip.
     LearnDecision {
@@ -1840,16 +1845,14 @@ fn push_decision_template(ids: &mut Vec<ObjectId>, template: &DecisionTemplate) 
     }
     for decision in &template.decisions {
         match decision {
-            PinnedDecision::Order { source, .. } => {
-                push_yield_target(ids, source);
-            }
             PinnedDecision::Targets { slot, targets } => {
                 push_decision_slot(ids, slot);
                 for target in targets {
                     push_target_pin(ids, target);
                 }
             }
-            PinnedDecision::Mode { slot, .. }
+            PinnedDecision::Order { slot, .. }
+            | PinnedDecision::Mode { slot, .. }
             | PinnedDecision::MayChoice { slot, .. }
             | PinnedDecision::UnlessBreak { slot, .. }
             | PinnedDecision::ConvokeTaps { slot }
@@ -2232,7 +2235,11 @@ impl GameAction {
                     push_related_object_id(&mut ids, selection.destination_id);
                 }
             }
-            Self::RetargetSpell { new_targets } => push_target_refs(&mut ids, new_targets),
+            Self::RetargetSpell { new_targets } => {
+                for target in new_targets.iter().flatten() {
+                    push_target_ref(&mut ids, target);
+                }
+            }
             Self::LearnDecision { choice } => {
                 if let LearnOption::Rummage { card_id } = choice {
                     push_related_object_id(&mut ids, *card_id);

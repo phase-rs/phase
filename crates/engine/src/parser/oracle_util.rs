@@ -1,12 +1,15 @@
 use nom::Parser;
 use std::collections::BTreeSet;
 
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_quantity::parse_cda_quantity;
-use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
+use super::oracle_quantity::{parse_cda_quantity, parse_cda_quantity_with_context};
+use crate::types::ability::{
+    Comparator, ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
+};
 use crate::types::card_type::{
     fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
 };
@@ -14,7 +17,7 @@ use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{alpha1, anychar, space1};
-use nom::combinator::{eof, map_res, opt, peek, recognize, value, verify};
+use nom::combinator::{all_consuming, eof, map_res, opt, peek, recognize, value, verify};
 use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
 
@@ -855,6 +858,332 @@ pub(crate) fn parse_count_expr_with_exclusion(
     }
     let (expr, rest) = parse_count_expr(text)?;
     Some((expr, rest, CountWord::Plain))
+}
+
+/// A verb's count position as read by [`parse_count_slot`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CountSlot<'a> {
+    /// The typed count.
+    pub count: QuantityExpr,
+    /// The span between the count head and its binder (or the clause end), case
+    /// preserved. The verb consumes it whole with its own noun grammar
+    /// ("cards", "life", "cards from their hand").
+    pub noun: &'a str,
+    /// CR 107.3c: what the "where X is" binder defines X as, when that binder
+    /// bound this count. An X the noun prints (a token's "X/X") is the same X.
+    pub where_x: Option<QuantityExpr>,
+}
+
+/// How a count position opens.
+pub(crate) enum CountHead {
+    /// "a number of" — the count is bound later in the clause, or by the caller.
+    Deferred,
+    /// No count word ("cards equal to …").
+    Absent,
+    /// A count word that carries X ("X cards", "X plus 1 life").
+    VariableX(QuantityExpr),
+    /// Any other count word ("two", "a", "that many", "half your library").
+    Counted(QuantityExpr),
+}
+
+/// The clause that binds a count position's quantity.
+#[derive(Debug, Clone, Copy)]
+enum CountBinder {
+    EqualTo,
+    WhereX,
+    ForEach,
+}
+
+impl CountHead {
+    /// Whether `binder` defines this head's count. An ineligible binder stays in
+    /// the noun ("an X/X green Ooze creature token, where X is …" binds the
+    /// token's P/T, not the count).
+    fn is_bound_by(&self, binder: CountBinder) -> bool {
+        match (self, binder) {
+            (CountHead::Deferred | CountHead::Absent, CountBinder::EqualTo)
+            | (CountHead::VariableX(_), CountBinder::WhereX)
+            | (CountHead::Counted(_) | CountHead::VariableX(_), CountBinder::ForEach) => true,
+            (CountHead::Counted(_) | CountHead::VariableX(_), CountBinder::EqualTo)
+            | (
+                CountHead::Deferred | CountHead::Absent | CountHead::Counted(_),
+                CountBinder::WhereX,
+            )
+            | (CountHead::Deferred | CountHead::Absent, CountBinder::ForEach) => false,
+        }
+    }
+}
+
+fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
+    alt((
+        value(CountBinder::EqualTo, tag("equal to ")),
+        value(CountBinder::WhereX, tag("where x is ")),
+        value(CountBinder::ForEach, tag("for each ")),
+    ))
+    .parse(input)
+}
+
+/// The head of a count position ("a number of", a count word, or none) and the
+/// text after it.
+pub(crate) fn parse_count_head(text: &str) -> (CountHead, &str) {
+    let lower = text.to_lowercase();
+    if let Some(((), rest)) =
+        nom_on_lower(text, &lower, |i| value((), tag("a number of ")).parse(i))
+    {
+        return (CountHead::Deferred, rest);
+    }
+    match parse_count_expr(text) {
+        Some((count, rest))
+            if count
+                .any_ref(&mut |r| matches!(r, QuantityRef::Variable { name } if name == "X")) =>
+        {
+            (CountHead::VariableX(count), rest)
+        }
+        Some((count, rest)) => (CountHead::Counted(count), rest),
+        None => (CountHead::Absent, text),
+    }
+}
+
+/// The one count position every verb shares (draw, mill, scry, surveil,
+/// discard, gain/lose life, reveal from hand, token creation).
+///
+/// CR 107.1 + CR 107.3a / CR 107.3c + CR 608.2h: reads `<head> <noun>
+/// [<binder> <quantity>]`, where the head is "a number of", a count word, or
+/// absent, and the binder is "equal to", "where X is" or "for each". Returns the
+/// typed count and the noun the verb must consume. Returns `None` — the clause
+/// then fails closed as `Effect::Unimplemented` — when a binder's quantity does
+/// not parse in full, or when a "a number of" / absent head has no binder and
+/// no caller-bound count (`ParseContext::caller_bound_count`). It never falls
+/// back to a literal.
+pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<CountSlot<'a>> {
+    let text = normalize_count_slot_text(text);
+    let (head, after_head) = parse_count_head(text);
+
+    let Some((binder_start, binder, quantity_start)) = find_count_binder(&head, after_head) else {
+        let count = match head {
+            CountHead::Deferred | CountHead::Absent => ctx.caller_bound_count.clone()?,
+            CountHead::VariableX(count) | CountHead::Counted(count) => count,
+        };
+        // CR 614.1a + CR 107.1: "that much/many <noun> plus|minus N" is decided by
+        // `parse_event_context_quantity`'s existing offset arm; the entry only
+        // locates the noun span that arm validated (its noun dimension holds no
+        // "plus"/"minus" word).
+        if matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        ) {
+            if let Some(offset @ QuantityExpr::Offset { .. }) =
+                super::oracle_quantity::parse_event_context_quantity(text)
+            {
+                let after_lower = after_head.to_lowercase();
+                let (noun, _, _) = nom_primitives::scan_preceded(&after_lower, |i| {
+                    alt((tag("plus "), tag("minus "))).parse(i)
+                })?;
+                return Some(CountSlot {
+                    count: offset,
+                    noun: after_head[..noun.len()].trim_end(),
+                    where_x: None,
+                });
+            }
+        }
+        let (count, noun) = apply_rounding_postmodifier(count, after_head.trim());
+        return Some(CountSlot {
+            count,
+            noun,
+            where_x: None,
+        });
+    };
+
+    let noun = after_head[..binder_start]
+        .trim_end()
+        .trim_end_matches(',')
+        .trim_end();
+    let quantity = after_head[quantity_start..].trim();
+    let (count, where_x) = match binder {
+        CountBinder::EqualTo => (parse_equal_to_count(quantity, ctx)?, None),
+        // CR 107.3c: the where-X clause defines X. The where-X authority binds X
+        // inside any composite ("X plus 1"); a bare X falls back to the cda
+        // grammar, as the token where-X binder does ("the number of times …").
+        CountBinder::WhereX => {
+            let CountHead::VariableX(count) = head else {
+                return None;
+            };
+            let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
+                .or_else(|| {
+                    parse_cda_quantity_with_context(quantity, &mut ctx.clone_player_antecedents())
+                })?;
+            let bare_x = matches!(
+                &count,
+                QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X"
+            );
+            let count = if bare_x {
+                x.clone()
+            } else {
+                super::oracle_effect::lower::apply_where_x_quantity_expression(
+                    count,
+                    Some(quantity),
+                )?
+            };
+            (count, Some(x))
+        }
+        // "<N> <noun> for each <filter>" multiplies the head count by the for-each quantity.
+        CountBinder::ForEach => {
+            let (CountHead::Counted(count) | CountHead::VariableX(count)) = head else {
+                return None;
+            };
+            let for_each = super::oracle_quantity::parse_for_each_clause_expr_with_context(
+                &quantity.to_lowercase(),
+                ctx,
+            )?;
+            (
+                super::oracle_ir::ast::replace_fixed_quantity(count, for_each),
+                None,
+            )
+        }
+    };
+    let (count, noun) = apply_rounding_postmodifier(count, noun);
+    Some(CountSlot {
+        count,
+        noun,
+        where_x,
+    })
+}
+
+/// CR 614.1a: the count position's text without its trailing period and one
+/// trailing " instead" — the replacement marker belongs to neither the count
+/// nor the noun.
+pub(crate) fn normalize_count_slot_text(text: &str) -> &str {
+    let text = text.trim();
+    // allow-noncombinator: trailing sentence punctuation cleanup, not dispatch.
+    let text = text.strip_suffix('.').unwrap_or(text).trim_end();
+    let lower = text.to_lowercase();
+    let body_len = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" instead"),
+        tag(" instead"),
+    ))
+    .parse(lower.as_str())
+    .map_or(text.len(), |(_, body)| body.len());
+    &text[..body_len]
+}
+
+/// The first binder after a count head that defines that head's count, as
+/// `(binder start, binder, quantity start)` byte offsets into `after_head`.
+/// Double-quoted spans and an anchored single-quoted granted ability are masked
+/// first, so a "for each" inside a token's granted ability never binds the
+/// token count (Urza's Saga).
+fn find_count_binder(head: &CountHead, after_head: &str) -> Option<(usize, CountBinder, usize)> {
+    let lower = after_head.to_lowercase();
+    let mut masked = nom_primitives::mask_double_quoted_spans_preserving_len(&lower).into_owned();
+    if let Some(span) = super::oracle_effect::token::find_anchored_single_quoted_span(&lower) {
+        let start = span.as_ptr() as usize - lower.as_ptr() as usize;
+        masked.replace_range(start..start + span.len(), &" ".repeat(span.len()));
+    }
+    let mut from = 0;
+    while let Some((before, binder, rest)) =
+        nom_primitives::scan_preceded(&masked[from..], parse_count_binder)
+    {
+        let quantity_start = masked.len() - rest.len();
+        if head.is_bound_by(binder) {
+            return Some((from + before.len(), binder, quantity_start));
+        }
+        from = quantity_start;
+    }
+    None
+}
+
+/// CR 107.1a: a fractional head's rounding postmodifier separated from the head
+/// by the noun ("half X life, rounded down"). Applies only to a
+/// `DivideRounded` count; the postmodifier leaves the noun.
+fn apply_rounding_postmodifier(count: QuantityExpr, noun: &str) -> (QuantityExpr, &str) {
+    let QuantityExpr::DivideRounded {
+        inner,
+        divisor,
+        rounding,
+    } = count
+    else {
+        return (count, noun);
+    };
+    let lower = noun.to_lowercase();
+    let (noun, rounding) = all_consuming((
+        take_until::<_, _, OracleError<'_>>(", round"),
+        super::oracle_nom::quantity::parse_explicit_rounding_suffix,
+    ))
+    .parse(lower.as_str())
+    .map_or((noun, rounding), |(_, (body, postmodifier))| {
+        (&noun[..body.len()], postmodifier)
+    });
+    (
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        },
+        noun,
+    )
+}
+
+/// The one "equal to <quantity>" chain every count position shares.
+///
+/// CR 608.2c / CR 608.2k: the rungs run in one written order — the event
+/// context ("that much", "the damage prevented this way"), the cda grammar, the
+/// chunk's bare-card aggregate ("those cards"), the where-X core (without the
+/// printed-name possessive arm), then the "the difference" placeholder that
+/// only the token carrier rebinds. A `Sum` whose operands read different object
+/// pronouns is a miss (the operand-anaphor guard).
+pub(crate) fn parse_equal_to_count(quantity: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
+    let lower = quantity
+        .trim()
+        .trim_end_matches(['.', ','])
+        .trim()
+        .to_lowercase();
+    let count = super::oracle_quantity::parse_event_context_quantity(&lower)
+        .or_else(|| super::oracle_quantity::parse_cda_quantity_with_context(&lower, ctx))
+        .or_else(|| {
+            let source = ctx.bare_card_aggregate_source?;
+            let (_, qty) = all_consuming(|i| {
+                super::oracle_nom::quantity::parse_contextual_bare_card_aggregate_ref(i, source)
+            })
+            .parse(lower.as_str())
+            .ok()?;
+            Some(QuantityExpr::Ref { qty })
+        })
+        .or_else(|| super::oracle_effect::lower::parse_where_x_quantity_core(&lower))
+        .or_else(|| {
+            all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+                .parse(lower.as_str())
+                .is_ok()
+                .then(super::oracle_effect::difference_anaphor_placeholder)
+        })?;
+    (!mixed_operand_scopes(&count)).then_some(count)
+}
+
+/// Operand-anaphor guard: `true` when a `Sum`'s object-stat operands
+/// (power / toughness / mana value, through `Multiply` and `Offset`) read
+/// different object scopes ("that creature's power plus its toughness").
+fn mixed_operand_scopes(count: &QuantityExpr) -> bool {
+    fn collect_scopes(expr: &QuantityExpr, scopes: &mut Vec<ObjectScope>) {
+        match expr {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::Power { scope }
+                    | QuantityRef::Toughness { scope }
+                    | QuantityRef::ObjectManaValue { scope },
+            } => scopes.push(*scope),
+            QuantityExpr::Multiply { inner, .. } | QuantityExpr::Offset { inner, .. } => {
+                collect_scopes(inner, scopes)
+            }
+            _ => {}
+        }
+    }
+    let QuantityExpr::Sum { exprs } = count else {
+        return false;
+    };
+    let mut scopes = Vec::new();
+    for expr in exprs {
+        collect_scopes(expr, &mut scopes);
+    }
+    scopes.windows(2).any(|pair| pair[0] != pair[1])
 }
 
 /// CR 107.3a: Strip a trailing "[, ]where x is " binder clause from the
@@ -5334,5 +5663,341 @@ mod tests {
             out2.contains("becomes a Coward in addition to its other types"),
             "subtype occurrence must stay literal, got: {out2}"
         );
+    }
+
+    fn slot(text: &str) -> Option<(QuantityExpr, String)> {
+        parse_count_slot(text, &mut ParseContext::default())
+            .map(|slot| (slot.count, slot.noun.to_string()))
+    }
+
+    fn event_context_offset(offset: i32) -> QuantityExpr {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            offset,
+        }
+    }
+
+    /// CR 107.1 + CR 107.3c + CR 608.2h: the count position pairs each head
+    /// ("a number of", absent, X, a count word) only with the binder that
+    /// defines it, and fails closed when no quantity grammar reads the binder.
+    #[test]
+    fn count_slot_head_binder_cells() {
+        assert_eq!(
+            slot("a number of cards equal to the result"),
+            Some((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "cards".to_string()
+            ))
+        );
+        assert_eq!(
+            slot("cards equal to the sacrificed creature's power"),
+            Some((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                "cards".to_string()
+            ))
+        );
+        let (count, noun) =
+            slot("X cards from their hand, where X is the number of Goblins you control").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "cards from their hand");
+        let (count, noun) = slot("2 life for each creature you control").unwrap();
+        assert!(
+            matches!(
+                &count,
+                QuantityExpr::Multiply { factor: 2, inner }
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "life");
+
+        // Fail closed: an unread for-each, and a binder-less "cards" with no
+        // caller-bound count.
+        assert_eq!(slot("2 life for each gorbleflux you control"), None);
+        assert_eq!(slot("cards"), None);
+        // An ineligible binder stays in the noun: a counted head's where-X
+        // binds the token's P/T, not its count.
+        let text =
+            "an X/X green Ooze creature token, where X is the number of creatures you control";
+        assert_eq!(
+            slot(text),
+            Some((
+                QuantityExpr::Fixed { value: 1 },
+                "X/X green Ooze creature token, where X is the number of creatures you control"
+                    .to_string()
+            ))
+        );
+    }
+
+    /// CR 701.38a + CR 608.2c: a caller-bound count answers only a binder-less
+    /// "a number of" / absent head; an in-text binder wins over it.
+    #[test]
+    fn count_slot_caller_bound_cells() {
+        let bound = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 0 },
+        };
+        let mut ctx = ParseContext {
+            caller_bound_count: Some(bound.clone()),
+            ..Default::default()
+        };
+        let cards = parse_count_slot("cards", &mut ctx).unwrap();
+        assert_eq!((cards.count, cards.noun), (bound.clone(), "cards"));
+        let tokens = parse_count_slot("a number of Treasure tokens", &mut ctx).unwrap();
+        assert_eq!(
+            (tokens.count, tokens.noun),
+            (bound.clone(), "Treasure tokens")
+        );
+        let in_text = parse_count_slot(
+            "a number of Treasure tokens equal to the number of creatures you control",
+            &mut ctx,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                in_text.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "the in-text binder must win, got {:?}",
+            in_text.count
+        );
+        // Read, not taken: the bound count is still staged for the caller.
+        assert_eq!(ctx.caller_bound_count, Some(bound));
+
+        assert_eq!(slot("a number of Treasure tokens"), None);
+    }
+
+    /// CR 107.3c: the where-X binder binds X inside a composed head through the
+    /// where-X authority, and falls back to the cda grammar for a bare X.
+    #[test]
+    fn count_slot_where_x_cells() {
+        let (count, noun) =
+            slot("X plus 1 life, where X is the number of green creatures on the battlefield")
+                .unwrap();
+        assert!(
+            matches!(
+                &count,
+                QuantityExpr::Offset { inner, offset: 1 }
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "An-Havva Inn: {count:?}"
+        );
+        assert_eq!(noun, "life");
+        let (count, noun) = slot(
+            "X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn",
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn { .. }
+                }
+            ),
+            "The Mycotyrant: {count:?}"
+        );
+        assert_eq!(
+            noun,
+            "1/1 black Fungus creature tokens with \"This token can't block,\""
+        );
+        assert_eq!(slot("X cards, where X is the gorbleflux"), None);
+
+        // The binder's X travels with the slot: the count for a bare X head,
+        // the X inside a composite head ("X plus 1").
+        let ooze = parse_count_slot(
+            "X X/X green Ooze creature tokens, where X is the number of lands you control",
+            &mut ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ooze.noun, "X/X green Ooze creature tokens");
+        assert!(
+            matches!(
+                ooze.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{ooze:?}"
+        );
+        assert_eq!(ooze.where_x, Some(ooze.count.clone()));
+        let inn = parse_count_slot(
+            "X plus 1 life, where X is the number of green creatures on the battlefield",
+            &mut ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                (&inn.count, &inn.where_x),
+                (QuantityExpr::Offset { inner, offset: 1 }, Some(x)) if **inner == *x
+            ),
+            "{inn:?}"
+        );
+        assert_eq!(
+            parse_count_slot("two cards", &mut ParseContext::default())
+                .unwrap()
+                .where_x,
+            None
+        );
+    }
+
+    /// CR 107.1a: a rounding postmodifier after the noun sets the fractional
+    /// head's rounding and leaves the noun.
+    #[test]
+    fn count_slot_rounding_cells() {
+        let (count, noun) = slot("half X cards, rounded up").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                    ..
+                }
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "cards");
+        let (count, noun) = slot("half X life, rounded down").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Down,
+                    ..
+                }
+            ),
+            "Brass Infiniscope: {count:?}"
+        );
+        assert_eq!(noun, "life");
+        // Rounding inside the head is the head grammar's own.
+        let (count, _) = slot("half your library, rounded up").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Up,
+                    ..
+                }
+            ),
+            "{count:?}"
+        );
+    }
+
+    /// A "for each" inside a token's granted ability (single- or double-quoted)
+    /// is the token's ability, not the token count (Urza's Saga).
+    #[test]
+    fn count_slot_masks_granted_abilities() {
+        for text in [
+            "a 0/0 colorless Construct artifact creature token with 'This token gets +1/+1 for each artifact you control.'",
+            "a 0/0 colorless Construct artifact creature token with \"This token gets +1/+1 for each artifact you control.\"",
+        ] {
+            let (count, noun) = slot(text).unwrap();
+            assert_eq!(count, QuantityExpr::Fixed { value: 1 }, "{text}");
+            assert_eq!(noun, &text["a ".len()..], "{text}");
+        }
+        // The same for-each outside the quotes binds the count.
+        let (count, noun) =
+            slot("a 1/1 colorless Construct artifact creature token for each artifact you control")
+                .unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "1/1 colorless Construct artifact creature token");
+    }
+
+    /// The operand-anaphor guard declines a `Sum` that mixes object pronouns
+    /// (Predator's Rapport); the bare "the difference" is the deferred
+    /// placeholder only a carrier verb accepts.
+    #[test]
+    fn count_slot_guard_and_difference_cells() {
+        assert_eq!(
+            slot("life equal to that creature's power plus its toughness"),
+            None
+        );
+        let (count, noun) = slot("life equal to its power plus its toughness").unwrap();
+        assert!(matches!(count, QuantityExpr::Sum { .. }), "{count:?}");
+        assert_eq!(noun, "life");
+        let (count, _) = slot("a number of Treasure tokens equal to the difference").unwrap();
+        assert!(
+            crate::parser::oracle_effect::is_difference_anaphor_placeholder(&count),
+            "{count:?}"
+        );
+    }
+
+    /// CR 614.1a + CR 107.1: "that much/many <noun> plus|minus N" is read by the
+    /// existing event-context offset arm for every verb; " instead" is removed
+    /// once, before the arm runs.
+    #[test]
+    fn count_slot_event_context_offset_cells() {
+        for (text, count, noun) in [
+            ("that many cards plus one", event_context_offset(1), "cards"),
+            (
+                "that many cards plus one instead.",
+                event_context_offset(1),
+                "cards",
+            ),
+            (
+                "that much life plus 1 instead",
+                event_context_offset(1),
+                "life",
+            ),
+            ("that many plus one", event_context_offset(1), ""),
+            (
+                "that many cards minus one",
+                event_context_offset(-1),
+                "cards",
+            ),
+            (
+                "that much life",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "life",
+            ),
+            (
+                "twice that many cards",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                },
+                "cards",
+            ),
+            // The arm declines a tail it does not own; the noun keeps it, so the
+            // verb's noun grammar rejects the clause.
+            (
+                "that many cards plus one, or this creature deals damage",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "cards plus one, or this creature deals damage",
+            ),
+        ] {
+            assert_eq!(slot(text), Some((count, noun.to_string())), "{text}");
+        }
     }
 }

@@ -44,11 +44,11 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
     runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
     runner.state_mut().objects.get_mut(&copy).unwrap().is_copy = true;
 
-    assert!(runner.state().objects[&real].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&token].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&copy].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&opponent].is_delve_eligible(P0));
-    assert!(!runner.state().objects[&wrong_zone].is_delve_eligible(P0));
+    assert!(runner.state().objects[&real].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&token].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&copy].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&opponent].is_delve_eligible(runner.state(), P0));
+    assert!(!runner.state().objects[&wrong_zone].is_delve_eligible(runner.state(), P0));
 
     let card_id = runner.state().objects[&delve_spell].card_id;
     runner
@@ -96,10 +96,7 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
         })
         .is_err());
     assert_eq!(runner.state().objects[&real].zone, Zone::Graveyard);
-    assert!(runner.state().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .is_empty());
+    assert!(runner.state().players[P0.0 as usize].mana_pool.is_empty());
 
     runner
         .act(GameAction::TapForConvoke {
@@ -115,20 +112,14 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
             action,
             GameAction::TapForConvoke { object_id, .. } if *object_id == real
         )));
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.mana.len(),
-        1
-    );
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 1);
     assert!(runner
         .act(GameAction::TapForConvoke {
             object_id: real,
             mana_type: ManaType::Colorless,
         })
         .is_err());
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.mana.len(),
-        1
-    );
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 1);
 }
 
 #[test]
@@ -164,8 +155,7 @@ fn treasure_cruise_delve_driver_exiles_only_cards_and_resolves_without_markers()
     }
     assert!(outcome.state().players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .all(|unit| !unit.is_convoke_payment()));
     assert!(matches!(
         outcome.final_waiting_for(),

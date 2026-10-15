@@ -46,6 +46,7 @@ let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 // The join/spectate origin the route carried, handed down as a provider prop.
 let capturedServerUrl: string | undefined;
+let capturedPile: string | undefined;
 
 const {
   mockCanActForWaitingState,
@@ -116,6 +117,7 @@ vi.mock("../../providers/GameProvider", () => ({
     onP2PEvent,
     formatConfig,
     serverUrl,
+    pile,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
@@ -123,12 +125,14 @@ vi.mock("../../providers/GameProvider", () => ({
     onP2PEvent?: (event: P2PAdapterEvent) => void;
     formatConfig?: FormatConfig;
     serverUrl?: string;
+    pile?: string;
   }) => {
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
     capturedFormatConfig = formatConfig;
     capturedServerUrl = serverUrl;
+    capturedPile = pile;
     return <>{children}</>;
   },
 }));
@@ -517,6 +521,15 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     renderGamePage("/game/test-game-123?mode=ai&format=TwoHeadedGiant&players=4");
 
     expect(capturedFormatConfig?.format).toBe("TwoHeadedGiant");
+  });
+
+  it("hands the URL's pile to GameProvider", () => {
+    renderGamePage("/game/test-game-123?mode=ai&format=Dandan&pile=Pile%20A");
+    expect(capturedPile).toBe("Pile A");
+    cleanup();
+
+    renderGamePage("/game/test-game-123?mode=ai&format=Dandan");
+    expect(capturedPile).toBeUndefined();
   });
 
   it("passes Planechase to GameProvider for a direct local URL", () => {

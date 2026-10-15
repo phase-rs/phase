@@ -210,12 +210,116 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 124 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
+ * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
  *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
  *       edit retypes power_delta/toughness_delta to required QuantityExpr
- *       power/toughness. A v123 peer cannot parse the new shapes; the
+ *       power/toughness. A v143 peer cannot parse the new shapes; the
  *       exact-match handshake refuses the pairing. P2P moves in lockstep
- *       (wire 106).
+ *       (wire 126).
+ * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
+ *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
+ *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
+ *      see PROTOCOL_VERSION's own `/// 143` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v142 peer's typed decoder
+ *      cannot read the object-shaped key; the exact-match version check at
+ *      connect refuses the pairing. Wire 125 moves with it.
+ * 142 — LinkedExileSnapshot gains incarnation (CR 400.7), carried in
+ *      GameState.linked_exile_lki and the trigger and zone-change
+ *      linked_exile_snapshot lists — see PROTOCOL_VERSION's own `/// 142`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v141 peer re-encoding
+ *      state drops the key; the exact-match version check at connect refuses
+ *      the pairing. Wire 124 moves with it.
+ * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
+ *      of casting a permanent spell, linked to the permanent it becomes),
+ *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v140 peer cannot parse
+ *      the tag; the exact-match version check at connect refuses the pairing.
+ *      Wire 123 moves with it.
+ * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
+ *      event's attackers attacked), carried in an ability's player_scope
+ *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v139 peer cannot parse the tag;
+ *      the exact-match version check at connect refuses the pairing. Wire 122
+ *      moves with it.
+ * 139 — CR 702.122c per-turn crew relation: GameState gains
+ *      crew_history_this_turn and FilterProp gains CrewedThisTurn — see
+ *      PROTOCOL_VERSION's own `/// 139` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v138 peer cannot parse the new filter tag. Wire 121 moves with it.
+ * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
+ *      stack-using activation created, carried in GameState's trigger events —
+ *      see PROTOCOL_VERSION's own `/// 134` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v133 peer drops it silently and
+ *      resolves an activation trigger's "copy that ability" differently; the
+ *      exact-match version check at connect refuses the pairing. Wire 116
+ *      moves with it.
+ * 133 — CR 614.12a pre-entry as-enters choices: NamedChoiceSourceBinding gains
+ *      PendingEntry (WaitingFor.NamedChoice.source.binding), and the parked
+ *      entry event / PendingReplacement carry the answers and the paused
+ *      delivery's boundary — see PROTOCOL_VERSION's own `/// 133` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v132 peer cannot parse the new
+ *      binding tag. Wire 115 moves with it.
+ * 132 — `GameObject::exile_from_stack_linked_source` carries the stamping
+ *      incarnation (`ObjectIncarnationRef`, CR 400.7); a v131 peer cannot
+ *      decode a set rider. Wire 114 moves with it; no lobby frame names it.
+ * 131 — PlayerFilter gains AnyOf (the union of player sets) and TargetPlayer
+ *      (the first declared player target), carried in an ability's
+ *      player_scope inside GameState — see PROTOCOL_VERSION's own `/// 131`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v130 peer cannot parse
+ *      either tag; the exact-match version check at connect refuses the
+ *      pairing. Wire 113 moves with it.
+ * 130 — `GameState::linked_exile_lki` holds one incarnation-bounded
+ *      `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
+ *      non-empty map. Wire 112 moves with it; no lobby frame names it.
+ * 129 — Loop-shortcut and period-confirmation shapes, one bump over 128:
+ *      ShortcutDecisionSchema replaced max_iterations with the pair
+ *      measured_repetition_bound and deliverable_capacity, so
+ *      WaitingFor.LoopShortcut publishes the threshold the reduction measured
+ *      separately from the count this engine will deliver (every field
+ *      involved carries a serde default, so a v128 peer reads a count neither
+ *      side measured, and the handshake is the only place that can be
+ *      refused); WaitingFor.LoopShortcut and ShortcutProposal gained a
+ *      required road naming the producer that minted the offer, which a v128
+ *      peer drops from every frame it re-encodes;
+ *      WaitingFor.ManaAbilityManaPayment and its ManaAbilityResume root are
+ *      new variants a v128 peer cannot parse, and ResolvedAbility gains the
+ *      optional delayed_origin; GameState drops the recorded loop-action
+ *      sequence; ConfirmedPeriod gains its reach and PeriodicDelta its
+ *      cleanup pair. Wire 111 moves with it; no lobby frame names it.
+ * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
+ *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
+ *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
+ *      PROTOCOL_VERSION's own `/// 127` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v126 client would take the new shape with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead. The same version makes retarget picks positional:
+ *      RetargetSpell.new_targets is (TargetRef | null)[] (null keeps), and the
+ *      copy walk's keep/decline permissions (CopyTargetSlot.can_keep and
+ *      can_decline, CopyRetarget.can_keep_rest) are engine fields this client
+ *      renders without a fallback; CopyRetarget.controller names the copy's
+ *      controller when a slot's chooser answers, and
+ *      CopyRetarget.announcer_election carries a copy announcement's
+ *      announcing-opponent election.
+ *      (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
+ * 128 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v127 peer
+ *      cannot deserialize it; the exact-match handshake refuses the pairing.
+ *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
+ *      delayed ability's creating chain named by group, omitted when empty;
+ *      amended in place, not bumped. P2P moves in lockstep (wire 110); lobby
+ *      messages are unchanged.
+ * 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the
+ *      destination object holds) inside `GameState` and the resolved-rules
+ *      journal's zone-change commands; a v125 peer rejects the journal when the
+ *      departure owner differs from the command owner. Wire 108 moves with it;
+ *      no lobby frame names it.
+ * 125 — `MulliganDecisionEntry` and `MulliganDeclaration` (inside
+ *      `WaitingFor::MulliganDecision`) gain `free_reveals_taken`. Wire 107
+ *      moves with it; no lobby frame names it.
+ * 124 — the resolved-rules journal admits a land-play `rebound_from`
+ *      (Library/Graveyard/Exile -> Battlefield) inside
+ *      GameState.resolved_rules_journal; a v123 peer rejects the state. Wire
+ *      106 moves with it; no lobby frame names it.
  * 123 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
  *      CR 722.3d), scope on Effect BecomePrepared / BecomeUnprepared (mass
  *      "each creature you control becomes prepared", CR 722.3a + CR 115.10a),
@@ -775,7 +879,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 124;
+export const PROTOCOL_VERSION = 144;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

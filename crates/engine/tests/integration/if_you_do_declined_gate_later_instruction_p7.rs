@@ -973,18 +973,22 @@ fn hollow_specter_declined_reveals_and_discards_nothing() {
     assert_eq!(runner.state().players[1].hand.len(), 2);
 }
 
-/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard effects
-/// resolve. GREEN AT BASE; preservation only. KNOWN-BAD (residue): at X = 1
-/// the whole hand is revealed and nothing is discarded, at base and on the
-/// candidate (measured: 2 cards revealed, P1's hand 2, graveyard 0). This row
-/// pins only the resolved kinds.
+/// J-6 (b2) at X = 1, paid. CR 701.20a: "reveals X cards from their hand and
+/// you choose one of them" is a counted reveal whose chooser rider the reveal
+/// verb does not read, so the clause is an honest gap instead of a whole-hand
+/// reveal (the count-position migration; base resolved `[Reveal, DiscardCard]`
+/// with both cards revealed). The discard after the gap still resolves and
+/// discards nothing: no card was chosen.
 #[test]
-fn hollow_specter_paid_x1_resolves_the_reveal_and_discard_kinds() {
-    let (_, events) = hollow_specter(true);
-    assert_eq!(
-        resolved(&events),
-        vec![EffectKind::Reveal, EffectKind::DiscardCard]
-    );
+fn hollow_specter_paid_x1_reaches_the_honest_reveal_gap() {
+    let (runner, events) = hollow_specter(true);
+    let kinds = resolved(&events);
+    // Reach guard: the declined row resolves nothing, so a non-empty list is
+    // the paid branch running.
+    assert!(!kinds.is_empty());
+    assert_eq!(kinds, vec![EffectKind::DiscardCard]);
+    assert_eq!(runner.state().players[1].hand.len(), 2);
+    assert!(runner.state().players[1].graveyard.is_empty());
 }
 
 /// J-6 (b3): Ardent Dustspeaker declined: nothing is exiled and no play

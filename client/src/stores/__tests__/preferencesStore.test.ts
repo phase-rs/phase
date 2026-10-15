@@ -381,6 +381,24 @@ describe("preferencesStore", () => {
   });
 
   it("falls back from an unsupported current-version persisted locale", () => {
+    // `zh-Hans` used to be this test's unsupported tag; it now resolves to the
+    // shipped `zh`, so using it here asserted the opposite of the behaviour
+    // under test. `zh-Hant` is genuinely unsupported — no Traditional catalog
+    // ships — and must not be folded into Simplified.
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { language: "zh-Hant" }, version: 34 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().language).toBe("en");
+  });
+
+  it("normalizes a persisted Simplified Chinese tag to the shipped zh locale", () => {
+    // The positive half of the case above, so "zh is supported" is asserted
+    // directly rather than being implied by a membership check that a hardcoded
+    // list could quietly stop covering.
     localStorage.setItem(
       "phase-preferences",
       JSON.stringify({ state: { language: "zh-Hans" }, version: 34 }),
@@ -388,9 +406,7 @@ describe("preferencesStore", () => {
 
     act(() => usePreferencesStore.persist.rehydrate());
 
-    expect(["en", "es", "fr", "de", "it", "pt", "pl", "ja"]).toContain(
-      usePreferencesStore.getState().language,
-    );
+    expect(usePreferencesStore.getState().language).toBe("zh");
   });
 
   it("migrates pre-log-dock preferences to the prior right dock", () => {

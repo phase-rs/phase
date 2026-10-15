@@ -8,9 +8,24 @@ const modules = import.meta.glob("./locales/*/*.json", {
 }) as Record<string, Record<string, unknown>>;
 
 /** Languages the app ships chrome catalogs for. English is the typing oracle and
- *  the `fallbackLng`; the others may lag without breaking the build. */
-export const SUPPORTED_LNGS = ["en", "es", "fr", "de", "it", "pt", "pl", "ja"] as const;
+ *  the `fallbackLng`; the others may lag without breaking the build.
+ *
+ *  `zh` is Simplified Chinese. The app ships no Traditional (`zh-Hant`) catalog,
+ *  and every Chinese card-content source it draws on is Simplified-only, so
+ *  {@link normalizeSupportedLng} deliberately sends Traditional tags to English
+ *  rather than silently down-converting them. */
+export const SUPPORTED_LNGS = ["en", "es", "fr", "de", "it", "pt", "pl", "ja", "zh"] as const;
 export type SupportedLng = (typeof SUPPORTED_LNGS)[number];
+
+/** Region/script subtags that mark a Chinese tag as Traditional. Lowercased, and
+ *  matched after the `zh` prefix rather than as a whole tag so `zh-Hant-TW`
+ *  resolves too. */
+const TRADITIONAL_CHINESE_SUBTAGS = new Set([
+  "hant", // zh-Hant — the explicit script tag
+  "tw", // zh-TW
+  "hk", // zh-HK
+  "mo", // zh-MO
+]);
 
 function isSupportedLng(value: string): value is SupportedLng {
   return (SUPPORTED_LNGS as readonly string[]).includes(value);
@@ -24,7 +39,21 @@ function isSupportedLng(value: string): value is SupportedLng {
  */
 export function normalizeSupportedLng(value: unknown, fallback: SupportedLng): SupportedLng {
   if (typeof value !== "string") return fallback;
-  const prefix = value.trim().split("-", 1)[0]?.toLowerCase() ?? "";
+  const subtags = value.trim().toLowerCase().split("-");
+  const prefix = subtags[0] ?? "";
+  if (prefix === "zh") {
+    // An explicit script subtag outranks a region in BCP 47, so `zh-Hans-HK` is
+    // Simplified *with* a Hong Kong region and must NOT be routed to the
+    // fallback by the region check below. Test `hans` first.
+    const simplified = subtags.includes("hans");
+    if (!simplified && subtags.some((tag) => TRADITIONAL_CHINESE_SUBTAGS.has(tag))) {
+      // A Traditional reader is not a Simplified reader. We ship no `zh-Hant`
+      // catalog, so treating `zh-TW` as `zh` would show Traditional users
+      // Simplified chrome with no signal. Falling back to English is the honest
+      // outcome until a Traditional catalog exists.
+      return fallback;
+    }
+  }
   return isSupportedLng(prefix) ? prefix : fallback;
 }
 

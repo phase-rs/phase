@@ -178,7 +178,7 @@ fn public_selected_two_count_cross_product_pays_once() {
                     if stolen { P1 } else { P0 }
                 );
             }
-            assert_eq!(runner.state().players[0].mana_pool.mana.len(), 3);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 3);
             assert!(legal_actions_full(runner.state())
                 .0
                 .contains(&GameAction::SelectCards {
@@ -227,7 +227,7 @@ fn public_selected_two_count_cross_product_pays_once() {
                 ),
                 (21, 20)
             );
-            assert_eq!(runner.state().players[0].mana_pool.mana.len(), 3);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 3);
         }
     }
 }

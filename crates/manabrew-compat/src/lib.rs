@@ -3569,7 +3569,7 @@ fn build_player_dto(
         is_human: player.id == viewer,
         life: player.life,
         counters,
-        mana_pool: mana_pool_counts(&player.mana_pool.mana),
+        mana_pool: mana_pool_counts(&player.mana_pool),
         commander_damage,
         has_city_blessing: state.city_blessing.contains(&player_id),
         has_enduring_story: state.enduring_story.contains(&player_id),
@@ -4602,10 +4602,10 @@ fn parse_attack_target_id(value: &str) -> Result<AttackTarget> {
 }
 
 /// CR 106.4: the viewer's floating mana, one entry per color actually held.
-fn mana_pool_counts(units: &[engine::types::mana::ManaUnit]) -> BTreeMap<ManaColorDto, u32> {
+fn mana_pool_counts(pool: &engine::types::mana::ManaPool) -> BTreeMap<ManaColorDto, u32> {
     let mut counts = BTreeMap::new();
-    for unit in units {
-        *counts.entry(mana_color_dto(unit.color)).or_insert(0) += 1;
+    for (shape, count) in pool.shapes() {
+        *counts.entry(mana_color_dto(shape.color)).or_insert(0) += count as u32;
     }
     counts
 }
@@ -4875,6 +4875,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
         WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
         WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+        WaitingFor::ManaAbilityManaPayment { .. } => "ManaAbilityManaPayment",
         WaitingFor::GameOver { .. } => "GameOver",
         _ => "Unsupported",
     }
@@ -6105,6 +6106,7 @@ mod tests {
                 "mulligan",
                 WaitingFor::MulliganDecision {
                     pending: vec![MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 1,
                         phase: MulliganDecisionPhase::Declare,
@@ -6117,6 +6119,7 @@ mod tests {
                 "mulliganPutBack",
                 WaitingFor::MulliganDecision {
                     pending: vec![MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 1,
                         phase: MulliganDecisionPhase::BottomCards {
@@ -7920,6 +7923,7 @@ mod tests {
         let mut state = GameState::new_two_player(7);
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
@@ -7975,6 +7979,7 @@ mod tests {
         );
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
@@ -8000,6 +8005,7 @@ mod tests {
 
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::BottomCards {

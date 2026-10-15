@@ -586,9 +586,6 @@
     "pendingCheaper": "La prossima magia costa {{amount}} in meno",
     "companion": "Compagno",
     "unboundedTooltip": "{{resource}} illimitato (∞)",
-    "unboundedScheduledTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; verrà scelta una quantità finita",
-    "unboundedScheduledYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; indicherai tu la quantità",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato",
     "unboundedConditionalYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato e, in caso contrario, indicherai tu la quantità",
     "unboundedMixedTooltip": "{{resource}} illimitato (∞) — parte di questo gruppo ha un collasso in sospeso; parte resta illimitata",
@@ -671,6 +668,7 @@
     "libraryCount_one": "Grimorio ({{count}} carta)",
     "libraryCount_other": "Grimorio ({{count}} carte)",
     "playFromTop": "Gioca {{name}} dalla cima del grimorio",
+    "activateFromTop": "Attiva {{name}} dalla cima del grimorio",
     "topOfLibrary": "cima del grimorio",
     "indicatorOpponentPrefix": "Avv ",
     "graveyardLower": "cimitero",
@@ -678,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Nessuna carta in {{zone}}",
     "castFromZone": "Lancia da {{zone}}: {{name}}",
+    "activateFromZone": "Attiva da {{zone}}: {{name}}",
     "viewCount": "Vedi {{count}}",
     "castableCount": "{{zone}} — {{count}} lanciabili"
   },
@@ -898,6 +897,7 @@
     },
     "confirmTap": "Conferma TAP ({{selected}}/{{count}})",
     "keepCurrentTargets": "Mantieni i bersagli attuali",
+    "keepCurrentTarget": "Mantieni questo bersaglio",
     "skip": "Salta",
     "opponentChoice": "(a scelta dell'avversario)",
     "chooseNewTarget": "Scegli il nuovo bersaglio della magia",
@@ -2407,7 +2407,8 @@
     "confirm": "Conferma",
     "badgeNewTarget": "Nuovo bersaglio",
     "slotLabel": "Bersaglio {{index}}: {{current}} → {{chosen}}",
-    "unselected": "invariato"
+    "unselected": "invariato",
+    "keep": "Mantieni"
   },
   "separatePiles": {
     "chooserName": "Giocatore {{number}}",

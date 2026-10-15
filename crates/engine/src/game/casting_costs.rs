@@ -49,8 +49,7 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::ability_utils::{
     assign_selected_slots_in_chain, auto_select_targets_for_ability,
     begin_target_selection_for_ability, build_target_slots, build_target_slots_labelled,
-    declared_targets_in_chain, modal_choice_for_player, random_select_targets_for_ability,
-    target_constraints_from_modal,
+    declared_targets_in_chain, random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -65,6 +64,46 @@ pub(crate) fn finalized_spell_cast_ledger_error(
     error: crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError,
 ) -> EngineError {
     EngineError::InvalidAction(format!("failed to record finalized spell cast: {error}"))
+}
+
+/// CR 601.2i + CR 707.12: a copy of an object cast during a resolution
+/// becomes cast once its casting steps (CR 601.2a?h, including the target
+/// announcement) are complete: publish `SpellCast`, record the cast in the
+/// ledger and stamp its occurrence. A copy whose announcement walk is
+/// abandoned (CR 601.2e) therefore never becomes cast and leaves no cast
+/// record, observer or latch. Idempotent: a copy already stamped (a save made
+/// before the commit moved to announcement completion) is not recorded twice.
+pub(crate) fn commit_copy_cast(
+    state: &mut GameState,
+    copy_id: ObjectId,
+    controller: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let copy =
+        state.objects.get(&copy_id).cloned().ok_or_else(|| {
+            EngineError::InvalidAction(format!("cast copy {copy_id:?} not found"))
+        })?;
+    if copy.cast_occurrence.is_some() {
+        return Ok(());
+    }
+    let origin = copy
+        .cast_from_zone
+        .unwrap_or(crate::types::zones::Zone::Exile);
+    events.push(GameEvent::SpellCast {
+        card_id: copy.card_id,
+        controller,
+        object_id: copy_id,
+        cast_mana_value: Some(copy.spell_mana_value()),
+    });
+    let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
+        state,
+        controller,
+        &copy,
+        origin,
+        crate::types::game_state::CastingVariant::Normal,
+    )
+    .map_err(finalized_spell_cast_ledger_error)?;
+    stamp_cast_occurrence_on_stack_spell(state, copy_id, occurrence)
 }
 
 /// CR 601.2i: Attach the ledger-minted identity to the finalized stack spell
@@ -1056,11 +1095,17 @@ fn spell_alternative_cost_is_payable(
         }
         // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
         // hand-discard legs must be payable together (one card cannot serve two).
+        // Spell costs prompt their object legs without look-ahead.
         AbilityCost::Composite { costs } => {
             costs.iter().all(|sub_cost| {
                 spell_alternative_cost_is_payable(state, player, object_id, sub_cost)
-            }) && super::cost_payability::discard_legs_jointly_payable(
-                state, player, object_id, None, costs,
+            }) && super::cost_payability::object_cost_legs_jointly_payable(
+                state,
+                player,
+                object_id,
+                None,
+                costs,
+                super::cost_payability::ObjectLegPayment::Unguided,
             )
         }
         other => other.is_payable(state, player, object_id),
@@ -1525,30 +1570,18 @@ pub(crate) fn finish_pending_cost_or_cast(
     }
 
     if let Some(modal) = pending.deferred_modal_choice.take() {
-        let mut capped = modal_choice_for_player(
+        let super::casting::SpellModeChoice {
+            modal: capped,
+            unavailable_modes,
+            ..
+        } = super::casting::spell_mode_choice(
             state,
             player,
             pending.object_id,
             &modal,
             &pending.ability.context,
         );
-        // CR 700.2i: pawprint modals use the point budget, not a mode-count cap.
-        if capped.mode_pawprints.is_empty() {
-            capped.max_choices = capped.max_choices.min(capped.mode_count);
-        }
         pending.target_constraints = target_constraints_from_modal(&capped);
-        let mode_abilities = state
-            .objects
-            .get(&pending.object_id)
-            .map(super::ability_utils::modal_spell_mode_abilities)
-            .unwrap_or_default();
-        let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
-            state,
-            pending.object_id,
-            player,
-            &capped,
-            &mode_abilities,
-        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
@@ -2574,6 +2607,14 @@ fn park_cost_payment_triggers_if_paused(
     } else {
         crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
     }
+    // CR 603.2c: the span is collected; the end-of-action announcement staging
+    // must not collect it again.
+    super::announcement_triggers::claim_ordinary_collected_span(
+        state,
+        events,
+        cost_event_start,
+        cost_event_end,
+    );
 }
 
 /// CR 601.2h + CR 616.1: Move `chosen[start_at_index..]` through the zone pipeline as
@@ -2726,7 +2767,17 @@ fn finish_cost_object_moves(
                         .is_some_and(|object| object.zone == Zone::Exile)
                 })
                 .collect();
-            let set_id = super::effects::publish_fresh_tracked_set(state, delivered);
+            // CR 608.2c: this arm's own placement names its producer. It is
+            // reached only behind a cost move whose destination is
+            // `Zone::Exile`, and it keeps exactly the members that arrived
+            // there, so a "cards exiled this way" count bound to that action
+            // reads them.
+            let cause = super::effects::this_way_cause_for_action(
+                crate::types::ability::EffectKind::ChangeZone,
+                Some(Zone::Exile),
+            );
+            let set_id =
+                super::effects::publish_fresh_tracked_set_with_causes(state, delivered, cause);
             let mut pending = pending;
             pending.ability.bind_tracked_set_sentinel_recursive(set_id);
             finish_pending_cost_or_cast(state, player, pending, events)?
@@ -3373,7 +3424,7 @@ fn validate_delve_selection_at_commit(
         state
             .objects
             .get(id)
-            .is_some_and(|obj| obj.is_delve_eligible(player))
+            .is_some_and(|obj| obj.is_delve_eligible(state, player))
     }) {
         Ok(())
     } else {
@@ -3399,14 +3450,12 @@ fn settle_delve_markers(
     };
     let unspent: Vec<ObjectId> = pool
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.is_convoke_payment() && selected.contains(&unit.source_id))
-        .map(|unit| unit.source_id)
+        .shapes()
+        .filter(|(shape, _)| shape.is_convoke_payment() && selected.contains(&shape.source_id))
+        .map(|(shape, _)| shape.source_id)
         .collect();
     pool.mana_pool
-        .mana
-        .retain(|unit| !(unit.is_convoke_payment() && unspent.contains(&unit.source_id)));
+        .retain_shapes(|shape| !(shape.is_convoke_payment() && unspent.contains(&shape.source_id)));
     pending.delved_cards = selected
         .into_iter()
         .filter(|id| !unspent.contains(id))
@@ -3485,6 +3534,8 @@ fn park_deferred_cost_triggers_if_paused(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .collect();
     crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
+    // CR 603.2c: see `park_cost_payment_triggers_if_paused`.
+    super::announcement_triggers::claim_ordinary_collected_span(state, events, start, end);
 }
 
 /// CR 603.10a: Retain the state-ledger identities for every selected permanent
@@ -5851,7 +5902,37 @@ pub(crate) fn target_first_activation_defers_interactive_costs_to_payment_bounda
 /// interactive activation-cost component from the serialized residual. Every
 /// completed handler removes one matching leg, so repeated components and a
 /// chosen `OneOf` branch naturally re-enter here until no selection remains.
+///
+/// Legs that use up chosen objects are paid with distinct objects: the residual
+/// must still be jointly payable before anything more is surfaced (a selection
+/// that strands a later leg is refused with its whole action), and a surfaced
+/// prompt offers only the objects that keep the rest payable.
 pub(crate) fn surface_next_unpaid_interactive_activation_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    if let Some(residual) = pending.activation_cost.as_ref() {
+        if !super::cost_payability::activation_residual_jointly_payable(
+            state,
+            player,
+            pending.object_id,
+            pending.ability.context.granting_object,
+            residual,
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "The remaining cost can't be paid with distinct objects".into(),
+            ));
+        }
+    }
+    let surfaced = surface_next_interactive_activation_cost_leg(state, player, pending, events)?;
+    Ok(surfaced.map(|waiting_for| {
+        super::cost_payability::restrict_activation_prompt_to_joint_payment(state, waiting_for)
+    }))
+}
+
+fn surface_next_interactive_activation_cost_leg(
     state: &mut GameState,
     player: PlayerId,
     pending: &mut PendingCast,
@@ -6898,6 +6979,7 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
                 target_selection,
                 carrier(),
+                activation_trigger_collection.clone(),
             ));
         }
         // CR 606.3: A `[−X]` loyalty ability is modeled as a chosen-X removal of
@@ -7164,6 +7246,7 @@ pub(super) fn push_ability_entry(
                 }
             }));
     }
+    super::announcement_triggers::end_activation_announcement(state);
     priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
@@ -7301,12 +7384,11 @@ pub(super) fn begin_modal_additional_cost_declaration(
         repeatability,
     }) = additional
     else {
-        let mut capped =
-            modal_choice_for_player(state, player, object_id, &modal, &ability.context);
-        // CR 700.2i: pawprint modals use the point budget, not a mode-count cap.
-        if capped.mode_pawprints.is_empty() {
-            capped.max_choices = capped.max_choices.min(capped.mode_count);
-        }
+        let super::casting::SpellModeChoice {
+            modal: capped,
+            unavailable_modes,
+            ..
+        } = super::casting::spell_mode_choice(state, player, object_id, &modal, &ability.context);
         let mut pending = PendingCast::new(object_id, card_id, ability, cost);
         pending.base_cost = base_cost;
         pending.casting_variant = casting_variant;
@@ -7316,18 +7398,6 @@ pub(super) fn begin_modal_additional_cost_declaration(
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
         pending.target_constraints = target_constraints_from_modal(&capped);
-        let mode_abilities = state
-            .objects
-            .get(&object_id)
-            .map(super::ability_utils::modal_spell_mode_abilities)
-            .unwrap_or_default();
-        let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
-            state,
-            object_id,
-            player,
-            &capped,
-            &mode_abilities,
-        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
@@ -8424,7 +8494,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
                         .map(|extra| extra.cost)
                     })
                 })
-        } else if super::casting::object_in_players_library(state, obj, player) {
+        } else if state.object_in_players_zone(obj, Zone::Library, player) {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
             // value rather than paying its mana cost").
@@ -11507,8 +11577,8 @@ pub(super) fn pay_and_push_adventure(
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
-        && super::casting::can_feasibly_pay_mana_cost(state, player, Some(object_id), cost)
-        && super::casting::has_manual_mana_payment_path_for_spell(state, player, object_id, cost);
+        && super::casting::spell_payment_manual_route(state, player, object_id, cost)
+            == super::casting::ManualPaymentRoute::Feasible;
     if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
@@ -11565,7 +11635,15 @@ pub(super) fn pay_and_push_adventure(
 
     state.pending_cast = Some(Box::new(pending));
     if payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
-        auto_tap_non_sacrificial_mana_sources(state, player, cost, events, object_id);
+        let keep_untapped = sacrificial_tap_sources_to_keep(state, player, cost, object_id);
+        auto_tap_non_sacrificial_mana_sources(
+            state,
+            player,
+            cost,
+            events,
+            object_id,
+            &keep_untapped,
+        );
         if pending_cost_is_payable_from_pool(state, player) {
             return finalize_automatic_mana_payment(state, player, events);
         }
@@ -12070,65 +12148,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .unwrap_or_default();
     let convoked_creature_count = convoked_creatures.len();
 
-    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast as a 1-element
-    // loop-action sequence the PR-7 Phase 4d-ii / P7 v3 loop-shortcut hook replays. Gated to a
-    // buyback-paid, permanent-creating (token) spell so the hook's cheap precondition
-    // (`!last_loop_action_sequence.is_empty()`) is set ~never. Fail-safe note: a spurious capture
-    // from buyback + some OTHER optional cost only makes the clone-drive run — its cover/abort
-    // rejects any non-covering recast, so this can never false-certify. Cleared (set `[]`) on any
-    // non-matching cast, so a stale sequence never lingers. Additionally gated on
-    // `!in_simulation_probe()` so the detection/materialize drive (which re-runs this same cast
-    // under a `SimulationProbeGuard`) does NOT re-write the field — the sequence must stay
-    // byte-stable across the cover's s_n/s_n1/s_n2 frames (it is COMPARED, resource.rs). Overwrite
-    // is idempotent for a recast, but the shared invariant keeps the multi-activation path (which
-    // APPENDS, engine.rs) honest. `ability.effect` is read here before `ability` is moved into
-    // `stack_ability` below.
-    {
-        let is_token_creating =
-            matches!(ability.effect, crate::types::ability::Effect::Token { .. });
-        let (has_buyback, convoke) = state.objects.get(&object_id).map_or((false, None), |obj| {
-            let has_buyback = obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)));
-            let convoke = obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Convoke))
-                .then_some(crate::types::game_state::ConvokeMode::Convoke);
-            (has_buyback, convoke)
-        });
-        // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
-        // SERIALIZED surface too — `last_loop_action_sequence` is `skip_serializing_if=is_empty`, so
-        // a spurious element in OFF mode would appear in a save/replay/scenario. Gate on the SAME
-        // accessor the consuming hook uses so the mode gate has one source. The whole
-        // set-or-clear is skipped inside a `SimulationProbeGuard` (the detection/materialize drive
-        // re-casts on a clone): the sequence must stay byte-STABLE across the cover's s_n/s_n1/s_n2
-        // frames (it is COMPARED, resource.rs), so the probe must LEAVE it untouched rather than
-        // clear it. Overwrite-with-`vec![ctx]`-or-`[]` is the real-cast behavior (idempotent for a
-        // homogeneous recast; a non-matching real cast clears a stale sequence).
-        if !crate::game::engine::in_simulation_probe() {
-            state.last_loop_action_sequence = (state.loop_detection.samples()
-                && additional_cost_paid
-                && has_buyback
-                && is_token_creating)
-                .then_some(crate::types::game_state::LoopActionContext {
-                    card_id,
-                    controller: player,
-                    action: crate::types::game_state::LoopAction::Recast {
-                        from_zone: source_zone,
-                        uses_buyback: crate::types::game_state::BuybackUsage::Used,
-                    },
-                    convoke,
-                    // FIX-1: a buyback recast pins its loop choices via `convoke`, not the
-                    // FIX-1 tap-cost/color/proliferate choices — recorded pinless.
-                    pins: Vec::new(),
-                })
-                .map(|ctx| vec![ctx])
-                .unwrap_or_default();
-        }
-    }
-
     let announced_targets = declared_targets_in_chain(&ability);
 
     // Determine whether this spell has a meaningful on-resolve ability.
@@ -12154,17 +12173,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
         ability.effect,
         crate::types::ability::Effect::Unimplemented { .. }
     ) && ability.targets.is_empty();
-    let stack_ability = if !is_placeholder {
-        Some(ability)
-    } else {
-        // CR 603.4: For permanent spells with no spell ability, store cast_from_zone
-        // directly on the object since there's no ability context to carry it.
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            obj.cast_from_zone = Some(source_zone);
-            obj.cast_controller = Some(player);
-        }
-        None
-    };
+    // CR 601.2a + CR 601.2i: every cast spell carries its cast provenance on
+    // the object itself, not only on its ability context. The engine-synthesized
+    // `WasCast` guard on the spell's own cast triggers (Cascade, CR 702.85a) is
+    // rechecked when the trigger resolves, while the spell is still on the
+    // stack and before `stack.rs` copies the context onto the resolving spell.
+    // Copies never reach here (CR 707.10: a copy of a spell isn't cast).
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_from_zone = Some(source_zone);
+        obj.cast_controller = Some(player);
+    }
+    let stack_ability = (!is_placeholder).then_some(ability);
 
     // CR 107.3m: Apply the paid-X snapshot to the object (after the placeholder
     // branch has already taken a mutable borrow). Done unconditionally so that
@@ -12297,7 +12316,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
             "graveyard permission slot not announced".to_string(),
         ));
     }
-    // CR 601.2a + CR 611.2a: Capture the tracked-set group of a
+    // CR 601.2a + CR 608.2c + CR 611.2a: Capture the tracked-set group of a
     // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
     // leaves its source zone for the stack.
     // Consumed after the move (see below) so the grant's one allowed cast is
@@ -12367,7 +12386,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // goes through the single entry while the consult is skipped (PLAN §3). The
     // spell moves itself, so the attribution source is the object.
     let stack_req =
-        crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id);
+        crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id, player);
     crate::game::zone_pipeline::move_object(state, stack_req, events);
 
     // CR 614.1a + CR 608.2n: install the graveyard-redirect rider captured above
@@ -12698,7 +12717,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         )
         .expect("top-of-library cast permission must have an unused ledger slot");
     }
-    // CR 601.2a + CR 611.2a: A single-use exile-cast grant is spent
+    // CR 601.2a + CR 608.2c + CR 611.2a: A single-use exile-cast grant is spent
     // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
     // every other card still in the tracked set so the remaining exiled cards
     // can no longer be cast (Chandra, Hope's Beacon +1: "an instant or sorcery
@@ -12783,6 +12802,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
             new_cumulative,
         });
     }
+
+    // CR 601.2i + CR 603.3b: the spell became cast. A paused announcement's
+    // staged triggers and this cast's own triggers (read against the cast
+    // ledger recorded above) are committed as one batch.
+    super::announcement_triggers::commit_spell_announcement(state, object_id, events);
 
     Ok(resolution_success_waiting_for.unwrap_or(WaitingFor::Priority { player }))
 }
@@ -13482,6 +13506,7 @@ pub(super) fn auto_tap_mana_sources_excluding(
         None,
         None,
         None,
+        AutoTapRowPolicy::Choose,
     );
 }
 
@@ -13557,6 +13582,7 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding_and_resume(
         None,
         resume,
         parent,
+        AutoTapRowPolicy::Choose,
     );
 }
 
@@ -13582,19 +13608,22 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding(
         None,
         None,
         None,
+        AutoTapRowPolicy::Choose,
     );
 }
 
 /// CR 601.2g-h + CR 605.3b: Apply the existing automatic planner while
-/// excluding sacrificial activation rows. This is the safe first leg of
-/// `AutoExceptSacrificialMana`; the caller retains the pending cast and offers
-/// the excluded capabilities explicitly if this leg cannot finish payment.
+/// excluding sacrificial activation rows and the `excluded` sources. This is
+/// the safe first leg of `AutoExceptSacrificialMana`; the caller retains the
+/// pending cast and offers the excluded capabilities explicitly if this leg
+/// cannot finish payment.
 pub(super) fn auto_tap_non_sacrificial_mana_sources(
     state: &mut GameState,
     player: PlayerId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
     source_id: ObjectId,
+    excluded: &HashSet<ObjectId>,
 ) {
     let spell_meta = super::casting::build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
@@ -13604,13 +13633,14 @@ pub(super) fn auto_tap_non_sacrificial_mana_sources(
         cost,
         events,
         Some(source_id),
-        &HashSet::new(),
+        excluded,
         Some(mana_sources::ManaSourcePenalty::Sacrifices),
         spell_ctx.as_ref(),
         None,
         None,
         None,
         None,
+        AutoTapRowPolicy::Choose,
     );
 }
 
@@ -13626,8 +13656,57 @@ pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap(
 ) -> bool {
     let mut simulated = state.clone();
     let mut events = Vec::new();
-    auto_tap_non_sacrificial_mana_sources(&mut simulated, player, cost, &mut events, source_id);
+    auto_tap_non_sacrificial_mana_sources(
+        &mut simulated,
+        player,
+        cost,
+        &mut events,
+        source_id,
+        &HashSet::new(),
+    );
     spell_cost_is_payable_from_pool(&simulated, player, source_id, cost)
+}
+
+/// CR 601.2g-h + CR 605.3a: The sources the first leg of
+/// `AutoExceptSacrificialMana` must leave untapped. A source whose sacrificial
+/// row needs `{T}` (Phyrexian Tower, Crystal Vein) loses that row once the first
+/// leg taps it for another row, so it is kept whenever tapping it would leave
+/// the cast unpayable by the castability authority.
+fn sacrificial_tap_sources_to_keep(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    source_id: ObjectId,
+) -> HashSet<ObjectId> {
+    let mut simulated = state.clone();
+    auto_tap_non_sacrificial_mana_sources(
+        &mut simulated,
+        player,
+        cost,
+        &mut Vec::new(),
+        source_id,
+        &HashSet::new(),
+    );
+    if super::casting::can_feasibly_pay_mana_cost(&simulated, player, Some(source_id), cost) {
+        return HashSet::new();
+    }
+    mana_sources::activatable_mana_source_selections(state, player)
+        .into_iter()
+        .filter(|selection| selection.penalty == mana_sources::ManaSourcePenalty::Sacrifices)
+        .filter(|selection| {
+            selection
+                .ability_index
+                .and_then(|index| {
+                    state
+                        .objects
+                        .get(&selection.source.object_id)?
+                        .abilities
+                        .get(index)
+                })
+                .is_some_and(|ability| mana_sources::has_tap_component(&ability.cost))
+        })
+        .map(|selection| selection.source.object_id)
+        .collect()
 }
 
 pub(crate) fn spell_cost_is_payable_from_pool(
@@ -13726,6 +13805,7 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding_cached(
         source_cache,
         None,
         None,
+        AutoTapRowPolicy::Choose,
     );
 }
 
@@ -13912,8 +13992,20 @@ fn auto_tap_mana_sources_inner(
     source_cache: Option<&AutoTapSourceCache>,
     resume: Option<&crate::types::game_state::ManaAbilityResume>,
     parent: Option<&ManaAbilityCostParent>,
+    row_policy: AutoTapRowPolicy,
 ) {
     use crate::types::mana::ManaCost;
+
+    // An explicit nested policy wins. A `Choose` call made while an automatic
+    // payment is executing (a mana ability's own sub-cost payment re-entering
+    // auto-tap, or a payment resumed after a pause) is part of that payment and
+    // takes its policy rather than deciding again.
+    let row_policy = match row_policy {
+        AutoTapRowPolicy::Choose => state
+            .active_auto_tap_row_policy
+            .unwrap_or(AutoTapRowPolicy::Choose),
+        AutoTapRowPolicy::WithoutAvoidableDrawbacks | AutoTapRowPolicy::AllRows => row_policy,
+    };
 
     // CR 601.2g: A player may spend mana from their mana pool to pay costs.
     // Plan against the *residual* cost (what the pool can't already cover) so
@@ -14002,18 +14094,268 @@ fn auto_tap_mana_sources_inner(
     });
     let available = filtered.as_deref().unwrap_or(available);
 
-    let mut to_tap: Vec<ManaSourceOption> = Vec::new();
-    let mut used_sources: HashSet<ObjectId> = HashSet::new();
-
     // Build the typed shard-requirements list first — used by both the
     // combination pre-pass and the main MCV/LCV loop.
+    let (needs, deferred_generic) = auto_tap_needs(shards, mana_spend_permission);
+    // The row policy is decided once for the whole payment and inherited by every
+    // nested mana sub-cost payment, so sibling sub-costs are funded under the plan
+    // that was verified for them together.
+    let floating_mana = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| p.mana_pool.total() > 0);
+    let (
+        AutoTapPlan {
+            mut to_tap,
+            used_sources,
+            ..
+        },
+        nested_row_policy,
+    ) = choose_auto_tap_plan(
+        state,
+        available,
+        &needs,
+        generic as usize + deferred_generic,
+        effective_ctx,
+        row_policy,
+        floating_mana,
+    );
+
+    // Phase 3: activate each selected mana source.
     //
+    // CR 601.2g permits mana-ability activation; CR 605.3b resolves it
+    // immediately; CR 605.3c prevents reactivation. Those rules do not prescribe
+    // this ordering. Engine scheduling policy: with every row, selected sources
+    // without a mana sub-cost resolve first, stably, so their mana is available to
+    // pay a later cost. A drawback-free plan selects at most one row with a mana
+    // sub-cost at each payment level, and only when the pool was empty
+    // (`planned_mana_sub_costs_fundable`); that row resolves first, so its
+    // sub-cost is planned against the same empty pool and unused sources the
+    // check planned it against, before any of this plan's mana floats.
+    // This preserves the plan and `used_sources` reservation; it changes only order.
+    let sub_cost_rows_first = nested_row_policy == AutoTapRowPolicy::WithoutAvoidableDrawbacks;
+    to_tap.sort_by_key(|option| {
+        let has_sub_cost = option.ability_index.is_some_and(|ability_index| {
+            state
+                .objects
+                .get(&option.object_id)
+                .and_then(|object| object.abilities.get(ability_index))
+                .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_some())
+        });
+        has_sub_cost != sub_cost_rows_first
+    });
+
+    // Publish this payment's policy for the activations below: a selected mana
+    // ability's own sub-cost payment re-enters auto-tap through the resolver
+    // with `Choose`, and must not decide independently of its siblings. Every
+    // exit below restores the enclosing value.
+    let enclosing_row_policy = state.active_auto_tap_row_policy.replace(nested_row_policy);
+
+    // Sources with an explicit ability delegate to resolve_mana_ability (the single
+    // authority for cost payment — handles tap, sacrifice, and future cost types).
+    // The basic-land-subtype fallback (ability_index: None) uses inline tap + produce.
+    //
+    // For options carrying TapsForMana aura overrides, populate
+    // `state.pending_taps_for_mana_overrides` so that
+    // `resolve_triggered_mana_ability_inline` can thread the correct color into the
+    // aura's triggered mana ability when `resolve_tap_mana_triggers_inline` fires.
+    for option in to_tap {
+        for (trigger_ref, override_val) in &option.taps_for_mana_overrides {
+            state
+                .pending_taps_for_mana_overrides
+                .insert(trigger_ref.clone(), override_val.clone());
+        }
+        if let Some(idx) = option.ability_index {
+            let ability_def = state
+                .objects
+                .get(&option.object_id)
+                .and_then(|obj| obj.abilities.get(idx))
+                .cloned();
+            if let Some(ability_def) = ability_def {
+                // CR 605.3c: Extend the in-flight exclusion chain with this
+                // source before re-entering auto-tap (pre-tap below) and before
+                // resolving the ability (which re-enters auto-tap through its
+                // mana sub-cost payment). This source's activation is suspended
+                // on the call stack until `resolve_mana_ability_excluding`
+                // returns, so it — and every ancestor already in
+                // `excluded_sources` — must be excluded from any nested
+                // auto-tap, or two cross-paying costed mana abilities recurse
+                // infinitely. The exclusion set is read only by
+                // `pay_mana_sub_cost`, reached only through the `AbilityCost::Mana`
+                // arms — exactly the costs `mana_sub_cost_of` reports `Some` for.
+                // A tap-only / sacrifice / pay-life mana ability never consumes
+                // it, so clone-and-extend only when a mana sub-cost is present and
+                // otherwise forward the caller's set unchanged — skipping a heap
+                // allocation per selected source on this auto-tap hot path.
+                //
+                // CR 118.10: Each payment of a cost applies to only one spell or
+                // ability, so a source the OUTER plan reserved for the outer cost
+                // (every id in `used_sources`, a superset of `to_tap` that already
+                // contains `option.object_id`) must be excluded from the nested
+                // sub-cost auto-tap. Phase 3 does not re-verify a source is untapped
+                // before resolving, so without this the sub-cost could grab a source
+                // the outer cost still needs. Unioning `used_sources` supersedes the
+                // prior `excluded.insert(option.object_id)`.
+                let sub_cost = mana_abilities::mana_sub_cost_of(&ability_def.cost);
+                let excluded_buf;
+                // CR 107.4b + CR 118.10: The outer cost's colored shards are
+                // reserved; computed once (only when a mana sub-cost is present, so
+                // the `None` / no-sub-cost path adds zero work) and threaded into
+                // both the nested sub-cost auto-tap and the ability's own resolution
+                // so the sub-cost's generic pips are funded from non-demanded mana,
+                // never a floated color the outer cost still needs (the Dimir/Gruul
+                // Signet over-consumption bug).
+                let demand: Option<mana_payment::ColorDemand> =
+                    sub_cost.map(|_| mana_payment::outer_cost_color_demand(cost));
+                let excluded: &HashSet<ObjectId> = if sub_cost.is_some() {
+                    excluded_buf = excluded_sources
+                        .union(&used_sources)
+                        .copied()
+                        .collect::<HashSet<ObjectId>>();
+                    &excluded_buf
+                } else {
+                    excluded_sources
+                };
+                if let Some(sub_cost) = sub_cost {
+                    let activation_context = super::casting::activation_payment_context(
+                        state,
+                        option.object_id,
+                        Some(idx),
+                    );
+                    let activation_ctx = activation_context.as_payment_context();
+                    auto_tap_mana_sources_inner(
+                        state,
+                        player,
+                        sub_cost,
+                        events,
+                        Some(option.object_id),
+                        excluded,
+                        excluded_penalty,
+                        Some(&activation_ctx),
+                        demand.as_ref(),
+                        None,
+                        resume,
+                        parent,
+                        nested_row_policy,
+                    );
+                    if super::casting::mana_ability_cost_payment_is_paused(state) {
+                        state.active_auto_tap_row_policy = enclosing_row_policy;
+                        return;
+                    }
+                }
+                // color_override tells resolve_mana_ability how to resolve the
+                // ability's choice dimension. `SingleColor` replays a per-color
+                // pick (AnyOneColor/ChoiceAmongExiledColors); `Combination`
+                // carries a pre-chosen multi-mana sequence (filter lands).
+                // Errors are non-fatal here: auto-tap runs synchronously during payment,
+                // so sources can't change state between collection and resolution. If a
+                // source is somehow invalid (e.g., removed by a replacement effect), we
+                // skip it silently — the player can still manually tap other sources.
+                let override_value = production_override_for_option(&ability_def, &option);
+                // CR 605.3c: Resolve via the exclusion-aware entry so the
+                // in-flight chain (`excluded`, including this source when it has a
+                // mana sub-cost) threads into the ability's own mana sub-cost
+                // auto-tap. The public `resolve_mana_ability` would discard the
+                // chain and re-tap a suspended ancestor, recursing infinitely.
+                let _ = mana_abilities::resolve_mana_ability_excluding(
+                    state,
+                    option.object_id,
+                    player,
+                    &ability_def,
+                    events,
+                    override_value,
+                    excluded,
+                    demand.as_ref(),
+                    resume,
+                    parent,
+                );
+                if super::casting::mana_ability_cost_payment_is_paused(state) {
+                    state.active_auto_tap_row_policy = enclosing_row_policy;
+                    return;
+                }
+            }
+        } else {
+            // Basic-land-subtype fallback — no explicit ability, just tap + produce.
+            let node = state.begin_activated_mana_journal_node(option.object_id);
+            state.with_rules_execution_node(node, |state| {
+                if crate::game::object_state::resolve_and_apply_object_edit(
+                    state,
+                    option.object_id,
+                    crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                    true,
+                )
+                .expect("auto-tap source must remain a live exact object")
+                {
+                    events.push(GameEvent::permanent_tapped(state, option.object_id, None));
+                }
+                // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
+                // intrinsic mana ability. It never moves the land, so it carries no
+                // departed-source LKI; its triggers are observed at the activation
+                // boundary, before production, like every mana activation.
+                let activation_event = super::casting_targets::emit_ability_activated(
+                    state,
+                    player,
+                    option.object_id,
+                    crate::types::events::ActivatedAbilityKind::Mana,
+                    None,
+                    crate::types::zones::Zone::Battlefield,
+                    events,
+                );
+                super::triggers::collect_activation_event_at_boundary(
+                    state,
+                    events,
+                    activation_event,
+                )
+                .expect("intrinsic mana activation trigger collection cause must be live");
+                mana_payment::produce_mana(
+                    state,
+                    option.object_id,
+                    option.mana_type,
+                    player,
+                    true,
+                    events,
+                );
+                // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
+                // always includes `{T}` in its cost, so this auto-tap fallback
+                // taps the land for mana. Emit one `TappedForMana` per resolution
+                // so `TapsForMana` triggers fire exactly once.
+                events.push(GameEvent::TappedForMana {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    tap_state: ManaTapState::FromTap,
+                });
+                events.push(GameEvent::ManaAbilityProduced {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+                });
+            });
+        }
+    }
+    state.active_auto_tap_row_policy = enclosing_row_policy;
+}
+
+/// One colored-shard requirement of an auto-tap plan: the acceptable mana
+/// types (empty = any), whether an unmet shard falls back to two generic
+/// (CR 107.4e), whether it needs a source that could produce two or more
+/// colors, and whether it is Phyrexian (CR 107.4f).
+type AutoTapNeed = (Vec<ManaType>, bool, bool, bool);
+
+/// Translate a cost's shards into auto-tap requirements. Returns the colored
+/// requirements and the number of shards deferred to generic payment.
+fn auto_tap_needs(
+    shards: &[crate::types::mana::ManaCostShard],
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+) -> (Vec<AutoTapNeed>, usize) {
     // CR 107.4f: Phyrexian shards can be paid with 2 life, so they should
     // not block using flexible mana sources (dual lands) for strict colored
     // requirements. We track Phyrexian shards separately and prioritize
     // them after strict colored shards (MCV will sort them as least constrained).
     let mut deferred_generic: usize = 0;
-    let mut needs: Vec<(Vec<ManaType>, bool, bool, bool)> = Vec::new();
+    let mut needs: Vec<AutoTapNeed> = Vec::new();
     for shard in shards {
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
@@ -14105,7 +14447,34 @@ fn auto_tap_mana_sources_inner(
         }
     }
 
+    (needs, deferred_generic)
+}
+
+/// The rows one auto-tap plan activates (Phases 0-2 of
+/// [`auto_tap_mana_sources_inner`]). Pure: nothing is tapped here.
+struct AutoTapPlan {
+    to_tap: Vec<ManaSourceOption>,
+    used_sources: HashSet<ObjectId>,
+    /// Every colored requirement and every generic unit has a planned source.
+    /// Mana sub-costs of the planned rows are not included; see
+    /// [`planned_mana_sub_costs_fundable`].
+    covers_cost: bool,
+}
+
+/// Plan which of `available` (sorted by `collect_sorted_auto_tap_source_options`)
+/// pay `needs` plus `generic_units` generic mana.
+fn plan_auto_tap_rows(
+    state: &GameState,
+    available: &[ManaSourceOption],
+    needs: &[AutoTapNeed],
+    generic_units: usize,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> AutoTapPlan {
+    let mut to_tap: Vec<ManaSourceOption> = Vec::new();
+    let mut used_sources: HashSet<ObjectId> = HashSet::new();
     let mut assigned = vec![false; needs.len()];
+    let mut unfilled_shards = 0usize;
+    let mut remaining_generic = generic_units;
 
     // Phase 0 (combo pre-pass): CR 605.3b + CR 106.1a — filter-land rows
     // produce a full multi-mana combination atomically. A naive per-shard
@@ -14114,11 +14483,11 @@ fn auto_tap_mana_sources_inner(
     // still-unfilled shards before falling through to the single-color loop.
     assign_combination_sources(
         available,
-        &needs,
+        needs,
         &mut assigned,
         &mut used_sources,
         &mut to_tap,
-        effective_ctx,
+        payment_context,
     );
 
     // Preserve a free, colorless source for each generic slot when another
@@ -14127,9 +14496,8 @@ fn auto_tap_mana_sources_inner(
     // Only reserve options that need no mana sub-cost: those sources can still
     // supply the generic slot without creating a recursive payment dependency.
     let mut generic_reservations = HashSet::new();
-    let reservable_count = generic as usize + deferred_generic;
     for option in available {
-        if generic_reservations.len() == reservable_count {
+        if generic_reservations.len() == generic_units {
             break;
         }
         let has_no_mana_sub_cost = option.ability_index.is_none_or(|ability_index| {
@@ -14141,7 +14509,7 @@ fn auto_tap_mana_sources_inner(
         });
         if option.atomic_combination.is_none()
             && option.mana_type == ManaType::Colorless
-            && option_allowed_for_context(option, effective_ctx)
+            && option_allowed_for_context(option, payment_context)
             && option.penalty == mana_sources::ManaSourcePenalty::None
             && has_no_mana_sub_cost
         {
@@ -14173,7 +14541,7 @@ fn auto_tap_mana_sources_inner(
                 &used_sources,
                 acceptable,
                 *requires_two_or_more_color_source,
-                effective_ctx,
+                payment_context,
             );
             let priority = if *is_phyrexian { 1u8 } else { 0u8 };
             // CR 107.4f: Prioritize strict colored shards (priority 0) over Phyrexian
@@ -14193,12 +14561,14 @@ fn auto_tap_mana_sources_inner(
             &generic_reservations,
             acceptable,
             *requires_two_or_more_color_source,
-            effective_ctx,
+            payment_context,
         ) {
             used_sources.insert(option.object_id);
             to_tap.push(option);
         } else if *two_generic_fallback {
-            deferred_generic += 2;
+            remaining_generic += 2;
+        } else {
+            unfilled_shards += 1;
         }
         assigned[idx] = true;
     }
@@ -14228,7 +14598,6 @@ fn auto_tap_mana_sources_inner(
     // were skipped here, which stranded Sol Ring (a combo with no non-combo
     // sibling ability) and made spells payable only by colorless rocks read as
     // uncastable in the shared affordability preview.
-    let mut remaining_generic = generic as usize + deferred_generic;
     let generic_priority = |option: &ManaSourceOption| -> u8 {
         let color_locked = match &option.atomic_combination {
             Some(combo) => combo.iter().all(|m| *m == ManaType::Colorless),
@@ -14275,8 +14644,8 @@ fn auto_tap_mana_sources_inner(
             if generic_priority(option) != class {
                 continue;
             }
-            let eligible_width = option_mana_types_for_context(option, effective_ctx).len();
-            if !option_allowed_for_context(option, effective_ctx) || eligible_width == 0 {
+            let eligible_width = option_mana_types_for_context(option, payment_context).len();
+            if !option_allowed_for_context(option, payment_context) || eligible_width == 0 {
                 continue;
             }
             if used_sources.insert(option.object_id) {
@@ -14286,202 +14655,274 @@ fn auto_tap_mana_sources_inner(
         }
     }
 
-    // Phase 3: activate each selected mana source.
-    //
-    // CR 601.2g permits mana-ability activation; CR 605.3b resolves it
-    // immediately; CR 605.3c prevents reactivation. Those rules do not prescribe
-    // this ordering. Engine scheduling policy: selected sources without a mana
-    // sub-cost resolve first, stably, so their mana is available to pay a later cost.
-    // This preserves the plan and `used_sources` reservation; it changes only order.
-    to_tap.sort_by_key(|option| {
-        option.ability_index.is_some_and(|ability_index| {
+    AutoTapPlan {
+        to_tap,
+        used_sources,
+        covers_cost: unfilled_shards == 0 && remaining_generic == 0,
+    }
+}
+
+/// CR 601.2g + CR 605.3b: Which mana-source rows an auto-tap plans with.
+///
+/// The policy belongs to one automatic payment, from its outermost auto-tap to
+/// its last nested mana sub-cost. It is passed explicitly to Phase 3's nested
+/// auto-taps and published in `GameState::active_auto_tap_row_policy` while that
+/// payment activates its sources, so a resolver re-entry that starts a new
+/// auto-tap with `Choose` inherits it. It is never persisted. Drawback avoidance
+/// applies only to a payment that completes without suspending: a resumed
+/// payment plans its remainder with `AllRows`
+/// (`mana_abilities::resume_mana_ability_root`), and a resumed outer payment's
+/// mana sub-cost never decides on its own (`mana_abilities::pay_mana_sub_cost`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoTapRowPolicy {
+    /// The outermost payment: decide for the whole payment, sub-costs included
+    /// (see [`choose_auto_tap_plan`]).
+    Choose,
+    /// Withhold avoidable drawback combination rows
+    /// ([`rows_without_avoidable_drawback_combinations`]).
+    WithoutAvoidableDrawbacks,
+    /// Every row: the planner without drawback avoidance.
+    AllRows,
+}
+
+/// CR 601.2g + CR 605.3b: Choose which mana-source rows auto-pay activates, and
+/// the policy every nested mana sub-cost payment of this payment inherits.
+///
+/// A source may offer a drawback-free mana ability beside a multi-mana one that
+/// costs or does more (`mana_sources::mana_source_option_has_drawback`): Arena of
+/// Glory's `{T}: Add {R}` beside its `{R}, {T}, Exert: Add {R}{R}`, Dwarven
+/// Ruins' `{T}: Add {R}` beside its `{T}, Sacrifice: Add {R}{R}`, a filter land's
+/// `{T}: Add {C}` beside its hybrid-costed pairs. The combination pre-pass
+/// (Phase 0) commits such a row whenever it covers a colored shard, before the
+/// per-source penalty ordering is consulted. Exerting (CR 701.43a: "you choose")
+/// and sacrificing (CR 701.21a) are the player's choices, and a mana sub-cost
+/// spends another source's mana, so none of them should be made when nothing
+/// needs them.
+///
+/// For the outermost payment (`Choose`) the planner first withholds the drawback
+/// combination rows of every source that also has a drawback-free row. It uses
+/// that plan when it pays the whole cost and every mana sub-cost of the rows it
+/// selects, planned the way Phase 3 will pay them: under the same withholding,
+/// from the sources still unused, against an empty pool. That last condition is
+/// enforced, not assumed (`planned_mana_sub_costs_fundable`). Otherwise the whole
+/// payment, nested sub-costs included, plans with every row, exactly as before
+/// drawback avoidance. Nested
+/// payments never re-decide: deciding per sub-cost could spend a source that a
+/// sibling sub-cost needs.
+///
+/// Single-mana rows are never withheld: the source sort already ranks them by
+/// penalty, and withholding them would change choices between different sources
+/// (a painland's colored row vs. a mana creature). A source with no drawback-free
+/// row (a Signet, Darkwater Catacombs) keeps all its rows.
+fn choose_auto_tap_plan(
+    state: &GameState,
+    available: &[ManaSourceOption],
+    needs: &[AutoTapNeed],
+    generic_units: usize,
+    payment_context: Option<&PaymentContext<'_>>,
+    policy: AutoTapRowPolicy,
+    floating_mana: bool,
+) -> (AutoTapPlan, AutoTapRowPolicy) {
+    let all_rows = || {
+        (
+            plan_auto_tap_rows(state, available, needs, generic_units, payment_context),
+            AutoTapRowPolicy::AllRows,
+        )
+    };
+    match policy {
+        AutoTapRowPolicy::AllRows => all_rows(),
+        AutoTapRowPolicy::Choose => {
+            let Some(rows) = rows_without_avoidable_drawback_combinations(state, available) else {
+                return all_rows();
+            };
+            let plan = plan_auto_tap_rows(state, &rows, needs, generic_units, payment_context);
+            if plan.covers_cost
+                && planned_mana_sub_costs_fundable(
+                    state,
+                    &rows,
+                    &plan,
+                    &mut plan.used_sources.clone(),
+                    floating_mana,
+                )
+            {
+                (plan, AutoTapRowPolicy::WithoutAvoidableDrawbacks)
+            } else {
+                all_rows()
+            }
+        }
+        // A nested payment of a verified plan. Its rows are the verified plan's
+        // rows minus the sources already used, so this replays the check. If it
+        // still falls short (mana the check did not count changed the residual),
+        // every row is the last resort rather than leaving the cost unpaid.
+        AutoTapRowPolicy::WithoutAvoidableDrawbacks => {
+            let rows = rows_without_avoidable_drawback_combinations(state, available);
+            let plan = plan_auto_tap_rows(
+                state,
+                rows.as_deref().unwrap_or(available),
+                needs,
+                generic_units,
+                payment_context,
+            );
+            if plan.covers_cost {
+                (plan, AutoTapRowPolicy::WithoutAvoidableDrawbacks)
+            } else {
+                all_rows()
+            }
+        }
+    }
+}
+
+/// `available` without the drawback combination rows (`atomic_combination`) of
+/// every source that also has a drawback-free row in `available`. `None` when no
+/// row is withheld.
+fn rows_without_avoidable_drawback_combinations(
+    state: &GameState,
+    available: &[ManaSourceOption],
+) -> Option<Vec<ManaSourceOption>> {
+    let drawbacks: Vec<bool> = available
+        .iter()
+        .map(|option| mana_sources::mana_source_option_has_drawback(state, option))
+        .collect();
+    let withheld_candidate = |option: &ManaSourceOption, has_drawback: bool| {
+        has_drawback && option.atomic_combination.is_some()
+    };
+    if !available
+        .iter()
+        .zip(&drawbacks)
+        .any(|(option, has_drawback)| withheld_candidate(option, *has_drawback))
+    {
+        return None;
+    }
+    let sources_with_free_row: HashSet<ObjectId> = available
+        .iter()
+        .zip(&drawbacks)
+        .filter(|(_, has_drawback)| !**has_drawback)
+        .map(|(option, _)| option.object_id)
+        .collect();
+    let rows: Vec<ManaSourceOption> = available
+        .iter()
+        .zip(&drawbacks)
+        .filter(|(option, has_drawback)| {
+            !withheld_candidate(option, **has_drawback)
+                || !sources_with_free_row.contains(&option.object_id)
+        })
+        .map(|(option, _)| option.clone())
+        .collect();
+    (rows.len() < available.len()).then_some(rows)
+}
+
+/// CR 605.3b + CR 118.3 + CR 106.4: True when every mana sub-cost of the rows
+/// `plan` activates can be paid by sources the plan leaves unused, recursively,
+/// and Phase 3 will pay it exactly as planned here. `consumed` starts as the
+/// plan's own sources and grows as sub-costs claim more.
+///
+/// Phase 3 of [`auto_tap_mana_sources_inner`] pays a selected sub-cost with a
+/// nested auto-tap that reduces it against the live pool, excludes the sources
+/// already used and inherits the outer row policy. This plans that payment with
+/// the same planner over `rows` (the rows that policy allows) minus `consumed`,
+/// against an empty pool. The two agree only if the pool is empty when the
+/// nested payment runs, so that is enforced, not assumed:
+///
+/// - each selected row makes at most one mana payment, counted over its whole
+///   cost tree with the flattener the cost cursor pays from
+///   (`mana_abilities::mana_ability_cost_components`), and that payment is the
+///   one Phase 3 pre-funds (`mana_sub_cost_of`); any other cost shape is not
+///   checked here, so the plan is not used;
+/// - at most one selected row has a mana sub-cost at each payment level, so no
+///   sub-cost can take mana an earlier selected row added (CR 106.4: produced
+///   mana goes to the pool);
+/// - when one does, `floating_mana` (the pool held mana when this plan was
+///   made) rejects the plan, so no sub-cost can take mana that was floating;
+/// - Phase 3 resolves that one row first under this policy, before any other
+///   selected source adds mana, and its own nested payment meets the same
+///   empty pool, so the rule recurses with `floating_mana = false`.
+///
+/// A sub-cost shape the planner cannot read counts as unfundable. A wrong
+/// `false` only makes [`choose_auto_tap_plan`] use every row for the whole
+/// payment.
+fn planned_mana_sub_costs_fundable(
+    state: &GameState,
+    rows: &[ManaSourceOption],
+    plan: &AutoTapPlan,
+    consumed: &mut HashSet<ObjectId>,
+    floating_mana: bool,
+) -> bool {
+    let mut sub_cost_rows = 0usize;
+    for option in &plan.to_tap {
+        let Some(ability) = option.ability_index.and_then(|ability_index| {
             state
                 .objects
                 .get(&option.object_id)
                 .and_then(|object| object.abilities.get(ability_index))
-                .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_some())
-        })
-    });
-
-    // Sources with an explicit ability delegate to resolve_mana_ability (the single
-    // authority for cost payment — handles tap, sacrifice, and future cost types).
-    // The basic-land-subtype fallback (ability_index: None) uses inline tap + produce.
-    //
-    // For options carrying TapsForMana aura overrides, populate
-    // `state.pending_taps_for_mana_overrides` so that
-    // `resolve_triggered_mana_ability_inline` can thread the correct color into the
-    // aura's triggered mana ability when `resolve_tap_mana_triggers_inline` fires.
-    for option in to_tap {
-        for (trigger_ref, override_val) in &option.taps_for_mana_overrides {
-            state
-                .pending_taps_for_mana_overrides
-                .insert(trigger_ref.clone(), override_val.clone());
-        }
-        if let Some(idx) = option.ability_index {
-            let ability_def = state
-                .objects
-                .get(&option.object_id)
-                .and_then(|obj| obj.abilities.get(idx))
-                .cloned();
-            if let Some(ability_def) = ability_def {
-                // CR 605.3c: Extend the in-flight exclusion chain with this
-                // source before re-entering auto-tap (pre-tap below) and before
-                // resolving the ability (which re-enters auto-tap through its
-                // mana sub-cost payment). This source's activation is suspended
-                // on the call stack until `resolve_mana_ability_excluding`
-                // returns, so it — and every ancestor already in
-                // `excluded_sources` — must be excluded from any nested
-                // auto-tap, or two cross-paying costed mana abilities recurse
-                // infinitely. The exclusion set is read only by
-                // `pay_mana_sub_cost`, reached only through the `AbilityCost::Mana`
-                // arms — exactly the costs `mana_sub_cost_of` reports `Some` for.
-                // A tap-only / sacrifice / pay-life mana ability never consumes
-                // it, so clone-and-extend only when a mana sub-cost is present and
-                // otherwise forward the caller's set unchanged — skipping a heap
-                // allocation per selected source on this auto-tap hot path.
-                //
-                // CR 118.10: Each payment of a cost applies to only one spell or
-                // ability, so a source the OUTER plan reserved for the outer cost
-                // (every id in `used_sources`, a superset of `to_tap` that already
-                // contains `option.object_id`) must be excluded from the nested
-                // sub-cost auto-tap. Phase 3 does not re-verify a source is untapped
-                // before resolving, so without this the sub-cost could grab a source
-                // the outer cost still needs. Unioning `used_sources` supersedes the
-                // prior `excluded.insert(option.object_id)`.
-                let sub_cost = mana_abilities::mana_sub_cost_of(&ability_def.cost);
-                let excluded_buf;
-                // CR 107.4b + CR 118.10: The outer cost's colored shards are
-                // reserved; computed once (only when a mana sub-cost is present, so
-                // the `None` / no-sub-cost path adds zero work) and threaded into
-                // both the nested sub-cost auto-tap and the ability's own resolution
-                // so the sub-cost's generic pips are funded from non-demanded mana,
-                // never a floated color the outer cost still needs (the Dimir/Gruul
-                // Signet over-consumption bug).
-                let demand: Option<mana_payment::ColorDemand> =
-                    sub_cost.map(|_| mana_payment::outer_cost_color_demand(cost));
-                let excluded: &HashSet<ObjectId> = if sub_cost.is_some() {
-                    excluded_buf = excluded_sources
-                        .union(&used_sources)
-                        .copied()
-                        .collect::<HashSet<ObjectId>>();
-                    &excluded_buf
-                } else {
-                    excluded_sources
-                };
-                if let Some(sub_cost) = sub_cost {
-                    let activation_context = super::casting::activation_payment_context(
-                        state,
-                        option.object_id,
-                        Some(idx),
-                    );
-                    let activation_ctx = activation_context.as_payment_context();
-                    auto_tap_mana_sources_inner(
-                        state,
-                        player,
-                        sub_cost,
-                        events,
-                        Some(option.object_id),
-                        excluded,
-                        excluded_penalty,
-                        Some(&activation_ctx),
-                        demand.as_ref(),
-                        None,
-                        resume,
-                        parent,
-                    );
-                    if super::casting::mana_ability_cost_payment_is_paused(state) {
-                        return;
-                    }
-                }
-                // color_override tells resolve_mana_ability how to resolve the
-                // ability's choice dimension. `SingleColor` replays a per-color
-                // pick (AnyOneColor/ChoiceAmongExiledColors); `Combination`
-                // carries a pre-chosen multi-mana sequence (filter lands).
-                // Errors are non-fatal here: auto-tap runs synchronously during payment,
-                // so sources can't change state between collection and resolution. If a
-                // source is somehow invalid (e.g., removed by a replacement effect), we
-                // skip it silently — the player can still manually tap other sources.
-                let override_value = production_override_for_option(&ability_def, &option);
-                // CR 605.3c: Resolve via the exclusion-aware entry so the
-                // in-flight chain (`excluded`, including this source when it has a
-                // mana sub-cost) threads into the ability's own mana sub-cost
-                // auto-tap. The public `resolve_mana_ability` would discard the
-                // chain and re-tap a suspended ancestor, recursing infinitely.
-                let _ = mana_abilities::resolve_mana_ability_excluding(
-                    state,
-                    option.object_id,
-                    player,
-                    &ability_def,
-                    events,
-                    override_value,
-                    excluded,
-                    demand.as_ref(),
-                    resume,
-                    parent,
-                );
-                if super::casting::mana_ability_cost_payment_is_paused(state) {
-                    return;
-                }
-            }
-        } else {
-            // Basic-land-subtype fallback — no explicit ability, just tap + produce.
-            let node = state.begin_activated_mana_journal_node(option.object_id);
-            state.with_rules_execution_node(node, |state| {
-                if crate::game::object_state::resolve_and_apply_object_edit(
-                    state,
-                    option.object_id,
-                    crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
-                    true,
-                )
-                .expect("auto-tap source must remain a live exact object")
-                {
-                    events.push(GameEvent::permanent_tapped(state, option.object_id, None));
-                }
-                // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
-                // intrinsic mana ability. It never moves the land, so it carries no
-                // departed-source LKI; its triggers are observed at the activation
-                // boundary, before production, like every mana activation.
-                let activation_event = super::casting_targets::emit_ability_activated(
-                    state,
-                    player,
-                    option.object_id,
-                    crate::types::events::ActivatedAbilityKind::Mana,
-                    crate::types::zones::Zone::Battlefield,
-                    events,
-                );
-                super::triggers::collect_activation_event_at_boundary(
-                    state,
-                    events,
-                    activation_event,
-                )
-                .expect("intrinsic mana activation trigger collection cause must be live");
-                mana_payment::produce_mana(
-                    state,
-                    option.object_id,
-                    option.mana_type,
-                    player,
-                    true,
-                    events,
-                );
-                // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
-                // always includes `{T}` in its cost, so this auto-tap fallback
-                // taps the land for mana. Emit one `TappedForMana` per resolution
-                // so `TapsForMana` triggers fire exactly once.
-                events.push(GameEvent::TappedForMana {
-                    player_id: player,
-                    source_id: option.object_id,
-                    produced: vec![option.mana_type],
-                    tap_state: ManaTapState::FromTap,
-                });
-                events.push(GameEvent::ManaAbilityProduced {
-                    player_id: player,
-                    source_id: option.object_id,
-                    produced: vec![option.mana_type],
-                    trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
-                });
-            });
+        }) else {
+            continue;
+        };
+        // The components the cost cursor will actually pay, from the same
+        // flattener it uses: a row must make exactly one mana payment, and it must
+        // be the one Phase 3 pre-funds (`mana_sub_cost_of`), or the check below
+        // does not describe the execution and the plan is not used.
+        let mana_components = ability.cost.as_ref().map_or(0, |cost| {
+            mana_abilities::mana_ability_cost_components(cost)
+                .iter()
+                .filter(|component| matches!(component, AbilityCost::Mana { .. }))
+                .count()
+        });
+        match mana_components {
+            0 => {}
+            1 if mana_abilities::mana_sub_cost_of(&ability.cost).is_some() => sub_cost_rows += 1,
+            _ => return false,
         }
     }
+    if sub_cost_rows > 1 || (sub_cost_rows == 1 && floating_mana) {
+        return false;
+    }
+    for option in &plan.to_tap {
+        let Some(ability_index) = option.ability_index else {
+            continue;
+        };
+        let Some(sub_cost) = state
+            .objects
+            .get(&option.object_id)
+            .and_then(|object| object.abilities.get(ability_index))
+            .and_then(|ability| mana_abilities::mana_sub_cost_of(&ability.cost))
+        else {
+            continue;
+        };
+        let (shards, generic) = match sub_cost {
+            ManaCost::NoCost => continue,
+            ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
+            ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => return false,
+        };
+        let (needs, deferred_generic) = auto_tap_needs(shards, None);
+        let remaining: Vec<ManaSourceOption> = rows
+            .iter()
+            .filter(|row| !consumed.contains(&row.object_id))
+            .cloned()
+            .collect();
+        let activation_context = super::casting::activation_payment_context(
+            state,
+            option.object_id,
+            Some(ability_index),
+        );
+        let activation_ctx = activation_context.as_payment_context();
+        let nested = plan_auto_tap_rows(
+            state,
+            &remaining,
+            &needs,
+            generic as usize + deferred_generic,
+            Some(&activation_ctx),
+        );
+        if !nested.covers_cost {
+            return false;
+        }
+        consumed.extend(nested.used_sources.iter().copied());
+        if !planned_mana_sub_costs_fundable(state, rows, &nested, consumed, false) {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn production_override_for_option(
@@ -14767,19 +15208,20 @@ pub(super) fn max_x_value_excluding(
     // max(mana yield, tap-keyword yield), never the sum, or the X cap inflates
     // above what the caster can actually pay.
     //
-    // CR 117.1d + CR 601.2g: Use `feasible_mana_capacity` (not the auto-tap-
-    // only `max_mana_yield`) so sacrifice-/discard-/life-cost mana abilities
-    // the controller could activate manually are counted. Without this, KCI
-    // (and similar non-tap mana sources) understate the X cap for X-spells
-    // — see #562. The per-permanent sum can over-count chain-sacrifice
-    // configurations (tracked in #1235); colored-shard non-tap feasibility
-    // is deferred separately (tracked in #1234).
+    // CR 117.1d + CR 601.2g: Use `x_ceiling_mana_capacity` (the feasible
+    // capacity, not the auto-tap-only `max_mana_yield`) so sacrifice-/discard-/
+    // life-cost mana abilities the controller could activate manually are
+    // counted. Without this, KCI (and similar non-tap mana sources) understate
+    // the X cap for X-spells — see #562. A source whose amount depends on the
+    // color it is activated for is left out (fails closed). The per-permanent
+    // sum can over-count chain-sacrifice configurations (tracked in #1235);
+    // colored-shard non-tap feasibility is deferred separately (tracked in #1234).
     let permanent_capacity: u32 = state
         .battlefield
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref());
+            let mana = mana_sources::x_ceiling_mana_capacity(state, id, player, spell_ctx.as_ref());
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
@@ -16777,6 +17219,68 @@ mod tests {
     use rand::RngCore;
 
     use super::*;
+    use crate::game::scenario::P0;
+    use crate::types::ability::ContinuousModification;
+
+    /// CR 601.2g + CR 605.3b: a `Choose` auto-tap made while an automatic payment
+    /// is executing takes that payment's published row policy instead of
+    /// deciding again. This is the single seam both a mana ability's resolver
+    /// re-entry (Phase 3's window) and a resumed payment
+    /// (`resume_mana_ability_cost_move`) rely on. Arena of Glory + Mountain
+    /// paying {R}: deciding afresh taps one land without exerting Arena; under an
+    /// inherited `AllRows` window the payment plans as before drawback
+    /// avoidance and exerts Arena, funded by the Mountain.
+    #[test]
+    fn choose_auto_tap_inherits_the_active_payment_row_policy() {
+        let exerted = |active: Option<AutoTapRowPolicy>| {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let arena = scenario
+                .add_land_from_oracle(
+                    P0,
+                    "Arena of Glory",
+                    "{T}: Add {R}.\n{R}, {T}, Exert this land: Add {R}{R}.",
+                )
+                .id();
+            scenario.add_basic_land(P0, ManaColor::Red);
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            state.active_auto_tap_row_policy = active;
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+            auto_tap_mana_sources(state, P0, &cost, &mut Vec::new(), None);
+            assert_eq!(
+                state.active_auto_tap_row_policy, active,
+                "auto-tap restores the enclosing window"
+            );
+            state
+                .transient_continuous_effects
+                .iter()
+                .filter(|effect| effect.affected == TargetFilter::SpecificObject { id: arena })
+                .any(|effect| {
+                    effect.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddStaticMode {
+                                mode: StaticMode::CantUntap
+                            }
+                        )
+                    })
+                })
+        };
+
+        assert!(
+            !exerted(None),
+            "a fresh payment decides and avoids the exert"
+        );
+        assert!(
+            exerted(Some(AutoTapRowPolicy::AllRows)),
+            "reach + inheritance: an AllRows window plans as before drawback avoidance"
+        );
+        assert!(!exerted(Some(AutoTapRowPolicy::WithoutAvoidableDrawbacks)));
+    }
 
     // CR 107.3a + CR 107.3k: bind this activation's bare X, without replacing
     // fixed, other-variable, source-derived, or compound life quantities.
@@ -18129,6 +18633,121 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 701.13a: an aggregate-threshold exile cost that pauses in
+    /// `PendingCostMoveCompletion::PublishExileTrackedSet` publishes the cards
+    /// that reached exile AND the action that put them there, so a "cards exiled
+    /// this way" count bound to `Exiled` reads them. Drives the real
+    /// `apply_action` payment path. Dropping the cause from that arm leaves the
+    /// side map absent and the second leg reads zero while the first still
+    /// passes.
+    #[test]
+    fn exile_aggregate_cost_publishes_the_action_that_exiled_its_members() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty, ThisWayCause};
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aggregate Exiler".to_string(),
+            Zone::Hand,
+        );
+        let mut fodder = Vec::new();
+        for (index, name) in ["Fodder A", "Fodder B"].into_iter().enumerate() {
+            let id = create_object(
+                &mut state,
+                CardId(10 + index as u64),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Graveyard,
+            );
+            state.players[0].graveyard.push_back(id);
+            fodder.push(id);
+        }
+
+        // No-kicker, no-target spell so the payment lands the cast in the same
+        // action (`finish_pending_cost_or_cast` → `pay_and_push`).
+        let mut pending = make_pending(spell);
+        pending.activation_ability_index = None;
+        pending.card_id = CardId(1);
+        pending.origin_zone = Zone::Hand;
+
+        // CR 601.2a: the announcement entry the real cast flow leaves on the
+        // stack while costs are paid.
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::ExileAggregate {
+                zone: Zone::Graveyard,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                value: 0,
+                filter: TargetFilter::Any,
+            },
+            choices: fodder.clone(),
+            count: fodder.len(),
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: fodder.clone(),
+            },
+        )
+        .expect("exiling both graveyard cards satisfies the aggregate threshold");
+
+        let published = state
+            .chain_tracked_set_id
+            .expect("the cost completion binds a chain tracked set");
+        let mut members = state
+            .tracked_object_sets
+            .get(&published)
+            .cloned()
+            .unwrap_or_default();
+        members.sort_unstable_by_key(|id| id.0);
+        let mut expected = fodder.clone();
+        expected.sort_unstable_by_key(|id| id.0);
+        // Reach guard: the cost really moved both cards and the arm really ran.
+        assert_eq!(
+            members, expected,
+            "the cost publishes exactly the cards that reached exile"
+        );
+
+        let causes = state
+            .tracked_set_member_causes
+            .get(&published)
+            .expect("the completion records the action that exiled its members");
+        for id in &fodder {
+            assert_eq!(
+                causes.get(id),
+                Some(&ThisWayCause::Exiled),
+                "each member carries the action the cost's exile named"
+            );
+        }
+    }
+
     /// CR 603.6c + CR 603.10a + CR 603.3b (DEFERRED kicker/target-paused
     /// sub-case): when an additional sacrifice cost is followed by a deferred
     /// target/kicker/modal pause, `finish_pending_cost_or_cast` returns a
@@ -18563,8 +19182,12 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 1, "no hand card may be paid");
         let mut actual_rng = state.rng.clone();
         assert_eq!(
-            actual_rng.next_u64(),
-            expected_rng.next_u64(),
+            actual_rng
+                .draw(crate::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
+            expected_rng
+                .draw(crate::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
             "strict rejection must not advance seeded randomness"
         );
     }
@@ -28993,7 +29616,7 @@ its replicate cost was paid.)\nDraw a card.";
             0,
             "excluding one real card leaves insufficient Delve capacity for {{X}}{{X}}"
         );
-        assert!(state.objects[&real_b].is_delve_eligible(PlayerId(0)));
+        assert!(state.objects[&real_b].is_delve_eligible(&state, PlayerId(0)));
     }
 
     #[test]

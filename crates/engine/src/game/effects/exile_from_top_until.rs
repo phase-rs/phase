@@ -61,7 +61,10 @@ pub fn resolve(
     // (The Infamous Cruelclaw, issue #2881) and would exile from the wrong library.
     // Per-iteration "their library" uses `TargetFilter::ScopedPlayer` or a typed
     // `ControllerRef::ScopedPlayer` filter instead.
-    let acting_player = super::resolve_player_for_context_ref(state, ability, player_filter);
+    let Some(acting_player) = super::resolve_player_for_context_ref(state, ability, player_filter)
+    else {
+        return Ok(());
+    };
     let resume = state.pending_exile_from_top_until.take();
     let player = state
         .players
@@ -192,11 +195,13 @@ pub fn resolve(
         // move also created this resolver's source link.
         if resumed_card == Some(obj_id)
             && index == 0
-            && state.exile_links.iter().any(|link| {
-                link.exiled_id == obj_id
-                    && link.source_id == ability.source_id
-                    && link.kind == crate::types::game_state::ExileLinkKind::TrackedBySource
-            })
+            // CR 607.2a + CR 113.7a: this resolution's own tracked exile, as the
+            // acting incarnation made it.
+            && crate::game::exile_links::tracked_exile_of_acting_incarnation(
+                state,
+                ability.source_id,
+                obj_id,
+            )
         {
             let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(object);
             if !linked_batch.contains(&pin) {
@@ -275,7 +280,9 @@ pub fn resolve(
                     //   as the parent target so anaphoric `ParentTarget` / `SelfRef`
                     //   references resolve to the just-exiled card.
                     if !sub_effect_references_exiled_by_source(&sub_clone) {
-                        sub_clone.targets = hits.iter().copied().map(TargetRef::Object).collect();
+                        sub_clone.set_unpinned_targets(
+                            hits.iter().copied().map(TargetRef::Object).collect(),
+                        );
                     }
                     sub_clone.context = ability.context.clone();
                     // CR 400.7j: the rest of this ability finds the cards this
@@ -323,10 +330,11 @@ pub fn resolve(
                     // CR 607.2a: no current pool means there is no "rest" to move.
                     if !pool.is_empty() {
                         let mut cleanup_clone = cleanup.clone();
-                        cleanup_clone.targets = pool
-                            .iter()
-                            .map(|pin| TargetRef::Object(pin.object_id))
-                            .collect();
+                        cleanup_clone.set_unpinned_targets(
+                            pool.iter()
+                                .map(|pin| TargetRef::Object(pin.object_id))
+                                .collect(),
+                        );
                         cleanup_clone.target_incarnations = pool;
                         // CR 607.2a + CR 608.2c: explicit targets are this exact pool.
                         if let Effect::PutAtLibraryPosition { target, .. } =

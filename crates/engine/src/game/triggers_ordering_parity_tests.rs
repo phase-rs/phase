@@ -286,9 +286,21 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // -X/-X where X is the mana value of the card THIS source exiled: each member reads
     // its own exile pile and writes only to it, so the members commute.
     "cemetery desecrator",
-    // Slime counter on SelfRef, then a token whose P/T reads the granter-named source's counters
-    // (member-bound, fail-closed): each member touches only its own source's counters, so they commute (#9682).
+    // Each member adds one slime counter, then creates a token whose P/T is a CDA (CR 604.3a)
+    // reading the counter total, so either order ends with the same counters and tokens.
     "gutter grime",
+    // Combat-begin "any opponent may tap an untapped creature they control; if
+    // they do, tap this creature and create a 1/1 Fish" (AST measured). Each
+    // member taps only ITSELF (disjoint self-write) and creates a Fish the
+    // Kraken's controller owns, so no sibling's product feeds another's
+    // "creature they [opponent] control" choice; the opponent's tapped pool is
+    // monotone (tapped stays tapped) and the intervening-if reads only
+    // self-tappedness, which no sibling writes. Identical siblings commute up
+    // to relabeling — either order ends with the same Fish count and tapped
+    // sets. Only visible post-#9830 — the scoped-player parse binds "they
+    // control" to the acting opponent; the pre-regen fixture carried
+    // controller You, which the discriminator auto-ordered.
+    "reservoir kraken",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event

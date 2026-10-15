@@ -15,6 +15,7 @@
 //! source object (`GameObject::spellbook`, copied from
 //! `CardFace::metadata.spellbook`); the resolver reads it from the source.
 
+use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
 use crate::types::ability::{
@@ -64,7 +65,10 @@ pub fn resolve(
     // vs. choice is the only difference from draft-from-spellbook, so both share this
     // resolver and the same card-creation path (`complete_draft`).
     if *random {
-        let index = state.rng.random_range(0..spellbook.len());
+        let index = state
+            .rng
+            .draw(RandomDraw::Outcome)
+            .random_range(0..spellbook.len());
         let card = spellbook[index].clone();
         return complete_draft(
             state,

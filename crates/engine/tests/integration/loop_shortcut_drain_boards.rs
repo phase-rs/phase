@@ -15,10 +15,11 @@
 
 use std::collections::BTreeSet;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use engine::analysis::decision_template::{
-    AnnouncementSubject, DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount,
-    PinnedDecision, TargetPin, TargetSchedule,
+    AnnouncementSubject, ChoicePoint, DecisionPoint, DecisionPointKind, DecisionSlot,
+    IterationCount, PinnedDecision, TargetPin, TargetSchedule,
 };
 use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
@@ -86,12 +87,13 @@ fn offered_player_targets(actions: &[GameAction]) -> BTreeSet<PlayerId> {
 }
 
 /// One beat, every beat crossing the public `apply()` boundary: pass at priority, aim
-/// every re-aimable choice at the LATCHED seat, and take an optional-effect prompt.
+/// every re-aimable choice at the LATCHED seat, take an optional-effect prompt, and answer any
+/// other prompt with its first legal action.
 ///
 /// The seat is latched at the first beat that offers one, as the LOWEST legal seat rather
 /// than in publisher order, and re-asserted legal at every later beat — a drive that
 /// silently re-aimed would move the certificate's losing seat under the rows that read it.
-fn drive_one_beat(state: &mut GameState, aimed_at: &mut Option<PlayerId>) {
+pub(crate) fn drive_one_beat(state: &mut GameState, aimed_at: &mut Option<PlayerId>) {
     let who = state
         .waiting_for
         .acting_player()
@@ -139,18 +141,13 @@ fn drive_one_beat(state: &mut GameState, aimed_at: &mut Option<PlayerId>) {
         return;
     }
 
-    let optional = actions
+    let answer = actions
         .iter()
         .find(|action| matches!(action, GameAction::DecideOptionalEffect { accept: true }))
+        .or_else(|| actions.first())
         .cloned()
-        .unwrap_or_else(|| {
-            panic!(
-                "this drive policy answers priority, a player-target choice and an optional-effect \
-                 prompt; unhandled {:?}",
-                state.waiting_for
-            )
-        });
-    submit(state, who, optional);
+        .unwrap_or_else(|| panic!("no legal action at {:?}", state.waiting_for));
+    submit(state, who, answer);
 }
 
 fn legal_actions_at_offer(state: &GameState, proposer: PlayerId) -> Vec<GameAction> {
@@ -197,7 +194,7 @@ pub(crate) fn drive_to_live_declarable_offer(state: &mut GameState) -> LiveOffer
     );
 }
 
-/// CR 704.5a: re-derive a live offer's `max_iterations` from PUBLISHED data alone — the
+/// CR 704.5a: re-derive a live offer's `measured_repetition_bound` from PUBLISHED data alone — the
 /// certificate's `per_cycle` delta, its `victim_slot` magnitudes and its `declarable_victims`,
 /// plus the live board's lives and libraries — and the seat the caller's own drive aimed at.
 ///
@@ -214,17 +211,48 @@ pub(crate) fn drive_to_live_declarable_offer(state: &mut GameState) -> LiveOffer
 /// three test-side re-derivations of that function share one statement of it instead of three.
 ///
 /// The strict minimum is the answer while more than one seat holds it; when exactly one does,
-/// the count reaches that seat's own crossing, unless doing so would mint the offer gate's
-/// un-narrowed sentinel.
+/// the count reaches that seat's own crossing, at whatever magnitude that lands on — the
+/// reduction applies no budget of its own, and the offer's producer is what derives a deliverable
+/// capacity from one.
+///
+/// `ceiling` answers the arm where no seat is consumed at all, which the reduction reports as an
+/// absence; every board this mirror is used on consumes one, and the parameter is what keeps the
+/// arm total rather than panicking.
+/// CR 732.2a + CR 704.5a: the count the PUBLISHED offer measures, given every living seat's
+/// STRICT headroom in whole repetitions — the mirror of `PeriodicDelta::elimination_cascade`'s
+/// reduction, where `relieve_strict_bound` beside it mirrors the divisor's.
+///
+/// A seat with strict headroom `s` crosses on repetition `s + 1`, and the cascade's count is its
+/// LAST entry, so the count is the WIDEST of those crossings. The divisor answers the other
+/// quantifier — the first crossing under any declaration — and the two coincide only where every
+/// consumed seat crosses together.
+///
+/// `proposer_strict` truncates the walk at the proposer's own crossing: no repetition past it is
+/// one the proposer is still in the game to take, so the cascade drops every later entry and its
+/// count becomes that crossing. `None` is the usual untargeted shape, where the period GAINS the
+/// proposer life. `ceiling` answers the arm where no seat is consumed at all, which the reduction
+/// reports as an absence.
+pub(crate) fn cascade_count_from_strict(
+    strict: &[i64],
+    proposer_strict: Option<i64>,
+    ceiling: i64,
+) -> i64 {
+    let Some(&widest) = strict.iter().max() else {
+        return ceiling;
+    };
+    let count = widest + 1;
+    proposer_strict.map_or(count, |own| count.min(own + 1))
+}
+
 pub(crate) fn relieve_strict_bound(strict: &[i64], ceiling: i64) -> i64 {
     let Some(&floor) = strict.iter().min() else {
         return ceiling;
     };
     let relieved = floor + 1;
-    if strict.iter().filter(|b| **b == floor).count() == 1 && relieved < ceiling {
-        relieved.clamp(0, ceiling)
+    if strict.iter().filter(|b| **b == floor).count() == 1 {
+        relieved
     } else {
-        floor.clamp(0, ceiling)
+        floor.max(0)
     }
 }
 
@@ -448,18 +476,55 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         "the published declaration pins the seat the drive aimed at"
     );
 
-    // Row 9 — the two published count fields agree, and the bound's VALUE is the one
-    // `rederive_live_offer_bound` computes from this offer's own published data and the seat
-    // the drive latched. Dropping the aim subtraction moves the published bound off this
-    // re-derivation on every board that charges an aimed slot.
-    let bound = schema.max_iterations;
-    assert_eq!(schema.iteration_count, IterationCount::Fixed(bound));
+    // Row 9 — the three published quantifiers, and the ORDER they stand in. The SUGGESTION is
+    // the count this offer's own declaration drives: the cascade it implies, cut where that
+    // declaration stops charging the seat it pinned. The CEILING is CR 732.2a's existential —
+    // the widest count SOME legal declaration may specify — so it never falls below the
+    // suggestion. And the DIVISOR (`rederive_live_offer_bound`) answers a third question, the
+    // FIRST crossing under any declaration, which is why it is no longer either published field.
+    let bound = schema.deliverable_capacity;
+    assert_eq!(schema.measured_repetition_bound, Some(bound));
+
+    let entries = crate::loop_shortcut::cascade_from(
+        state,
+        *proposer,
+        per_cycle,
+        Some(declaration),
+        &schema.points,
+    );
+    let pinned = pinned_seats(&declaration.decisions);
+    assert!(
+        !pinned.is_empty(),
+        "reach-guard: the published declaration pins a seat (row 8), so the cut below is a real \
+         truncation rather than the untargeted identity"
+    );
+    // CR 732.2a: inclusive at the entry the pinned seat departs on — that entry the declaration
+    // still drives; the ones after it charge a seat this declaration no longer names.
+    let suggestion = entries
+        .iter()
+        .find(|(_, seats)| seats.iter().any(|seat| pinned.contains(seat)))
+        .or_else(|| entries.last())
+        .map(|(repetition, _)| *repetition)
+        .expect("a bounded offer's cascade carries at least one entry");
     assert_eq!(
-        bound,
-        rederive_live_offer_bound(state, offer.aimed_at),
-        "CR 704.5a: `max_iterations` is the MIN over every living seat's headroom divided by \
-         what one repetition charges it — the slot's magnitude on every seat it reaches, less \
-         what the window saw it aim at that seat"
+        schema.iteration_count,
+        IterationCount::Fixed(suggestion),
+        "CR 732.2a: the published suggestion is the count the offer's OWN declaration drives; \
+         cascade {entries:?} cut at the seats it pins {pinned:?}"
+    );
+
+    let divisor = rederive_live_offer_bound(state, offer.aimed_at);
+    assert!(
+        divisor <= suggestion && suggestion <= bound,
+        "CR 704.5a: the first crossing under ANY declaration cannot outrun the last one under \
+         THIS declaration, and neither outruns the widest count some declaration may specify; \
+         divisor {divisor}, suggestion {suggestion}, ceiling {bound}"
+    );
+    assert!(
+        divisor < suggestion || suggestion < bound,
+        "LIVE INSTRUMENT: the three quantifiers must not collapse into one number on this board, \
+         or the ordering above is satisfied by a producer that publishes one value three times; \
+         divisor {divisor}, suggestion {suggestion}, ceiling {bound}"
     );
 }
 
@@ -579,11 +644,14 @@ fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
 #[test]
 fn only_a_published_targets_slot_off_the_charged_set_is_unbacked() {
     fn slot(source_id: u64) -> DecisionSlot {
-        DecisionSlot::target(YieldTarget::ThisObject {
-            source_id: ObjectId(source_id),
-            incarnation: Some(0),
-            trigger_description: None,
-        })
+        DecisionSlot::first(
+            YieldTarget::ThisObject {
+                source_id: ObjectId(source_id),
+                incarnation: Some(0),
+                trigger_description: None,
+            },
+            ChoicePoint::AnnouncedTarget,
+        )
     }
     fn targets(slot: DecisionSlot) -> DecisionPoint {
         DecisionPoint {
@@ -624,4 +692,402 @@ fn only_a_published_targets_slot_off_the_charged_set_is_unbacked() {
         }]
     )
     .is_empty());
+}
+
+/// **The suggestion-count ingress route reaches the same refusal.**
+/// [`InteractionShortcutDecision`] is closed at three variants and this row accounts for all
+/// three: `Decline` returns `GameAction::DeclineShortcut` above the pin loop and reaches no
+/// conjunct at all, while `AcceptSuggested` and `Fixed` fall through the SAME pin loop into the
+/// same `declaration_conforms` call. `AcceptSuggested`'s count is the offer's own published
+/// SUGGESTION while its pins are CLIENT-submitted, so "the offer cannot refuse its own published
+/// declaration" does not reach it — this board publishes a legal victim whose own crossing lies
+/// strictly BELOW that suggestion.
+///
+/// # What attributes the refusal
+///
+/// `ConstraintUnsatisfied` is not by itself proof this conjunct fired — the ingress returns it
+/// from several places — so the two halves differ in NOTHING but which published victim the pin
+/// aims at, at the same count, on the same board, in the same invocation.
+///
+/// REVERT-PROBE: delete `declaration_conforms`' aim conjunct ⇒ the first half is accepted and
+/// this row fails on its refusal assertion.
+#[test]
+fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
+    use engine::game::interaction::{
+        bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
+    };
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionReasonCode, InteractionResponse,
+        InteractionResponseSpec, InteractionSessionId, InteractionShortcutCountSpec,
+        InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
+        InteractionSubmission,
+    };
+
+    let mut state = weird_drain_board();
+    let live = drive_to_live_declarable_offer(&mut state);
+    let WaitingFor::LoopShortcut {
+        proposer,
+        certificate,
+        schema,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("the helper returns at a declarable offer");
+    };
+    let (proposer, schema) = (*proposer, schema.clone());
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .expect("a bounded offer publishes its per-period signature")
+        .clone();
+    assert_eq!(proposer, live.proposer);
+
+    let target_group = schema
+        .points
+        .iter()
+        .position(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+        .expect("reach-guard: this board publishes a CR 601.2c Targets point");
+    let DecisionPointKind::Targets { legal_targets, .. } = &schema.points[target_group].kind else {
+        unreachable!("the position above selected a Targets point");
+    };
+    let legal_seats: Vec<PlayerId> = legal_targets
+        .iter()
+        .map(|target| match target {
+            TargetRef::Player(seat) => *seat,
+            other => panic!("this board's victims are seats, got {other:?}"),
+        })
+        .collect();
+    assert!(
+        legal_seats.len() > 1,
+        "reach-guard: the straddle below needs two published legal victims; got {legal_seats:?}"
+    );
+
+    // Each victim's own crossing while aimed, from its published life and its own published
+    // per-cycle charge — never spelled.
+    let crossing = |seat: PlayerId| -> u32 {
+        let life = state
+            .players
+            .iter()
+            .find(|player| player.id == seat)
+            .map(|player| player.life)
+            .expect("a published legal victim is seated");
+        let charge = per_cycle
+            .seat_life_charge
+            .iter()
+            .find(|(charged, _)| *charged == seat)
+            .map(|(_, magnitude)| *magnitude)
+            .expect("a published legal victim carries a published per-cycle charge");
+        assert!(
+            life > 0 && charge > 0,
+            "seat={seat:?} life={life} charge={charge}"
+        );
+        (life as u32) / (charge as u32)
+    };
+
+    let mut probe = state.clone();
+    bind_interaction_authority(
+        &mut probe,
+        InteractionSessionId("p3-accept-suggested".into()),
+    )
+    .expect("valid interaction authority binding");
+    let filtered = filter_state_for_viewer(&probe, proposer);
+    let view = derive_viewer_interaction(&probe, &filtered, proposer);
+    let opportunity = view
+        .opportunities
+        .iter()
+        .find(|o| {
+            matches!(
+                &o.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Shortcut { .. },
+                    ..
+                }
+            )
+        })
+        .expect("reach-guard: the offer is published as a shortcut schema");
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { count, points, .. },
+        ..
+    } = &opportunity.response
+    else {
+        unreachable!("the find above selected a shortcut schema");
+    };
+    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count else {
+        panic!("this board publishes a Fixed count window, got {count:?}");
+    };
+    let suggested = *suggested;
+    assert_eq!(
+        points[target_group].kind,
+        InteractionShortcutPointKind::Targets,
+        "reach-guard: the published point at the schema's Targets index is a Targets point"
+    );
+    assert_eq!(
+        points[target_group].candidate_ids.len(),
+        legal_seats.len(),
+        "reach-guard: candidate ids are positionally aligned with the published legal victims, \
+         which is how the pins below name a seat without spelling an id"
+    );
+
+    let low = legal_seats
+        .iter()
+        .copied()
+        .min_by_key(|seat| crossing(*seat))
+        .expect("non-empty by the guard above");
+    let high = legal_seats
+        .iter()
+        .copied()
+        .max_by_key(|seat| crossing(*seat))
+        .expect("non-empty by the guard above");
+    assert!(
+        crossing(low) < suggested && crossing(high) >= suggested,
+        "reach-guard: this board must STRADDLE the refusal boundary — one published victim whose \
+         own crossing is below the suggestion and one at or above it. A `>` form on the upper \
+         half reds here, because the upper crossing is EXACTLY the suggestion. low={low:?}@{} \
+         high={high:?}@{} suggested={suggested}",
+        crossing(low),
+        crossing(high)
+    );
+
+    // One pin per non-read-only published point; the Targets point's pin names `seat`.
+    let pins_aiming = |seat: PlayerId| -> Vec<InteractionShortcutPin> {
+        let index = legal_seats
+            .iter()
+            .position(|candidate| *candidate == seat)
+            .expect("a published legal victim");
+        points
+            .iter()
+            .filter(|point| !point.read_only)
+            .map(|point| InteractionShortcutPin {
+                group: point.group,
+                choice_ids: if point.group == points[target_group].group {
+                    vec![point.candidate_ids[index].clone()]
+                } else {
+                    point
+                        .candidate_ids
+                        .iter()
+                        .take(point.min as usize)
+                        .cloned()
+                        .collect()
+                },
+                amounts: Vec::new(),
+            })
+            .collect()
+    };
+    let submit_decision = |decision: InteractionShortcutDecision, seat: PlayerId| {
+        resolve_interaction_response(
+            &probe,
+            proposer,
+            &InteractionSubmission {
+                interaction_id: opportunity.interaction_id.clone(),
+                response: InteractionResponse::Shortcut {
+                    decision,
+                    pins: pins_aiming(seat),
+                },
+            },
+        )
+    };
+
+    // ── The paired positive: the SAME variant, the SAME count, a pin aiming the victim whose
+    //    crossing is not below the suggestion.
+    let accepted = submit_decision(InteractionShortcutDecision::AcceptSuggested, high)
+        .expect("CR 732.2a: every aim survives, so this submission mints its declaration");
+    match &accepted {
+        GameAction::DeclareShortcut { count, template } => {
+            assert_eq!(
+                *count,
+                IterationCount::Fixed(suggested),
+                "`AcceptSuggested` declares the count the OFFER published"
+            );
+            assert!(
+                template.is_some(),
+                "and it mints the client's own pins as the declaration"
+            );
+        }
+        other => panic!("the ingress mints a DeclareShortcut, got {other:?}"),
+    }
+
+    // ── The refusal: the same variant, the same count, aiming the victim below the suggestion.
+    assert_eq!(
+        submit_decision(InteractionShortcutDecision::AcceptSuggested, low)
+            .map_err(|error| error.code),
+        Err(InteractionReasonCode::ConstraintUnsatisfied),
+        "CR 732.2a + CR 102.1: at the published suggestion this aim outlives its own seat's \
+         crossing, so the ingress refuses the declaration and mints NO action. The two halves \
+         differ in nothing but which published victim the pin names"
+    );
+
+    // ── The adjacent enum variant, which shows the refusal belongs to the shared authority
+    //    rather than to the `AcceptSuggested` arm.
+    assert_eq!(
+        submit_decision(
+            InteractionShortcutDecision::Fixed {
+                iterations: suggested
+            },
+            low
+        )
+        .map_err(|error| error.code),
+        Err(InteractionReasonCode::ConstraintUnsatisfied),
+        "`Fixed` at that same published count with those same pins is refused too — both \
+         variants fall through one pin loop into one `declaration_conforms` call"
+    );
+}
+
+/// The seats an offer publishes as aimable — the player targets its `Targets` points admit.
+fn published_aimable_seats(points: &[DecisionPoint]) -> Vec<PlayerId> {
+    points
+        .iter()
+        .filter_map(|point| match &point.kind {
+            DecisionPointKind::Targets { legal_targets, .. } => Some(legal_targets),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|target| match target {
+            TargetRef::Player(seat) => Some(*seat),
+            _ => None,
+        })
+        .collect::<BTreeSet<PlayerId>>()
+        .into_iter()
+        .collect()
+}
+
+/// **The aim-independent charge is zero on both committed drain boards.** CR 704.5a: every seat
+/// these offers publish as aimable is charged nothing a declaration's aim cannot move, so a count
+/// partitioned across their seats crosses where the partition says and not where the order does.
+///
+/// The engine's own rule, read on the two boards this file already drives, through the live offer
+/// `drive_to_live_declarable_offer` returns — the restored offers are not readable for this
+/// (`declarable_victims` deserialize empty), which is the same reason every other row here drives
+/// first. The ceiling control, the bounded assertion and the two-seat floor all live in
+/// [`crate::fantastic_four_bounded_loop::assert_no_aim_independent_charge`] and its caller here,
+/// so a board demoted out of this shape reds rather than passing vacuously.
+#[test]
+fn both_drain_boards_publish_no_aim_independent_charge_at_their_live_offer() {
+    for mut state in [lethal_lifegain_loss_board(), weird_drain_board()] {
+        drive_to_live_declarable_offer(&mut state);
+        let WaitingFor::LoopShortcut {
+            certificate,
+            schema,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "the helper returns at a declarable offer: {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            schema.is_bounded(),
+            "reach-guard: an unbounded offer publishes no per-repetition charge to read"
+        );
+        let per_cycle = certificate
+            .per_cycle
+            .as_ref()
+            .expect("a bounded offer publishes its per-period signature");
+        let seats = published_aimable_seats(&schema.points);
+        crate::fantastic_four_bounded_loop::assert_no_aim_independent_charge(
+            &state,
+            per_cycle,
+            &schema.points,
+            &seats,
+        );
+    }
+}
+
+/// A committed dump's whole JSON document, inflated and parsed.
+pub(crate) fn committed_document(path: &Path) -> serde_json::Value {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(bytes.as_slice())
+        .read_to_string(&mut json)
+        .unwrap_or_else(|error| panic!("{} must inflate to UTF-8 JSON: {error}", path.display()));
+    serde_json::from_str(&json)
+        .unwrap_or_else(|error| panic!("{} must parse as JSON: {error}", path.display()))
+}
+
+pub(crate) fn collect_gz(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("read dir entry").path();
+        if path.is_dir() {
+            collect_gz(&path, out);
+        } else if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".json.gz"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Whether a committed dump's own JSON says it restores AT a CR 732.2a offer carrying a certified
+/// period — decided by reading the persisted document, with no restore and no drive.
+///
+/// Both envelope shapes are tried, because committed dumps use each and an envelope-only read
+/// would drop a real board by name.
+fn restores_at_a_certified_offer(path: &Path) -> bool {
+    let document = committed_document(path);
+    let board = document.get("gameState").unwrap_or(&document);
+    let Some(waiting) = board.get("waiting_for") else {
+        return false;
+    };
+    waiting.get("type").and_then(serde_json::Value::as_str) == Some("LoopShortcut")
+        && waiting
+            .pointer("/data/certificate/per_cycle")
+            .is_some_and(|per_cycle| !per_cycle.is_null())
+}
+
+/// **Which committed dumps the row above is the whole population of.** The two boards it drives
+/// are exactly the committed dumps whose own persisted JSON restores at a CR 732.2a offer carrying
+/// a certified period; a newcomer reds here and prints its own name, so it is added to that row
+/// rather than found in playtesting.
+///
+/// # What kind of claim this is, which is NOT the kind the row above makes
+///
+/// The row above guards the ENGINE'S RULE on named boards. This one is CORPUS SURVEILLANCE: it
+/// enforces a claim about the committed FIXTURE POPULATION, never about engine behaviour, and
+/// nothing it asserts would change if the charge model changed.
+///
+/// # What it catches, and what it does not
+///
+/// It catches a dump that RESTORES at a bounded offer and misses one that must be DRIVEN to reach
+/// its offer — the population it walks is every committed `*.json.gz` under `crates/`, classified
+/// from the persisted document alone.
+///
+/// # A second walk over those same files, disclosed rather than optimised away
+///
+/// `fixture_deck_size_conformance` already gunzips and parses every one of them, so folding this
+/// predicate in there would cost no additional suite time. That consolidation was NOT taken, on a
+/// stated ground: that file lies outside this change's scope, so extending it would be a scope
+/// extension for about seven seconds of walk. A later reader holding both files in one scope can
+/// take it cheaply.
+#[test]
+fn the_committed_dumps_that_restore_at_a_certified_offer_are_the_two_this_file_drives() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    collect_gz(&root, &mut files);
+
+    let restoring: BTreeSet<String> = files
+        .iter()
+        .filter(|path| restores_at_a_certified_offer(path))
+        .map(|path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    assert_eq!(
+        restoring,
+        BTreeSet::from([
+            "lethal_lifegain_loss_4p.json.gz".to_string(),
+            "weird_drain_4p.json.gz".to_string(),
+        ]),
+        "a committed dump restoring at a certified CR 732.2a offer is one of the boards \
+         `both_drain_boards_publish_no_aim_independent_charge_at_their_live_offer` reads, and the \
+         difference above names the newcomer: add it to that row, or move it out of the corpus"
+    );
 }

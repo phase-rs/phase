@@ -141,10 +141,7 @@ fn cryptex_collect_evidence_mana_ability_produces_mana_and_counter() {
     // +1 blue mana produced.
     let pool = &runner.state().players[0].mana_pool;
     assert_eq!(
-        pool.mana
-            .iter()
-            .filter(|m| m.color == ManaType::Blue)
-            .count(),
+        pool.units().filter(|m| m.color == ManaType::Blue).count(),
         1,
         "exactly one blue mana produced"
     );

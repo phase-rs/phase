@@ -199,15 +199,14 @@ fn stensian_sanguinist_becomes_prepared_on_combat_damage() {
             .iter_mut()
             .find(|p| p.id == P0)
             .unwrap()
-            .mana_pool
-            .mana;
-        pool.push(engine::types::mana::ManaUnit::new(
+            .mana_pool;
+        pool.add(engine::types::mana::ManaUnit::new(
             engine::types::mana::ManaType::Black,
             engine::types::identifiers::ObjectId(0),
             false,
             vec![],
         ));
-        pool.push(engine::types::mana::ManaUnit::new(
+        pool.add(engine::types::mana::ManaUnit::new(
             engine::types::mana::ManaType::Black,
             engine::types::identifiers::ObjectId(0),
             false,

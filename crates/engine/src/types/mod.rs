@@ -22,6 +22,7 @@ pub mod layers;
 pub mod log;
 pub mod mana;
 pub mod match_config;
+pub mod object_map;
 pub mod phase;
 pub mod player;
 pub mod proposed_event;

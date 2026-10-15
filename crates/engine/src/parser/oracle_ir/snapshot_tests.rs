@@ -729,25 +729,27 @@ fn trigger_die_table_scanner_preserves_non_table_and_unsupported_rows() {
 /// to give it a private one. `OracleDocIr.diagnostics` is the single warning
 /// channel; `parse_warnings` is a copy of it.
 ///
-/// Fixture is pool-verified, not synthetic: Boing!'s Oracle text is verbatim
-/// MTGJSON, and it carries a live `DynamicQty` swallowed-clause warning — "scry
-/// a number of cards equal to the result" lowers to a fixed `Scry` count, so
-/// the die-result-dependent quantity is genuinely dropped from the parse. A
-/// synthetic fixture could go vacuously green if the detector stopped firing;
-/// this one cannot without that separately-tracked defect being fixed.
+/// Fixture is pool-verified, not synthetic: Hinder's Oracle text is verbatim
+/// MTGJSON, and it carries a live `Replacement_Instead` swallowed-clause warning —
+/// "put that card on your choice of the top or bottom of its owner's library
+/// instead of into that player's graveyard" has no modeled countered-spell
+/// destination, so the redirect is genuinely dropped from the parse. A synthetic
+/// fixture could go vacuously green if the detector stopped firing; this one
+/// cannot without that separately-tracked defect being fixed.
 ///
-/// (Intermediate Chirography previously served as this fixture, but issue
+/// (Boing! previously served as this fixture, until its "scry a number of cards
+/// equal to the result" stopped swallowing: the count position now reads or
+/// fails closed. Intermediate Chirography served before that, until issue
 /// #5638's fix taught `parse_class_oracle_text` to compose a level-gated
 /// trigger's printed intervening-if with its `ClassLevelGE` condition instead
-/// of overwriting it — the card's `Duration_ThisTurn` warning was that
-/// overwrite silently dropping the "this turn" scoped condition, and is gone
-/// now that the condition survives.)
+/// of overwriting it.)
 #[test]
 fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
     let (ir, lowered) = parse_two_layer(
-        "Return target creature to its owner's hand, then roll a six-sided die. \
-         If the result is 3 or less, scry a number of cards equal to the result.",
-        "Boing!",
+        "Counter target spell. If that spell is countered this way, put that card on your \
+         choice of the top or bottom of its owner's library instead of into that player's \
+         graveyard.",
+        "Hinder",
         &["Instant"],
         &[],
     );

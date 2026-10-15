@@ -364,5 +364,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Pile",
+    "default": "Pile par défaut"
   }
 }

@@ -7,9 +7,14 @@ use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::oracle_classifier::lower_starts_with;
 use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_modal::{
+    label_names_rules_term, split_short_label_prefix, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
+};
 use super::oracle_nom::condition::parse_you_cast_another_spell_filter_this_turn;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_saga::is_saga_chapter;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
@@ -17,6 +22,34 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
 };
 use crate::types::mana::ManaColor;
+
+/// CR 118.8: the opener of an additional cost on this spell, the prefix
+/// `parse_additional_cost_line` reads a cost after.
+const THIS_SPELL_ADDITIONAL_COST_PREFIX: &str = "as an additional cost to cast this spell, ";
+
+/// CR 118.8 + CR 207.2c + CR 207.2d: The text of an "As an additional cost …"
+/// line, or `None` when the line is not one. A label before a cost on this
+/// spell is read past only when it is an ability word or flavor word
+/// (CR 207.2c, CR 207.2d): `label_names_rules_term` finds no keyword term in
+/// it, and the line is not a Saga chapter line (CR 714.2b).
+/// The label is not word-capped: the remainder is re-validated by the
+/// additional-cost opener itself, which is what tells a label from an
+/// ordinary em-dash sentence (see `FLAVOR_WORD_COST_LABEL_MAX_WORDS`).
+pub(crate) fn additional_cost_line_text(line: &str) -> Option<&str> {
+    const OPENER: &str = "as an additional cost";
+    if lower_starts_with(&line.to_lowercase(), OPENER) {
+        return Some(line);
+    }
+    let (label, rest) = split_short_label_prefix(line, FLAVOR_WORD_COST_LABEL_MAX_WORDS)?;
+    // CR 118.8: after a label, only a cost on this spell is read; a labeled line that imposes a
+    // cost on other spells is left to the later line parsers.
+    // CR 207.2c + CR 207.2d: only an ability word or flavor word is read past. A label that
+    // names a rules term, or a Saga chapter (CR 714.2b), keeps the line on its own route.
+    (lower_starts_with(&rest.to_lowercase(), THIS_SPELL_ADDITIONAL_COST_PREFIX)
+        && !is_saga_chapter(&line.to_lowercase())
+        && !label_names_rules_term(&label.to_lowercase()))
+    .then_some(rest)
+}
 
 /// Split a combined additional-cost line from its trailing self-spell cost
 /// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
@@ -52,7 +85,7 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     // additional cost to cast creature spells, ..." — Chorus of the Conclave) is
     // not a cost on this object at all, so no cost may be stapled to its face.
     let (after_prefix, names_this_spell) =
-        tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
+        tag::<_, _, OracleError<'_>>(THIS_SPELL_ADDITIONAL_COST_PREFIX)
             .parse(lower)
             .map_or((lower, false), |(rest, _)| (rest, true));
     // Use TextPair for case-preserving parallel slicing, then strip trailing period.
@@ -1799,6 +1832,180 @@ Trample";
             trailing,
             "This spell costs {1} less to cast for each permanent sacrificed this way."
         );
+    }
+
+    /// CR 207.2c + CR 207.2d: the additional-cost recognizer reads the text
+    /// after a label of any length, and nothing that is not an additional cost.
+    #[test]
+    fn additional_cost_line_text_reads_the_cost_after_a_label() {
+        const COST: &str = "As an additional cost to cast this spell, discard a card.";
+        assert_eq!(
+            additional_cost_line_text(
+                "One Two Three Four Five — As an additional cost to cast this spell, discard a card."
+            ),
+            Some(COST)
+        );
+        assert_eq!(additional_cost_line_text(COST), Some(COST));
+        assert_eq!(
+            additional_cost_line_text(
+                "Raid — If you attacked this turn, you may pay {U} rather than pay this spell's mana cost."
+            ),
+            None
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "+ {1} — As an additional cost to cast this spell, discard a card."
+            ),
+            None,
+            "a prefix with a mana symbol is not a label"
+        );
+        assert_eq!(additional_cost_line_text("Trample"), None);
+    }
+
+    /// CR 118.8: after any label, only a cost on this spell is read; an unlabeled line keeps its
+    /// route.
+    #[test]
+    fn additional_cost_line_text_reads_only_a_cost_on_this_spell_after_a_label() {
+        const COST: &str = "As an additional cost to cast this spell, discard a card.";
+        assert_eq!(
+            additional_cost_line_text(
+                "Threshold — As an additional cost to cast this spell, discard a card."
+            ),
+            Some(COST),
+            "an ability word with a mapped condition is still stripped"
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "Fallen Warrior — As an additional cost to cast this spell, discard a card."
+            ),
+            Some(COST),
+            "a flavor word is still stripped"
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "Rally — As an additional cost to cast creature spells, sacrifice a creature."
+            ),
+            None
+        );
+        assert_eq!(
+            additional_cost_line_text(
+                "As an additional cost to cast creature spells, you may pay any amount of mana."
+            ),
+            Some("As an additional cost to cast creature spells, you may pay any amount of mana."),
+            "an unlabeled line keeps its existing route"
+        );
+    }
+
+    // CR 207.2c + CR 207.2d: only a label that names no keyword term is read past (see
+    // label_names_rules_term).
+    #[test]
+    fn additional_cost_line_text_reads_past_only_a_label_that_names_no_rules_term() {
+        const COST: &str = "As an additional cost to cast this spell, discard a card.";
+        const REFUSED: &[&str] = &[
+            "Companion",
+            "Partner",
+            "Suspend 4",
+            "Awaken 3",
+            "Impending 4",
+            "Reinforce 2",
+            "Prize",
+            "Solved",
+            "To solve",
+            "Boast",
+            "Exhaust",
+            "Power-up",
+            "Forecast",
+            "Visit",
+            "Max speed",
+            "∞",
+            "Ward",
+            "Echo",
+            "Equip",
+            "Cumulative upkeep",
+            "Morph",
+            "Ninjutsu",
+            "Kicker",
+            "Cycling",
+            "Flashback",
+            "Escape",
+            "Crew 3",
+            "Flying",
+            "Trample",
+            "First strike",
+            "Protection from red",
+            "Partner with Pir",
+            "Affinity",
+            "Affinity for artifacts",
+            "Enchant creature",
+            "Hexproof from black",
+            "Swampcycling",
+            "Islandwalk",
+            "Desertwalk",
+            "Champion a Faerie",
+            "Goblin offering",
+            "Bands with other Legends",
+            "Friends forever",
+            "Character select",
+            "Father & son",
+            "Survivors",
+            "Megamorph",
+            "Multikicker",
+            "Double agenda",
+            "Choose a Background",
+            "Basic landcycling",
+            "Commander ninjutsu",
+            "Totem armor",
+            "Discover 3",
+            "Adapt 2",
+            "Scry 2",
+            "Collect evidence 4",
+            "Venture into Undercity",
+            "Specialize",
+            "Augment",
+            "Double team",
+            "Starting intensity",
+            "Level 2",
+            "I",
+            "I, II",
+            "• Khans",
+            "Increment",
+            "Echo of the Lost",
+            "Echo of the First Murder",
+        ];
+        const READ_PAST: &[&str] = &[
+            "Fallen Warrior",
+            "Frenzied Metabolism",
+            "Titanic",
+            "Tragic Backstory",
+            "One Two Three Four Five",
+            "Threshold",
+            "Rally",
+            "Landfall",
+            "Strive",
+            "Channel",
+            "Descend 4",
+            "Opus",
+            "Grant an Advantage",
+            "Wardens Unite",
+            "Flashpoint",
+            "Echoing Call",
+            "Wind Walk",
+        ];
+        let mut mismatches = Vec::new();
+        for label in REFUSED {
+            let line = format!("{label} — {COST}");
+            if let Some(read) = additional_cost_line_text(&line) {
+                mismatches.push(format!("{label}: read {read:?}"));
+            }
+        }
+        for label in READ_PAST {
+            let line = format!("{label} — {COST}");
+            let read = additional_cost_line_text(&line);
+            if read != Some(COST) {
+                mismatches.push(format!("{label}: read {read:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
     #[test]
