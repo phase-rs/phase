@@ -2256,17 +2256,12 @@ pub(super) fn timed_clause_sub_chain(clause_ir: &ClauseIr) -> Option<Box<Ability
     chain
 }
 
-/// CR 115.10a: whether an accepting-player body's printed text calls an object a
-/// "target" (the clause's recorded source fragment).
-fn accepting_body_prints_target(fragment: &str) -> bool {
-    nom_primitives::scan_contains(&fragment.to_lowercase(), "target ")
-}
-
 /// CR 115.10a + CR 608.2d: an accepting-player body ("any opponent may tap an
 /// untapped creature they control") whose object is described, not called a
-/// "target", declares no target: the player who accepts chooses the object while
-/// the ability resolves. A determined object ("them", "that card") or a player is
-/// not a choice of that kind and is not re-timed.
+/// "target" in the clause's printed text (`PrintedTargetWord`), declares no
+/// target: the player who accepts chooses the object while the ability
+/// resolves. A determined object ("them", "that card") or a player is not a
+/// choice of that kind and is not re-timed.
 fn accepting_player_object_timing(
     clause_ir: &ClauseIr,
     effect: &Effect,
@@ -2275,8 +2270,9 @@ fn accepting_player_object_timing(
         && effect
             .target_filter()
             .is_some_and(|filter| !filter.is_context_ref() && !filter.denotes_player_target())
-        && !accepting_body_prints_target(clause_ir.source.fragment().unwrap_or_default()))
-    .then_some(TargetChoiceTiming::Resolution)
+        && PrintedTargetWord::from_clauses(std::slice::from_ref(clause_ir))
+            == PrintedTargetWord::Absent)
+        .then_some(TargetChoiceTiming::Resolution)
 }
 
 /// The clause's target-choice timing from its parsed effect and printed fragment; the
