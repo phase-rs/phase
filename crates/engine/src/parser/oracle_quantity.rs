@@ -151,6 +151,13 @@ pub(crate) fn parse_quantity_ref_with_context(
 ) -> Option<QuantityRef> {
     let trimmed = text.trim().trim_end_matches('.');
 
+    match nom_quantity::parse_coordinated_card_population_with_context(&trimmed.to_lowercase(), ctx)
+    {
+        Ok(("", qty)) => return Some(canonicalize_quantity_ref(qty)),
+        Err(nom::Err::Failure(_)) => return None,
+        _ => {}
+    }
+
     // Try nom combinator first for simple exact-match patterns.
     if let Ok((rest, qty)) = nom_quantity::parse_quantity_ref.parse(trimmed) {
         if rest.is_empty() {
@@ -3395,6 +3402,15 @@ fn parse_for_each_clause_with_they_controller(
     ctx: &ParseContext,
 ) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
+
+    match nom_quantity::parse_coordinated_card_population_with_context(
+        &clause.to_lowercase(),
+        &for_each_anaphor_context(ctx, &antecedents),
+    ) {
+        Ok(("", qty)) => return Some(qty),
+        Err(nom::Err::Failure(_)) => return None,
+        _ => {}
+    }
 
     if let Some(qty) = parse_for_each_kicker_count(clause) {
         return Some(qty);
@@ -7456,29 +7472,46 @@ mod tests {
         let result = parse_cda_quantity(
             "the total number of instant and sorcery cards you own in exile and in your graveyard",
         );
-        let Some(QuantityExpr::Sum { exprs }) = result else {
-            panic!("expected summed zone counts, got {result:?}");
-        };
-        assert_eq!(exprs.len(), 2);
-        for (expr, expected_zone) in [(&exprs[0], ZoneRef::Exile), (&exprs[1], ZoneRef::Graveyard)]
-        {
-            match expr {
-                QuantityExpr::Ref {
-                    qty:
-                        QuantityRef::ZoneCardCount {
-                            zone,
-                            card_types,
-                            filter: None,
-                            scope,
+        // SHAPE: the coordinated population carries the shared type/owner
+        // restriction outside its zones. Runtime membership is checked by
+        // game::quantity::tests::coordinated_population_runtime.
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Or {
+                            filters: [TypeFilter::Instant, TypeFilter::Sorcery]
+                                .into_iter()
+                                .map(|kind| {
+                                    TargetFilter::Typed(TypedFilter::new(kind).properties(vec![
+                                        FilterProp::Owned {
+                                            controller: ControllerRef::You,
+                                        },
+                                    ]))
+                                })
+                                .collect(),
                         },
-                } => {
-                    assert_eq!(*zone, expected_zone);
-                    assert_eq!(card_types, &vec![TypeFilter::Instant, TypeFilter::Sorcery]);
-                    assert_eq!(*scope, CountScope::Owner);
-                }
-                other => panic!("expected ZoneCardCount segment, got {other:?}"),
-            }
-        }
+                        TargetFilter::Or {
+                            filters: vec![
+                                TargetFilter::Typed(
+                                    TypedFilter::card()
+                                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                                ),
+                                TargetFilter::Typed(TypedFilter::card().properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    },
+                                    FilterProp::Owned {
+                                        controller: ControllerRef::You,
+                                    },
+                                ])),
+                            ],
+                        },
+                    ],
+                },
+            },
+        };
+        assert_eq!(result, Some(expected));
     }
 
     #[test]

@@ -9933,6 +9933,55 @@ mod tests {
 
     use super::*;
     use crate::game::zones::create_object;
+
+    #[test]
+    fn coordinated_population_runtime() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::card::LayoutKind;
+
+        for populated in [false, true] {
+            let mut scenario = GameScenario::new();
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Count source", "")
+                .id();
+            let mut adventures = Vec::new();
+            if populated {
+                let overlap = scenario
+                    .add_spell_to_exile(P0, "Instant Adventure", true)
+                    .id();
+                scenario.add_spell_to_graveyard(P0, "Sorcery member", false);
+                let permanent = scenario
+                    .add_creature_to_graveyard(P0, "Adventure permanent", 1, 1)
+                    .id();
+                adventures.extend([overlap, permanent]);
+                scenario.add_spell_to_exile(P1, "Foreign exile", true);
+                scenario.add_spell_to_graveyard(P1, "Opponent graveyard", false);
+                scenario.add_creature_to_graveyard(P0, "Ordinary permanent", 1, 1);
+                scenario.add_spell_to_hand(P0, "Wrong zone instant", true);
+            }
+            let mut runner = scenario.build();
+            for id in adventures {
+                runner.state_mut().objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+                    name: "Adventure alternative".into(),
+                    layout_kind: Some(LayoutKind::Adventure),
+                    ..Default::default()
+                });
+            }
+            for (phrase, expected) in [
+                ("card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an adventure", 3),
+                ("card you own in your graveyard and in exile that's an instant card or a sorcery card or a card that has an adventure", 3),
+                ("card you own in exile and in your graveyard and in exile that's an instant card or an instant card or a sorcery card or a card that has an adventure", 3),
+                ("instant and sorcery cards you own in exile and in your graveyard", 2),
+            ] {
+                let (rest, qty) = crate::parser::oracle_nom::quantity::parse_coordinated_card_population(phrase).unwrap();
+                assert_eq!(rest, "");
+                // CR 108.3 + CR 109.2a + CR 715.2c: owner, zones, and the whole
+                // predicate intersect; overlapping types/zones count each card once.
+                assert_eq!(resolve_quantity(runner.state(), &QuantityExpr::Ref { qty }, P0, source), if populated { expected } else { 0 }, "{phrase}");
+            }
+        }
+    }
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,

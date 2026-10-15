@@ -8,8 +8,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::character::complete::satisfy;
-use nom::combinator::{all_consuming, eof, map, map_opt, map_res, opt, peek, value, verify};
-use nom::multi::{many0, separated_list1};
+use nom::combinator::{all_consuming, cut, eof, map, map_opt, map_res, opt, peek, value, verify};
+use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -27,7 +27,8 @@ use super::target::{
 use crate::parser::oracle_ir::context::{bind_controller_phrase, PlayerAntecedents};
 use crate::parser::oracle_target::{
     parse_counter_suffix, parse_shared_quality, parse_shared_quality_clause,
-    parse_target_with_syntax, parse_type_phrase_folding, TargetSyntax,
+    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -1129,6 +1130,7 @@ pub(crate) fn parse_extreme_chosen_number_ref(input: &str) -> OracleResult<'_, Q
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         alt((
+            parse_coordinated_card_population,
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
             parse_chosen_number_ref,
@@ -2065,7 +2067,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
         // stranded remainder; its "unique vowels"/"<letter>'s" + sticker-set
         // language is disjoint from every other arm's.
-        parse_name_sticker_letter_count,
+        alt((
+            parse_coordinated_card_population,
+            parse_name_sticker_letter_count,
+        )),
         // CR 110.4: the permanent-type head lowers to `ObjectCountDistinct`, not
         // `DistinctCardTypes`, so it must precede the card-type head.
         parse_distinct_permanent_types_in_zone,
@@ -2799,6 +2804,111 @@ fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRe
             player: PlayerScope::DefendingPlayer,
         },
     ))
+}
+
+fn parse_population_locative(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (_, _) = peek(tag("in ")).parse(input)?;
+    let (mut properties, controller, consumed) =
+        crate::parser::oracle_target::parse_zone_suffix(input).ok_or_else(|| oracle_err(input))?;
+    // CR 108.3 + CR 109.5 + CR 400.1: possessive card zones retain their
+    // owner authority independently of the shared head's ownership restriction.
+    if let Some(controller) = controller {
+        properties.push(FilterProp::Owned { controller });
+    }
+    Ok((
+        &input[consumed..],
+        TargetFilter::Typed(TypedFilter::card().properties(properties)),
+    ))
+}
+
+/// Complete coordinated card population; Error means another grammar owns it,
+/// while Failure preserves an unfinished coordinated form across fallbacks.
+pub(crate) fn parse_coordinated_card_population(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_coordinated_card_population_with_context(input, &ParseContext::default())
+}
+
+pub(crate) fn parse_coordinated_card_population_with_context<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, QuantityRef> {
+    let (input, _) = opt(tag("the number of ")).parse(input)?;
+    let (locatives, head) = take_until(" in ").parse(input)?;
+    let (head_filter, remainder) = parse_type_phrase_folding_with_ctx(head, &mut ctx.clone());
+    if head.is_empty()
+        || !remainder.is_empty()
+        || !quantity_filter_has_meaningful_content(&head_filter)
+    {
+        return Err(oracle_err(input));
+    }
+    let (rest, first_zone) = parse_population_locative(locatives.trim_start())?;
+    // Commit only after a valid first locative and the actual coordinated-zone
+    // introducer. "and each" belongs to the separate repeated-population grammar.
+    let (_, _) = peek((tag(" and in"), alt((tag(" "), eof)))).parse(rest)?;
+    let (rest, mut zones) =
+        cut(many1(preceded(tag(" and "), parse_population_locative))).parse(rest)?;
+    zones.insert(0, first_zone);
+    let (rest, predicate) = cut(opt(preceded(
+        tag(" "),
+        crate::parser::oracle_target::parse_relative_card_filter,
+    )))
+    .parse(rest)?;
+    let (rest, _) = cut(eof).parse(rest)?;
+    // CR 109.2a + CR 715.2a + CR 715.2c: the shared card predicate intersects
+    // the whole zone union; an Adventure card remains one member of that union.
+    let mut filters = vec![head_filter, TargetFilter::Or { filters: zones }];
+    if let Some(predicate) = predicate {
+        filters.push(predicate);
+    }
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And { filters },
+        },
+    ))
+}
+
+#[cfg(test)]
+mod coordinated_population_tests {
+    use super::*;
+
+    #[test]
+    fn coordinated_population_complete() {
+        for phrase in [
+            "card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an adventure",
+            "card you own in your graveyard and in exile that is an artifact card or a card that has an adventure",
+            "card you own in exile and in your graveyard and in your hand that is a creature card",
+            "cards in your graveyard and in an opponent's graveyard",
+            "card in exile and in their graveyard",
+        ] {
+            assert!(matches!(parse_coordinated_card_population(phrase), Ok(("", QuantityRef::ObjectCount { .. }))), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_for_each_clause(phrase).is_some(), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")).is_some(), "{phrase}");
+        }
+        for phrase in [
+            "card you own in exile and in unknown",
+            "card you own in exile and in",
+            "card you own in exile and in your graveyard and",
+            "card you own in exile and in your graveyard and each artifact you control",
+            "card you own in exile and in your graveyard that's an instant card or unknown",
+            "card you own in exile and in your graveyard that's an instant card and",
+            "card you own in exile and in your graveyard that's a card that has an adventures",
+            "card you own in exile and in your graveyard that's a card that has an unknown adventure",
+        ] {
+            assert!(matches!(parse_coordinated_card_population(phrase), Err(nom::Err::Failure(_))), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_for_each_clause(phrase).is_none(), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")).is_none(), "{phrase}");
+        }
+        assert!(matches!(
+            parse_coordinated_card_population(
+                "artifact you control and each artifact card in your hand"
+            ),
+            Err(nom::Err::Error(_))
+        ));
+        assert!(matches!(
+            parse_coordinated_card_population("card in exile and inside a graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+    }
 }
 
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -5321,7 +5431,12 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
 ) -> OracleResult<'a, QuantityRef> {
+    let population_context = ParseContext {
+        relative_player_scope: antecedents.third_person.clone(),
+        ..Default::default()
+    };
     alt((
+        |i| parse_coordinated_card_population_with_context(i, &population_context),
         // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
         // stranded remainder; its "unique vowel"/"<letter>'s" + sticker-set
         // language is disjoint from every other arm's.

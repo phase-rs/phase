@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
-use nom::multi::many0;
+use nom::multi::{many0, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -10109,6 +10109,38 @@ fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter
     Ok((rest, type_filters))
 }
 
+fn parse_relative_card_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    // Reuse the property suffix's Adventure leaf and its word boundary.
+    let (after_article, _) = opt(nom_primitives::parse_article).parse(input)?;
+    if let Ok((after_card, _)) = nom_quantity::parse_card_word(after_article) {
+        if let Some((properties, consumed)) = parse_that_clause_suffix(after_card, None) {
+            if properties == [FilterProp::HasAdventure] {
+                return Ok((
+                    &after_card[consumed..],
+                    TargetFilter::Typed(TypedFilter::card().properties(properties)),
+                ));
+            }
+        }
+    }
+    let (rest, kind) = parse_relative_core_type_leg(input)?;
+    let (rest, _) = opt(preceded(tag(" "), nom_quantity::parse_card_word)).parse(rest)?;
+    Ok((rest, TargetFilter::Typed(TypedFilter::new(kind))))
+}
+
+/// CR 109.2a + CR 715.2a: relative card predicates may mix card types with
+/// Adventure properties, while the caller retains shared head/zone restrictions.
+pub(crate) fn parse_relative_card_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (after_intro, _, negated) = parse_relative_clause_intro(input)
+        .ok_or_else(|| super::oracle_nom::error::oracle_err(input))?;
+    if negated {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    let (rest, filters) =
+        separated_list1(parse_relative_core_type_separator, parse_relative_card_leg)
+            .parse(after_intro)?;
+    Ok((rest, TargetFilter::Or { filters }))
+}
+
 /// Parses a positive relative card-type clause like
 /// "that's an artifact, creature, or enchantment" into the trailing card-type
 /// list. The caller applies those types as branches against the already-parsed
@@ -15606,6 +15638,38 @@ mod tests {
         }
 
         assert!(parse_that_clause_suffix(" that has an adventures", None).is_none());
+    }
+
+    #[test]
+    fn coordinated_relative_predicate() {
+        let (rest, filter) = parse_relative_card_filter(
+            "that's an instant card, a sorcery card, or a card that has an adventure",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasAdventure])
+                    ),
+                ]
+            }
+        );
+        let (rest, types) =
+            parse_relative_core_type_list("an instant or a card that has an adventure").unwrap();
+        assert_eq!(types, vec![TypeFilter::Instant, TypeFilter::Card]);
+        assert_eq!(rest, " that has an adventure");
+        let (rest, types) =
+            parse_relative_core_type_list("an instant card, a sorcery card").unwrap();
+        assert_eq!(types, vec![TypeFilter::Instant]);
+        assert_eq!(rest, " card, a sorcery card");
+        assert!(nom::combinator::all_consuming(parse_relative_card_filter)
+            .parse("that's a card that has an adventures")
+            .is_err());
     }
 
     #[test]

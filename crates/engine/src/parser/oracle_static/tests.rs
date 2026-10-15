@@ -17,6 +17,41 @@ use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
+#[test]
+fn coordinated_static_honesty() {
+    // SHAPE: cost reductions are consumed by casting rather than continuous layers.
+    let def = parse_static_line("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::And { .. }
+            }),
+            ..
+        }
+    ));
+    for count in [
+        "card you own in exile and in unknown",
+        "card you own in exile and in",
+        "card you own in exile and in your graveyard that's an instant card and",
+        "card you own in exile and in your graveyard and each artifact you control",
+        "card you own in exile and in your graveyard that's a card that has an adventures",
+    ] {
+        assert!(
+            parse_static_line(&format!(
+                "This spell costs {{1}} less to cast for each {count}."
+            ))
+            .is_none(),
+            "{count}"
+        );
+    }
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies
@@ -9739,25 +9774,42 @@ fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert!(def.characteristic_defining);
-    let expected = QuantityExpr::Sum {
-        exprs: vec![
-            QuantityExpr::Ref {
-                qty: QuantityRef::ZoneCardCount {
-                    zone: ZoneRef::Exile,
-                    card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
-                    scope: CountScope::Owner,
-                    filter: None,
-                },
+    // SHAPE: one owned instant/sorcery population spans both zones.
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: [TypeFilter::Instant, TypeFilter::Sorcery]
+                            .into_iter()
+                            .map(|kind| {
+                                TargetFilter::Typed(TypedFilter::new(kind).properties(vec![
+                                    FilterProp::Owned {
+                                        controller: ControllerRef::You,
+                                    },
+                                ]))
+                            })
+                            .collect(),
+                    },
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(
+                                TypedFilter::card()
+                                    .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                            ),
+                            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                                FilterProp::InZone {
+                                    zone: Zone::Graveyard,
+                                },
+                                FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                },
+                            ])),
+                        ],
+                    },
+                ],
             },
-            QuantityExpr::Ref {
-                qty: QuantityRef::ZoneCardCount {
-                    zone: ZoneRef::Graveyard,
-                    card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
-                    scope: CountScope::Owner,
-                    filter: None,
-                },
-            },
-        ],
+        },
     };
     assert_eq!(
         def.modifications,

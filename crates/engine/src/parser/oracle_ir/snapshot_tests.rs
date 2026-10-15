@@ -18,6 +18,24 @@ use crate::types::ability::{
 use crate::types::game_state::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
+#[test]
+fn coordinated_population_full_card_ir() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)",
+        "Sailors' Bane", &["Ward"], &["Creature"], &["Dragon", "Turtle"],
+    );
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(lowered
+        .abilities
+        .iter()
+        .all(|a| !ability_has_unimplemented(a)));
+    assert!(lowered.extracted_keywords.iter().any(|k| matches!(k,
+        crate::types::keywords::Keyword::Ward(crate::types::keywords::WardCost::Mana(cost)) if cost == &ManaCost::generic(4))));
+    insta::assert_json_snapshot!("coordinated_population_sailors_ir", &ir);
+    insta::assert_json_snapshot!("coordinated_population_sailors_lowered", &lowered);
+}
+
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
         || def

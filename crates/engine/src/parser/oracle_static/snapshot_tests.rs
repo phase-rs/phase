@@ -7,6 +7,12 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn coordinated_population_sailors() {
+    let def = parse_static_line("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.").unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
 fn static_continuous_buff() {
     let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
     insta::assert_json_snapshot!(def);

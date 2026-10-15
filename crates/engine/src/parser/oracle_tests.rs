@@ -16,6 +16,35 @@ use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
 #[test]
+fn coordinated_population_unknown_tail_is_honest() {
+    let oracle = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
+    let supported = parse_oracle_text(
+        oracle,
+        "Sailors' Bane",
+        &["Ward".into()],
+        &["Creature".into()],
+        &["Dragon".into(), "Turtle".into()],
+    );
+    assert_eq!(supported.statics.len(), 1);
+    assert!(supported.abilities.iter().all(|a| !has_unimplemented(a)));
+    assert!(supported.parse_warnings.is_empty());
+    assert!(supported.extracted_keywords.iter().any(|k| matches!(k, Keyword::Ward(crate::types::keywords::WardCost::Mana(cost)) if cost == &ManaCost::generic(4))));
+    for count in [
+        "card you own in exile and in unknown",
+        "card you own in exile and in",
+        "card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an unknown adventure",
+        "card you own in exile and in your graveyard that's an instant card and",
+        "card you own in exile and in your graveyard and each artifact you control",
+    ] {
+        let oracle = format!("This spell costs {{1}} less to cast for each {count}.");
+        let parsed = parse_oracle_text(&oracle, "Synthetic hostile cost", &[], &["Creature".into()], &[]);
+        assert!(parsed.statics.is_empty(), "must not emit a weaker cost: {count}");
+        let residual = parsed.abilities.iter().find(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "static_structure")).expect("visible unsupported static");
+        assert_eq!(residual.description.as_deref(), Some(oracle.as_str()), "complete fragment retained");
+    }
+}
+
+#[test]
 fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
     let oracle = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n\
 [+1]: Draw a card, then discard a card.\n\
