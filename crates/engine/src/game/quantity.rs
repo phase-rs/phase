@@ -370,6 +370,55 @@ fn characteristic_view_for_object(
     }
 }
 
+/// CR 608.2h + CR 400.7: the characteristic view for one targeted object.
+///
+/// A target whose announced incarnation has departed is read from its
+/// departure LKI — never from the retained live entry (a different object)
+/// and never from the legacy cache slot (which may describe a later
+/// incarnation); this mirrors the exact-history selection in `filter.rs`. A
+/// current or unpinned target resolves through the shared live-or-LKI helper,
+/// preserving live reads for cards targeted where they stand (including
+/// graveyard targets).
+fn targeted_object_characteristic_view<'s>(
+    state: &'s GameState,
+    ability: Option<&ResolvedAbility>,
+    object_id: ObjectId,
+) -> Option<CharacteristicView<'s>> {
+    if let Some(pin) = ability.and_then(|ability| targeted_occurrence_pin(ability, object_id)) {
+        if !pin.is_current(state) {
+            return state
+                .lki_by_incarnation
+                .get(&object_id)
+                .and_then(|history| history.get(&pin.incarnation))
+                .map(CharacteristicView::Lki);
+        }
+    }
+    characteristic_view_for_object(state, object_id)
+}
+
+/// The announced incarnation for one targeted object: positional occurrence
+/// pins first (announced targets), then keyed pins (delayed-trigger
+/// referents). `None` when the ability never pinned the object.
+fn targeted_occurrence_pin(
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    if let Some(index) = ability
+        .targets
+        .iter()
+        .position(|target| matches!(target, TargetRef::Object(id) if *id == object_id))
+    {
+        if let Some(pin) = ability.target_pin_at(index) {
+            return Some(pin);
+        }
+    }
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == object_id)
+        .copied()
+}
+
 /// CR 109.2 + CR 400.1: Walk the population a [`CardTypeSetSource`] names,
 /// yielding one [`CharacteristicView`] per member.
 ///
@@ -648,9 +697,10 @@ fn visit_characteristic_leaf<'s>(
             }
         },
         // CR 608.2c + CR 115.1: the resolving ability's chosen object targets,
-        // addressed by identity (announcement-bound, zone-independent). Reads
-        // live objects with an `lki_cache` fallback, exactly as the
-        // `TrackedSet` arm above. Slot selection reuses the target-slot
+        // addressed by identity (announcement-bound, zone-independent). View
+        // selection is provenance-aware: a target whose announced incarnation
+        // departed reads its departure LKI (CR 608.2h), while a current or
+        // unpinned target reads live. Slot selection reuses the target-slot
         // authority `referenced_targets_for_filter` rather than re-deriving
         // it; with no resolving ability in scope (detection-time reads) the
         // population is empty — fail-closed, never a census.
@@ -683,12 +733,9 @@ fn visit_characteristic_leaf<'s>(
                 let TargetRef::Object(oid) = target else {
                     continue;
                 };
-                let view = state
-                    .objects
-                    .get(&oid)
-                    .map(CharacteristicView::Object)
-                    .or_else(|| state.lki_cache.get(&oid).map(CharacteristicView::Lki));
-                if let Some(view) = view {
+                if let Some(view) =
+                    targeted_object_characteristic_view(state, filter_ctx.ability, oid)
+                {
                     visit(CharacteristicMember::Object(oid), view, false);
                 }
             }

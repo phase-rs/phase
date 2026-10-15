@@ -22,13 +22,15 @@
 //! Oracle text is quoted from Scryfall, not from memory.
 
 use engine::game::combat::AttackTarget;
-use engine::game::quantity::{resolve_quantity, resolve_quantity_with_ctx, QuantityContext};
+use engine::game::quantity::{
+    resolve_quantity, resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
+};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AggregateFunction, CardTypeSetSource, ControllerRef, DieResultBranch,
-    Effect, ObjectProperty, QuantityExpr, QuantityRef, TargetFilter, TrackedAnaphorSource,
-    TypedFilter,
+    Effect, ObjectProperty, QuantityExpr, QuantityRef, TargetFilter, TargetRef,
+    TrackedAnaphorSource, TypedFilter,
 };
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -1025,6 +1027,150 @@ fn filtered_tracked_set_aggregate_counts_only_the_named_agents_members_via_lki()
         resolve_quantity(&state, &unfiltered, P0, oak),
         10,
         "unfiltered over live objects without LKI still over-counts to 10"
+    );
+}
+
+/// PR-C F3 — RESOLVER. A battlefield target that leaves mid-resolution is
+/// read from its departure LKI, not its retained live entry (CR 608.2h + CR
+/// 400.7): the 2/2 buffed to 5/6 departs with 5/6 LKI while the retained
+/// graveyard entry reverts to base 2/2 — the Power aggregate over the pinned
+/// target must read 5, not 2. The buff values are fixture-set; the LKI
+/// capture, incarnation bump, and base revert below all run through the real
+/// zone pipeline.
+#[test]
+fn targeted_objects_power_reads_departure_lki_after_battlefield_exit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
+    let source = scenario.add_creature(P0, "Source", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    // Production-shaped ability shell: Doom Blade's real targeting sentence.
+    let parsed = parse_oracle_text(
+        "Destroy target nonblack creature.",
+        "Doom Blade",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Doom Blade parses an ability");
+    let mut ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+        def,
+        source,
+        P0,
+        vec![TargetRef::Object(brute)],
+    );
+    ability.announce_target_pins(&state);
+    assert!(
+        ability
+            .target_pin_at(0)
+            .is_some_and(|pin| pin.is_current(&state)),
+        "reach guard: the pin names the live battlefield incarnation"
+    );
+    {
+        let obj = state.objects.get_mut(&brute).expect("brute exists");
+        obj.power = Some(5);
+        obj.toughness = Some(6);
+    }
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(&mut state, brute, Zone::Graveyard, &mut events);
+
+    // Reach guards: the exit staled the pin, captured 5/6 departure LKI under
+    // the pinned incarnation, and reverted the retained entry to base 2/2.
+    let pin = ability.target_pin_at(0).expect("pin announced");
+    assert!(
+        !pin.is_current(&state),
+        "reach guard: the battlefield exit must stale the pin"
+    );
+    let live = state.objects.get(&brute).expect("retained entry exists");
+    assert_eq!(
+        (live.power, live.toughness),
+        (Some(2), Some(2)),
+        "reach guard: the retained entry reverts to base 2/2"
+    );
+    let history = state
+        .lki_by_incarnation
+        .get(&brute)
+        .and_then(|history| history.get(&pin.incarnation))
+        .expect("departure LKI captured under the pinned incarnation");
+    assert_eq!(
+        (history.power, history.toughness),
+        (Some(5), Some(6)),
+        "reach guard: departure LKI captures the 5/6 body"
+    );
+
+    let power = QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                CardTypeSetSource::TargetedObjects { slot: None },
+            )
+            .expect("statically valid property aggregate"),
+        ),
+    };
+    assert_eq!(
+        resolve_quantity_with_targets(&state, &power, &ability),
+        5,
+        "a departed battlefield target reads its departure body (5), not the retained base entry (2)"
+    );
+}
+
+/// PR-C F3 — RESOLVER preservation. A card targeted in its graveyard that
+/// never leaves is read live (Song of Inspiration's shape): the pinned,
+/// current incarnation resolves through the live object, not LKI.
+#[test]
+fn targeted_objects_toughness_reads_live_for_unmoved_graveyard_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ghoul = scenario.add_creature_to_graveyard(P0, "Ghoul", 3, 4).id();
+    let source = scenario.add_creature(P0, "Source", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let parsed = parse_oracle_text(
+        "Destroy target nonblack creature.",
+        "Doom Blade",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Doom Blade parses an ability");
+    let mut ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+        def,
+        source,
+        P0,
+        vec![TargetRef::Object(ghoul)],
+    );
+    ability.announce_target_pins(&state);
+    assert!(
+        ability
+            .target_pin_at(0)
+            .is_some_and(|pin| pin.is_current(&state)),
+        "reach guard: the pin names the live graveyard incarnation"
+    );
+
+    let toughness = QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Toughness,
+                CardTypeSetSource::TargetedObjects { slot: None },
+            )
+            .expect("statically valid property aggregate"),
+        ),
+    };
+    assert_eq!(
+        resolve_quantity_with_targets(&state, &toughness, &ability),
+        4,
+        "an unmoved graveyard target reads its live body (4)"
     );
 }
 
