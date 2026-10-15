@@ -24,7 +24,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
 
 import {
   AdapterError,
@@ -178,7 +178,7 @@ interface DeckSeatPayload {
   signature_spell?: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
-  bracket_tier?: string;
+  bracket_tier?: CommanderBracketTier;
 }
 
 interface DeckListPayload {

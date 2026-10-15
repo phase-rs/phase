@@ -26,16 +26,16 @@ import {
   ACTIVE_DECK_KEY,
   isRandomDeckSelection,
   loadActiveDeck,
-  loadSavedDeckBracket,
+  loadActiveDeckBracket,
 } from "../constants/storage";
-import { isCommanderFamilyFormat, type CommanderBracket } from "../types/bracket";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
-import type { AiDeckCandidate } from "../services/aiDeckCatalog";
+import type { CommanderBracket } from "../types/bracket";
+import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
-import { restrictAiPoolByBracket } from "../services/aiRandomPool";
+import { cedhSeatProblem, pickAiSeatDecks } from "../services/aiRandomPool";
+import { resolveLocalAiSeatPlan, type LocalAiSeatPlan } from "../services/localAiSeatPlan";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
-import { effectiveAiDifficulty } from "../services/cedhLock";
+import { CEDH_DIFFICULTY, effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
@@ -247,37 +247,6 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return expandParsedDeck(deck);
 }
 
-/**
- * Read the declared bracket for the currently active deck from localStorage.
- * Returns `null` when no deck is selected or the deck carries no bracket tag.
- * This is the sole call site for bracket → active-deck bridging so future
- * bracket storage changes only need to update this function.
- */
-function loadActiveDeckBracket(): CommanderBracket | null {
-  const name = localStorage.getItem(ACTIVE_DECK_KEY);
-  if (!name || isRandomDeckSelection(name)) return null;
-  return loadSavedDeckBracket(name);
-}
-
-/**
- * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
- * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
- *
- * Uses the inverse of `BRACKET_TIER_NUMERIC` from `bracketEstimate.ts`.
- * Returns `"core"` (the engine's `Default`) for any unrecognised value so
- * that missing or invalid tags degrade safely.
- */
-function bracketToEngineTier(bracket: CommanderBracket | null | undefined): CommanderBracketTier {
-  switch (bracket) {
-    case 1: return "exhibition";
-    case 2: return "core";
-    case 3: return "upgraded";
-    case 4: return "optimized";
-    case 5: return "cedh";
-    default: return "core";
-  }
-}
-
 type ExpandedDeckWithTier = {
   main_deck: string[];
   sideboard: string[];
@@ -342,6 +311,20 @@ function saveWasmAiResumePointer(
   playerCount: number | undefined,
   formatConfig: FormatConfig | undefined,
 ): void {
+  // A start flow that already wrote this game's seat snapshot (Host Game's
+  // all-AI path) owns the per-seat difficulty and deck: keep it rather than
+  // re-deriving the seats from single-player preferences.
+  const existing = loadActiveGame();
+  if (existing?.id === gameId && existing.aiSeats && existing.aiSeats.length > 0) {
+    saveActiveGame({
+      id: gameId,
+      mode: "ai",
+      difficulty: existing.aiSeats[0].difficulty,
+      aiSeats: existing.aiSeats,
+      formatConfig: existing.formatConfig ?? formatConfig,
+    });
+    return;
+  }
   const { aiSeats, cedhMode } = usePreferencesStore.getState();
   const opponentCount = Math.max(1, (playerCount ?? 2) - 1);
   const seats = Array.from({ length: opponentCount }, (_, index) => {
@@ -366,42 +349,6 @@ function nativeFallbackReason(error: unknown): string {
     : "native_engine_unavailable";
 }
 
-function candidatePassesFilters(
-  candidate: AiDeckCandidate,
-  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
-  coverageFloor: number,
-): boolean {
-  if (candidate.coveragePct != null && candidate.coveragePct < coverageFloor) return false;
-  return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
-}
-
-function pickOpponentDeck(
-  catalog: AiDeckCandidate[],
-  pool: AiDeckCandidate[],
-  requestedDeckId: string,
-  excludeIds: Set<string>,
-  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
-  coverageFloor: number,
-  selectedFormat?: FormatConfig["format"] | null,
-): AiDeckCandidate {
-  if (requestedDeckId !== AI_DECK_RANDOM) {
-    const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
-    if (pinned) return pinned;
-  }
-
-  // Random seats draw from `pool`: the bracket-restricted pool when it is
-  // non-empty, else the full legal catalog (an empty restriction warns at
-  // setup, so reaching here means the fallback was accepted). Archetype +
-  // coverage are soft preferences applied within that pool.
-  const filtered = pool.filter((candidate) =>
-    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
-  );
-  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : pool, {
-    selectedFormat,
-    excludeIds,
-  }) ?? catalog[0];
-}
-
 // The empty decklist a seat submits when it has no deck to send.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
@@ -421,18 +368,16 @@ async function buildLocalAiDeckList(
   selectedMatchType: MatchType | undefined,
   playerBracket: CommanderBracket | null,
   pileSource: PileSource,
+  seats: readonly LocalAiSeatPlan[],
 ): Promise<DeckListPayload> {
   // Supplied-deck formats have no AI deck catalog: the pile seat submits the
   // host's pile (empty for the default or an engine-fixed deck) and every other
   // seat submits nothing, leaving the engine to load the shared or fixed deck.
   if (formatConfig && formatSuppliesDeck(formatConfig.format)) {
-    const { aiSeats, cedhMode } = usePreferencesStore.getState();
     const opponentCount = Math.max(1, playerCount - 1);
     const pile = await pileSeatDeck(formatConfig.format, pileSource);
     if (!pile) throw new Error(t("multiplayer:page.couldNotLoadDeck"));
-    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
-      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
-    );
+    const aiDifficulties = seats.map((seat) => seat.difficulty);
     return {
       player: { ...pile, bracket_tier: "core" },
       opponent: emptySeat(),
@@ -441,7 +386,11 @@ async function buildLocalAiDeckList(
     };
   }
 
-  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor, aiBracketFilter } = usePreferencesStore.getState();
+  const { aiArchetypeFilter, aiCoverageFloor, aiBracketFilter } = usePreferencesStore.getState();
+  // The seat snapshot already maps table cEDH into each seat's difficulty, and
+  // the engine's cEDH bracket gate fires per seat — so the table is cEDH
+  // exactly when any seat plays at cEDH difficulty.
+  const tableCedh = seats.some((seat) => seat.difficulty === CEDH_DIFFICULTY);
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
     selectedMatchType,
@@ -457,12 +406,8 @@ async function buildLocalAiDeckList(
   // The bracket/cEDH restriction is the same pool the setup page previews
   // (`restrictAiPoolByBracket`): Random seats draw from it, so a 1–3 filter
   // can never field a bracket-4+ deck. Pinned seats bypass the pool —
-  // `pickOpponentDeck` resolves explicit ids against the full catalog.
-  const bracketPool = restrictAiPoolByBracket(catalog.candidates, {
-    bracketFilter: aiBracketFilter,
-    cedhMode,
-    selectedFormat: formatConfig?.format ?? null,
-  });
+  // `pickAiSeatDecks` resolves explicit ids against the full catalog.
+  const requestedDeckIds = seats.map((seat) => seat.deckId);
   // An empty pool means the table's bracket constraint excluded every legal
   // deck (the catalog itself is non-empty here). In cEDH mode the engine
   // rejects any non-bracket-5 deck at init (`validate_cedh_bracket`, gated
@@ -471,24 +416,23 @@ async function buildLocalAiDeckList(
   // filter) any legal deck plays fine — the setup page warns about the
   // empty pool (soft gate, Start stays enabled), so fall back to the full
   // legal catalog.
-  const effectiveCedhMode = cedhMode && isCommanderFamilyFormat(formatConfig?.format ?? undefined);
-  if (bracketPool.length === 0 && effectiveCedhMode) {
-    const opponentCount = Math.max(1, playerCount - 1);
-    const needsRandomSeat = Array.from(
-      { length: opponentCount },
-      (_, i) => aiSeats[i]?.deckId ?? AI_DECK_RANDOM,
-    ).some((requestedDeckId) =>
-      requestedDeckId === AI_DECK_RANDOM || !catalog.candidates.some((c) => c.id === requestedDeckId),
+  // A pinned non-bracket-5 deck (`PinnedDeckNotCedh`) is left to the engine's own
+  // cEDH bracket gate at init, which reports the specific bracket error.
+  if (
+    cedhSeatProblem({
+      catalog: catalog.candidates,
+      requestedDeckIds,
+      bracketFilter: aiBracketFilter,
+      cedhMode: tableCedh,
+      selectedFormat: formatConfig?.format ?? null,
+    }) === "NoCedhDeckForRandom"
+  ) {
+    throw new Error(
+      formatConfig?.format
+        ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+        : t("gameProvider.noLegalAiDecks.generic"),
     );
-    if (needsRandomSeat) {
-      throw new Error(
-        formatConfig?.format
-          ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
-          : t("gameProvider.noLegalAiDecks.generic"),
-      );
-    }
   }
-  const randomPool = bracketPool.length > 0 ? bracketPool : catalog.candidates;
 
   const excludeIds = new Set<string>();
   let playerDeck = deck;
@@ -509,37 +453,23 @@ async function buildLocalAiDeckList(
     excludeIds.add(playerPick.id);
   }
 
-  const opponentCount = Math.max(1, playerCount - 1);
-  const picks: AiDeckCandidate[] = [];
-  for (let i = 0; i < opponentCount; i++) {
-    // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
-    // through to seat 0 would re-introduce the original bug: if the user
-    // pinned one deck for a 2-player session and a 4-player resume-fallback
-    // fires, every missing seat would clone that pinned deck.
-    const requestedDeckId = aiSeats[i]?.deckId ?? AI_DECK_RANDOM;
-    const result = pickOpponentDeck(
-      catalog.candidates,
-      randomPool,
-      requestedDeckId,
-      excludeIds,
-      aiArchetypeFilter,
-      aiCoverageFloor,
-      formatConfig?.format,
-    );
-    picks.push(result);
-    excludeIds.add(result.id);
-  }
+  const picks = pickAiSeatDecks({
+    catalog: catalog.candidates,
+    requestedDeckIds,
+    archetypeFilter: aiArchetypeFilter,
+    coverageFloor: aiCoverageFloor,
+    bracketFilter: aiBracketFilter,
+    cedhMode: tableCedh,
+    selectedFormat: formatConfig?.format,
+    excludeIds,
+  });
 
   const playerExpanded = expandParsedDeck(playerDeck);
   const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
-  // to ai_decks. Missing seat prefs default to "Medium".
-  // cEDH is a table-wide toggle: every seat resolves to "CEDH" when it's on,
-  // regardless of the remembered per-seat difficulty.
-  const aiDifficulties = picks.map((_, i) =>
-    effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
-  );
+  // to ai_decks. The plan's difficulties are already cEDH-mapped.
+  const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
     player: { ...playerExpanded, bracket_tier: playerTier },
     opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
@@ -1226,7 +1156,12 @@ export function GameProvider({
       const parsedDeck = isSpectate ? null : loadActiveDeck();
       // A guest of a supplied-deck room submits nothing; the room's format rides the join URL.
       const suppliedJoin = Boolean(joinCode) && formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
-      const deck = parsedDeck && !suppliedJoin ? parsedDeckToDeckData(parsedDeck) : emptySeatDeck();
+      const deck = parsedDeck && !suppliedJoin
+        ? {
+            ...parsedDeckToDeckData(parsedDeck),
+            bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+          }
+        : emptySeatDeck();
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
@@ -1733,6 +1668,7 @@ export function GameProvider({
               matchConfig?.match_type,
               loadActiveDeckBracket(),
               pileSourceFromParam(pile),
+              resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1803,6 +1739,7 @@ export function GameProvider({
           matchConfig?.match_type,
           loadActiveDeckBracket(),
           pileSourceFromParam(pile),
+          resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1890,6 +1827,7 @@ export function GameProvider({
                 matchConfig?.match_type,
                 loadActiveDeckBracket(),
                 pileSourceFromParam(pile),
+                resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
               );
             } catch (deckErr) {
               if (!cancelled) {

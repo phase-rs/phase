@@ -237,6 +237,8 @@ vi.mock("../../services/gamePersistence", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../services/gamePersistence")>(),
   clearGameStrict,
   loadGameStrict,
+  // `localAiSeatPlan` reads the seat snapshot from this module directly.
+  loadActiveGame,
 }));
 
 vi.mock("../../constants/storage", async (importOriginal) => ({
@@ -284,11 +286,6 @@ vi.mock("../../stores/preferencesStore", () => {
     usePreferencesStore: Object.assign(vi.fn(), { getState: () => preferences }),
   };
 });
-
-vi.mock("../../services/cedhLock", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../services/cedhLock")>(),
-  effectiveAiDifficulty: (difficulty: string) => difficulty,
-}));
 
 vi.mock("../../game/controllers/gameLoopController", () => ({
   createGameLoopController: vi.fn(() => ({ start: vi.fn(), dispose: vi.fn(), stop: vi.fn() })),
@@ -1326,6 +1323,38 @@ describe("GameProvider native AI routing", () => {
     );
   });
 
+  it("keeps the game's seat snapshot when the native fallback rewrites the resume pointer", async () => {
+    preferences.aiSeats = [{ difficulty: "Easy", deckId: "Random" }];
+    const hostSeats = [{ difficulty: "VeryHard", deckId: "saved:Host Deck" }];
+    loadActiveGame.mockReturnValue({
+      id: "native-fallback-seats",
+      mode: "ai",
+      difficulty: "VeryHard",
+      aiSeats: hostSeats,
+    });
+    nativeAdapterInitialize.mockRejectedValue(new NativeEngineVersionMismatchError());
+
+    render(
+      <GameProvider gameId="native-fallback-seats" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith(
+        "wasm",
+        "server_version_mismatch",
+      );
+    });
+    expect(saveActiveGame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "native-fallback-seats",
+        difficulty: "VeryHard",
+        aiSeats: hostSeats,
+      }),
+    );
+  });
+
   it("writes a native resume pointer and suspends (no concede) on exit", async () => {
     const view = render(
       <GameProvider gameId="native-resume-write" mode="ai">
@@ -1559,6 +1588,46 @@ describe("GameProvider native AI routing", () => {
     // pickRandomDeckCandidate is mocked to take the first candidate, so an
     // unfiltered draw would hand the AI the bracket-4 deck listed first.
     expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B2-Card"]);
+  });
+
+  it("starts each AI seat from the game's seat snapshot instead of single-player preferences", async () => {
+    // Host Game's all-AI start writes this snapshot before navigating.
+    preferences.aiSeats = [
+      { difficulty: "Easy", deckId: "Random" },
+      { difficulty: "Easy", deckId: "Random" },
+    ];
+    loadActiveGame.mockReturnValue({
+      id: "host-form-seats",
+      mode: "ai",
+      difficulty: "Hard",
+      aiSeats: [
+        { difficulty: "Hard", deckId: "saved:B2 Deck" },
+        { difficulty: "VeryHard", deckId: null },
+      ],
+    });
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
+      ],
+    });
+
+    render(
+      <GameProvider gameId="host-form-seats" mode="ai" playerCount={3}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const seats = nativeAdapters[0]!.nativeAiOptions?.aiSeats;
+    expect(seats?.map((seat) => seat.difficulty)).toEqual(["Hard", "VeryHard"]);
+    // Seat 1 is pinned by the snapshot; seat 2 (null = Random) avoids that deck.
+    expect(seats?.[0]?.deck.main_deck).toEqual(["B2-Card"]);
+    expect(seats?.[1]?.deck.main_deck).toEqual(["B4-Card"]);
   });
 
   it("restricts AI random draws to bracket 5 in cEDH mode at game start", async () => {

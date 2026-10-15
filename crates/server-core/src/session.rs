@@ -10014,6 +10014,81 @@ mod tests {
         ));
     }
 
+    /// A host table built from the JSON the client emits for a cEDH table: the
+    /// host's `deck` and the AI seat's `DeckList` choice are independent
+    /// payloads, each carrying `bracket_tier` only when its tier is `Some`.
+    /// The AI payload also resolves the AI seat's deck. Returns the table's
+    /// session room after seating the AI at `CEDH` difficulty.
+    fn client_emitted_cedh_table(
+        db: &CardDatabase,
+        host_bracket_tier: Option<&str>,
+        ai_bracket_tier: Option<&str>,
+    ) -> (SessionManager, String) {
+        let deck_json = |bracket_tier: Option<&str>| {
+            let mut deck = serde_json::json!({
+                "main_deck": vec!["Forest"; 40],
+                "sideboard": [],
+                "commander": [],
+                "planar_deck": [],
+                "scheme_deck": [],
+            });
+            if let Some(tier) = bracket_tier {
+                deck["bracket_tier"] = serde_json::json!(tier);
+            }
+            deck
+        };
+        let host: crate::starter_decks::DeckData =
+            serde_json::from_value(deck_json(host_bracket_tier))
+                .expect("the client's host deck shape parses");
+        let ai_deck = deck_json(ai_bracket_tier);
+        let ai: crate::starter_decks::DeckData = serde_json::from_value(ai_deck.clone())
+            .expect("the client's AI seat deck shape parses");
+        let ai_choice: DeckChoice =
+            serde_json::from_value(serde_json::json!({ "type": "DeckList", "data": ai_deck }))
+                .expect("the client's AI seat choice shape parses");
+        let (mut mgr, code) = hosted_room(db, &host);
+        install_ai_seat(&mut mgr, &code, db, AiDifficulty::CEDH, ai_choice, &ai);
+        (mgr, code)
+    }
+
+    #[test]
+    fn a_client_emitted_cedh_table_passes_the_start_gate() {
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, Some("cedh"), Some("cedh"));
+
+        assert_eq!(mgr.try_session(&code).unwrap().start_game(&db), Ok(()));
+    }
+
+    #[test]
+    fn a_client_emitted_host_deck_without_a_declared_tier_is_refused_at_cedh() {
+        // Paired negative isolating the host payload: the pre-fix host deck
+        // omitted `bracket_tier`, which deserializes to Core.
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, None, Some("cedh"));
+
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().start_game(&db),
+            Err(StartGameError::Bracket(
+                CedhBracketError::DeckNotCedh { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_client_emitted_ai_deck_without_a_declared_tier_is_refused_at_cedh() {
+        // Paired negative isolating the AI seat payload, with the host deck
+        // correctly declared.
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, Some("cedh"), None);
+
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().start_game(&db),
+            Err(StartGameError::Bracket(
+                CedhBracketError::DeckNotCedh { .. }
+            ))
+        ));
+    }
+
     #[test]
     fn a_restored_ai_seat_keeps_its_deck_and_its_choice() {
         let db = lands_db();

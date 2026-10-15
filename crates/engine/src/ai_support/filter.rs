@@ -152,6 +152,9 @@ impl CandidateFilter for SimulationFilter {
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }
+        if super::structurally_valid_named_choice_answer(state, &candidate.action) {
+            return true;
+        }
         if structurally_valid_priority_activation(state, &candidate.action) {
             return true;
         }
@@ -174,6 +177,9 @@ impl CandidateFilter for SimulationFilter {
             return true;
         }
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
+            return true;
+        }
+        if super::structurally_valid_named_choice_answer(state, &candidate.action) {
             return true;
         }
         if structurally_valid_priority_activation(state, &candidate.action) {
@@ -1502,10 +1508,10 @@ fn legality_equivalence_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_support::candidate_actions;
+    use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
-    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::game_state::{ActivationTargetSelection, TransientContinuousEffectBindings};
     use crate::types::identifiers::ObjectIncarnationRef;
 
     /// Matrix rows 9a + 9b — the mana-role POISON scan is a PURE EXTENSION.
@@ -2081,15 +2087,16 @@ mod tests {
     use crate::game::combat::{AttackTarget, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Comparator, ContinuousModification, Duration,
-        Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, Comparator,
+        ContinuousModification, Duration, Effect, FilterProp, NumberDistinctness, ParitySource,
+        ParsedCondition, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterMatch;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -2831,5 +2838,382 @@ mod tests {
         evaluate_layers(runner.state_mut());
         assert!(runner.state().objects[&host].goaded_by.is_empty());
         assert!(LegalityPoisonGates::compute(runner.state()).has_declare_attacker);
+    }
+
+    // ------------------------------------------------------------------
+    // `structurally_valid_named_choice_answer` — the sixth structural hatch.
+    //
+    // Soundness condition, as for the pass-priority hatch above:
+    //
+    //   structurally_valid_named_choice_answer(state, action) == true
+    //     ⇒ fallback_simulation(state, candidate) == true
+    //
+    // asserted against `pass_oracle_accepts`, `fallback_simulation`'s body.
+    // ------------------------------------------------------------------
+
+    /// Distant Melody ("Choose a creature type. Draw a card for each permanent
+    /// you control of that type."), cast and resolved up to its CR 608.2d
+    /// resolution-time creature-type prompt. The answer persists on the
+    /// resolving spell, so the prompt is `ExactObjectAndResolution`-bound.
+    fn distant_melody_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Distant Melody",
+            false,
+            "Choose a creature type. Draw a card for each permanent you control of that type.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Blue],
+        });
+        let melody = builder.id();
+        let mut pool: Vec<ManaUnit> = (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, melody, false, vec![]))
+            .collect();
+        pool.push(ManaUnit::new(ManaType::Blue, melody, false, vec![]));
+        scenario.with_mana_pool(PlayerId(0), pool);
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(melody).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+            ),
+            "Distant Melody must halt on its source-bound creature-type prompt"
+        );
+        state
+    }
+
+    /// Brave the Elements ("Choose a color. White creatures you control gain
+    /// protection from the chosen color until end of turn."), cast and resolved
+    /// up to its CR 608.2d color prompt. Its `Choose` does not persist, so the
+    /// prompt carries no source.
+    fn brave_the_elements_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Brave the Elements",
+            true,
+            "Choose a color. White creatures you control gain protection from the chosen color until end of turn.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let brave = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(ManaType::White, brave, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(brave).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: None, .. }
+            ),
+            "Brave the Elements must halt on its source-less color prompt"
+        );
+        state
+    }
+
+    /// Thriving Grove, played up to its CR 614.12a pre-entry color prompt
+    /// (a `PendingEntry`-bound source with a live parked entry).
+    fn thriving_grove_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let grove = scenario
+            .add_land_to_hand(PlayerId(0), "Thriving Grove")
+            .from_oracle_text(
+                "This land enters tapped. As it enters, choose a color other than green.\n{T}: Add {G} or one mana of the chosen color.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let card_id = runner.state().objects[&grove].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: grove,
+                card_id,
+            })
+            .expect("playing the land must start its entry");
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
+            ),
+            "Thriving Grove must halt on its pre-entry color prompt"
+        );
+        state
+    }
+
+    /// Stave Off ("Target creature gains protection from the color of your
+    /// choice until end of turn."), cast at a creature and resolved up to its
+    /// CR 608.2d color prompt. The answer persists on the resolving spell, so
+    /// the prompt is `ExactObjectAndResolution`-bound with a matching context.
+    fn stave_off_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let bear = scenario
+            .add_creature(PlayerId(0), "Grizzly Bears", 2, 2)
+            .id();
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Stave Off",
+            true,
+            "Target creature gains protection from the color of your choice until end of turn.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let stave_off = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(ManaType::White, stave_off, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(stave_off).target_object(bear).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                        && source.has_matching_context()
+            ),
+            "Stave Off must halt on its source-bound color prompt"
+        );
+        state
+    }
+
+    fn named_choice_candidates(state: &GameState) -> Vec<CandidateAction> {
+        candidate_actions(state)
+            .into_iter()
+            .filter(|candidate| matches!(candidate.action, GameAction::ChooseOption { .. }))
+            .collect()
+    }
+
+    fn choose(choice: &str) -> GameAction {
+        GameAction::ChooseOption {
+            choice: choice.to_string(),
+        }
+    }
+
+    fn first_named_option(state: &GameState) -> String {
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => options
+                .first()
+                .cloned()
+                .expect("the prompt must enumerate its domain"),
+            other => panic!("expected a NamedChoice prompt, got {other:?}"),
+        }
+    }
+
+    /// U1. Every enumerated answer the hatch admits is one the real reducer
+    /// admits — for a source-less prompt (Brave the Elements), a `PendingEntry`
+    /// prompt (Thriving Grove) and `ExactObjectAndResolution` prompts (Distant
+    /// Melody, Stave Off). The `true` assertion is the positive reach guard;
+    /// `pass_oracle_accepts` is the soundness check.
+    #[test]
+    fn named_choice_hatch_is_sound_against_the_reducer() {
+        for state in [
+            brave_the_elements_named_choice_state(),
+            distant_melody_named_choice_state(),
+            thriving_grove_named_choice_state(),
+            stave_off_named_choice_state(),
+        ] {
+            let candidates = named_choice_candidates(&state);
+            assert!(
+                !candidates.is_empty(),
+                "the prompt must enumerate ChooseOption candidates"
+            );
+            for candidate in &candidates {
+                assert!(
+                    crate::ai_support::structurally_valid_named_choice_answer(
+                        &state,
+                        &candidate.action
+                    ),
+                    "the hatch must admit enumerated answer {:?}",
+                    candidate.action
+                );
+                assert!(
+                    pass_oracle_accepts(&state, candidate),
+                    "the reducer must accept enumerated answer {:?}",
+                    candidate.action
+                );
+            }
+        }
+    }
+
+    /// U2. Each row changes exactly one input from an accepted premise and the
+    /// hatch must then refuse (`false` costs only a simulation).
+    #[test]
+    fn named_choice_hatch_refuses_what_the_reducer_or_cost_payment_refuses() {
+        let melody = distant_melody_named_choice_state();
+        let melody_option = first_named_option(&melody);
+        assert!(hatch(&melody, &choose(&melody_option)), "premise: accepted");
+
+        // (a) An answer outside the enumerated domain.
+        assert!(!hatch(&melody, &choose("Not A Creature Type")));
+
+        let grove = thriving_grove_named_choice_state();
+        let grove_option = first_named_option(&grove);
+        assert!(hatch(&grove, &choose(&grove_option)), "premise: accepted");
+
+        // (b) A source-bound prompt without its matching context
+        // (`has_matching_context` is false — the viewer-projection shape).
+        let mut no_context = grove.clone();
+        if let WaitingFor::NamedChoice {
+            source: Some(source),
+            ..
+        } = &mut no_context.waiting_for
+        {
+            source.context = None;
+        }
+        assert!(!hatch(&no_context, &choose(&grove_option)));
+
+        // (c) CR 614.12a: a `PendingEntry` prompt whose parked entry is gone.
+        let mut no_entry = grove.clone();
+        no_entry.pending_replacement = None;
+        assert!(!hatch(&no_entry, &choose(&grove_option)));
+
+        // (d) CR 107.1a/b + CR 201.4: free-entry and card-name prompts are validated by
+        // rule, not by membership — even an answer that IS in `options`.
+        for choice_type in [
+            ChoiceType::NumberRange {
+                min: 0,
+                max: None,
+                distinctness: NumberDistinctness::Repeatable,
+            },
+            ChoiceType::CardName,
+        ] {
+            let mut by_rule = melody.clone();
+            if let WaitingFor::NamedChoice {
+                choice_type: prompt_type,
+                ..
+            } = &mut by_rule.waiting_for
+            {
+                *prompt_type = choice_type;
+            }
+            assert!(!hatch(&by_rule, &choose(&melody_option)));
+        }
+
+        // (e) CR 601.2f + CR 601.2h + CR 602.2b: the engine's only cast-time
+        // `NamedChoice` constructor (a non-mana "Pay X speed" activation). This
+        // is ROUTING evidence only: every speed answer is payable by
+        // construction, so it shows the hatch declines while an activation is
+        // pending, not that an unpayable answer is excluded.
+        let mut paying = GameState::new_two_player(42);
+        paying.players[0].speed = Some(2);
+        let source_id = ObjectId(1);
+        paying.waiting_for = casting::begin_variable_speed_payment(
+            &mut paying,
+            PlayerId(0),
+            source_id,
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            ),
+            AbilityCost::PaySpeed {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            0,
+            ActivationTargetSelection::Pending,
+            None,
+            None,
+        );
+        assert!(paying.withholds_priority(), "premise: activation pending");
+        let speed_options = match &paying.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => options.clone(),
+            other => panic!("expected the speed prompt, got {other:?}"),
+        };
+        assert_eq!(speed_options, ["0", "1", "2"]);
+        for option in &speed_options {
+            assert!(
+                !hatch(&paying, &choose(option)),
+                "the hatch must decline answer {option} while an activation is pending"
+            );
+            let mut not_paying = paying.clone();
+            not_paying.pending_cast = None;
+            assert!(
+                hatch(&not_paying, &choose(option)),
+                "only the pending activation refuses answer {option}"
+            );
+        }
+
+        // The existing simulation still runs for the pending-activation answer.
+        let candidate = CandidateAction {
+            action: choose(&speed_options[0]),
+            metadata: crate::ai_support::ActionMetadata::for_actor(
+                Some(PlayerId(0)),
+                crate::ai_support::TacticalClass::Selection,
+            ),
+        };
+        crate::game::perf_counters::reset();
+        let _ = SimulationFilter.accept(&paying, &candidate);
+        assert!(
+            crate::game::perf_counters::snapshot().raw_validation_state_clones >= 1,
+            "a pending-activation answer must reach the clone-and-apply simulation"
+        );
+    }
+
+    /// U3. The hatch must be wired into BOTH `accept` and `accept_with_probe`;
+    /// the integration tests only reach `accept_with_probe`. The verdict
+    /// asserts are reach guards; the per-method zero counters are the evidence.
+    #[test]
+    fn named_choice_hatch_is_wired_into_both_accept_methods() {
+        for state in [
+            brave_the_elements_named_choice_state(),
+            distant_melody_named_choice_state(),
+        ] {
+            let candidate = named_choice_candidates(&state)
+                .into_iter()
+                .next()
+                .expect("the prompt must enumerate ChooseOption candidates");
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept(&state, &candidate));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept` must answer an enumerated named choice without cloning"
+            );
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept_with_probe` must answer an enumerated named choice without cloning"
+            );
+        }
     }
 }

@@ -15,11 +15,12 @@ import type { FullSessionKey } from "./multiplayerSession";
 import type { P2PSessionKey } from "./p2pSession";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
-/** Snapshot of an AI seat's configuration at game-start time. The per-seat
- *  deck has already been baked into the engine's persisted `GameState`, so
- *  `deckId` is retained only as an informational label for UI/resume tooling.
- *  `difficulty` is the load-bearing field: the AI controller needs it on resume
- *  to reconstruct the per-seat policy. */
+/** Snapshot of an AI seat's configuration at game-start time. `deckId` is read
+ *  once, at a fresh game start, to pick the seat's deck (`null` = Random;
+ *  absent = fall back to the single-player preferences). After start the
+ *  per-seat deck is baked into the engine's persisted `GameState`, so on resume
+ *  `deckId` is informational only. `difficulty` is load-bearing at both points:
+ *  the AI controller needs it on resume to reconstruct the per-seat policy. */
 export interface AiSeatMeta {
   difficulty: string;
   deckId?: string | null;

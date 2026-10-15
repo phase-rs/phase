@@ -114,7 +114,7 @@ import {
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
-import { usePreferencesStore } from "./preferencesStore";
+import { usePreferencesStore, type AiDeckSelection } from "./preferencesStore";
 import {
   canAttemptNativeEngine,
   ensureNativeEngine,
@@ -127,6 +127,7 @@ import {
   type DraftPhase,
 } from "../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../adapter/draft-adapter";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type {
   DeckChoice,
   PlayerSlot,
@@ -174,6 +175,7 @@ function asDeckPayload(deck: HostingDeck): {
   commander: string[];
   planar_deck: string[];
   scheme_deck: string[];
+  bracket_tier?: CommanderBracketTier;
 } {
   return {
     main_deck: deck.main_deck,
@@ -181,6 +183,7 @@ function asDeckPayload(deck: HostingDeck): {
     commander: deck.commander,
     planar_deck: deck.planar_deck ?? [],
     scheme_deck: deck.scheme_deck ?? [],
+    ...(deck.bracket_tier ? { bracket_tier: deck.bracket_tier } : {}),
   };
 }
 
@@ -189,6 +192,17 @@ function aiSeatDeckChoice(deckName: string | null): DeckChoice {
     return { type: "Random" };
   }
   return { type: "Named", data: deckName };
+}
+
+/** The wire shape of an AI seat for `CreateGameWithSettings`: client-only
+ *  fields such as `deckId` stay off the wire. */
+function aiSeatRequest(seat: AiSeatConfig) {
+  return {
+    seatIndex: seat.seatIndex,
+    difficulty: seat.difficulty,
+    deckName: seat.deckName,
+    ...(seat.deck ? { deck: seat.deck } : {}),
+  };
 }
 
 function effectiveAiSeats(settings: HostingSettings): AiSeatConfig[] {
@@ -1461,6 +1475,11 @@ export interface AiSeatConfig {
   difficulty: string;
   deckName: string | null;
   deck?: DeckChoice;
+  /** The seat's deck selection: an AI deck catalog id, or the Random sentinel
+   *  (which stays Random even after `deck` is resolved). Used by the host form and
+   *  the all-AI local start only; it is never sent on the wire — `deck` carries
+   *  the concrete decklist. */
+  deckId?: AiDeckSelection;
 }
 
 export interface HostingDeck {
@@ -1469,6 +1488,8 @@ export interface HostingDeck {
   commander: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
+  /** Declared Commander bracket tier; omitted decks default to Core on the engine. */
+  bracket_tier?: CommanderBracketTier;
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the
@@ -2444,6 +2465,7 @@ function finalizeRememberedHostConfig(
         )
         || typeof seat.difficulty !== "string"
         || (typeof seat.deckName !== "string" && seat.deckName !== null)
+        || (seat.deckId !== undefined && typeof seat.deckId !== "string")
       ) {
         continue;
       }
@@ -2451,6 +2473,7 @@ function finalizeRememberedHostConfig(
         seatIndex: seat.seatIndex,
         difficulty: seat.difficulty,
         deckName: seat.deckName,
+        ...(seat.deckId !== undefined ? { deckId: seat.deckId } : {}),
       });
     }
   }
@@ -3162,7 +3185,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 loop_detection: settings.loopDetection,
               },
               format_config: settings.formatConfig,
-              ai_seats: aiSeats,
+              ai_seats: aiSeats.map(aiSeatRequest),
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,

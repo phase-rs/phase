@@ -25,7 +25,7 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, isCustomGameFormat, nextSnapshotSeq } from "./types";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -43,6 +43,7 @@ import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
+  bracket_tier?: CommanderBracketTier;
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
