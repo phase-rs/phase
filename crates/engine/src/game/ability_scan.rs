@@ -2345,7 +2345,10 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     caused_by: _,
                     // Batch members are event records, not tracked objects:
                     // a member filter has nothing to bind to here (mirrors
-                    // the quantity `TrackedSet` arm), so no filter scan.
+                    // the quantity `TrackedSet` arm), so no filter scan. The
+                    // combination is rejected at the `PropertyAggregate`
+                    // constructor, which every producer and decoder routes
+                    // through — a filtered batch cannot arrive here.
                     filter: _,
                 } => Axes {
                     event: true,

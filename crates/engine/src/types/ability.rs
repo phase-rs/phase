@@ -9662,6 +9662,8 @@ pub struct PropertyAggregate {
 pub enum PropertyAggregateError {
     #[error("turn-journal property aggregates support only ManaValue, not {0:?}")]
     UnsupportedTurnJournalProperty(ObjectProperty),
+    #[error("triggering-batch property aggregates accept no member filter")]
+    UnsupportedTriggeringBatchFilter,
     #[error("property aggregate source exceeds the supported union depth")]
     SourceDepthExceeded,
 }
@@ -9673,11 +9675,27 @@ impl PropertyAggregate {
         source: CardTypeSetSource,
     ) -> Result<Self, PropertyAggregateError> {
         let mut invalid_journal = false;
+        let mut invalid_batch_filter = false;
         let complete = source.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
             if matches!(leaf, CardTypeSetSource::TurnJournal { .. })
                 && property != ObjectProperty::ManaValue
             {
                 invalid_journal = true;
+            }
+            // F6 verdict: no producer emits a member filter on a
+            // triggering-batch source, and batch snapshots have no member
+            // binding for one — reject the combination here (all decoding
+            // routes through this constructor) rather than silently ignore
+            // the filter at resolution.
+            if matches!(
+                leaf,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    filter: Some(_),
+                    ..
+                }
+            ) {
+                invalid_batch_filter = true;
             }
         });
         if !complete {
@@ -9687,6 +9705,9 @@ impl PropertyAggregate {
             return Err(PropertyAggregateError::UnsupportedTurnJournalProperty(
                 property,
             ));
+        }
+        if invalid_batch_filter {
+            return Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter);
         }
         Ok(Self {
             function,
@@ -41485,6 +41506,54 @@ mod tests {
 
         let invalid_json = r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TurnJournal","journal":"SpellsCast","scope":"Controller"}}"#;
         assert!(serde_json::from_str::<QuantityRef>(invalid_json).is_err());
+    }
+
+    /// PR-C F6 — VERDICT (reject). No producer emits a member filter on a
+    /// triggering-batch source, and batch snapshots have no member binding
+    /// for one — so the constructor rejects the combination (all decoding
+    /// routes through it) rather than silently ignore the filter at
+    /// resolution. An unfiltered batch still constructs and decodes.
+    #[test]
+    fn property_aggregate_rejects_filtered_triggering_batch() {
+        let batch = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+            filter,
+        };
+        let filtered = batch(Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::Another],
+        })));
+        assert_eq!(
+            PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, filtered),
+            Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter),
+            "a member filter on a triggering-batch source must be rejected"
+        );
+        assert!(
+            PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, batch(None))
+                .is_ok(),
+            "an unfiltered batch still constructs"
+        );
+
+        let wrap = |qty: &str| format!(r#"{{"type":"Ref","qty":{qty}}}"#);
+        let invalid_json = wrap(
+            r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TrackedSet","set":"TriggeringBatch","filter":{"type":"Any"}}}"#,
+        );
+        let err = serde_json::from_str::<QuantityExpr>(&invalid_json)
+            .expect_err("decoding a filtered batch must fail");
+        assert!(
+            err.to_string()
+                .contains("triggering-batch property aggregates accept no member filter"),
+            "decoding must fail on the constructor rejection, not a shape error: {err}"
+        );
+        let valid_json = wrap(
+            r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TrackedSet","set":"TriggeringBatch"}}"#,
+        );
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&valid_json).is_ok(),
+            "an unfiltered batch still decodes"
+        );
     }
 
     #[test]

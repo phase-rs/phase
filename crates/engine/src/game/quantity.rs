@@ -519,8 +519,9 @@ fn visit_characteristic_leaf<'s>(
             caused_by,
             // Declaration-record members are event records, not tracked
             // objects: member narrowing has nothing to bind to here. A
-            // TriggeringBatch aggregate with a member filter is unreachable
-            // from today's producers.
+            // TriggeringBatch aggregate with a member filter is rejected at
+            // the `PropertyAggregate` constructor, which every producer and
+            // decoder routes through — a filtered batch cannot arrive here.
             filter: _,
         } => {
             // CR 603.4: detection checks must prefer their explicit TLS event;
