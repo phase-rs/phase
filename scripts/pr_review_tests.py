@@ -4192,6 +4192,40 @@ class IncrementalDashboardTests(unittest.TestCase):
         self.assertEqual(self.cache_bytes(), previous)
         self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1])
 
+    def test_delta_volume_and_membership_churn_exhaust_budget_without_publishing(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        dashboard_path = self.state_dir / "review-dashboard.json"
+        html_path = self.state_dir / "review-dashboard.html"
+        dashboard, html = dashboard_path.read_bytes(), html_path.read_bytes()
+        original = self.github
+        for endpoint in ("issues", "issues/comments"):
+            for scenario in ("volume", "churn"):
+                with self.subTest(endpoint=endpoint, scenario=scenario):
+                    requests = 0
+
+                    def exceed_budget(command):
+                        nonlocal requests
+                        if command[2] != f"repos/phase-rs/phase/{endpoint}":
+                            return original(command)
+                        requests += 1
+                        self.assertLessEqual(requests, 3, "REST budget must also bound replay passes")
+                        page = int(next(item.split("=", 1)[1] for item in command if item.startswith("page=")))
+                        if scenario == "volume" or page == 1:
+                            return [{"id": requests, "number": requests}]
+                        return []
+
+                    with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
+                            mock.patch.object(pr_review, "DISCOVERY_REST_MAX_REQUESTS", 3), \
+                            mock.patch.object(pr_review, "run_json", side_effect=exceed_budget):
+                        with self.assertRaisesRegex(ValueError, "budget; discovery is incomplete"):
+                            self.run_dashboard()
+                    self.assertEqual(requests, 3)
+                    self.assertEqual(self.cache_bytes(), previous)
+                    self.assertEqual(dashboard_path.read_bytes(), dashboard)
+                    self.assertEqual(html_path.read_bytes(), html)
+        self.assertEqual(self.run_dashboard()["discovery"]["mode"], "incremental")
+
     def test_truncated_open_bootstrap_and_census_never_advance(self) -> None:
         self.args.limit = 1
         self.nodes[2] = self.node(2)

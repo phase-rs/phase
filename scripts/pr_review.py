@@ -67,6 +67,8 @@ DASHBOARD_DEFAULT_TERMINAL_LIMIT = 200
 DISCOVERY_CACHE_VERSION = 1
 DISCOVERY_OVERLAP_SECONDS = 60
 DISCOVERY_REST_PAGE_SIZE = 100
+# Two endpoints per sweep: at most 40 REST requests, including replay passes.
+DISCOVERY_REST_MAX_REQUESTS = 20
 SUCCESS_STATES = {"accepted", "merged"}
 BLOCK_STATES = {"blocked", "changes_requested"}
 HOLD_STATES = {"held", "held_ci"}
@@ -4159,13 +4161,18 @@ def read_discovery_cache(path: Path, args: argparse.Namespace) -> dict[str, Any]
 
 
 def fetch_issue_delta(repo: str, endpoint: str, since: str) -> list[dict[str, Any]]:
-    """REST since membership, traversed in immutable creation order, without a cap."""
+    """Read complete REST since membership within a fixed request budget."""
     # Deletions before a numbered-page offset can skip unread rows. Re-read
     # multi-page results until membership agrees before advancing the checkpoint.
     previous_ids: set[int] | None = None
     rows: dict[int, dict[str, Any]] = {}
     page = 1
+    requests = 0
     while True:
+        if requests >= DISCOVERY_REST_MAX_REQUESTS:
+            raise ValueError(f"GitHub {endpoint} delta exceeded its {DISCOVERY_REST_MAX_REQUESTS}-request "
+                             "budget; discovery is incomplete and its checkpoint is unchanged")
+        requests += 1
         command = ["gh", "api", f"repos/{repo}/{endpoint}", "--method", "GET",
                    "-f", f"since={since}", "-f", "sort=created", "-f", "direction=asc",
                    "-F", f"per_page={DISCOVERY_REST_PAGE_SIZE}", "-F", f"page={page}"]
