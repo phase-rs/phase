@@ -52,6 +52,33 @@ fn coordinated_static_honesty() {
     }
 }
 
+#[test]
+fn coordinated_base_pt_quantity_case_bridge() {
+    let operand = "the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure";
+    let expected = super::grammar::resolve_base_pt_x_ref(Some(&operand.to_lowercase())).unwrap();
+    assert_eq!(
+        super::grammar::resolve_base_pt_x_ref(Some(operand)),
+        Some(expected)
+    );
+    assert_eq!(
+        super::grammar::resolve_base_pt_x_ref(None),
+        Some(QuantityRef::CostXPaid)
+    );
+    assert!(super::grammar::resolve_base_pt_x_ref(Some("an unknown quantity")).is_none());
+    for intro in ["", "the number of ", "the total number of "] {
+        let valid = format!("{intro}cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure");
+        assert!(parse_static_line(&format!(
+            "This spell costs {{1}} less to cast for each {valid}."
+        ))
+        .is_some());
+        let invalid = format!("{intro}cards you own in exile and in your graveyard that are instant cards, are squirrels wearing hats");
+        assert!(parse_static_line(&format!(
+            "This spell costs {{1}} less to cast for each {invalid}."
+        ))
+        .is_none());
+    }
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies

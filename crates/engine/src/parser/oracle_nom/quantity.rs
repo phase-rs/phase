@@ -1718,8 +1718,16 @@ fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
 
 /// Parse "the number of [type] you control" → ObjectCount.
 fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
+    let (rest, _) = parse_card_count_introduction(input)?;
     parse_number_of_inner(rest)
+}
+
+fn parse_card_count_introduction(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("the total number of "), tag("the number of "))),
+    )
+    .parse(input)
 }
 
 /// The maximizing extremum adjective. Oracle text prints several
@@ -2068,7 +2076,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // stranded remainder; its "unique vowels"/"<letter>'s" + sticker-set
         // language is disjoint from every other arm's.
         alt((
-            parse_coordinated_card_population,
+            |i| parse_coordinated_card_population_body(i, &ParseContext::default()),
             parse_name_sticker_letter_count,
         )),
         // CR 110.4: the permanent-type head lowers to `ObjectCountDistinct`, not
@@ -2831,7 +2839,14 @@ pub(crate) fn parse_coordinated_card_population_with_context<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> OracleResult<'a, QuantityRef> {
-    let (input, _) = opt(tag("the number of ")).parse(input)?;
+    let (input, _) = opt(parse_card_count_introduction).parse(input)?;
+    parse_coordinated_card_population_body(input, ctx)
+}
+
+fn parse_coordinated_card_population_body<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, QuantityRef> {
     let (locatives, head) = take_until(" in ").parse(input)?;
     let (head_filter, remainder) = parse_type_phrase_folding_with_ctx(head, &mut ctx.clone());
     if head.is_empty()
@@ -2870,6 +2885,53 @@ pub(crate) fn parse_coordinated_card_population_with_context<'a>(
 #[cfg(test)]
 mod coordinated_population_tests {
     use super::*;
+
+    #[test]
+    fn coordinated_count_introductions() {
+        let head = "cards you own in exile and in your graveyard";
+        for introduction in ["", "the number of ", "the total number of "] {
+            let complete = format!("{introduction}{head} that are instant cards, are sorcery cards, and/or have an adventure");
+            let expected = parse_coordinated_card_population(&complete).unwrap().1;
+            assert_eq!(parse_quantity_ref_complete(&complete).unwrap().1, expected);
+            assert_eq!(
+                parse_quantity_ref(&complete).unwrap(),
+                ("", expected.clone())
+            );
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&complete).is_some());
+            assert!(crate::parser::oracle_quantity::parse_for_each_clause(&complete).is_some());
+            assert!(parse_for_each_clause_ref_with_they_controller(
+                &complete,
+                &PlayerAntecedents::default()
+            )
+            .is_ok());
+            if !introduction.is_empty() {
+                assert_eq!(parse_the_number_of(&complete).unwrap(), ("", expected));
+            }
+            for tail in [
+                "that are instant cards, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+                "that are instant cards, are sorcery cards, and/or have an adventure, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or",
+                "that are instant cards, are sorcery cards, and/or have an adventure,",
+            ] {
+                let malformed = format!("{introduction}{head} {tail}");
+                assert!(matches!(parse_coordinated_card_population(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(matches!(parse_quantity_ref(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(matches!(parse_quantity_ref_complete(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(matches!(parse_for_each_clause_ref_with_they_controller(&malformed, &PlayerAntecedents::default()), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(crate::parser::oracle_quantity::parse_quantity_ref(&malformed).is_none(), "{malformed}");
+                assert!(crate::parser::oracle_quantity::parse_for_each_clause(&malformed).is_none(), "{malformed}");
+                if !introduction.is_empty() {
+                    assert!(matches!(parse_the_number_of(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                }
+            }
+        }
+        assert!(parse_the_number_of("the total number of creatures you control").is_ok());
+        assert!(matches!(
+            parse_coordinated_card_population("the number of creatures you control"),
+            Err(nom::Err::Error(_))
+        ));
+    }
 
     #[test]
     fn coordinated_population_complete() {

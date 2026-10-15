@@ -10993,6 +10993,35 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
 
 fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
     let clause = clause.trim_start().trim_end_matches('.').trim_end();
+    match nom_quantity::parse_coordinated_card_population(clause.lower) {
+        Ok(_) => return clause,
+        Err(nom::Err::Failure(_)) => {
+            // CR 608.2c: a coordinated population keeps its whole predicate.
+            // Only a proven independent instruction can end its operand.
+            let mut remaining = clause.lower;
+            while let Ok((_, (prefix, tail))) = nom_primitives::split_once_on(remaining, ",") {
+                let end = clause.len() - remaining.len() + prefix.len();
+                let candidate = clause.slice(0, end).trim_end();
+                let tail = tail.trim_start();
+                let (instruction, _) =
+                    opt(alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))))
+                        .parse(tail)
+                        .expect("optional connector");
+                if nom_quantity::parse_coordinated_card_population(candidate.lower).is_ok()
+                    && crate::parser::oracle_target::parse_relative_card_continuation_head(
+                        instruction,
+                    )
+                    .is_err()
+                    && super::sequence::starts_clause_text_or_conjugated(instruction)
+                {
+                    return candidate;
+                }
+                remaining = tail;
+            }
+            return clause;
+        }
+        Err(nom::Err::Error(_) | nom::Err::Incomplete(_)) => {}
+    }
     // CR 613.4c: a "+X/+Y" pump binds each axis to its own quantity via
     // "<X quantity>, and Y is <Y quantity>" (Aspect of Wolf). The "and Y is …"
     // is a continuation of the SAME binding, not a new instruction, so keep the
@@ -14826,6 +14855,44 @@ mod tests {
 
         assert_eq!(without_where_x.original, "draw x cards");
         assert_eq!(expr.as_deref(), Some("the number of creatures you control"));
+    }
+
+    #[test]
+    fn coordinated_where_x_operand_is_complete() {
+        for introduction in ["", "the number of ", "the total number of "] {
+            let head = format!("{introduction}cards you own in exile and in your graveyard");
+            for tail in [
+                "that are instant cards, are sorcery cards, and/or have an Adventure",
+                "that are instant cards, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+                "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or",
+                "that are instant cards, are sorcery cards, and/or have an Adventure,",
+            ] {
+                let operand = format!("{head} {tail}");
+                let text = format!("draw X cards, where X is {operand}.");
+                let lower = text.to_lowercase();
+                assert_eq!(strip_trailing_where_x(TextPair::new(&text, &lower)).1.as_deref(), Some(operand.as_str()));
+            }
+            let operand = format!(
+                "{head} that are instant cards, are sorcery cards, and/or have an Adventure"
+            );
+            for following in [
+                ", draw a card.",
+                ", and draw a card.",
+                ", then draw a card.",
+                ". Draw a card.",
+            ] {
+                let text = format!("draw X cards, where X is {operand}{following}");
+                let lower = text.to_lowercase();
+                assert_eq!(
+                    strip_trailing_where_x(TextPair::new(&text, &lower))
+                        .1
+                        .as_deref(),
+                    Some(operand.as_str())
+                );
+            }
+        }
     }
 
     #[test]

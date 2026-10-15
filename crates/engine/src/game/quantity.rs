@@ -9962,7 +9962,9 @@ mod tests {
             }
             let mut runner = scenario.build();
             for id in adventures {
-                runner.state_mut().objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+                let object = runner.state_mut().objects.get_mut(&id).unwrap();
+                object.controller = P1;
+                object.back_face = Some(BackFaceData {
                     name: "Adventure alternative".into(),
                     layout_kind: Some(LayoutKind::Adventure),
                     ..Default::default()
@@ -9973,12 +9975,115 @@ mod tests {
                 ("card you own in your graveyard and in exile that's an instant card or a sorcery card or a card that has an adventure", 3),
                 ("card you own in exile and in your graveyard and in exile that's an instant card or an instant card or a sorcery card or a card that has an adventure", 3),
                 ("instant and sorcery cards you own in exile and in your graveyard", 2),
+                ("cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an adventure", 3),
             ] {
                 let (rest, qty) = crate::parser::oracle_nom::quantity::parse_coordinated_card_population(phrase).unwrap();
                 assert_eq!(rest, "");
                 // CR 108.3 + CR 109.2a + CR 715.2c: owner, zones, and the whole
                 // predicate intersect; overlapping types/zones count each card once.
                 assert_eq!(resolve_quantity(runner.state(), &QuantityExpr::Ref { qty }, P0, source), if populated { expected } else { 0 }, "{phrase}");
+            }
+            // Evaluate actual changed quantities from full printed sources,
+            // without claiming their unrelated abilities are covered here.
+            let cases: [(&str, &[&str], &str, i32); 7] = [
+                ("Sailors' Bane", &["Creature"], "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)", 3),
+                ("Candlekeep Inspiration", &["Sorcery"], "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.", 3),
+                ("Beacon Bolt", &["Sorcery"], "Beacon Bolt deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nJump-start (You may cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile this card.)", 2),
+                ("Crackling Drake", &["Creature"], "Flying\nCrackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nWhen this creature enters, draw a card.", 2),
+                ("Huskburster Swarm", &["Creature"], "This spell costs {1} less to cast for each creature card you own in exile and in your graveyard.\nMenace, deathtouch", 2),
+                ("Ral, Izzet Viceroy", &["Planeswalker"], "[+1]: Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.\n[−3]: Ral deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\n[−8]: You get an emblem with \"Whenever you cast an instant or sorcery spell, this emblem deals 4 damage to any target and you draw two cards.\"", 2),
+                ("Serpentine Curve", &["Sorcery"], "Create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it, where X is one plus the total number of instant and sorcery cards you own in exile and in your graveyard.", 3),
+            ];
+            for (name, types, oracle, expected) in cases {
+                let parsed = crate::parser::parse_oracle_text(
+                    oracle,
+                    name,
+                    &[],
+                    &types.iter().map(|s| (*s).into()).collect::<Vec<_>>(),
+                    &[],
+                );
+                let mut quantities = Vec::new();
+                for definition in &parsed.statics {
+                    if let crate::types::statics::StaticMode::ModifyCost {
+                        dynamic_count: Some(qty),
+                        ..
+                    } = &definition.mode
+                    {
+                        quantities.push(QuantityExpr::Ref { qty: qty.clone() });
+                    }
+                    for modification in &definition.modifications {
+                        if let crate::types::ability::ContinuousModification::SetDynamicPower {
+                            value,
+                        } = modification
+                        {
+                            quantities.push(value.clone());
+                        }
+                    }
+                }
+                for ability in &parsed.abilities {
+                    match ability.effect.as_ref() {
+                        Effect::DealDamage { amount, .. } => quantities.push(amount.clone()),
+                        Effect::Token {
+                            enter_with_counters,
+                            ..
+                        } => quantities.extend(enter_with_counters.iter().map(|(_, q)| q.clone())),
+                        Effect::GenericEffect {
+                            static_abilities, ..
+                        } => {
+                            for definition in static_abilities {
+                                for modification in &definition.modifications {
+                                    if let crate::types::ability::ContinuousModification::SetPowerDynamic { value } | crate::types::ability::ContinuousModification::SetToughnessDynamic { value } = modification { quantities.push(value.clone()); }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    quantities.len(),
+                    if name == "Candlekeep Inspiration" {
+                        2
+                    } else {
+                        1
+                    },
+                    "actual changed subtree: {name}"
+                );
+                for quantity in quantities {
+                    let empty = i32::from(name == "Serpentine Curve");
+                    assert_eq!(
+                        resolve_quantity(runner.state(), &quantity, P0, source),
+                        if populated { expected } else { empty },
+                        "{name}: {quantity:?}"
+                    );
+                }
+            }
+            // Synthetic introduction witnesses use the same public Sorcery
+            // consumer and hostile board; the printed Oracle above stays exact.
+            for introduction in ["", "the total number of "] {
+                let oracle = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {introduction}cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.");
+                let parsed = crate::parser::parse_oracle_text(
+                    &oracle,
+                    "Synthetic count introduction",
+                    &[],
+                    &["Sorcery".into()],
+                    &[],
+                );
+                let Effect::GenericEffect {
+                    static_abilities, ..
+                } = parsed.abilities[0].effect.as_ref()
+                else {
+                    panic!("full source base P/T");
+                };
+                let mut values = 0;
+                for definition in static_abilities {
+                    for modification in &definition.modifications {
+                        if let crate::types::ability::ContinuousModification::SetPowerDynamic { value } | crate::types::ability::ContinuousModification::SetToughnessDynamic { value } = modification {
+                        assert_eq!(resolve_quantity(runner.state(), value, P0, source), if populated { 3 } else { 0 }, "{introduction}");
+                        values += 1;
+                    }
+                    }
+                }
+                assert_eq!(values, 2);
             }
         }
     }

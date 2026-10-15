@@ -16,6 +16,122 @@ use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
 #[test]
+fn coordinated_population_where_x_full_source_honesty() {
+    assert_coordinated_where_x_full_source_honesty(&["", "the number of "]);
+}
+
+#[test]
+fn coordinated_total_count_full_source_honesty() {
+    assert_coordinated_where_x_full_source_honesty(&["the total number of "]);
+}
+
+fn assert_coordinated_where_x_full_source_honesty(introductions: &[&str]) {
+    fn unsupported_fragment_has(ability: &AbilityDefinition, operand: &str) -> bool {
+        matches!(ability.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(operand))
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|a| unsupported_fragment_has(a, operand))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|a| unsupported_fragment_has(a, operand))
+            || ability
+                .mode_abilities
+                .iter()
+                .any(|a| unsupported_fragment_has(a, operand))
+    }
+    let head = "cards you own in exile and in your graveyard";
+    for introduction in introductions {
+        let operand = format!("{introduction}{head} that are instant cards, are sorcery cards, and/or have an Adventure");
+        let frame = |operand: &str| {
+            format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {operand}.")
+        };
+        let complete = parse_oracle_text(
+            &frame(&operand),
+            "Candlekeep Inspiration",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert_eq!(complete.abilities.len(), 1);
+        assert!(!has_unimplemented(&complete.abilities[0]));
+        let expected = crate::parser::oracle_quantity::parse_quantity_ref(&operand).unwrap();
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = complete.abilities[0].effect.as_ref()
+        else {
+            panic!("complete base P/T effect");
+        };
+        assert!(static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(m, ContinuousModification::SetPowerDynamic { value } if value == &QuantityExpr::Ref { qty: expected.clone() }))));
+        assert!(static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { value } if value == &QuantityExpr::Ref { qty: expected.clone() }))));
+        assert!(complete.parse_warnings.is_empty());
+        for tail in [
+            "that are instant cards, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or",
+            "that are instant cards, are sorcery cards, and/or have an Adventure,",
+        ] {
+            let operand = format!("{introduction}{head} {tail}");
+            let source = frame(&operand);
+            let malformed = parse_oracle_text(&source, "Synthetic population witness", &[], &["Sorcery".into()], &[]);
+            assert!(malformed.abilities.iter().any(has_unimplemented), "must remain unsupported: {source}");
+            assert!(malformed.abilities.iter().any(|a| unsupported_fragment_has(a, &operand)), "full operand in unsupported fragment: {:?}", malformed.abilities);
+        }
+    }
+}
+
+#[test]
+fn coordinated_population_where_x_instruction_boundary() {
+    let operand = "the total number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure";
+    for separator in [", ", ", and ", ", then ", ". "] {
+        let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {operand}{separator}draw a card.");
+        let parsed = parse_oracle_text(
+            &source,
+            "Synthetic instruction boundary",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            parsed.abilities.iter().all(|a| !has_unimplemented(a)),
+            "{source}: {:?}",
+            parsed.abilities
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. })),
+            "{source}"
+        );
+        fn has_draw(a: &AbilityDefinition) -> bool {
+            matches!(a.effect.as_ref(), Effect::Draw { .. })
+                || a.sub_ability.as_deref().is_some_and(has_draw)
+        }
+        assert!(
+            parsed.abilities.iter().any(has_draw),
+            "following instruction retained: {source}"
+        );
+    }
+    for prefix in ["one plus ", "twice ", "half "] {
+        let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {prefix}{operand}.");
+        let parsed = parse_oracle_text(
+            &source,
+            "Synthetic arithmetic boundary",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            parsed.abilities.iter().any(has_unimplemented),
+            "unchanged unsupported consumer: {source}"
+        );
+    }
+}
+
+#[test]
 fn coordinated_population_unknown_tail_is_honest() {
     let oracle = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
     let supported = parse_oracle_text(

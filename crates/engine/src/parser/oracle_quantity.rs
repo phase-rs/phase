@@ -3945,6 +3945,27 @@ mod tests {
     };
     use crate::types::mana::ManaColor;
 
+    #[test]
+    fn coordinated_population_context_adapters() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        for intro in ["", "the number of ", "the total number of "] {
+            let complete = format!("{intro}cards they own in exile and in their graveyard that are instant cards, are sorcery cards, and/or have an Adventure");
+            let direct = parse_quantity_ref_with_context(&complete, &mut ctx.clone()).unwrap();
+            assert_eq!(
+                parse_for_each_clause_with_context(&complete, &ctx),
+                Some(direct)
+            );
+            let malformed = format!("{intro}cards they own in exile and in their graveyard that are instant cards, are squirrels wearing hats");
+            assert!(parse_quantity_ref_with_context(&malformed, &mut ctx.clone()).is_none());
+            assert!(parse_for_each_clause_with_context(&malformed, &ctx).is_none());
+        }
+        assert!(parse_quantity_ref("the number of creatures you control").is_some());
+        assert!(parse_for_each_clause("artifact you control").is_some());
+    }
+
     // -----------------------------------------------------------------------
     // CR 608.2c — the spell-history swallow guard, and the narrow contract of
     // the retained tracked-set entry.

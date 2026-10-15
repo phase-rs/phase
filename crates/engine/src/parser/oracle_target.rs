@@ -9252,22 +9252,9 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     // even while it is using its normal face. Reuse the shared relative-clause
     // property path so spell filters and ordinary target filters agree on the
     // same `FilterProp::HasAdventure` predicate.
-    if let Ok((after_verb, _)) = alt((
-        tag::<_, _, OracleError<'_>>("has "),
-        tag::<_, _, OracleError<'_>>("have "),
-    ))
-    .parse(after_that)
-    {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an adventure").parse(after_verb) {
-            let next_char_is_boundary = rest
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
-            if next_char_is_boundary {
-                let consumed = that_len + after_that.len() - rest.len();
-                return Some((vec![FilterProp::HasAdventure], consumed));
-            }
-        }
+    if let Ok((rest, property)) = parse_adventure_have_predicate(after_that) {
+        let consumed = that_len + after_that.len() - rest.len();
+        return Some((vec![property], consumed));
     }
 
     // CR 508.6: "that attacked you this turn" — defender-scoped attack-history
@@ -10110,6 +10097,13 @@ fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter
 }
 
 fn parse_relative_card_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(alt((tag("is "), tag("are ")))).parse(input)?;
+    if let Ok((rest, property)) = parse_adventure_have_predicate(input) {
+        return Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![property])),
+        ));
+    }
     // Reuse the property suffix's Adventure leaf and its word boundary.
     let (after_article, _) = opt(nom_primitives::parse_article).parse(input)?;
     if let Ok((after_card, _)) = nom_quantity::parse_card_word(after_article) {
@@ -10125,6 +10119,35 @@ fn parse_relative_card_leg(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, kind) = parse_relative_core_type_leg(input)?;
     let (rest, _) = opt(preceded(tag(" "), nom_quantity::parse_card_word)).parse(rest)?;
     Ok((rest, TargetFilter::Typed(TypedFilter::new(kind))))
+}
+
+fn parse_adventure_have_predicate(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, _) = alt((tag("has "), tag("have "))).parse(input)?;
+    let (rest, _) = opt(nom_primitives::parse_article).parse(rest)?;
+    let (rest, _) = tag("adventure").parse(rest)?;
+    let (rest, _) = nom::combinator::not(nom::character::complete::satisfy(|c| {
+        c.is_alphanumeric() || c == '_'
+    }))
+    .parse(rest)?;
+    Ok((rest, FilterProp::HasAdventure))
+}
+
+/// A relative-list head cannot start a separate instruction, even when its
+/// predicate is unfinished. Shared with the where-X operand boundary owner.
+pub(crate) fn parse_relative_card_continuation_head(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value(
+            (),
+            terminated(
+                alt((tag("is"), tag("are"), tag("has"), tag("have"))),
+                alt((tag(" "), nom::combinator::eof)),
+            ),
+        ),
+        value((), nom_primitives::parse_article),
+        value((), parse_relative_core_type_leg),
+        value((), nom_quantity::parse_card_word),
+    ))
+    .parse(input)
 }
 
 /// CR 109.2a + CR 715.2a: relative card predicates may mix card types with
@@ -15642,6 +15665,47 @@ mod tests {
 
     #[test]
     fn coordinated_relative_predicate() {
+        for phrase in [
+            "that are instant cards, are sorcery cards, and/or have an adventure",
+            "that are sorcery cards or have an adventure or are instant cards",
+            "that's an instant, sorcery, or card that has an adventure",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_relative_card_filter)
+                    .parse(phrase)
+                    .is_ok(),
+                "{phrase}"
+            );
+        }
+        for malformed in [
+            "that are instants",
+            "that are instant cards, are sorceries",
+            "that are instant cards and have",
+            "that are instant cards and have an adventures",
+            "that are instant cards and have an unknown adventure",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_relative_card_filter)
+                    .parse(malformed)
+                    .is_err(),
+                "{malformed}"
+            );
+        }
+        for head in [
+            "is",
+            "are",
+            "has",
+            "have",
+            "an instant card",
+            "a sorcery card",
+            "card",
+            "instant",
+        ] {
+            assert!(
+                parse_relative_card_continuation_head(head).is_ok(),
+                "{head}"
+            );
+        }
         let (rest, filter) = parse_relative_card_filter(
             "that's an instant card, a sorcery card, or a card that has an adventure",
         )

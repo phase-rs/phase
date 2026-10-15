@@ -19,6 +19,22 @@ use crate::types::game_state::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
 #[test]
+fn coordinated_population_candlekeep() {
+    let (ir, lowered) = parse_two_layer(
+        "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.",
+        "Candlekeep Inspiration", &["Sorcery"], &[],
+    );
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    assert!(
+        matches!(lowered.abilities[0].effect.as_ref(), Effect::GenericEffect { static_abilities, .. } if static_abilities.iter().any(|s| s.modifications.len() == 2))
+    );
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("coordinated_population_candlekeep_ir", &ir);
+    insta::assert_json_snapshot!("coordinated_population_candlekeep_lowered", &lowered);
+}
+
+#[test]
 fn coordinated_population_full_card_ir() {
     let (ir, lowered) = parse_two_layer_with_keywords(
         "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)",

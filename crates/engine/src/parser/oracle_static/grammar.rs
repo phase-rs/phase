@@ -1561,9 +1561,12 @@ pub(crate) fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> Qua
 /// When a "where X is …" expression is present, parse it via the nom quantity grammar.
 pub(crate) fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef> {
     if let Some(expr) = where_x_expression {
-        return super::oracle_nom::quantity::parse_quantity_ref_complete(expr)
-            .ok()
-            .map(|(_, qty)| qty);
+        return crate::parser::oracle_nom::bridge::nom_on_lower(
+            expr,
+            &expr.to_lowercase(),
+            super::oracle_nom::quantity::parse_quantity_ref_complete,
+        )
+        .map(|(qty, _)| qty);
     }
     // CR 107.3m: In a spell-cast context, X refers to the value paid for {X}.
     Some(QuantityRef::CostXPaid)
