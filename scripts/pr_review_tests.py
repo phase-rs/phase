@@ -3927,7 +3927,7 @@ class IncrementalDashboardTests(unittest.TestCase):
         with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 2):
             result = self.run_dashboard()
         issue_calls = [call for call in self.calls if call[2].endswith("/issues")]
-        self.assertEqual(len(issue_calls), 4)
+        self.assertEqual(len(issue_calls), 8)
         for call in issue_calls:
             self.assertIn("state=all", call)
             self.assertIn("sort=created", call)
@@ -3956,7 +3956,7 @@ class IncrementalDashboardTests(unittest.TestCase):
         self.assertEqual(result["discovery"]["since"], "2026-10-06T12:01:00Z")
         self.assertEqual(result["discovery"]["refreshed_prs"], [1])
 
-    def test_old_comment_entering_before_read_page_replays_after_long_sweep(self) -> None:
+    def test_old_comment_entering_before_read_page_is_recovered_during_long_sweep(self) -> None:
         self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
         self.record("held")
         self.run_dashboard()
@@ -3995,13 +3995,47 @@ class IncrementalDashboardTests(unittest.TestCase):
         with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
                 mock.patch.object(pr_review, "run_json", side_effect=paginate_live_membership):
             first = self.run_dashboard()
-            self.assertEqual(self.row(first)["advisory_action"], "hold")
+            self.assertEqual(self.row(first)["advisory_action"], "review")
+            self.assertEqual(first["discovery"]["refreshed_prs"], [1])
             self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], "2026-10-06T12:02:00Z")
             second = self.run_dashboard()
         self.assertEqual(second["discovery"]["since"], "2026-10-06T12:01:00Z")
-        self.assertEqual(second["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(second["discovery"]["refreshed_prs"], [])
         self.assertEqual(self.row(second)["advisory_action"], "review")
         self.assertEqual(self.row(second)["reason"], "author_followup_after_maintainer_activity")
+
+    def test_deletion_before_page_offset_cannot_drop_unread_old_comment_edit(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.record("held")
+        self.run_dashboard()
+        self.clock = "2026-10-06T12:02:00Z"
+        self.comments = [
+            {"id": 10, "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"},
+            {"id": 20, "node_id": "old-comment", "user": {"login": "contributor"},
+             "author_association": "CONTRIBUTOR", "created_at": "2026-07-01T00:00:00Z",
+             "updated_at": "2026-10-06T12:00:30Z", "body": "I addressed the feedback.",
+             "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"},
+            {"id": 30, "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"},
+        ]
+        original = self.github
+        deleted = False
+
+        def delete_read_comment(command):
+            nonlocal deleted
+            result = original(command)
+            if command[2].endswith("issues/comments") and not deleted:
+                # Removing page 1 shifts the unread edit behind page 2's offset.
+                self.comments.pop(0)
+                deleted = True
+            return result
+
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
+                mock.patch.object(pr_review, "run_json", side_effect=delete_read_comment):
+            result = self.run_dashboard()
+        self.assertEqual(result["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(self.row(result)["advisory_action"], "review")
+        self.assertEqual(self.row(result)["reason"], "author_followup_after_maintainer_activity")
+        self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], "2026-10-06T12:02:00Z")
 
     def test_compact_watch_refreshes_independent_ci_queue_head_label_issue_and_review_edits(self) -> None:
         self.run_dashboard()

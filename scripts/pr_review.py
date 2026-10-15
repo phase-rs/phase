@@ -4160,8 +4160,9 @@ def read_discovery_cache(path: Path, args: argparse.Namespace) -> dict[str, Any]
 
 def fetch_issue_delta(repo: str, endpoint: str, since: str) -> list[dict[str, Any]]:
     """REST since membership, traversed in immutable creation order, without a cap."""
-    # Insertions before a read page can repeat rows; edits first entering there
-    # are replayed next sweep from the checkpoint captured BEFORE this query.
+    # Deletions before a numbered-page offset can skip unread rows. Re-read
+    # multi-page results until membership agrees before advancing the checkpoint.
+    previous_ids: set[int] | None = None
     rows: dict[int, dict[str, Any]] = {}
     page = 1
     while True:
@@ -4178,8 +4179,13 @@ def fetch_issue_delta(repo: str, endpoint: str, since: str) -> list[dict[str, An
         for row in result:
             rows[row["id"]] = row
         if len(result) < DISCOVERY_REST_PAGE_SIZE:
-            return list(rows.values())
-        page += 1
+            if page == 1 or set(rows) == previous_ids:
+                return list(rows.values())
+            previous_ids = set(rows)
+            rows = {}
+            page = 1
+        else:
+            page += 1
 
 
 def fetch_discovery_details(repo: str, numbers: list[int]) -> list[dict[str, Any]]:
