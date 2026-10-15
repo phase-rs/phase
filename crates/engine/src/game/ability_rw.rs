@@ -4124,6 +4124,11 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
             let mut profile = reads_zone_membership();
             if let Some(filter) = filter {
                 profile.merge(board_membership_read(filter));
+                // CR 603.3b: a member filter narrows the read to the members
+                // each source exposes, so the read is member-bound — the
+                // same event can feed two different member populations and
+                // must not take the `profiles_conflict` fast path.
+                profile.reads_member_bound = true;
             }
             profile
         }
@@ -6658,7 +6663,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
                     // constant, so the flag cannot drift from the filter's.
                     CardTypeSetSource::TargetedObjects { slot } => {
                         reads_live_object = true;
-                        reads_tracked = member_bound_target_filter(
+                        // CR 603.3b: OR-accumulate — an earlier union member
+                        // may already read a tracked set, and a later
+                        // every-target leaf must not clear that bit.
+                        reads_tracked |= member_bound_target_filter(
                             &CardTypeSetSource::targeted_objects_filter(slot),
                         );
                     }
@@ -7815,6 +7823,18 @@ mod tests {
             CardTypeSetSource::TargetedObjects { slot: Some(1) },
             journal.clone(),
             CardTypeSetSource::any_of(vec![objects, journal]).unwrap(),
+            // F7: a union whose tracked leaf must survive a later
+            // every-target leaf — a plain assignment erases the tracked bit
+            // and wrongly clears the same-event ordering gate.
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: None,
+                },
+                CardTypeSetSource::TargetedObjects { slot: None },
+            ])
+            .unwrap(),
         ];
         for source in sources {
             let qty = QuantityRef::PropertyAggregate(
@@ -7922,6 +7942,7 @@ mod tests {
         };
         let mut expected_filtered = reads_zone_membership();
         expected_filtered.merge(board_membership_read(&board_filter));
+        expected_filtered.reads_member_bound = true;
         assert_eq!(
             characteristic_source_read(&filtered_chain),
             expected_filtered,
@@ -7932,14 +7953,23 @@ mod tests {
             reads_zone_membership(),
             "a merge that drops the member filter's controller span must fail"
         );
+        assert!(
+            characteristic_source_read(&filtered_chain).reads_member_bound(),
+            "F7: a filtered chain set read is member-bound — each source reads its own set (CR 603.3b)"
+        );
+        let unfiltered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
         assert_eq!(
-            characteristic_source_read(&CardTypeSetSource::TrackedSet {
-                set: TrackedAnaphorSource::ChainSet,
-                caused_by: None,
-                filter: None,
-            }),
+            characteristic_source_read(&unfiltered_chain),
             reads_zone_membership(),
             "an unfiltered chain set keeps the zone-membership profile"
+        );
+        assert!(
+            !characteristic_source_read(&unfiltered_chain).reads_member_bound(),
+            "an unfiltered chain set read is not member-bound"
         );
 
         // Idempotence: a union of two identical members equals that member.
