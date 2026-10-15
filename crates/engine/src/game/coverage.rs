@@ -716,6 +716,13 @@ fn effect_type_name(effect: &Effect) -> String {
 // Detail formatters — extract human-readable parameter summaries
 // ---------------------------------------------------------------------------
 
+/// CR 115.1: the canonical declared-slot label, shared by the target-filter
+/// renderer below and the targeted-objects population renderer — one
+/// authority, so two signatures can never spell the same slot differently.
+fn fmt_slot_label(index: usize) -> String {
+    format!("slot {index}")
+}
+
 fn fmt_target(filter: &TargetFilter) -> String {
     match filter {
         TargetFilter::None => "none".into(),
@@ -781,7 +788,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "the player or planeswalker it's attacking".into()
         }
         TargetFilter::ParentTarget => "parent target".into(),
-        TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
+        TargetFilter::ParentTargetSlot { index } => {
+            format!("parent target {}", fmt_slot_label(*index))
+        }
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
@@ -2792,11 +2801,13 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
         }
         // CR 608.2c + CR 115.1: the Oracle antecedent for the ability's chosen
         // targets is "those cards" (Song of Inspiration's own surface form);
-        // a slot-selected subset is singular — "that card". The unslotted
-        // string matches the short-circuit above by construction.
+        // a slot-selected subset is singular — "that card" — and names its
+        // slot through the canonical label, so slot 0 and slot 1 render
+        // distinct signatures. The unslotted string matches the short-circuit
+        // above by construction.
         CardTypeSetSource::TargetedObjects { slot } => match slot {
             None => "those cards".into(),
-            Some(_) => "that card".into(),
+            Some(index) => format!("that card ({})", fmt_slot_label(*index)),
         },
         // CR 109.2: a set union renders as its members joined by "and", mirroring
         // the Oracle surface form ("permanents you control and spells you've cast
@@ -25007,6 +25018,44 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             }),
             "card types among tracked cards matching you control card"
         );
+    }
+
+    /// F8 (CR 115.1): a slot-selected targeted-objects subset names its slot
+    /// through the canonical slot label — slot 0 and slot 1 are different
+    /// populations and must render distinct signatures — while the unslotted
+    /// population keeps the legacy "those cards" string.
+    #[test]
+    fn indexed_targeted_objects_population_renders_its_slot() {
+        use crate::types::ability::{
+            AggregateFunction, CardTypeSetSource, ObjectProperty, PropertyAggregate, QuantityRef,
+        };
+        let aggregate = |source| {
+            QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::ManaValue, source)
+                    .expect("statically valid property aggregate"),
+            )
+        };
+        // Unslotted: the legacy "those cards" short-circuit is retained exactly.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TargetedObjects {
+                slot: None
+            })),
+            "total mana value of those cards"
+        );
+        // Indexed: each slot renders distinctly; identical strings here would
+        // hide a slot0→slot1 semantic change in the coverage signature.
+        let slot0 = fmt_quantity_ref(&aggregate(CardTypeSetSource::TargetedObjects {
+            slot: Some(0),
+        }));
+        let slot1 = fmt_quantity_ref(&aggregate(CardTypeSetSource::TargetedObjects {
+            slot: Some(1),
+        }));
+        assert_ne!(
+            slot0, slot1,
+            "slot 0 and slot 1 select different objects and must not share a signature"
+        );
+        assert_eq!(slot0, "total mana value of that card (slot 0)");
+        assert_eq!(slot1, "total mana value of that card (slot 1)");
     }
 }
 
