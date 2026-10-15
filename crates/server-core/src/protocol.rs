@@ -71,6 +71,14 @@ pub enum WireFormat {
     Unknown,
 }
 
+/// Optional timing hints for application JSON Ping/Pong diagnostics.
+/// These describe client JSON pings, not the native WebSocket Ping cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatContract {
+    pub ping_interval_ms: u64,
+    pub silence_budget_ms: u64,
+}
+
 pub use engine::starter_decks::DeckData;
 
 /// AI seat configuration sent by the client when creating a game with AI opponents.
@@ -680,6 +688,9 @@ pub enum ServerMessage {
         /// Binary envelopes this server can negotiate after the text hello.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wire_formats: Vec<WireFormat>,
+        /// Present when application Ping replies are independent of game CPU work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat: Option<HeartbeatContract>,
     },
     GameCreated {
         game_code: String,
@@ -2350,8 +2361,17 @@ mod tests {
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
             wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            heartbeat: Some(HeartbeatContract {
+                ping_interval_ms: 5_000,
+                silence_budget_ms: 45_000,
+            }),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            wire["data"]["heartbeat"],
+            serde_json::json!({"ping_interval_ms": 5000, "silence_budget_ms": 45000})
+        );
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::ServerHello {
@@ -2362,6 +2382,7 @@ mod tests {
                 lobby_protocol_version,
                 public_url,
                 wire_formats,
+                heartbeat,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -2370,6 +2391,13 @@ mod tests {
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert_eq!(
+                    heartbeat,
+                    Some(HeartbeatContract {
+                        ping_interval_ms: 5_000,
+                        silence_budget_ms: 45_000,
+                    })
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2388,6 +2416,7 @@ mod tests {
             lobby_protocol_version: None,
             public_url: None,
             wire_formats: Vec::new(),
+            heartbeat: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -2401,6 +2430,29 @@ mod tests {
             !json.contains("wire_formats"),
             "empty list must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn legacy_hello_does_not_advertise_compute_independent_heartbeats() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "0.109.0",
+                "build_commit": "legacy",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full"
+            }
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::ServerHello {
+                heartbeat: None,
+                ..
+            }
+        ));
+        let encoded = serde_json::to_value(parsed).unwrap();
+        assert!(encoded["data"].get("heartbeat").is_none());
     }
 
     #[test]

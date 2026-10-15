@@ -37,24 +37,20 @@ pub(crate) fn encode_json_message_sync(
         return Ok(Message::text(json));
     }
 
-    let bytes = json.into_bytes();
+    let mut bytes = json.into_bytes();
     if bytes.len() < COMPRESSION_THRESHOLD {
-        let mut framed = Vec::with_capacity(bytes.len() + 1);
-        framed.push(FORMAT_RAW);
-        framed.extend(bytes);
-        return Ok(Message::binary(framed));
+        bytes.insert(0, FORMAT_RAW);
+        return Ok(Message::binary(bytes));
     }
 
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::new(COMPRESSION_LEVEL));
+    // The format prefix is outside the gzip stream. Let the encoder append
+    // directly to the final frame, avoiding a second compressed-payload copy.
+    let mut encoder = GzEncoder::new(vec![FORMAT_GZIP], Compression::new(COMPRESSION_LEVEL));
     encoder
         .write_all(&bytes)
         .map_err(|error| error.to_string())?;
     let compressed = encoder.finish().map_err(|error| error.to_string())?;
-    let mut framed = Vec::with_capacity(compressed.len() + 1);
-    framed.push(FORMAT_GZIP);
-    framed.extend(compressed);
-
-    Ok(Message::binary(framed))
+    Ok(Message::binary(compressed))
 }
 
 pub async fn decode_client_envelope(

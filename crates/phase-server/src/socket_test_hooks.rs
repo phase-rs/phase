@@ -482,13 +482,9 @@ fn starting_join_bootstrap_precedes_an_existing_players_action() {
                 false,
             )
             .await;
-            let action_revision = loop {
-                match recv_server_message(&mut host).await {
-                    ServerMessage::StateUpdate { state_revision, .. } => break state_revision,
-                    ServerMessage::ActionRejected { rejection } => panic!("action: {rejection:?}"),
-                    _ => {}
-                }
-            };
+            // Startup retains its ordering lease through CPU admission and
+            // publication. An existing player cannot advance that unpublished
+            // revision, nor may the joining socket receive an update first.
             assert!(
                 tokio::time::timeout(Duration::from_millis(250), async {
                     loop {
@@ -505,14 +501,27 @@ fn starting_join_bootstrap_precedes_an_existing_players_action() {
                 "an unbootstrapped joining socket received an action update"
             );
             gate.release.notify_one();
-            loop {
+            let bootstrap_revision = loop {
                 match recv_server_message(&mut guest).await {
-                    ServerMessage::GameStarted { state_revision, .. } => {
-                        assert!(state_revision >= action_revision);
-                        break;
-                    }
+                    ServerMessage::GameStarted { state_revision, .. } => break state_revision,
                     ServerMessage::StateUpdate { .. } => panic!("update overtook startup"),
                     _ => {}
+                }
+            };
+            let action_revision = loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::StateUpdate { state_revision, .. } => break state_revision,
+                    ServerMessage::ActionRejected { rejection } => panic!("action: {rejection:?}"),
+                    _ => {}
+                }
+            };
+            assert!(action_revision > bootstrap_revision);
+            loop {
+                if let ServerMessage::StateUpdate { state_revision, .. } =
+                    recv_server_message(&mut guest).await
+                {
+                    assert_eq!(state_revision, action_revision);
+                    break;
                 }
             }
         })

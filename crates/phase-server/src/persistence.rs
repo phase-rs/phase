@@ -38,7 +38,26 @@ pub enum SessionRetention {
 pub struct GameDb {
     conn: Mutex<Connection>,
     retention: SessionRetention,
+    #[cfg(test)]
+    full_save_hook: Mutex<Option<FullSaveHook>>,
+    #[cfg(test)]
+    full_save_io_hook: Mutex<Option<FullSaveIoHook>>,
 }
+
+/// CPU-prepared SQL inputs. The full game snapshot is released before I/O.
+pub(crate) struct PreparedFullSave {
+    pub(crate) key: FullSessionKey,
+    mutation_revision: u64,
+    activation_epoch: Option<u64>,
+    deck_pools_json: std::sync::Arc<str>,
+    json: String,
+}
+
+#[cfg(test)]
+type FullSaveHook = std::sync::Arc<dyn Fn(&FullPersistSnapshot) + Send + Sync>;
+
+#[cfg(test)]
+type FullSaveIoHook = std::sync::Arc<dyn Fn(&FullSessionKey, u64) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RatingDelta {
@@ -127,7 +146,21 @@ impl GameDb {
         Ok(Self {
             conn: Mutex::new(conn),
             retention,
+            #[cfg(test)]
+            full_save_hook: Mutex::new(None),
+            #[cfg(test)]
+            full_save_io_hook: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_save_hook(&self, hook: FullSaveHook) {
+        *self.full_save_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_save_io_hook(&self, hook: FullSaveIoHook) {
+        *self.full_save_io_hook.lock().unwrap() = Some(hook);
     }
 
     /// Legacy persistence path retained while Full runtime callers migrate to
@@ -292,13 +325,86 @@ impl GameDb {
         &self,
         snapshot: &FullPersistSnapshot,
     ) -> rusqlite::Result<FullPersistDisposition> {
-        let json = serde_json::to_string(&snapshot.persisted)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let json = self.serialize_full_session(snapshot)?;
+        self.save_full_session_parts(
+            &snapshot.key,
+            snapshot.mutation_revision,
+            snapshot.activation_epoch,
+            snapshot.deck_pools_json.as_ref(),
+            &json,
+        )
+    }
+
+    pub(crate) fn prepare_full_session_save(
+        &self,
+        snapshot: FullPersistSnapshot,
+    ) -> Result<PreparedFullSave, (FullSessionKey, rusqlite::Error)> {
+        let json = match self.serialize_full_session(&snapshot) {
+            Ok(json) => json,
+            Err(error) => return Err((snapshot.key, error)),
+        };
+        let FullPersistSnapshot {
+            key,
+            mutation_revision,
+            activation_epoch,
+            deck_pools_json,
+            ..
+        } = snapshot;
+        Ok(PreparedFullSave {
+            key,
+            mutation_revision,
+            activation_epoch,
+            deck_pools_json,
+            json,
+        })
+    }
+
+    fn serialize_full_session(&self, snapshot: &FullPersistSnapshot) -> rusqlite::Result<String> {
+        #[cfg(test)]
+        {
+            let hook = self.full_save_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(snapshot);
+            }
+        }
+        serde_json::to_string(&snapshot.persisted)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+    }
+
+    /// Performs only the fenced SQL write; callers need no game CPU admission.
+    pub(crate) fn save_prepared_full_session(
+        &self,
+        prepared: &PreparedFullSave,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        self.save_full_session_parts(
+            &prepared.key,
+            prepared.mutation_revision,
+            prepared.activation_epoch,
+            prepared.deck_pools_json.as_ref(),
+            &prepared.json,
+        )
+    }
+
+    fn save_full_session_parts(
+        &self,
+        key: &FullSessionKey,
+        mutation_revision: u64,
+        activation_epoch: Option<u64>,
+        deck_pools_json: &str,
+        json: &str,
+    ) -> rusqlite::Result<FullPersistDisposition> {
         let now = now_epoch();
         let mut conn = self.conn.lock().unwrap();
+        #[cfg(test)]
+        {
+            let hook = self.full_save_io_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(key, mutation_revision);
+            }
+        }
         let tx = conn.transaction()?;
 
-        if let Some(epoch) = snapshot.activation_epoch {
+        if let Some(epoch) = activation_epoch {
             let active = tx
                 .query_row(
                     "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
@@ -312,13 +418,7 @@ impl GameDb {
                     },
                 )
                 .optional()?;
-            if active
-                != Some((
-                    snapshot.key.game_code.clone(),
-                    snapshot.key.generation,
-                    epoch,
-                ))
-            {
+            if active != Some((key.game_code.clone(), key.generation, epoch)) {
                 return Ok(FullPersistDisposition::NotCurrentActivation);
             }
         }
@@ -351,12 +451,12 @@ impl GameDb {
                     AND (excluded.mutation_revision > game_sessions.mutation_revision
                         OR game_sessions.session_state_json IS NULL))",
             params![
-                snapshot.key.game_code,
-                snapshot.key.generation,
-                snapshot.mutation_revision,
-                snapshot.activation_epoch,
+                key.game_code,
+                key.generation,
+                mutation_revision,
+                activation_epoch,
                 json,
-                snapshot.deck_pools_json.as_ref(),
+                deck_pools_json,
                 now,
             ],
         )?;
@@ -365,7 +465,7 @@ impl GameDb {
                 "INSERT INTO full_generation_high_water (game_code, generation)
                  VALUES (?1, ?2)
                  ON CONFLICT(game_code) DO UPDATE SET generation = MAX(generation, excluded.generation)",
-                params![snapshot.key.game_code, snapshot.key.generation],
+                params![key.game_code, key.generation],
             )?;
             tx.commit()?;
             Ok(FullPersistDisposition::Applied)

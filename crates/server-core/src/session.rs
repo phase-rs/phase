@@ -36,14 +36,13 @@ use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
 use lobby_broker::protocol::code_in_use_message;
-use phase_ai::auto_play::AiActionsStop;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::Rng;
 use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::filter::filter_state_for_player;
 use crate::game_log::GameFileCache;
@@ -51,6 +50,9 @@ use crate::persist::{PersistedLobbyMeta, PersistedSession};
 use crate::protocol::{PlayerSlotInfo, ServerErrorCode, ServerMessage};
 use crate::reconnect::ReconnectManager;
 use crate::takeback::PendingTakeback;
+
+mod ai_run;
+pub use ai_run::AiRunCursor;
 
 const TAKEBACK_INTERACTION_SESSION_PREFIX: &str = "rewind-";
 
@@ -253,15 +255,6 @@ pub struct AiRunOutcome {
     /// an AI driver failure. Transports must send the final state frames before
     /// publishing this record.
     pub fault: Option<AiDriverFault>,
-}
-
-/// Internal result of one uninterrupted AI decision batch. Keeping the exact
-/// stop reason until [`GameSession::run_ai`] has finished the engine-owned
-/// stack-resolution session is necessary: a safety cap is terminal only when
-/// an AI submitter is still eligible in the resulting state.
-struct AiActionBatch {
-    transitions: Vec<AiTransition>,
-    stop: AiActionsStop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1378,7 +1371,7 @@ impl GameSession {
     /// Only the final entry carries a decision snapshot. Stack automation remains
     /// in that ordinary transition stream rather than a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
-    /// Returns an empty vec if the session has no AI seats.
+    /// Returns an empty transition stream if the session has no AI seats.
     ///
     /// GH #1507: also a no-op while a takeback request is pending. AI moves
     /// mutate `self.state` directly (not through `handle_action`'s pending-
@@ -1388,113 +1381,20 @@ impl GameSession {
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
     pub fn run_ai(&mut self) -> AiRunOutcome {
-        if let Some(fault) = self.ai_driver_fault.clone() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: Some(fault),
-            };
-        }
-        if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: None,
-            };
-        }
-
-        let batch = self.run_ai_action_batch();
-        let transitions = batch.transitions;
-        let failure = match batch.stop {
-            AiActionsStop::NoEligibleAiActor | AiActionsStop::ActionBudgetReached { .. } => None,
-            AiActionsStop::MissingAiConfig { player } => {
-                Some(AiDriverFailure::MissingAiConfig { player })
-            }
-            AiActionsStop::ChooseActionNone { player } => {
-                Some(AiDriverFailure::ChooseActionNone { player })
-            }
-            AiActionsStop::ApplyFailed { player, error, .. } => {
-                Some(AiDriverFailure::ApplyFailed {
-                    player,
-                    error: error.to_string(),
-                })
-            }
-            AiActionsStop::ActionSafetyCapReached { limit } if self.ai_seat_can_act() => {
-                Some(AiDriverFailure::ActionSafetyCapReached { limit })
-            }
-            AiActionsStop::ActionSafetyCapReached { .. } => None,
+        let mut cursor = match self.begin_ai_run() {
+            std::ops::ControlFlow::Break(outcome) => return outcome,
+            std::ops::ControlFlow::Continue(cursor) => cursor,
         };
-        let fault = failure
-            .clone()
-            .map(|failure| self.record_ai_driver_fault(failure));
-        AiRunOutcome {
-            transitions,
-            failure,
-            fault,
+        loop {
+            match self.advance_ai_run(cursor) {
+                std::ops::ControlFlow::Break(outcome) => return outcome,
+                std::ops::ControlFlow::Continue(next) => cursor = next,
+            }
         }
-    }
-
-    /// One uninterrupted run of AI decisions from the current state.
-    fn run_ai_action_batch(&mut self) -> AiActionBatch {
-        let mut rng = rand::rng();
-        let ai_session = self
-            .ai_session
-            .get_or_insert_with(|| AiSession::arc_from_game(&self.state));
-        let ai_results = phase_ai::auto_play::run_ai_actions(
-            &mut self.state,
-            &self.ai_seats,
-            &self.ai_configs,
-            &mut rng,
-            ai_session,
-        );
-
-        if !ai_results.is_empty() {
-            debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
-        }
-
-        let stop = ai_results.stop;
-
-        let result_count = ai_results.results.len();
-        let transitions = ai_results
-            .results
-            .into_iter()
-            .enumerate()
-            .map(|(index, r)| {
-                let decision =
-                    (index + 1 == result_count).then(|| DecisionSnapshot::from_state(&r.state));
-                let revision = self.advance_state_revision();
-                // Per AI result, which is exactly the granularity
-                // `run_ai_actions` reports. This is what makes a turn that
-                // elapses entirely inside AI play still produce a rewind
-                // point; a rule that promoted entries out of
-                // `takeback_history` could not, because `run_ai` pushes none.
-                self.observe_transition(&r.events, &r.state);
-                // Per-game JSON debug log (issue #7978): this is the single
-                // AI-transition mint point every caller of `run_ai` funnels
-                // through (takeback approve/reject, reconnect, game start,
-                // Play-vs-AI start, and the AI follow-up after a human
-                // action) — one hook here covers all of them, matching the
-                // human-action hooks in `handle_action`/
-                // `handle_interaction_with_rejection`.
-                self.game_log
-                    .write_game_log_entries(&self.game_code, &r.log_entries);
-                AiTransition {
-                    state_revision: revision,
-                    state: r.state,
-                    events: r.events,
-                    log_entries: r.log_entries,
-                    decision,
-                }
-            })
-            .collect();
-
-        AiActionBatch { transitions, stop }
     }
 
     fn ai_seat_can_act(&self) -> bool {
-        acting_players(&self.state)
-            .into_iter()
-            .any(|player| self.ai_seats.contains(&player))
+        phase_ai::auto_play::eligible_ai_decision(&self.state, &self.ai_seats).is_some()
     }
 
     /// Recomputes the broadcast-ready fields (legal actions, auto-pass,

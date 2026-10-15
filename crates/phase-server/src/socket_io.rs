@@ -218,6 +218,7 @@ impl Drop for SocketTasks {
 pub(crate) struct SocketConfig {
     pub(crate) replies: mpsc::UnboundedSender<ServerMessage>,
     pub(crate) metrics: Arc<crate::metrics::ServerMetrics>,
+    pub(crate) executor: crate::game_executor::GameExecutor,
     #[cfg(test)]
     pub(crate) hooks: crate::socket_test_hooks::Hooks,
 }
@@ -233,6 +234,7 @@ pub(crate) fn start(
 ) {
     #[cfg(test)]
     let hooks = config.hooks;
+    let executor = config.executor;
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (sink, stream) = socket.split();
     let death = Death::new(config.metrics, connection);
@@ -283,8 +285,11 @@ pub(crate) fn start(
                 sample_backlog(connection, messages.len() + 1, &metrics, &mut warned);
                 #[cfg(test)]
                 hooks.before_encode(&message).await;
-                let encoding =
-                    encode_application(message, control.encoding() == Encoding::GzipEnvelope);
+                let encoding = encode_application(
+                    &executor,
+                    message,
+                    control.encoding() == Encoding::GzipEnvelope,
+                );
                 tokio::pin!(encoding);
                 let frame = loop {
                     tokio::select! {
@@ -614,16 +619,29 @@ enum EncodingFailure {
 }
 
 async fn encode_application(
+    executor: &crate::game_executor::GameExecutor,
     message: ServerMessage,
     envelope: bool,
 ) -> Result<Message, EncodingFailure> {
     let envelope = envelope && !matches!(&message, ServerMessage::ServerHello { .. });
-    tokio::task::spawn_blocking(move || {
+    let state_bearing = matches!(
+        &message,
+        ServerMessage::StateUpdate { .. }
+            | ServerMessage::GameStarted { .. }
+            | ServerMessage::AuthoritativeStateExport { .. }
+    );
+    let encode = move || {
         let json = serde_json::to_string(&message).map_err(EncodingFailure::Serialization)?;
         wire::encode_json_message_sync(json, envelope).map_err(EncodingFailure::Transport)
-    })
-    .await
-    .map_err(|error| EncodingFailure::Transport(error.to_string()))?
+    };
+    // Each connection still encodes exactly one FIFO frame at a time. Metadata
+    // has an independent blocking lane; it never waits behind game CPU permits.
+    let encoded = if state_bearing {
+        executor.try_run(encode).await
+    } else {
+        tokio::task::spawn_blocking(encode).await
+    };
+    encoded.map_err(|error| EncodingFailure::Transport(error.to_string()))?
 }
 
 fn sample_backlog(

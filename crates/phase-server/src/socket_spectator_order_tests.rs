@@ -72,15 +72,16 @@ fn full_spectator_switch_cannot_publish_a_prior_game_update_after_the_new_bootst
             let broadcast = tokio::spawn({
                 let spectators = app.game_spectators.clone();
                 let connections = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+                let executor = app.context.game_executor.clone();
                 async move {
                     broadcasting.send(()).unwrap();
                     // Exercise the real spectator StateUpdate fan-out, queued
                     // behind the same registry mutex as the destination switch.
                     crate::broadcast_takeback_approved(
+                        &executor,
                         &connections,
                         &spectators,
-                        &prior_key.game_code,
-                        &prior_key,
+                        prior_key,
                         2,
                         17,
                         (

@@ -244,6 +244,7 @@ fn server_hello_mode_byte_identical() {
         // broker's ServerHello, which has no public_url field.
         public_url: None,
         wire_formats: Vec::new(),
+        heartbeat: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),

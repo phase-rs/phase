@@ -315,14 +315,6 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                 send_test_message(&mut target_player, &ClientMessage::Concede, false).await;
                 if let Some(pending) = terminal_gate.as_ref() {
                     pending.entered.notified().await;
-                    let target = crate::lock_session(&app.sessions, &target_key.game_code)
-                        .await
-                        .unwrap();
-                    assert!(matches!(
-                        target.state.waiting_for,
-                        engine::types::game_state::WaitingFor::GameOver { .. }
-                    ));
-                    drop(target);
                     assert_eq!(
                         app.game_db
                             .load_active_full_key(&target_key.game_code)
@@ -352,27 +344,41 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                 }
                 gate.release.notify_one();
                 drop(prior_lease);
-                let mut refusal = None;
-                loop {
-                    match recv_server_message(&mut moving).await {
-                        ServerMessage::DraftActionRejected { .. } => refusal = Some(()),
-                        ServerMessage::DraftStateUpdate { .. } => {
-                            assert!(
-                                refusal.is_some(),
-                                "terminal handoff must report its refusal"
-                            );
-                            break;
+                let refusal = async {
+                    let mut refused = false;
+                    loop {
+                        match recv_server_message(&mut moving).await {
+                            ServerMessage::DraftActionRejected { .. } => refused = true,
+                            ServerMessage::DraftStateUpdate { .. } => {
+                                assert!(refused, "terminal handoff must report its refusal");
+                                break;
+                            }
+                            ServerMessage::DraftMatchStart { .. }
+                            | ServerMessage::GameStarted { .. }
+                            | ServerMessage::StateUpdate { .. } => {
+                                panic!("terminal target was published as an active Full binding");
+                            }
+                            _ => {}
                         }
-                        ServerMessage::DraftMatchStart { .. }
-                        | ServerMessage::GameStarted { .. }
-                        | ServerMessage::StateUpdate { .. } => {
-                            panic!("terminal target was published as an active Full binding");
-                        }
-                        _ => {}
                     }
-                }
-                if let Some(pending) = terminal_gate {
+                };
+                tokio::pin!(refusal);
+                let already_refused = if let Some(pending) = terminal_gate.as_ref() {
+                    // A retained publication lease may defer the refusal until
+                    // terminal commit. Neither lease model may publish an active
+                    // binding while the real Concede transaction is paused.
+                    let completed = tokio::time::timeout(Duration::from_millis(30), &mut refusal)
+                        .await
+                        .is_ok();
                     pending.release.notify_one();
+                    completed
+                } else {
+                    false
+                };
+                if !already_refused {
+                    refusal.await;
+                }
+                if terminal_gate.is_some() {
                     loop {
                         match recv_server_message(&mut target_player).await {
                             ServerMessage::TerminalResult { delivery: Some(_) } => break,

@@ -74,6 +74,7 @@ fn draft_creator_bootstrap_does_not_wait_for_unrelated_lobby_work() {
             crate::ServerMode::Full,
             tst_draft_pools(),
             std::sync::Arc::new(crate::CardDatabase::default()),
+            crate::ServerContext::default(),
         )
         .await;
         let outcome = tokio::time::timeout(Duration::from_secs(5), async {

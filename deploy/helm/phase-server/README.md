@@ -128,6 +128,20 @@ Under `scaleOut`, logs are per-replica (each ordinal owns its own `data` PVC),
 so port-forward the specific ordinal's Service (`<release>-<ordinal>`) — same
 as reaching that ordinal's games.
 
+## Game CPU admission
+
+Full-mode game computation and state encoding run on blocking workers, not the
+WebSocket/HTTP runtime. `PHASE_GAME_CPU_PERMITS` (native CLI:
+`--game-cpu-permits`) overrides their shared concurrency limit; set it through
+`server.extraEnv` in this chart. The default is one less than the available
+processor count, with a minimum of one, respecting CPU affinity and cgroup
+quotas. Increasing it spends the headroom reserved for socket and HTTP work.
+
+Individual AI decisions release CPU admission between steps so another game's
+action can proceed during a long AI sequence. Background Full-session saves
+serialize one snapshot at a time and do not occupy a game CPU slot while
+waiting for SQLite.
+
 ## Behind Cloudflare
 
 Traefik typically sees a SNAT'd node IP (Service `externalTrafficPolicy: Cluster`),
@@ -147,6 +161,10 @@ client's JavaScript ping timer. Its 30 s response budget begins only after an
 unanswered Ping has flushed. Any inbound frame clears it; actual in-flight
 writes pause the remaining budget, but later Pings or application writes do
 not renew it.
+
+`ServerHello.heartbeat` optionally advertises a 5,000 ms application Ping
+cadence and a 45,000 ms silence diagnostic budget. This diagnostic contract
+does not replace the native WebSocket response deadline above.
 
 Queued application ingress is limited to 64 commands and 1 MiB of retained
 payload across the raw and decoded queues. Overflow closes the connection with
