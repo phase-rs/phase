@@ -30969,9 +30969,10 @@ fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource, read: Ta
         CardTypeSetSource::AnyOf { sources } => sources
             .iter()
             .any(|x| card_type_set_source_reads_chosen_target(x, read)),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
         // CR 608.2c + CR 115.1: a targeted-objects population reads the
         // ability's chosen targets, so it reads a chosen target by
         // definition — routed through the single `targeted_objects_filter`

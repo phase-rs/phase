@@ -1497,6 +1497,12 @@ fn quantity_ref(r: &$($mut_)? QuantityRef, v: &mut impl FnMut(Symbol<'_>)) {
             if let CardTypeSetSource::Objects { filter: f } = define_granter_walk!(@source aggregate $($mut_)?) {
                 filter(f, v);
             }
+            // CR 201.5a: the tracked-set member filter binds the granting
+            // incarnation exactly like an object filter — omitting it leaves
+            // granter symbols in the aggregate unbound.
+            if let CardTypeSetSource::TrackedSet { filter: Some(f), .. } = define_granter_walk!(@source aggregate $($mut_)?) {
+                filter(f, v);
+            }
         }
         _ => {}
     }
@@ -1587,4 +1593,60 @@ pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
 /// (CR 613.1f).
 pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
     matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::granter_symbols;
+    use super::{each_granter_symbol, DefinitionNode};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, Effect,
+        ObjectProperty, PropertyAggregate, QuantityExpr, QuantityRef, TargetFilter,
+        TrackedAnaphorSource,
+    };
+
+    /// PR-C F5 — VISITOR. The granter walk visits a `TrackedSet` member
+    /// filter exactly like an `Objects` filter: a granting-object symbol
+    /// inside the member filter is found (and therefore bindable), and an
+    /// unfiltered set yields nothing.
+    #[test]
+    fn granter_walk_visits_tracked_set_member_filter() {
+        let define = |filter: Option<TargetFilter>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(
+                            PropertyAggregate::new(
+                                AggregateFunction::Sum,
+                                ObjectProperty::Toughness,
+                                CardTypeSetSource::TrackedSet {
+                                    set: TrackedAnaphorSource::ChainSet,
+                                    caused_by: None,
+                                    filter,
+                                },
+                            )
+                            .expect("statically valid property aggregate"),
+                        ),
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let collect = |def: &AbilityDefinition| {
+            let mut found = false;
+            each_granter_symbol(DefinitionNode::Ability(def), &mut |symbol| {
+                found |= matches!(symbol, granter_symbols::Symbol::Filter(_));
+            });
+            found
+        };
+        assert!(
+            collect(&define(Some(TargetFilter::GrantingObject { bound: None }))),
+            "a granter symbol in the member filter must be visited"
+        );
+        assert!(
+            !collect(&define(None)),
+            "an unfiltered set yields no granter symbol"
+        );
+    }
 }

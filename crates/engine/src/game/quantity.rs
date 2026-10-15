@@ -1912,6 +1912,41 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
     quantity_expr_recipient_read(expr) != RecipientRead::Unread
 }
 
+/// How a card-type population reads the recipient binding: consult the
+/// stored member filter (Objects, TurnJournal, TrackedSet) or the canonical
+/// slot filter (TargetedObjects), walking unions. Mirrors
+/// `characteristic_leaf_reads_at` so recipient classification can never
+/// disagree with characteristic reads on which filter a source carries.
+fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientRead {
+    match source {
+        CardTypeSetSource::Objects { filter } => filter_recipient_read(filter),
+        CardTypeSetSource::TurnJournal { filter, .. }
+        | CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .map_or(RecipientRead::Unread, filter_recipient_read),
+        CardTypeSetSource::AnyOf { .. } => {
+            let mut read = RecipientRead::Unread;
+            let complete = source.try_for_each_member(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| {
+                    read = read.max(card_type_set_source_recipient_read(leaf));
+                },
+            );
+            // Fail-SAFE: an unseen member may read anything, so over-report
+            // rather than under-report a recipient consumer.
+            if complete {
+                read
+            } else {
+                RecipientRead::Characteristics
+            }
+        }
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => RecipientRead::Unread,
+        CardTypeSetSource::TargetedObjects { slot } => {
+            filter_recipient_read(&CardTypeSetSource::targeted_objects_filter(slot))
+        }
+    }
+}
+
 /// How `expr` reads the recipient binding; see [`RecipientRead`].
 pub(crate) fn quantity_expr_recipient_read(expr: &QuantityExpr) -> RecipientRead {
     match expr {
@@ -2132,30 +2167,6 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
-    }
-}
-
-fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientRead {
-    match source {
-        CardTypeSetSource::Objects { filter } => filter_recipient_read(filter),
-        CardTypeSetSource::AnyOf { .. } => {
-            let mut grade = RecipientRead::Unread;
-            let complete = source
-                .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-                    grade = grade.max(card_type_set_source_recipient_read(leaf))
-                });
-            if complete {
-                grade
-            } else {
-                // An unseen member could read characteristics; do not bind an
-                // uncreated token merely because the walk was truncated.
-                RecipientRead::Characteristics
-            }
-        }
-        CardTypeSetSource::TurnJournal { .. }
-        | CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => RecipientRead::Unread,
     }
 }
 
@@ -11695,6 +11706,39 @@ mod tests {
         // graveyard excluded); P1 sees only their own 2.
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), bf), 3);
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(1), opp), 2);
+    }
+
+    /// PR-C F5 — VISITOR. A `PropertyAggregate` over a filter-bearing
+    /// `TrackedSet` source classifies the member filter's recipient read
+    /// exactly like an `Objects` source: "other" is a population-identity
+    /// read, and an unfiltered set reads nothing.
+    #[test]
+    fn tracked_set_member_filter_participates_in_recipient_reads() {
+        let aggregate = |filter: Option<TargetFilter>| QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Toughness,
+                    crate::types::ability::CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter,
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        };
+        let other = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Another]));
+        assert_eq!(
+            quantity_expr_recipient_read(&aggregate(Some(other))),
+            RecipientRead::PopulationIdentity,
+            "the member filter's 'other' must read as population identity"
+        );
+        assert_eq!(
+            quantity_expr_recipient_read(&aggregate(None)),
+            RecipientRead::Unread,
+            "an unfiltered set reads no recipient"
+        );
     }
 
     /// CR 107.4a + CR 107.4e + CR 202.1: `aggregate_property_over` is the single

@@ -4226,9 +4226,19 @@ fn card_type_set_source_contains_input(
                 // the conservative answer prevents an under-reported consumer.
                 contains || !complete
             }
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
+            CardTypeSetSource::TrackedSet { filter, .. } => filter.as_ref().is_some_and(|inner| {
+                scalar_filter(inner, object_information_available, slot_context)
+                    || filter_contains_input(
+                        inner,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
+            }),
+            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
             // CR 608.2c + CR 115.1: a targeted-objects population's predicate
             // reachability is the reachability of its canonical slot filter —
             // routed through the single `targeted_objects_filter` authority.
@@ -5955,9 +5965,20 @@ fn rewrite_card_type_set_source_filter_props(
             );
             *complete &= source_complete;
         }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => {}
+        CardTypeSetSource::TrackedSet { filter, .. } => {
+            filter.as_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {}
         // CR 608.2c + CR 115.1: nothing to rewrite in place — a
         // targeted-objects population's filter is derived canonically per
         // read via `targeted_objects_filter`, never stored on the source.
@@ -13903,6 +13924,89 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
+    /// PR-C F5 ΓÇö VISITOR. A `TrackedSet` member filter participates in
+    /// input discovery exactly like the `Objects`/`TurnJournal` peers: a
+    /// predicate naming a prop inside the member filter is found, and an
+    /// unfiltered set reports nothing. Decided against the input query, not
+    /// the retired prop-only recursion.
+    #[test]
+    fn tracked_set_member_filter_participates_in_prop_discovery() {
+        let filtered = CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::Another],
+            })),
+        };
+        assert!(card_type_set_source_contains_input(
+            &filtered,
+            &|prop, _, _| matches!(prop, FilterProp::Another),
+            &|_, _, _, _| false,
+            &|_, _, _| false,
+            &|_, _, _| false,
+            false,
+            None,
+        ));
+        let bare = CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        assert!(!card_type_set_source_contains_input(
+            &bare,
+            &|prop, _, _| matches!(prop, FilterProp::Another),
+            &|_, _, _, _| false,
+            &|_, _, _| false,
+            &|_, _, _| false,
+            false,
+            None,
+        ));
+    }
+
+    /// PR-C F5 ΓÇö VISITOR. A `TrackedSet` member filter participates in
+    /// prop rewrite exactly like the `Objects`/`TurnJournal` peers: a rewrite
+    /// applied to the source reaches the props inside the member filter.
+    #[test]
+    fn tracked_set_member_filter_participates_in_prop_rewrite() {
+        let mut source = CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::Another],
+            })),
+        };
+        let mut complete = true;
+        rewrite_card_type_set_source_filter_props(
+            &mut source,
+            &mut |_, _, _| {},
+            &mut |prop| {
+                if matches!(prop, FilterProp::Another) {
+                    *prop = FilterProp::Suspected;
+                }
+            },
+            &mut |_| {},
+            &mut complete,
+            false,
+            None,
+        );
+        assert!(complete, "the rewrite walk must stay complete");
+        assert!(
+            card_type_set_source_contains_input(
+                &source,
+                &|prop, _, _| matches!(prop, FilterProp::Suspected),
+                &|_, _, _, _| false,
+                &|_, _, _| false,
+                &|_, _, _| false,
+                false,
+                None,
+            ),
+            "the rewrite must reach the member filter's props"
+        );
+    }
     #[test]
     fn canonical_scalar_reads_preserve_roles_order_and_raw_player_boundaries() {
         let ability = ResolvedAbility::new(

@@ -1174,6 +1174,66 @@ fn targeted_objects_toughness_reads_live_for_unmoved_graveyard_target() {
     );
 }
 
+/// PR-C F5 — IDENTIFICATION CONTRACT. A roll modifier pairing the Danse
+/// aggregate (toughness over the You-filtered chain set: oak's 3) with a
+/// par-added filter-bearing `TrackedSet` aggregate (toughness over the
+/// P1-filtered chain set: elm's 7) keeps both legs: the summed modifier is
+/// 10. This pins the parallel-aggregate modifier shape every F5 visitor
+/// must keep supporting — a member filter invisible to discovery, rewrite,
+/// chosen-target, recipient, or granter classification would silently drop
+/// or misbind its leg.
+#[test]
+fn roll_modifier_with_two_tracked_set_aggregates_keeps_both_legs() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature_to_graveyard(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature_to_graveyard(P1, "Elm", 1, 7).id();
+    let runner = scenario.build();
+
+    let mut state = runner.state().clone();
+    for oid in [oak, elm] {
+        let snapshot = state
+            .objects
+            .get(&oid)
+            .expect("tracked member exists")
+            .snapshot_public_characteristics();
+        state.lki_cache.insert(oid, snapshot);
+    }
+    let set_id = engine::types::identifiers::TrackedSetId(state.next_tracked_set_id);
+    state.next_tracked_set_id += 1;
+    state.tracked_object_sets.insert(set_id, vec![oak, elm]);
+
+    let aggregate = |controller: ControllerRef| QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Toughness,
+                CardTypeSetSource::TrackedSet {
+                    set: engine::types::ability::TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: Some(controller),
+                        properties: vec![],
+                    })),
+                },
+            )
+            .expect("statically valid property aggregate"),
+        ),
+    };
+    let modifier = QuantityExpr::Sum {
+        exprs: vec![
+            aggregate(ControllerRef::You),
+            aggregate(ControllerRef::SpecificPlayer { id: P1 }),
+        ],
+    };
+    assert_eq!(
+        resolve_quantity(&state, &modifier, P0, oak),
+        10,
+        "the Danse leg reads oak's 3 and the par-added leg reads elm's 7"
+    );
+}
+
 /// B-5 — RESOLVER. Ossuary's `they` (ScopedPlayer) follows the resolution
 /// scope: scoped to P1 it counts only P1's exiled member; with no scope
 /// active it falls back to the ability controller.
