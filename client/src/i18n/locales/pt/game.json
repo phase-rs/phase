@@ -2624,8 +2624,8 @@
     "close": "Fechar sobreposição da decisão da IA"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Sua prioridade",
+    "yourPriorityReason": "Sua prioridade — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {

@@ -161,6 +161,9 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { usePriorityAttentionController } from "../hooks/usePriorityAttention.ts";
+import { usePriorityChime } from "../hooks/usePriorityChime.ts";
+import { usePriorityTabTitle } from "../hooks/usePriorityTabTitle.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -1199,6 +1202,11 @@ function GamePageContent({
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
   useKeyboardShortcuts();
+
+  // Priority-attention cues: one controller writes the store; each cue reads it.
+  usePriorityAttentionController();
+  usePriorityChime();
+  usePriorityTabTitle();
 
   // Toggle debug layout bounds with Ctrl+Shift+D
   useEffect(() => {

@@ -4249,6 +4249,10 @@ export type ExileLinkKind =
 export type LookGrant = "SourceController" | { Player: { player: PlayerId } };
 
 export interface GameState {
+  /** CR 500.1 + CR 500.8: how many times each step has begun this turn, counting
+   *  the second combat damage step (CR 510.4) and repeated cleanup steps. Mirrors
+   *  engine `steps_started_this_turn`; omitted from the wire while empty. */
+  steps_started_this_turn?: Partial<Record<Phase, number>>;
   turn_number: number;
   active_player: PlayerId;
   phase: Phase;

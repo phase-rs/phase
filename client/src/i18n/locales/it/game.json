@@ -2624,8 +2624,8 @@
     "close": "Chiudi la finestra della decisione IA"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "La tua priorità",
+    "yourPriorityReason": "La tua priorità — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {

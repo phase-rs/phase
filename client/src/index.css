@@ -986,6 +986,55 @@ select.select-dark option {
   }
 }
 
+/* Priority attention is a display-only cue shared by the status pill and the
+   primary priority action. A separate shadow layer preserves the surface's
+   depth shadow and the button's focus-visible ring without adding borders. */
+.priority-attention-glow {
+  --priority-attention-ring-min: 1px;
+  --priority-attention-ring-max: 3px;
+  --priority-attention-glow-min: 12px;
+  --priority-attention-glow-max: 24px;
+  --priority-attention-duration: 2s;
+}
+
+.priority-attention-glow-escalated {
+  --priority-attention-ring-min: 3px;
+  --priority-attention-ring-max: 6px;
+  --priority-attention-glow-min: 20px;
+  --priority-attention-glow-max: 36px;
+  --priority-attention-duration: 1s;
+}
+
+.priority-attention-glow::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 var(--priority-attention-ring-max) rgba(52, 211, 153, 0.65),
+    0 0 var(--priority-attention-glow-max) rgba(16, 185, 129, 0.55);
+  animation: priority-attention-pulse var(--priority-attention-duration) ease-in-out infinite;
+}
+
+@keyframes priority-attention-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 var(--priority-attention-ring-min) rgba(52, 211, 153, 0.35),
+      0 0 var(--priority-attention-glow-min) rgba(16, 185, 129, 0.25);
+  }
+
+  50% {
+    box-shadow: 0 0 0 var(--priority-attention-ring-max) rgba(52, 211, 153, 0.65),
+      0 0 var(--priority-attention-glow-max) rgba(16, 185, 129, 0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .priority-attention-glow::after {
+    animation: none;
+  }
+}
+
 /* Debug layout bounds — toggled via Ctrl+Shift+D */
 .debug-bounds [data-debug-label] {
   outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);

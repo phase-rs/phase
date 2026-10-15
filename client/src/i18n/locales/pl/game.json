@@ -2624,8 +2624,8 @@
     "close": "Zamknij nakładkę decyzji SI"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Twój priorytet",
+    "yourPriorityReason": "Twój priorytet — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {

@@ -2624,8 +2624,8 @@
     "close": "Cerrar la superposición de decisión de IA"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Tu prioridad",
+    "yourPriorityReason": "Tu prioridad — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {

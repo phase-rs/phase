@@ -229,6 +229,9 @@ vi.mock("../../hooks/usePlayerId", () => ({
   // re-declared or the call throws. gameStore is mocked with waitingFor: null,
   // for which the real waitingPlayer returns null — mirror that here.
   waitingPlayer: () => null,
+  // The mounted priority-attention controller reaches `shouldAutoPass`, which
+  // reads the local seat through `getPlayerId`.
+  getPlayerId: () => 0,
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({

@@ -2624,8 +2624,8 @@
     "close": "KI-Entscheidungsfenster schließen"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Du hast Priorität",
+    "yourPriorityReason": "Du hast Priorität — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
