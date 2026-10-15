@@ -45,7 +45,7 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 **Target propagation:** Parent targets flow to sub-abilities automatically. "Exile target creature. Its controller gains life equal to its power" → the sub-ability for `GainLife` receives the creature target from the parent `ChangeZone`, without duplicating target data.
 
-**Continuation pattern:** For interactive effects (reveal hand → choose card → exile it), use `pending_continuation`. The resolver sets `WaitingFor` and stashes the remaining sub-ability chain. When the player responds, `engine.rs` picks up the continuation.
+**Continuation pattern:** For interactive effects (reveal hand → choose card → exile it), follow [add-interactive-effect](../add-interactive-effect/SKILL.md). Remaining abilities live in typed frames on `GameState::resolution_stack`, parked through the existing continuation helpers. Resolution-choice handlers finish through the shared resume path; preserve source/target bindings, parent events, and empty/decline results there.
 
 ### When to extend an effect vs. compose a new one
 
