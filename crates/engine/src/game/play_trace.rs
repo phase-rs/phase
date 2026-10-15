@@ -856,6 +856,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => Choice::Play(Play::Activate(*source_id, *ability_index)),
         GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             Choice::Play(Play::Mana(
@@ -1847,6 +1848,7 @@ pub fn install_plays_for_tests(state: &mut GameState, plays: &[(PlayerId, PlayLo
             | PlayLocus::Mana(source_id, Some(ability_index)) => GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode: Default::default(),
             },
             PlayLocus::Cast(object_id) => GameAction::CastSpell {
                 object_id,

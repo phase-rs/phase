@@ -7553,6 +7553,7 @@ mod settlement_election_host_resume_tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the activation starts");

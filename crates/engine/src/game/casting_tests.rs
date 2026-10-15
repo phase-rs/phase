@@ -736,6 +736,7 @@ fn castability_follows_two_swamps_through_a_filter_land_payment() {
             ability_index: filter_selection
                 .ability_index
                 .expect("the filter land selection names its printed ability"),
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the filter land must accept the black mana payment");
@@ -908,6 +909,7 @@ fn castability_follows_a_manual_nonland_producer_through_a_filter_land_payment()
         GameAction::ActivateAbility {
             source_id: producer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the deterministic nonland producer must resolve through the live reducer");
@@ -924,6 +926,7 @@ fn castability_follows_a_manual_nonland_producer_through_a_filter_land_payment()
             ability_index: filter_selection
                 .ability_index
                 .expect("the filter land selection names its printed ability"),
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the filter land must spend one of the battery's black mana");
@@ -1053,7 +1056,7 @@ fn tapped_relic_can_use_a_new_legend_to_pay_a_second_creature_spell() {
             candidate.action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if source_id == relic
         )));
 }
@@ -6887,7 +6890,7 @@ fn legacy_equip_effect_cost_one_of_is_legal_without_mana_when_discard_available(
             action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 1,
+                ability_index: 1, ..
             } if *source_id == source
         )),
         "legal actions must offer legacy EffectCost equip when discard is affordable"
@@ -7211,6 +7214,7 @@ fn x_composite_mana_tap_activation_rejects_source_only_pending_payment_without_t
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7267,6 +7271,7 @@ fn x_composite_mana_tap_activation_excludes_source_during_pending_payment() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7339,6 +7344,7 @@ fn x_phyrexian_composite_mana_tap_activation_excludes_source_during_phyrexian_pr
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7433,6 +7439,7 @@ fn x_phyrexian_composite_mana_tap_activation_keeps_source_untapped_until_choice_
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7530,6 +7537,7 @@ fn phyrexian_tap_activation_preserves_life_and_mana_routes_without_eager_tap() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the Phyrexian activation should be legal");
@@ -7639,6 +7647,7 @@ fn phyrexian_tap_activation_rejects_unavailable_mana_route_without_mutation() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the life-only Phyrexian activation should be legal");
@@ -9009,6 +9018,7 @@ fn x_cost_activated_composite_tap_prompts_for_x_and_taps_on_resolution() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9104,6 +9114,7 @@ fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9423,6 +9434,7 @@ fn activation_discard_replacement_resumes_and_pays_remaining_composite_cost() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("activation should pause for discard replacement");
@@ -9508,6 +9520,7 @@ fn targeted_activation_replacement_pause_preserves_selected_targets() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("activation should ask for a target before costs");
@@ -9623,6 +9636,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9756,6 +9770,7 @@ fn kessig_wolf_run_x_pump_grants_dynamic_power_and_trample() {
         GameAction::ActivateAbility {
             source_id: kessig,
             ability_index: pump_ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("activating the X-cost pump must succeed");
@@ -9856,6 +9871,7 @@ fn x_cost_activated_minimum_above_payable_max_rejects_before_choose_x() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
 
@@ -9930,6 +9946,7 @@ fn activated_discard_cost_prompts_and_resumes_activation() {
         GameAction::ActivateAbility {
             source_id: blood,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -10030,6 +10047,7 @@ fn bare_non_self_discard_activation_does_not_double_prompt() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -10135,6 +10153,7 @@ fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -10292,6 +10311,7 @@ fn jhoira_does_not_regrant_suspend_to_a_natively_suspended_card() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -10401,6 +10421,7 @@ fn jhoira_reads_a_suspend_granted_in_exile_after_the_cost_was_paid() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -10684,6 +10705,7 @@ fn grim_lavamancer_targets_before_graveyard_exile_cost() {
         GameAction::ActivateAbility {
             source_id: lavamancer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Grim Lavamancer activation must enter targeting");
@@ -10798,6 +10820,7 @@ fn targeted_exile_cost_activation_with_no_legal_target_does_not_prompt_or_pay_co
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect_err("activation with no legal target must fail before cost payment");
@@ -10891,6 +10914,7 @@ fn self_ref_exile_cost_exiles_card_from_hand() {
             GameAction::ActivateAbility {
                 source_id: card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .unwrap_or_else(|e| panic!("{name}: activation must enter the pipeline: {e:?}"));
@@ -11057,6 +11081,7 @@ fn jhoira_granted_suspend_installs_upkeep_and_cast_triggers() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -11364,6 +11389,7 @@ fn jhoira_granted_suspend_persists_and_ticks_across_upkeep() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -11859,6 +11885,7 @@ fn x_cost_activated_composite_sacrifice_bounds_x_by_fixed_portion() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -28244,6 +28271,7 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -28453,6 +28481,7 @@ fn set_triggered_ability_mode_choice(state: &mut GameState, player: PlayerId, so
         ability_cost: None,
         activation_cost_snapshot: None,
         unavailable_modes: vec![],
+        activation_payment_mode: CastPaymentMode::Auto,
     };
 }
 
@@ -28488,6 +28517,7 @@ fn cancel_activated_modal_ability_rolls_back_to_priority() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -28537,6 +28567,7 @@ fn cancel_activated_modal_ability_rolls_back_to_priority() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("re-activating after cancel must succeed");
@@ -28611,6 +28642,7 @@ fn activated_modal_mode_choice_offers_cancel_in_legal_actions() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -37210,6 +37242,7 @@ mod krrik_life_for_color {
             GameAction::ActivateAbility {
                 source_id: activator,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("CR 107.4f: targeted activation announcement must succeed");
@@ -37287,6 +37320,7 @@ mod krrik_life_for_color {
         let activate = GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         };
         let result = apply_as_current(&mut state, activate)
             .expect("CR 107.4f: {{B}} activation announcement must succeed");
@@ -42614,7 +42648,7 @@ mod loyalty_gate {
                 candidate.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if source_id == pw
             )),
             "matching ActivateAsInstant permission must offer the loyalty activation outside sorcery timing"
@@ -51906,6 +51940,7 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Agatha-reduced {4}->{1} ability must activate with exactly {1} mana");
@@ -51928,6 +51963,7 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -52040,6 +52076,7 @@ fn doc_aurlock_reduced_plot_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: plot_card,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Doc-Aurlock-reduced {3}->{1} plot must activate with exactly {1} mana");
@@ -52075,6 +52112,7 @@ fn doc_aurlock_reduced_plot_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: plot_card,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -52181,6 +52219,7 @@ fn plot_special_action_bypasses_activated_ability_prohibitions() {
             GameAction::ActivateAbility {
                 source_id: plot_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .unwrap_or_else(|e| {
@@ -52518,6 +52557,7 @@ fn plot_special_action_still_enforces_sorcery_speed_timing() {
             GameAction::ActivateAbility {
                 source_id: plot_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         );
         assert!(
@@ -52541,6 +52581,7 @@ fn plot_special_action_still_enforces_sorcery_speed_timing() {
             GameAction::ActivateAbility {
                 source_id: plot_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("C0 baseline: plot on own main phase with empty stack must succeed");
@@ -53965,6 +54006,7 @@ mod plot_from_library {
             GameAction::ActivateAbility {
                 source_id: top,
                 ability_index: idx,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activating plot-from-library must be accepted")
@@ -56471,6 +56513,7 @@ fn activate_conduit_to_offer(
         .act(GameAction::ActivateAbility {
             source_id: conduit,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Conduit's {T} ability must succeed");
     for _ in 0..16 {
@@ -58335,6 +58378,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("CR 107.3a: activating an X-sentinel tap cost with 3 eligible artifacts is legal");
@@ -58393,6 +58437,7 @@ mod x_sentinel_tap_creatures_activation_cost {
                 GameAction::ActivateAbility {
                     source_id: source,
                     ability_index,
+                    payment_mode: CastPaymentMode::Auto,
                 },
             )
             .expect("activation must surface the tap-cost prompt");
@@ -58524,6 +58569,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must surface the tap-cost prompt");
@@ -58649,6 +58695,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("a self-matching source must still be able to activate the ability");
@@ -58756,6 +58803,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must surface the tap-cost prompt");
@@ -58825,6 +58873,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must surface the tap-cost prompt");
@@ -59129,6 +59178,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect(
                 "CR 107.3a: X=0 is legal, so a 'Tap X untapped tokens you control' mana ability \
@@ -59164,6 +59214,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
 
@@ -59303,6 +59354,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: parents,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the fixed tap-cost prompt");
         runner
@@ -59355,6 +59407,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
         assert!(
@@ -59421,6 +59474,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
 
@@ -59746,6 +59800,7 @@ mod fixed_mana_ability_tap_cost_rejects_partial_payment {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
 
@@ -59794,6 +59849,7 @@ mod fixed_mana_ability_tap_cost_rejects_partial_payment {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
         runner
@@ -60773,6 +60829,7 @@ fn the_x_lock_passes_through_a_carrier_deferred_to_another_point() {
             cost,
             0,
             Some(Box::new(snapshot)),
+            CastPaymentMode::Auto,
         )));
         state
     };

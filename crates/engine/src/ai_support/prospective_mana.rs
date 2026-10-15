@@ -989,6 +989,7 @@ fn is_exact_fetchland_candidate(state: &GameState, candidate: &CandidateAction) 
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = candidate.action
     else {
         return false;

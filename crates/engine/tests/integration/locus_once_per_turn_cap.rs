@@ -168,6 +168,7 @@ fn locus_capped_grant_blocks_second_activation_same_turn() {
         .act(GameAction::ActivateAbility {
             source_id: locus,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("first activation of the donated ability must be accepted");
 
@@ -178,6 +179,7 @@ fn locus_capped_grant_blocks_second_activation_same_turn() {
     let second = runner.act(GameAction::ActivateAbility {
         source_id: locus,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         second.is_err(),
@@ -202,6 +204,7 @@ fn locus_capped_grant_blocks_second_activation_same_turn() {
         .act(GameAction::ActivateAbility {
             source_id: locus,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("after the per-turn reset the donated ability must be activatable again");
 }
@@ -228,6 +231,7 @@ fn uncapped_grant_allows_repeated_activation_same_turn() {
         .act(GameAction::ActivateAbility {
             source_id: locus,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("first activation of the uncapped donated ability must be accepted");
 
@@ -236,6 +240,7 @@ fn uncapped_grant_allows_repeated_activation_same_turn() {
         .act(GameAction::ActivateAbility {
             source_id: locus,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect(
             "CR 602.5b: an uncapped donated ability must be activatable repeatedly the same turn",

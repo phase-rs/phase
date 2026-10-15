@@ -388,6 +388,7 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::ActivateAbility(announcement) => GameAction::ActivateAbility {
             source_id: announcement.source_id(&_access),
             ability_index: announcement.ability_index(&_access),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
         PriorityAnnouncement::UnlockRoomDoor(announcement) => GameAction::UnlockRoomDoor {
             object_id: announcement.object_id(&_access),
@@ -11435,6 +11436,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode,
             },
         ) => {
             if state.priority_player
@@ -11491,21 +11493,23 @@ fn apply_non_priority_pass_action(
             {
                 // CR 606.3: Loyalty abilities activate once per turn at sorcery speed.
                 state.lands_tapped_for_mana.remove(player);
-                planeswalker::handle_activate_loyalty(
+                planeswalker::handle_activate_loyalty_with_payment_mode(
                     state,
                     *player,
                     source_id,
                     ability_index,
+                    payment_mode,
                     &mut events,
                 )?
             } else {
                 // Non-mana activated ability — the acceptance authority brackets it.
                 let cleared = begin_non_mana_activation(state, *player);
-                let wf = casting::handle_activate_ability(
+                let wf = casting::handle_activate_ability_with_payment_mode(
                     state,
                     *player,
                     source_id,
                     ability_index,
+                    payment_mode,
                     &mut events,
                 )?;
                 if activation_cost_still_open(state, &wf) {
@@ -13063,7 +13067,7 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::UnlessPayment { .. },
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             },
         ) => engine_payment_choices::handle_unless_payment_activate_ability(
             state,
@@ -13627,7 +13631,7 @@ fn apply_non_priority_pass_action(
             window @ (WaitingFor::ManaPayment { .. } | WaitingFor::ManaAbilityManaPayment { .. }),
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             },
         ) => {
             let (player, resume) = payment_window_resume(window)
@@ -16558,6 +16562,8 @@ pub(super) fn begin_pending_trigger_target_selection(
                                     ability_index: None,
                                     ability_cost: None,
                                     activation_cost_snapshot: None,
+                                    activation_payment_mode:
+                                        crate::types::game_state::CastPaymentMode::Auto,
                                     unavailable_modes,
                                 }));
                             }
@@ -16583,6 +16589,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 ability_index: None,
                 ability_cost: None,
                 activation_cost_snapshot: None,
+                activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 unavailable_modes,
             }));
         }
@@ -23560,6 +23567,7 @@ mod kilo_interruptibility_tests {
             GameAction::ActivateAbility {
                 source_id: RELIC,
                 ability_index: RELIC_TAP_MANA,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate Relic mana ability");
@@ -23608,6 +23616,7 @@ mod kilo_interruptibility_tests {
                             GameAction::ActivateAbility {
                                 source_id: FREED,
                                 ability_index: FREED_UNTAP,
+                                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                             },
                         )
                         .expect("activate Freed untap");

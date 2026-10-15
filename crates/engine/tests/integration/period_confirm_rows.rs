@@ -114,6 +114,7 @@ fn a_control_changed_kiki_copy_survives_its_delayed_sacrifice() {
         GameAction::ActivateAbility {
             source_id: kiki,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
     resolve_stack(&mut runner, bears);
@@ -1188,6 +1189,7 @@ pub(crate) fn grand_architect_pili_pala(
         let untapped = runner.act(GameAction::ActivateAbility {
             source_id: pili,
             ability_index: untap,
+            payment_mode: CastPaymentMode::Auto,
         });
         if untapped.is_err() {
             break;
@@ -3284,10 +3286,12 @@ fn najeela_step(runner: &mut GameRunner) {
                 Some(myr) => GameAction::ActivateAbility {
                     source_id: myr,
                     ability_index: ability(state, myr, true),
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 None if state.players[0].mana_pool.total() >= 5 => GameAction::ActivateAbility {
                     source_id: najeela,
                     ability_index: ability(state, najeela, false),
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 None => GameAction::PassPriority,
             }
@@ -4086,6 +4090,7 @@ fn a_walking_ballista_spending_its_counters_is_refused_on_its_loss_axis() {
             GameAction::ActivateAbility {
                 source_id: ballista,
                 ability_index: ping,
+                payment_mode: CastPaymentMode::Auto,
             },
         );
         act(

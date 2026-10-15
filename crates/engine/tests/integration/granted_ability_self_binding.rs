@@ -1692,7 +1692,7 @@ mod concretizer_seams {
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::events::GameEvent;
-    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
     use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -1866,6 +1866,7 @@ mod concretizer_seams {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         if matches!(
@@ -3060,6 +3061,7 @@ mod concretizer_seams {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         if matches!(
@@ -3113,6 +3115,7 @@ mod concretizer_seams {
             let result = runner.act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             });
             if pole_tapped {
                 assert!(result.is_err(), "{:?}", runner.state().waiting_for);
@@ -3152,6 +3155,7 @@ mod concretizer_seams {
             .act(GameAction::ActivateAbility {
                 source_id: plague,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         if matches!(
@@ -3602,6 +3606,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: b.host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
     }
@@ -3980,6 +3985,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: b.host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .is_ok()
     }
@@ -4150,6 +4156,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         assert!(b.runner.state().objects[&source].tapped, "{source:?}");
@@ -4206,6 +4213,7 @@ mod granter_stamp {
                 .act(GameAction::ActivateAbility {
                     source_id: killer,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             if matches!(
@@ -4307,6 +4315,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: fb,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         runner.advance_until_stack_empty();
@@ -4774,6 +4783,7 @@ mod granter_stamp {
                 .act(GameAction::ActivateAbility {
                     source_id: host,
                     ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap_or_else(|e| panic!("controller={bracelet_controller:?}: {e:?}"));
             let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
@@ -4875,6 +4885,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: b.host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         let WaitingFor::PayCost { choices, .. } = &b.runner.state().waiting_for else {
@@ -5129,6 +5140,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         runner.advance_until_stack_empty();
@@ -5977,6 +5989,7 @@ mod granter_stamp {
                     .act(GameAction::ActivateAbility {
                         source_id: fb,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     })
                     .unwrap();
                 assert_eq!(remember_accept(&mut b.runner), prompted, "reach-guard");
@@ -6030,6 +6043,7 @@ mod granter_stamp {
                     .act(GameAction::ActivateAbility {
                         source_id: host,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     })
                     .unwrap();
                 assert_eq!(remember_accept(&mut runner), prompted, "reach-guard");
@@ -6054,7 +6068,7 @@ mod granted_caster_reference {
     use engine::game::scenario::GameRunner;
     use engine::types::ability::{PlayerFilter, TargetRef};
     use engine::types::actions::GameAction;
-    use engine::types::game_state::WaitingFor;
+    use engine::types::game_state::{CastPaymentMode, WaitingFor};
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
 
@@ -6138,6 +6152,7 @@ mod granted_caster_reference {
             .act(GameAction::ActivateAbility {
                 source_id: pinger,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the pinger activates");
         while matches!(
@@ -6344,6 +6359,7 @@ mod granted_caster_reference {
             .act(GameAction::ActivateAbility {
                 source_id: pinger,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the pinger activates");
         while matches!(

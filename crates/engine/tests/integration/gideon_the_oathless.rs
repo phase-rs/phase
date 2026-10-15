@@ -196,6 +196,7 @@ fn opponent_loyalty(generated: bool) {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("legal Chandra +1 activation")
         .events;
@@ -394,6 +395,7 @@ fn gideon_controller_and_event_player_authority() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("legal own Chandra activation")
         .events;

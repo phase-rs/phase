@@ -434,6 +434,7 @@ fn decision_contract_keeps_reducer_completable_final_activation_targets() {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must reach its final target prompt");

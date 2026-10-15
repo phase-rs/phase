@@ -1268,6 +1268,7 @@ pub(crate) fn activate_and_resolve(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
     {
@@ -1628,6 +1629,7 @@ fn drive_ballista_ping(probe: &mut LoopProbe, ballista: ObjectId, ability_index:
         .act(GameAction::ActivateAbility {
             source_id: ballista,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Ballista remove-counter ability");
     // The ability targets "any target"; choose the opponent.
@@ -2362,6 +2364,7 @@ fn drive_mana_outlet_offer(
             .act(GameAction::ActivateAbility {
                 source_id: outlet,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .ok()?;
         runner
@@ -2510,6 +2513,7 @@ pub(crate) fn drive_grove_marvin_offer(db: &CardDatabase) -> Option<LoopCertific
         runner.act(GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })?;
         if matches!(
             runner.state().waiting_for,
@@ -2660,6 +2664,7 @@ pub(crate) fn drive_najeela_urtet_offer(db: &CardDatabase) -> Option<LoopCertifi
                     Some(GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: activated(state, source, untapped.is_some())?,
+                        payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                     })
                 })
                 .unwrap_or(GameAction::PassPriority)

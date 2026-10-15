@@ -146,6 +146,7 @@ fn activate(runner: &mut GameRunner, source: ObjectId, ability_index: usize) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activation is announced");
 }
@@ -196,6 +197,7 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Vec<String> {
                     GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     }
                 }
                 None => GameAction::PassPriority,

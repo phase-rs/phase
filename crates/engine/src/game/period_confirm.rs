@@ -241,9 +241,11 @@ fn rebound(item: &PeriodItem, replay: &GameState) -> GameAction {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         } => GameAction::ActivateAbility {
             source_id: map(*source_id),
             ability_index: *ability_index,
+            payment_mode: *payment_mode,
         },
         GameAction::CastSpell {
             object_id,

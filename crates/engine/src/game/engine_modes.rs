@@ -30,6 +30,7 @@ pub(super) fn handle_ability_mode_choice(
         ability_index,
         ability_cost,
         activation_cost_snapshot,
+        activation_payment_mode,
         unavailable_modes,
     } = waiting_for
     else {
@@ -85,6 +86,7 @@ pub(super) fn handle_ability_mode_choice(
                 ability_index,
                 ability_cost,
                 activation_cost_snapshot,
+                payment_mode: activation_payment_mode,
                 modal,
                 mode_abilities,
                 indices,
@@ -151,6 +153,8 @@ struct ActivatedModeChoice {
     ability_cost: Option<crate::types::ability::AbilityCost>,
     /// CR 601.2f + CR 602.2b: the activation's cost-modifier carrier.
     activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+    /// CR 602.2b + CR 601.2g-h: the activation's payment mode.
+    payment_mode: crate::types::game_state::CastPaymentMode,
     modal: crate::types::ability::ModalChoice,
     /// CR 700.2: the card's mode definitions and the chosen indices, carried so
     /// per-slot mode labels can be built at the SAME post-flush point as slots
@@ -172,6 +176,7 @@ fn handle_activated_mode_choice(
         ability_index,
         ability_cost,
         activation_cost_snapshot,
+        payment_mode,
         modal,
         mode_abilities,
         indices,
@@ -208,6 +213,7 @@ fn handle_activated_mode_choice(
                 mana_cost,
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
             pending_x.activation_cost = remaining;
             pending_x.target_constraints = target_constraints;
@@ -235,6 +241,7 @@ fn handle_activated_mode_choice(
                 mana_cost.unwrap_or(ManaCost::NoCost),
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
             pending_x.activation_cost = remaining;
             pending_x.target_constraints = target_constraints;
@@ -309,6 +316,7 @@ fn handle_activated_mode_choice(
                 ManaCost::NoCost,
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
             pending.activation_cost = ability_cost.clone();
             pending.target_constraints = target_constraints;
@@ -324,6 +332,7 @@ fn handle_activated_mode_choice(
                 ManaCost::NoCost,
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
             pending.activation_cost = ability_cost;
             pending.target_constraints = target_constraints;
@@ -343,6 +352,7 @@ fn handle_activated_mode_choice(
             ManaCost::NoCost,
             ability_index,
             activation_cost_snapshot.clone(),
+            payment_mode,
         );
         pending.activation_cost = ability_cost;
         pending.target_constraints = target_constraints;
