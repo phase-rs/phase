@@ -25,6 +25,73 @@ fn coordinated_total_count_full_source_honesty() {
     assert_coordinated_where_x_full_source_honesty(&["the total number of "]);
 }
 
+// SHAPE: synthetic full-source witnesses for existing integer Draw consumers.
+// Actual delivery is covered by coordinated_population_draw_composition.
+#[test]
+fn coordinated_population_draw_full_source() {
+    let head = "cards you own in exile and in your graveyard";
+    let complete_tail = "that are instant cards, are sorcery cards, and/or have an Adventure";
+    let population = QuantityExpr::Ref {
+        qty: crate::parser::oracle_quantity::parse_quantity_ref(&format!("{head} {complete_tail}"))
+            .expect("complete three-predicate population"),
+    };
+    for (introduction, expected) in [
+        ("the number of ", population.clone()),
+        ("the total number of ", population.clone()),
+        (
+            "one plus the total number of ",
+            QuantityExpr::Offset {
+                inner: Box::new(population.clone()),
+                offset: 1,
+            },
+        ),
+        (
+            "twice the number of ",
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(population.clone()),
+            },
+        ),
+    ] {
+        let operand = format!("{introduction}{head} {complete_tail}");
+        let source = format!("Draw X cards, where X is {operand}.");
+        let parsed = parse_oracle_text(
+            &source,
+            "Synthetic complete Draw population",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert!(!has_unimplemented(&parsed.abilities[0]), "{source}");
+        assert!(
+            matches!(parsed.abilities[0].effect.as_ref(), Effect::Draw { count, target: TargetFilter::Controller } if count == &expected),
+            "{source}: {:?}",
+            parsed.abilities
+        );
+        assert!(parsed.parse_warnings.is_empty(), "{source}");
+        for tail in [
+            "that are instant cards, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or",
+            "that are instant cards, are sorcery cards, and/or have an Adventure,",
+        ] {
+            let operand = format!("{introduction}{head} {tail}");
+            let source = format!("Draw X cards, where X is {operand}.");
+            let malformed = parse_oracle_text(
+                &source,
+                "Synthetic malformed Draw population",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert!(malformed.abilities.iter().any(has_unimplemented), "{source}");
+            assert!(malformed.abilities.iter().any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(&operand))), "whole original Draw operand: {source}: {:?}", malformed.abilities);
+        }
+    }
+}
+
 fn assert_coordinated_where_x_full_source_honesty(introductions: &[&str]) {
     fn unsupported_fragment_has(ability: &AbilityDefinition, operand: &str) -> bool {
         matches!(ability.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(operand))

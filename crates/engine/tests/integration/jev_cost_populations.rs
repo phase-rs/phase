@@ -256,3 +256,97 @@ fn candlekeep_population_empty_cases() {
     assert_eq!(outcome.mana_pool_total(P0), 0);
     assert_eq!(outcome.state().objects[&opponent].toughness, Some(9));
 }
+
+#[test]
+fn coordinated_population_draw_composition() {
+    // Synthetic Sorcery witnesses: these compose the repaired population with
+    // existing Draw/Offset/Multiply consumers, without replacing printed Oracle.
+    for (introduction, populated_draws, empty_draws) in [
+        ("the number of ", 3, 0),
+        ("the total number of ", 3, 0),
+        ("one plus the total number of ", 4, 1),
+        ("twice the number of ", 6, 0),
+    ] {
+        for (populated, expected) in [(true, populated_draws), (false, empty_draws)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            mana(&mut scenario, 2);
+            let source = format!("Draw X cards, where X is {introduction}cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.");
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic population Draw", false)
+                .with_mana_cost(blue_cost(1, 1))
+                .from_oracle_text(&source)
+                .id();
+            // Known qualifying types in Hand and Library must contribute zero.
+            scenario.add_spell_to_hand(P0, "Hand instant", true);
+            scenario.add_spell_to_hand(P1, "Opponent hand sorcery", false);
+            for player in [P0, P1] {
+                for index in 0..8 {
+                    scenario.add_spell_to_library_top(
+                        player,
+                        &format!("Known library instant {index}"),
+                        true,
+                    );
+                }
+            }
+            let mut adventure_ids = Vec::new();
+            let mut foreign_ids = Vec::new();
+            if populated {
+                let overlap = scenario
+                    .add_spell_to_exile(P0, "Instant Adventure member", true)
+                    .id();
+                let sorcery = scenario
+                    .add_spell_to_graveyard(P0, "Sorcery member", false)
+                    .id();
+                let adventure = scenario
+                    .add_creature_to_graveyard(P0, "Adventure permanent member", 1, 1)
+                    .id();
+                adventure_ids.extend([overlap, adventure]);
+                foreign_ids.push(
+                    scenario
+                        .add_spell_to_exile(P1, "Foreign exile instant", true)
+                        .id(),
+                );
+                foreign_ids.push(
+                    scenario
+                        .add_spell_to_graveyard(P1, "Opponent graveyard sorcery", false)
+                        .id(),
+                );
+                scenario.add_creature_to_graveyard(P0, "Ordinary permanent", 1, 1);
+                let mut runner = scenario.build();
+                // CR 108.3 + CR 109.4: off-zone controller values cannot replace
+                // ownership; hostile foreign cards coexist with positive members.
+                for id in [overlap, sorcery, adventure] {
+                    runner.state_mut().objects.get_mut(&id).unwrap().controller = P1;
+                }
+                for id in foreign_ids {
+                    runner.state_mut().objects.get_mut(&id).unwrap().controller = P0;
+                }
+                // CR 715.2a + CR 715.2c: actual Adventure metadata qualifies the
+                // permanent; Instant plus Adventure is still one card.
+                for id in adventure_ids {
+                    runner.state_mut().objects.get_mut(&id).unwrap().back_face =
+                        Some(BackFaceData {
+                            name: "Adventure alternative".into(),
+                            layout_kind: Some(LayoutKind::Adventure),
+                            ..Default::default()
+                        });
+                }
+                assert_population_draw(&mut runner, spell, expected);
+            } else {
+                assert_population_draw(&mut scenario.build(), spell, expected);
+            }
+        }
+    }
+}
+
+fn assert_population_draw(runner: &mut GameRunner, spell: ObjectId, expected: i64) {
+    let outcome = runner.cast(spell).resolve();
+    // CR 121.1 + CR 121.2: measure actual library-to-hand deliveries from stack
+    // commit. CR 608.2h: the source is on Stack at the one population read;
+    // its subsequent graveyard arrival cannot add another draw.
+    outcome.assert_hand_drawn(P0, expected);
+    outcome.assert_hand_drawn(P1, 0);
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+}
