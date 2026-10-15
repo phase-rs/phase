@@ -16,10 +16,11 @@ use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
-    ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr,
-    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
+    ContinuousModification, ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect,
+    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, PtValue, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -4732,7 +4733,7 @@ fn build_keyword_choice_sub_ability(
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches,
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         ),
         choice_duration,
@@ -4877,7 +4878,7 @@ fn build_keyword_choice_clause(
     let choose_effect = Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
         branches,
-        villainous: false,
+        kind: ChooseOneOfKind::Ordinary,
     };
     let (effect, sub_ability) = if let Some(target) = application.target.clone() {
         let choose = AbilityDefinition::new(AbilityKind::Spell, choose_effect);
@@ -5078,7 +5079,7 @@ fn build_pt_choice_clause(
     let choose_effect = Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
         branches,
-        villainous: false,
+        kind: ChooseOneOfKind::Ordinary,
     };
     let (effect, sub_ability) = if let Some(target) = application.target.clone() {
         let choose = AbilityDefinition::new(AbilityKind::Spell, choose_effect);

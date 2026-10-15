@@ -12,9 +12,9 @@ use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode, DamageAmountScope,
-    DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
+    ChooseOneOfKind, ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification,
+    ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
     DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
     ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
     ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
@@ -38281,7 +38281,7 @@ fn chain_creates_reflexive_ability_descends_nested_definitions() {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![AbilityDefinition::new(AbilityKind::Spell, draw()), branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         )
     };

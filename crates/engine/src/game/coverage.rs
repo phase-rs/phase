@@ -15141,11 +15141,11 @@ mod tests {
     use crate::database::synthesis::build_oracle_face;
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, Comparator, ContinuousModification,
-        ControllerRef, CounterTransferMode, DelayedTriggerCondition, DieResultBranch, Effect,
-        PileSource, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, QuantityExpr,
-        ReplacementCondition, StaticDefinition, TargetFilter, TriggerConstraint, TriggerDefinition,
-        VoteSubject, VoteTally, VoteVisibility, VoterScope,
+        AbilityCondition, AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator,
+        ContinuousModification, ControllerRef, CounterTransferMode, DelayedTriggerCondition,
+        DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope, PreventionAmount,
+        PreventionScope, QuantityExpr, ReplacementCondition, StaticDefinition, TargetFilter,
+        TriggerConstraint, TriggerDefinition, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -18395,7 +18395,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                         *payload("choose_one_branch_one"),
                         *payload("choose_one_branch_two"),
                     ],
-                    villainous: false,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ),
         ]
@@ -18510,7 +18510,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                         target: TargetFilter::Controller,
                     },
                 )],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         assert!(test_ability_is_supported(&supported));
@@ -20732,7 +20732,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![plus_one_branch, charge_branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         ));
 
@@ -20918,7 +20918,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![destroy_branch, bounce_branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         ));
 

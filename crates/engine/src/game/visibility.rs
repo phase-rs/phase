@@ -4109,6 +4109,15 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
         }
         WaitingFor::MultiTargetSelection {
             pending_ability, ..
+        }
+        // CR 400.2 + CR 701.10a: the batch-semantics token-host pause
+        // (`effects/token.rs` clones the raw creating ability into
+        // `pending_ability`) carries the same trigger-source payment
+        // snapshots as the multi-target pause and needs the same
+        // viewer-keyed redaction — otherwise a hidden cost-paid mana
+        // source leaks to opponents and unseated viewers.
+        | WaitingFor::ChooseTokenHost {
+            pending_ability, ..
         } => redact_ability_payment(pending_ability, hidden_ids),
         WaitingFor::RepeatDecision { ability, .. }
         | WaitingFor::ClashChooseOpponent { ability, .. }
@@ -6596,6 +6605,22 @@ mod tests {
                     legal_targets: Vec::new(),
                     min_targets: 0,
                     max_targets: 1,
+                    pending_ability: effect(),
+                }),
+            ),
+            (
+                // CR 400.2 + CR 701.10a: the batch token-host pause carries
+                // the same trigger-source payment snapshots as the
+                // multi-target pause (production path: `effects/token.rs`
+                // clones the raw creating ability) and gets the same
+                // viewer-keyed redaction.
+                "ChooseTokenHost",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ChooseTokenHost {
+                    player: owner,
+                    source_id: paid,
+                    legal_targets: Vec::new(),
                     pending_ability: effect(),
                 }),
             ),

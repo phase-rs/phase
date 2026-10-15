@@ -3452,7 +3452,7 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous: _,
+            kind: _,
         } => legacy_player_filter(chooser) || branches.iter().any(legacy_definition),
         Effect::PutSticker {
             target,
@@ -5947,7 +5947,7 @@ fn rw_effect(
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous: _,
+            kind: _,
         } => {
             let mut p = rw_player_filter(chooser);
             for b in branches {

@@ -50,11 +50,11 @@ use super::oracle_util::{
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
-    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
-    EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
+    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
+    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
+    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
+    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -4349,7 +4349,7 @@ fn enters_with_counters_outcome(
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches,
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         let mut choice = choice;
@@ -5828,7 +5828,7 @@ fn parse_whenever_you_cast_enters_with(
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches,
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         choice.description = Some("your choice of counter".to_string());
@@ -11426,7 +11426,7 @@ fn parse_optional_token_substitution_choice(
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches,
-                    villainous: false,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))
             .description(original_text.to_string()),

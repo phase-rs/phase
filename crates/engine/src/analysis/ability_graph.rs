@@ -2363,8 +2363,8 @@ pub(crate) fn candidate_cycles_from_nodes(nodes: Vec<AbilityNode>) -> Vec<Candid
 mod tests {
     use super::*;
     use crate::types::ability::{
-        default_target_filter_any, EffectScope, PlayerFilter, PtValue, QuantityRef, SacrificeCost,
-        TriggerDefinition, TypedFilter,
+        default_target_filter_any, ChooseOneOfKind, EffectScope, PlayerFilter, PtValue,
+        QuantityRef, SacrificeCost, TriggerDefinition, TypedFilter,
     };
     use crate::types::counter::CounterType;
 
@@ -2853,7 +2853,7 @@ mod tests {
         let mut top = activated(Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![branch],
-            villainous: false,
+            kind: ChooseOneOfKind::Ordinary,
         });
         top.sub_ability = Some(Box::new(activated(put_counter(
             CounterType::Plus1Plus1,

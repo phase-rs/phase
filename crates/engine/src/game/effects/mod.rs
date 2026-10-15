@@ -21604,6 +21604,7 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+    use crate::types::ability::ChooseOneOfKind;
     use crate::types::ability::SpentColor;
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
@@ -41925,7 +41926,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: crate::types::ability::PlayerFilter::Controller,
                 branches: vec![fixed_branch, dynamic_branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             vec![],
             source,
@@ -42063,7 +42064,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: crate::types::ability::PlayerFilter::Controller,
                 branches: vec![dynamic_branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             vec![],
             source,
@@ -42164,7 +42165,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![add_branch, remove_branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             vec![TargetRef::Object(target)],
             source,

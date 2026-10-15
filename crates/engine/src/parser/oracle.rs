@@ -13015,9 +13015,9 @@ mod pipeline_snapshot_tests;
 mod has_unimplemented_wrapper_recursion_tests {
     use super::has_unimplemented;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, DieResultBranch,
-        Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope, QuantityExpr,
-        TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, DelayedTriggerCondition,
+        DieResultBranch, Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope,
+        QuantityExpr, TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::phase::Phase;
 
@@ -13178,7 +13178,7 @@ mod has_unimplemented_wrapper_recursion_tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![failure()],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         assert!(has_unimplemented(&choose_one_of), "ChooseOneOf branch");
@@ -13270,7 +13270,7 @@ mod has_unimplemented_wrapper_recursion_tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![clean(), clean()],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         assert!(!has_unimplemented(&choose_one_of), "ChooseOneOf branch");
@@ -13399,7 +13399,7 @@ mod has_unimplemented_wrapper_recursion_tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![*payload("branch_one"), *payload("branch_two")],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         ];
 

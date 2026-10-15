@@ -937,11 +937,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
-        CopiableValues, CounterSourceRider, DelayedTriggerCondition, DieResultBranch, Duration,
-        PileSource, PlayerFilter, PlayerScope, PtValue, QuantityExpr, ReplacementDefinition,
-        ReplacementMode, StaticDefinition, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessPayModifier, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+        AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, ContinuousModification,
+        ControllerRef, CopiableValues, CounterSourceRider, DelayedTriggerCondition,
+        DieResultBranch, Duration, PileSource, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition, TypeFilter,
+        TypedFilter, UnlessPayModifier, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card::CleaveVariant;
     use crate::types::card_type::CoreType;
@@ -1679,7 +1679,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![fight_def()],
-                    villainous: false,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ),
         ));
@@ -1972,7 +1972,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![fight_def()],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         let (state, spell) = guard_fixture(vec![def]);

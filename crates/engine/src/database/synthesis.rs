@@ -12,15 +12,16 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
     AggregateFunction, AttachCardinality, AttachSelection, AttackSubject, CardPlayMode,
     CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
-    CombatHistoryScope, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, DamageChannel, DamageKindFilter, DamageModification,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SacrificeCost, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ChooseOneOfKind, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterTriggerFilter, DamageChannel, DamageKindFilter,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -3773,7 +3774,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
         Effect::ChooseOneOf {
             chooser: crate::types::ability::PlayerFilter::Controller,
             branches: vec![counters_branch, servos_branch],
-            villainous: false,
+            kind: ChooseOneOfKind::Ordinary,
         },
     );
 
@@ -8045,7 +8046,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![exile_branch, sacrifice_branch.clone()],
-            villainous: false,
+            kind: ChooseOneOfKind::Ordinary,
         },
     )
     .condition(champion_has_eligible_object_condition(type_str));

@@ -16,10 +16,10 @@ use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, CardSelectionMode,
-    CastCostModifier, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, CountBinding,
-    CounterTransferMode, DigRestOrder, ExcessRecipient, ForEachCategoryAction,
-    MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource, SeatDirection,
-    TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
+    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
+    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
+    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -50902,11 +50902,12 @@ fn villainous_choice_routes_chooser_without_player_scope_rebinding() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_eq!(
                     ability.player_scope, None,
@@ -51114,11 +51115,12 @@ fn the_master_most_life_villainous_choice() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_eq!(*chooser, PlayerFilter::ChosenPlayer { index: 0 });
             assert_eq!(branches.len(), 2);
@@ -51146,11 +51148,12 @@ fn villainous_choice_supports_life_lost_restricted_chooser() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_eq!(
                 ability.player_scope, None,
@@ -51182,11 +51185,12 @@ fn villainous_choice_supports_life_lost_continuation_remainder() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_life_lost_villainous_chooser(chooser, PlayerRelation::Opponent);
             assert_eq!(branches.len(), 2);
@@ -51206,11 +51210,12 @@ fn villainous_choice_supports_life_lost_restricted_all_players() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_life_lost_villainous_chooser(chooser, PlayerRelation::All);
             assert_eq!(branches.len(), 2);
@@ -51235,11 +51240,12 @@ fn davros_token_then_restricted_villainous_choice_chain() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_life_lost_villainous_chooser(chooser, PlayerRelation::Opponent);
             assert_eq!(branches.len(), 2);
@@ -51259,11 +51265,12 @@ fn villainous_choice_supports_defending_player_chooser() {
         Effect::ChooseOneOf {
             chooser,
             branches,
-            villainous,
+            kind,
         } => {
-            assert!(
-                *villainous,
-                "the villainous prefix must set the doubling flag"
+            assert_eq!(
+                *kind,
+                ChooseOneOfKind::Villainous,
+                "the villainous prefix must set the Villainous instruction kind"
             );
             assert_eq!(*chooser, PlayerFilter::DefendingPlayer);
             assert_eq!(branches.len(), 2);
@@ -58923,14 +58930,15 @@ fn villainous_choice_keeps_multistep_first_branch() {
     let Effect::ChooseOneOf {
         chooser,
         branches,
-        villainous,
+        kind,
     } = &*ability.effect
     else {
         panic!("expected ChooseOneOf, got {:?}", ability.effect);
     };
-    assert!(
-        *villainous,
-        "the villainous prefix must set the doubling flag"
+    assert_eq!(
+        *kind,
+        ChooseOneOfKind::Villainous,
+        "the villainous prefix must set the Villainous instruction kind"
     );
     assert_eq!(*chooser, PlayerFilter::Opponent);
     assert_eq!(branches.len(), 2);
@@ -58968,14 +58976,15 @@ fn villainous_choice_keeps_discard_then_draw_branch() {
     let Effect::ChooseOneOf {
         chooser,
         branches,
-        villainous,
+        kind,
     } = &*ability.effect
     else {
         panic!("expected ChooseOneOf, got {:?}", ability.effect);
     };
-    assert!(
-        *villainous,
-        "the villainous prefix must set the doubling flag"
+    assert_eq!(
+        *kind,
+        ChooseOneOfKind::Villainous,
+        "the villainous prefix must set the Villainous instruction kind"
     );
     assert_eq!(*chooser, PlayerFilter::Opponent);
     assert_eq!(branches.len(), 2);
@@ -59011,14 +59020,15 @@ fn that_creatures_controller_faces_villainous_choice_uses_parent_controller_choo
     let Effect::ChooseOneOf {
         chooser,
         branches,
-        villainous,
+        kind,
     } = &*ability.effect
     else {
         panic!("expected ChooseOneOf, got {:?}", ability.effect);
     };
-    assert!(
-        *villainous,
-        "the villainous prefix must set the doubling flag"
+    assert_eq!(
+        *kind,
+        ChooseOneOfKind::Villainous,
+        "the villainous prefix must set the Villainous instruction kind"
     );
     assert_eq!(
         *chooser,
@@ -59149,14 +59159,15 @@ fn missy_endstep_villainous_choice_unchanged() {
     let Effect::ChooseOneOf {
         chooser,
         branches,
-        villainous,
+        kind,
     } = &*ability.effect
     else {
         panic!("expected ChooseOneOf, got {:?}", ability.effect);
     };
-    assert!(
-        *villainous,
-        "the villainous prefix must set the doubling flag"
+    assert_eq!(
+        *kind,
+        ChooseOneOfKind::Villainous,
+        "the villainous prefix must set the Villainous instruction kind"
     );
     assert_eq!(*chooser, PlayerFilter::Opponent);
     assert_eq!(branches.len(), 2);
@@ -86763,14 +86774,15 @@ fn villainous_choice_keeps_unparsed_option_as_gap() {
     let Effect::ChooseOneOf {
         chooser,
         branches,
-        villainous,
+        kind,
     } = &*execute.effect
     else {
         panic!("{:?}", execute.effect);
     };
-    assert!(
-        *villainous,
-        "the villainous prefix must set the doubling flag"
+    assert_eq!(
+        *kind,
+        ChooseOneOfKind::Villainous,
+        "the villainous prefix must set the Villainous instruction kind"
     );
     assert_eq!(*chooser, PlayerFilter::Opponent);
     assert_eq!(branches.len(), 2, "{branches:?}");

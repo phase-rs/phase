@@ -6188,8 +6188,8 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
-        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, Chooser, Comparator,
-        ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
+        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
         EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
         PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
         StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
@@ -7566,7 +7566,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![create],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         let Effect::ChooseOneOf { branches, .. } = modal.effect.as_ref() else {

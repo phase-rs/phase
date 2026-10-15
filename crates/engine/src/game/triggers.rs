@@ -13717,10 +13717,19 @@ fn collect_matching_delayed_triggers(
             }
             // Digital-only Alchemy (no CR entry): CR 603.4 (first half) for a
             // boon's EMBEDDED gate — the hoist above cannot see it. Same
-            // evaluator, same single-occurrence discard: the boon spent its
-            // one trigger event. Inert for non-boons (the helper gates on
-            // `DelayedTriggerKind::Boon`). Only the FIRED alternative's gate
-            // is checked — never the conjunction of both alternatives'.
+            // evaluator, but a failed INITIAL check does NOT spend the boon:
+            // CR 603.4 says the ability "does nothing", and the Tenacious
+            // Pup ruling ("Once it triggers, it won't trigger again") spends
+            // the one trigger on FIRING, not on failing to. The boon stays
+            // installed for the next occurrence; consumption happens only in
+            // the fire path below (`to_remove` takes every fired one-shot).
+            // The resolution-time recheck is untouched: a boon that fired
+            // and then fails its recheck is already removed — never
+            // refunded. Ordinary delayed-trigger expiry policy lives in the
+            // arm above and is deliberately not shared here. Inert for
+            // non-boons (the helper gates on `DelayedTriggerKind::Boon`).
+            // Only the FIRED alternative's gate is checked — never the
+            // conjunction of both alternatives'.
             if let Some(condition) = boon_embedded_condition(delayed, matched_alternative) {
                 if !check_trigger_condition_with_source(
                     state,
@@ -13730,12 +13739,9 @@ fn collect_matching_delayed_triggers(
                     delayed.ability.trigger_definition_ref.as_ref(),
                     Some(&trigger_event),
                 ) {
-                    if delayed.one_shot && false_gate_consumes_one_shot(&delayed.condition) {
-                        to_discard.push((
-                            idx,
-                            super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
-                        ));
-                    }
+                    // Retained, not discarded: a false initial gate is not a
+                    // firing (see above). `continue` skips the fire push, so
+                    // the installed boon simply waits for the next occurrence.
                     continue;
                 }
             }

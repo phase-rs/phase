@@ -1,10 +1,15 @@
 //! Digital-only Alchemy (no CR entry): one-time boons (issue #7495).
 //!
 //! Runtime behavior: a grant installs a Persistent one-shot `WhenNextEvent`
-//! delayed trigger for its holder; the next matching event fires it once and
-//! consumes it; "if you have a boon" reads the held list; an intervening-`if`
-//! on the granted trigger is checked at fire time and again at resolution
-//! (CR 603.4), with a false gate consuming the single occurrence (CR 603.7b).
+//! delayed trigger for its holder; the next matching event whose gate holds
+//! fires it once and consumes it; "if you have a boon" reads the held list;
+//! an intervening-`if` on the granted trigger is checked at fire time and
+//! again at resolution (CR 603.4). A false INITIAL check does not spend the
+//! boon — CR 603.4 says the ability "does nothing", and the Tenacious Pup
+//! ruling ("Once it triggers, it won't trigger again") spends the one
+//! trigger on firing — so the boon stays installed for the next occurrence.
+//! A boon that fired and then fails its resolution recheck is already
+//! removed, never refunded.
 
 use engine::ai_support::legal_actions;
 use engine::game::keywords::object_has_effective_keyword_kind;
@@ -90,6 +95,34 @@ fn advance_to_end_step_peaceful(runner: &mut GameRunner) {
             .expect("declare no attackers to cross combat");
     }
     runner.advance_to_end_step();
+}
+
+/// Pass through the opponent's whole turn to the start of P0's next
+/// precombat main phase, attacking and blocking with nothing.
+fn pass_to_own_next_main(runner: &mut GameRunner) {
+    let start = runner.state().turn_number;
+    for _ in 0..600 {
+        let state = runner.state();
+        if state.turn_number >= start + 2
+            && state.active_player == P0
+            && state.phase == Phase::PreCombatMain
+        {
+            return;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt while crossing the turn: {other:?}"),
+        };
+        runner.act(action).expect("the turn cycle advances");
+    }
+    panic!("did not reach P0's next main phase");
 }
 
 /// Held boons and their controllers.
@@ -357,7 +390,7 @@ fn valiant_batrider_grants_boon_to_damaged_player() {
 }
 
 #[test]
-fn warlock_false_gate_consumes_boon_and_fizzles_have_a_boon() {
+fn warlock_false_gate_retains_boon_and_have_a_boon_resolves() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PostCombatMain);
     scenario.with_library_top(P0, &["A", "B", "C", "D"]);
@@ -370,17 +403,32 @@ fn warlock_false_gate_consumes_boon_and_fizzles_have_a_boon() {
     drain_stack(&mut runner);
     assert_eq!(held_boons(&runner), vec![P0]);
 
-    // End step with nothing died: the boon's gate is false, so it is
-    // discarded without firing — and the have-a-boon trigger, true at fire
-    // time, finds no boon at its CR 603.4 resolution recheck and does nothing.
+    // End step with nothing died: the boon's gate is false, so CR 603.4 says
+    // it does nothing — the boon is NOT spent (Tenacious Pup ruling: "Once
+    // it triggers, it won't trigger again") and stays installed. The
+    // separate have-a-boon trigger still finds a held boon at both its
+    // fire-time check and its CR 603.4 resolution recheck, so it mills
+    // three, draws a card, and costs 2 life.
     let hand_before = runner.state().players[0].hand.len();
     let grave_before = runner.state().players[0].graveyard.len();
     advance_to_end_step_peaceful(&mut runner);
     drain_stack(&mut runner);
-    assert!(held_boons(&runner).is_empty());
-    assert_eq!(runner.state().players[0].hand.len(), hand_before);
-    assert_eq!(runner.state().players[0].graveyard.len(), grave_before);
-    assert_eq!(runner.state().players[0].life, 20);
+    assert_eq!(
+        held_boons(&runner),
+        vec![P0],
+        "a false initial gate retains the boon"
+    );
+    assert_eq!(
+        runner.state().players[0].graveyard.len(),
+        grave_before + 3,
+        "mill three"
+    );
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before + 1,
+        "draw a card"
+    );
+    assert_eq!(runner.state().players[0].life, 18);
     assert_eq!(runner.state().players[1].life, 20);
 }
 
@@ -403,8 +451,9 @@ fn warlock_have_a_boon_resolves_while_lash_boon_held() {
 
     // The Warlock's own end-step boon is held, and Lash grants a second boon
     // whose event (a cast) cannot occur during the end step — so have-a-boon
-    // is true at fire time AND still true at its CR 603.4 resolution recheck
-    // even after the end-step boon's false gate discards it.
+    // is true at fire time AND still true at its CR 603.4 resolution recheck.
+    // The peaceful end step retains BOTH boons: the Lash boon's event never
+    // occurs, and the end-step boon's false gate does not spend it.
     runner.cast(warlock).resolve();
     drain_stack(&mut runner);
     runner.cast(lash).target_player(P1).resolve();
@@ -427,16 +476,106 @@ fn warlock_have_a_boon_resolves_while_lash_boon_held() {
     assert_eq!(runner.state().players[0].life, 18);
     assert_eq!(
         held_boons(&runner),
-        vec![P0],
-        "the Lash boon survives the end step"
+        vec![P0, P0],
+        "both boons survive the peaceful end step"
     );
 
-    // The surviving boon still fires on the next noncreature cast.
+    // The Lash boon still fires on the next noncreature cast (cast-then-draw
+    // nets zero cards) while the retained end-step boon — whose event is not
+    // a cast — stays installed.
     let hand_before = runner.state().players[0].hand.len();
     runner.cast(bolt).target_player(P1).resolve();
     drain_stack(&mut runner);
     assert_eq!(runner.state().players[0].hand.len(), hand_before);
-    assert!(held_boons(&runner).is_empty());
+    assert_eq!(
+        held_boons(&runner),
+        vec![P0],
+        "only the end-step boon remains after the Lash boon fires"
+    );
+}
+
+/// A boon retained through a peaceful end step still fires exactly once on
+/// a later qualifying end step, then is consumed: turn 1 ends peacefully
+/// (retained), three creatures die on P0's next turn, and the turn-2 end
+/// step drains once (P1 −5, P0 +5) with nothing left held.
+#[test]
+fn warlock_retained_boon_fires_once_on_later_qualifying_end_step() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.with_library_top(
+        P0,
+        &["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"],
+    );
+    scenario.with_library_top(P1, &["P1 A", "P1 B"]);
+    let warlock = scenario
+        .add_creature_to_hand_from_oracle(P0, "Underbridge Warlock", 2, 4, WARLOCK)
+        .id();
+    let mut victims = Vec::new();
+    let mut removal = Vec::new();
+    for index in 0..3 {
+        victims.push(
+            scenario
+                .add_creature(P1, &format!("Doomed Witness {index}"), 2, 2)
+                .id(),
+        );
+        removal.push(
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    &format!("Doom Blade {index}"),
+                    true,
+                    "Destroy target creature.",
+                )
+                .id(),
+        );
+    }
+    let mut runner = scenario.build();
+    runner.cast(warlock).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Turn 1 end step, peaceful: the false gate retains the boon and the
+    // separate have-a-boon payoff resolves (mill 3, draw 1, lose 2).
+    advance_to_end_step_peaceful(&mut runner);
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    assert_eq!(runner.state().players[0].life, 18);
+
+    // P1's turn passes quietly; on P0's next turn three creatures die.
+    pass_to_own_next_main(&mut runner);
+    for (spell, victim) in removal.into_iter().zip(victims) {
+        runner.cast(spell).target_object(victim).resolve();
+    }
+    drain_stack(&mut runner);
+
+    // Cross combat into the end step: the Warlock is a legal attacker on
+    // this turn, so the crossing may stall at the declare prompt — retry
+    // until the end step is actually reached.
+    for _ in 0..50 {
+        if runner.state().phase == Phase::End {
+            break;
+        }
+        advance_to_end_step_peaceful(&mut runner);
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::End,
+        "the qualifying end step was reached"
+    );
+
+    // Qualifying end step: the retained boon fires exactly once — one
+    // 5-life drain — and is consumed. (P0's own life total pins the
+    // engine's listed trigger order: the boon resolves before have-a-boon,
+    // so have-a-boon finds no held boon at its resolution recheck and the
+    // +5 stands unreduced by a second lose-2.)
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().players[1].life,
+        15,
+        "one 5-life drain, exactly once"
+    );
+    assert_eq!(runner.state().players[0].life, 23);
+    assert!(held_boons(&runner).is_empty(), "the fired boon is consumed");
 }
 
 #[test]
@@ -995,6 +1134,113 @@ fn dunbarrow_two_entrants_offer_host_choice() {
         "the Role must attach to the chosen entrant"
     );
     assert!(held_boons(&runner).is_empty());
+}
+
+/// CR 400.2 + CR 701.10a production reach control: the real Dunbarrow
+/// batch prompt pauses at `ChooseTokenHost` with the cloned creating
+/// ability in `pending_ability`, and the viewer projections carry the
+/// prompt through the payment redaction authority — opponent and
+/// spectator views keep the prompt shape with the ability intact (no
+/// snapshots exist on this path, so nothing blanks), the authoritative
+/// state is untouched by projecting, and no hidden hand card leaks into
+/// either projection's wire JSON. The synthetic census row in
+/// `game::visibility` proves the blanking itself with nonempty snapshots.
+#[test]
+fn dunbarrow_batch_host_prompt_projects_without_leak() {
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    // A hidden hand card with a name no projection may repeat.
+    scenario.add_creature_to_hand_from_oracle(P0, "Veiled Sentry Mole", 1, 1, "Defender");
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Drive the batch to the host prompt and STOP there, unanswered.
+    runner.cast(alarm).commit();
+    for _ in 0..200 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseTokenHost { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    let raw = runner.state().clone();
+    let (player, source_id, legal_targets, pending_ability) = match &raw.waiting_for {
+        WaitingFor::ChooseTokenHost {
+            player,
+            source_id,
+            legal_targets,
+            pending_ability,
+        } => (
+            *player,
+            *source_id,
+            legal_targets.clone(),
+            (**pending_ability).clone(),
+        ),
+        other => panic!("reach-guard: expected the batch host prompt, got {other:?}"),
+    };
+    assert_eq!(player, P0, "reach-guard: P0 chooses the host");
+    assert_eq!(
+        legal_targets.len(),
+        2,
+        "reach-guard: both entrants offered, got {legal_targets:?}"
+    );
+
+    for (label, view) in [
+        ("opponent", filter_state_for_viewer(&raw, P1)),
+        ("spectator", filter_state_for_unseated_viewer(&raw)),
+    ] {
+        match &view.waiting_for {
+            WaitingFor::ChooseTokenHost {
+                player: view_player,
+                source_id: view_source,
+                legal_targets: view_targets,
+                pending_ability: view_pending,
+            } => {
+                assert_eq!(*view_player, player, "{label}: prompt player preserved");
+                assert_eq!(*view_source, source_id, "{label}: prompt source preserved");
+                assert_eq!(
+                    *view_targets, legal_targets,
+                    "{label}: offered entrants preserved"
+                );
+                assert_eq!(
+                    format!("{:?}", **view_pending),
+                    format!("{pending_ability:?}"),
+                    "{label}: pending ability passes through with no snapshots to blank"
+                );
+            }
+            other => panic!("{label}: prompt shape lost in projection: {other:?}"),
+        }
+        let json = serde_json::to_string(&view).expect("projection serializes");
+        assert!(
+            !json.contains("Veiled Sentry Mole"),
+            "{label}: hidden hand card must not leak through the host prompt"
+        );
+    }
+
+    // Authoritative state is untouched by projecting.
+    assert_eq!(
+        runner.state().waiting_for,
+        raw.waiting_for,
+        "projecting must not mutate the authoritative prompt"
+    );
 }
 
 #[test]

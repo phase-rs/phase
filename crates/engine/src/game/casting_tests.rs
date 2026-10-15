@@ -9,11 +9,11 @@ use crate::parser::oracle_util::normalize_card_name_refs_reporting;
 use crate::types::ability::{
     AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
     AttackedYouScope, BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
-    ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-    CostCategory, CountScope, EffectScope, FilterProp, GameRestriction, KickerVariant,
-    ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
-    ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ChooseOneOfKind, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
+    ControllerRef, CostCategory, CountScope, EffectScope, FilterProp, GameRestriction,
+    KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction,
+    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec,
+    ObjectProperty, ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
     SacrificeCost, SacrificeRequirement, SearchSelectionConstraint, StaticCondition,
     StaticDefinition, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -6855,7 +6855,7 @@ fn legacy_equip_effect_cost_one_of_is_legal_without_mana_when_discard_available(
                     },
                 ),
             ],
-            villainous: false,
+            kind: ChooseOneOfKind::Ordinary,
         }),
     };
     let source = create_colorless_tap_activated_source(

@@ -17288,6 +17288,37 @@ pub enum CounterKindChooser {
     Random,
 }
 
+/// Which instruction category an [`Effect::ChooseOneOf`] choice belongs to.
+/// A villainous-choice instruction is categorically distinct (CR 701.55a;
+/// doubled by `GrantsExtraVillainousChoice` per CR 701.55c), not a flag on
+/// an ordinary choice (CR 608.2d) — hence a typed axis rather than a bool,
+/// mirroring [`DelayedTriggerKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ChooseOneOfKind {
+    /// DEFAULT — an ordinary CR 608.2d effect choice ("choice of" /
+    /// "choose one"). Resolves once no matter how many Valeyards are out.
+    /// Every pre-existing entry is this variant.
+    #[default]
+    Ordinary,
+    /// CR 701.55a: the printed villainous-choice instruction ("… faces a
+    /// villainous choice — A, or B").
+    Villainous,
+}
+
+impl ChooseOneOfKind {
+    /// Serde skip-helper: `Ordinary` is the default and is omitted from
+    /// JSON, so every pre-existing serialized choice round-trips
+    /// byte-identical.
+    pub fn is_ordinary(&self) -> bool {
+        matches!(self, ChooseOneOfKind::Ordinary)
+    }
+
+    /// True for the printed villainous-choice instruction.
+    pub fn is_villainous(self) -> bool {
+        matches!(self, ChooseOneOfKind::Villainous)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -21021,14 +21052,15 @@ pub enum Effect {
         /// The branches the controller may choose between. Each element is a
         /// self-contained ability (effect + optional cost + optional target).
         branches: Vec<AbilityDefinition>,
-        /// CR 701.55a vs CR 608.2d: true only for the printed villainous-choice
-        /// instruction ("… faces a villainous choice — A, or B"). Only a
-        /// villainous choice is doubled by `GrantsExtraVillainousChoice`
-        /// (CR 701.55c, The Valeyard); an ordinary "choice of" / "choose one"
-        /// (CR 608.2d) resolves once no matter how many Valeyards are out.
-        /// Absent (false) on every pre-existing snapshot.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        villainous: bool,
+        /// CR 701.55a vs CR 608.2d: the printed villainous-choice
+        /// instruction ("… faces a villainous choice — A, or B") versus an
+        /// ordinary choice. Only a villainous choice is doubled by
+        /// `GrantsExtraVillainousChoice` (CR 701.55c, The Valeyard); an
+        /// ordinary "choice of" / "choose one" (CR 608.2d) resolves once no
+        /// matter how many Valeyards are out. Absent (`Ordinary`) on every
+        /// pre-existing snapshot.
+        #[serde(default, skip_serializing_if = "ChooseOneOfKind::is_ordinary")]
+        kind: ChooseOneOfKind,
     },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.

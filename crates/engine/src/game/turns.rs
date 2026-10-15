@@ -4021,10 +4021,10 @@ mod tests {
     use crate::game::triggers::trigger_source_context_for_latch;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ContinuousModification,
-        DelayedTriggerCondition, DelayedTriggerLifetime, Duration, Effect, PlayFromExileProvenance,
-        PlayerScope, ProhibitedActivity, QuantityExpr, ResolvedAbility, RestrictionPlayerScope,
-        TriggerDefinition,
+        AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChooseOneOfKind,
+        ContinuousModification, DelayedTriggerCondition, DelayedTriggerLifetime, Duration, Effect,
+        PlayFromExileProvenance, PlayerScope, ProhibitedActivity, QuantityExpr, ResolvedAbility,
+        RestrictionPlayerScope, TriggerDefinition,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -10700,7 +10700,7 @@ card into your hand at the beginning of your next end step.";
                 Effect::ChooseOneOf {
                     chooser: crate::types::ability::PlayerFilter::Controller,
                     branches: vec![gain(1), gain(2)],
-                    villainous: false,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ));
         substitute.valid_player = Some(crate::types::ability::ReplacementPlayerScope::Opponent);

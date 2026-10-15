@@ -496,9 +496,9 @@ mod tests {
     use crate::game::deck_loading::DeckEntry;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, EffectOutcomeSignal,
-        PlayerFilter, QuantityExpr, QuantityModification, ReplacementDefinition, SubAbilityLink,
-        TargetFilter, TargetRef,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect,
+        EffectOutcomeSignal, PlayerFilter, QuantityExpr, QuantityModification,
+        ReplacementDefinition, SubAbilityLink, TargetFilter, TargetRef,
     };
     use crate::types::card::CardFace;
     use crate::types::events::GameEvent;
@@ -846,7 +846,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         state
@@ -1023,7 +1023,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         state
@@ -1682,7 +1682,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         state

@@ -2045,6 +2045,7 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::ChooseOneOfKind;
     use crate::types::format::FormatConfig;
 
     /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
@@ -4433,7 +4434,7 @@ mod tests {
         let choose_one = Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![conjure_ability("choose_one", Zone::Hand)],
-            villainous: false,
+            kind: ChooseOneOfKind::Ordinary,
         };
         walk_effect(&choose_one, &mut names);
 

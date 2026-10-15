@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::players;
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, ChooseOneOfKind, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -299,7 +300,7 @@ fn choosing_players(
     let villainous = matches!(
         &ability.effect,
         Effect::ChooseOneOf {
-            villainous: true,
+            kind: ChooseOneOfKind::Villainous,
             ..
         }
     );
@@ -493,7 +494,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -567,7 +568,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Opponent,
                 branches: vec![branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             source,
@@ -667,7 +668,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Opponent,
                 branches: vec![branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -770,7 +771,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![colorless, white],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -813,7 +814,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ChosenPlayer { index: 0 },
                 branches: vec![branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -866,7 +867,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(1),
@@ -908,7 +909,7 @@ mod tests {
                     value: Box::new(QuantityExpr::Fixed { value: 3 }),
                 },
                 branches: vec![branch],
-                villainous: false,
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -957,7 +958,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch.clone()],
-                villainous: true,
+                kind: ChooseOneOfKind::Villainous,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(1),
@@ -1091,7 +1092,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch],
-                villainous: true,
+                kind: ChooseOneOfKind::Villainous,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(1),
@@ -1206,7 +1207,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch],
-                villainous: true,
+                kind: ChooseOneOfKind::Villainous,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(1),
