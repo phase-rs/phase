@@ -464,20 +464,49 @@ fn song_of_inspiration_modifier_drops_a_target_lost_mid_stack() {
     let mut runner = scenario.build();
     let mut committed = runner.cast(song).target_objects(&[oak, elm]).commit();
 
-    if let Some(obj) = committed.state_mut().objects.get_mut(&elm) {
-        obj.zone = Zone::Exile;
-    }
-    let exiled = committed
+    // F9 (CR 400.7 + CR 608.2b): move Elm through the real zone pipeline
+    // while Song waits on the stack. A direct `obj.zone =` assignment
+    // bypasses zone collections, LKI, and incarnation bookkeeping, so it
+    // cannot discriminate the production target-legality boundary.
+    let elm_incarnation_before = committed
         .state()
         .objects
-        .values()
-        .filter(|o| o.zone == Zone::Exile)
-        .count();
-    assert_eq!(
-        exiled, 1,
-        "NON-VACUITY: the mid-stack exile must actually move Elm, else this \
-         test cannot tell a live read from a stale one"
+        .get(&elm)
+        .expect("Elm is staged in the graveyard")
+        .incarnation;
+    let mut exile_events = Vec::new();
+    engine::game::zones::move_to_zone(committed.state_mut(), elm, Zone::Exile, &mut exile_events);
+    assert!(
+        exile_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Graveyard),
+                to: Zone::Exile,
+                ..
+            } if *object_id == elm
+        )),
+        "NON-VACUITY: the mid-stack exile must move Elm graveyard→exile \
+         through the pipeline, got {exile_events:?}"
     );
+    let elm_after = committed
+        .state()
+        .objects
+        .get(&elm)
+        .expect("Elm survives the move under its storage id");
+    assert_eq!(
+        elm_after.zone,
+        Zone::Exile,
+        "the pipeline must deliver Elm to exile"
+    );
+    assert_ne!(
+        elm_after.incarnation, elm_incarnation_before,
+        "CR 400.7: the exiled Elm is a new object, not the targeted incarnation"
+    );
+    // No LKI assertion here: the pipeline snapshots LKI only on departure
+    // from the battlefield, exile, or the stack (`zones.rs`), so a
+    // graveyard→exile move records none. The illegality rides on zone
+    // membership plus the incarnation break, both asserted above.
 
     let outcome = committed.resolve();
     // Oak returns; Elm is unaffected (CR 608.2b) and stays exiled.
