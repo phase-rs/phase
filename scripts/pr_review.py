@@ -4160,6 +4160,8 @@ def read_discovery_cache(path: Path, args: argparse.Namespace) -> dict[str, Any]
 
 def fetch_issue_delta(repo: str, endpoint: str, since: str) -> list[dict[str, Any]]:
     """REST since membership, traversed in immutable creation order, without a cap."""
+    # Insertions before a read page can repeat rows; edits first entering there
+    # are replayed next sweep from the checkpoint captured BEFORE this query.
     rows: dict[int, dict[str, Any]] = {}
     page = 1
     while True:

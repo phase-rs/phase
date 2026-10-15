@@ -215,8 +215,8 @@ Only needed if the effect pauses for player input.
 - [ ] **`crates/engine/src/types/game_state.rs` — `WaitingFor` enum**
   Add a variant (e.g., `RevealChoice { player, cards, filter }`) that carries enough data for the frontend to render the choice UI.
 
-- [ ] **`crates/engine/src/game/engine.rs` — `apply()` match arm**
-  Handle the `(WaitingFor::YourChoice, GameAction::YourResponse)` pair. This is where the player's choice feeds back into the engine.
+- [ ] **`crates/engine/src/game/engine_resolution_choices.rs` — `handles()` and `handle_resolution_choice()`**
+  Register a new prompt in `handles()`, then handle its response in `handle_resolution_choice()`. Validate and deliver the choice through that authority and finish through the shared continuation path, preserving source/target bindings, parent events, and empty or declined results. `engine.rs::apply()` dispatches handled prompts to this module.
 
 - [ ] **`crates/engine/src/types/game_state.rs` — `GameAction` enum**
   Add a variant for the player's response if no existing action fits.
@@ -330,7 +330,7 @@ AbilityDefinition ──────► card-data.json (exported)
                     GameEvent emitted → frontend renders
                               │
                               ▼
-                    WaitingFor (if interactive) → GameAction response → engine.rs apply()
+                    WaitingFor (if interactive) → GameAction response → engine.rs::apply() dispatch → engine_resolution_choices.rs → shared resume path
 ```
 
 ---

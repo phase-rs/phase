@@ -3956,6 +3956,53 @@ class IncrementalDashboardTests(unittest.TestCase):
         self.assertEqual(result["discovery"]["since"], "2026-10-06T12:01:00Z")
         self.assertEqual(result["discovery"]["refreshed_prs"], [1])
 
+    def test_old_comment_entering_before_read_page_replays_after_long_sweep(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.record("held")
+        self.run_dashboard()
+        old_comment = {"id": 10, "node_id": "old-comment", "user": {"login": "contributor"},
+            "author_association": "CONTRIBUTOR", "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-10-06T08:00:00Z", "body": "I addressed the feedback.",
+            "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"}
+        self.comments = [old_comment] + [
+            {"id": number, "created_at": f"2026-08-{number:02d}T00:00:00Z",
+             "updated_at": "2026-10-06T12:00:30Z",
+             "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"}
+            for number in (20, 30)
+        ]
+        self.clock = "2026-10-06T12:02:00Z"
+        original = self.github
+        edited = False
+
+        def paginate_live_membership(command):
+            nonlocal edited
+            if not command[2].endswith("issues/comments"):
+                return original(command)
+            self.calls.append(command)
+            since = next(item.split("=", 1)[1] for item in command if item.startswith("since="))
+            page = int(next(item.split("=", 1)[1] for item in command if item.startswith("page=")))
+            count = int(next(item.split("=", 1)[1] for item in command if item.startswith("per_page=")))
+            matching = sorted((row for row in self.comments if row["updated_at"] > since),
+                              key=lambda row: row["created_at"])
+            result = copy.deepcopy(matching[(page - 1) * count:page * count])
+            if not edited:
+                # An old comment enters before page 1 AFTER page 1 was read.
+                old_comment["updated_at"] = "2026-10-06T12:02:01Z"
+                edited = True
+                self.clock = "2026-10-06T12:10:00Z"
+            return result
+
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
+                mock.patch.object(pr_review, "run_json", side_effect=paginate_live_membership):
+            first = self.run_dashboard()
+            self.assertEqual(self.row(first)["advisory_action"], "hold")
+            self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], "2026-10-06T12:02:00Z")
+            second = self.run_dashboard()
+        self.assertEqual(second["discovery"]["since"], "2026-10-06T12:01:00Z")
+        self.assertEqual(second["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(self.row(second)["advisory_action"], "review")
+        self.assertEqual(self.row(second)["reason"], "author_followup_after_maintainer_activity")
+
     def test_compact_watch_refreshes_independent_ci_queue_head_label_issue_and_review_edits(self) -> None:
         self.run_dashboard()
         mutations = [
