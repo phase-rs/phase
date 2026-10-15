@@ -1872,6 +1872,48 @@ async fn admit_seat_return_while_session_locked(
     }
 }
 
+/// Cancel a return which never published a Full sender. The held game lease
+/// fences owners: preserve a live intervening route and any grace record that
+/// its own departure created, rather than overwriting either with this abort.
+async fn abort_unpublished_full_admission(
+    state: &SharedState,
+    connections: &SharedConnections,
+    session: &mut GameSession,
+    player: PlayerId,
+) {
+    let peers = {
+        let routes = connections.lock().await;
+        let players = routes.get(&session.game_code);
+        if players
+            .and_then(|players| players.get(&player))
+            .is_some_and(|sender| !sender.is_closed())
+        {
+            return;
+        }
+        players
+            .into_iter()
+            .flat_map(|players| players.iter())
+            .filter(|(other, _)| **other != player)
+            .map(|(_, sender)| sender.clone())
+            .collect::<Vec<_>>()
+    };
+    let disconnected_at = Instant::now();
+    session.mark_disconnected(player);
+    let grace = {
+        let mut registry = state.lock().await;
+        if registry
+            .reconnect
+            .is_disconnected(&session.game_code, player)
+        {
+            return;
+        }
+        let grace = registry.reconnect.grace_period;
+        registry.record_disconnect(&session.game_code, player, disconnected_at);
+        grace
+    };
+    notify_full_seat_disconnect(session, player, grace, disconnected_at, &peers);
+}
+
 /// Verifies a Full seat while the caller already owns this game's session lock.
 ///
 /// This is the authority linearization point for every state mutation: the
@@ -2089,7 +2131,23 @@ async fn depart_full_seat_while_session_locked(
         })
         .await;
     }
-    let full_key = session.full_runtime.as_ref().map(|r| r.key.clone());
+    notify_full_seat_disconnect(session, player_id, grace, disconnected_at, &peers);
+}
+
+fn notify_full_seat_disconnect(
+    session: &GameSession,
+    player_id: PlayerId,
+    grace: std::time::Duration,
+    disconnected_at: Instant,
+    peers: &[mpsc::UnboundedSender<ServerMessage>],
+) {
+    let Some((last, others)) = peers.split_last() else {
+        return;
+    };
+    let full_key = session
+        .full_runtime
+        .as_ref()
+        .map(|runtime| runtime.key.clone());
     let remaining = grace.saturating_sub(disconnected_at.elapsed());
     let grace_seconds = remaining
         .as_secs()
@@ -2100,9 +2158,10 @@ async fn depart_full_seat_while_session_locked(
         grace_seconds,
         player: Some(player_id),
     };
-    for sender in peers {
+    for sender in others {
         let _ = sender.send(message.clone());
     }
+    let _ = last.send(message);
 }
 
 /// A pregame seat's return, called with the game's session guard held. Seat 0's
@@ -2434,7 +2493,7 @@ async fn attach_current_draft_match(
     if session.player_for_token(&player_token) != Some(game_player) {
         return Err("Draft match player identity is inconsistent".to_string());
     }
-    let was_disconnected = !session.connected[player_index];
+    let mut was_disconnected = !session.connected[player_index];
 
     reconnect_seat_while_session_locked(state, &mut session, &player_token, received_at).await?;
     if let Some((previous_game, previous_player)) = previous_full.as_ref() {
@@ -2479,18 +2538,57 @@ async fn attach_current_draft_match(
             return Err("Draft match Full identity changed during attachment".to_string());
         }
     }
-    // A terminal finalizer can retire this lifetime while prior-game departure
-    // waits. Reuse Full reconnect's durable active-key authority, not just the
-    // still-resident session's unchanged token and generation.
-    let active_key = game_db
-        .load_active_full_key(&game_code)
-        .map_err(|error| format!("Failed to validate draft match identity: {error}"))?;
+    // Engine termination precedes the asynchronous terminal transaction. The
+    // final game lease fences that pending-commit window; a successful SELECT
+    // alone is not a lease on the lifetime's continued activity.
+    if matches!(
+        session.state.waiting_for,
+        engine::types::game_state::WaitingFor::GameOver { .. }
+    ) {
+        let _ = tx.send(ServerMessage::DraftActionRejected {
+            reason: "Draft match is no longer active".to_string(),
+        });
+        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        return Ok(());
+    }
+    let active_key = match game_db.load_active_full_key(&game_code) {
+        Ok(key) => key,
+        Err(error) => {
+            abort_unpublished_full_admission(state, connections, &mut session, game_player).await;
+            return Err(format!("Failed to validate draft match identity: {error}"));
+        }
+    };
     if active_key.as_ref() != Some(&full_key) {
         let _ = tx.send(ServerMessage::DraftActionRejected {
             reason: "Draft match is no longer active".to_string(),
         });
         let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
         return Ok(());
+    }
+    // Only a cross-game handoff released this lease after revoking its old
+    // target route. Any route installed in that gap is a newer owner and wins;
+    // a closed-and-removed route may instead be reclaimed using our original
+    // ingress timestamp, not the time spent waiting for the previous game.
+    if previous_full.is_some()
+        && connections
+            .lock()
+            .await
+            .get(&game_code)
+            .and_then(|players| players.get(&game_player))
+            .is_some_and(|sender| !sender.same_channel(tx))
+    {
+        let _ = tx.send(ServerMessage::DraftActionRejected {
+            reason: "Draft match seat belongs to a newer Full connection".to_string(),
+        });
+        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        return Ok(());
+    }
+    was_disconnected |= !session.connected[player_index];
+    if let Err(error) =
+        admit_seat_return_while_session_locked(state, &mut session, game_player, received_at).await
+    {
+        abort_unpublished_full_admission(state, connections, &mut session, game_player).await;
+        return Err(error);
     }
     let decision = DecisionSnapshot::from_state(&session.state);
     let game_started =
@@ -10672,6 +10770,8 @@ async fn handle_client_message(
                     let _ = socket.enqueue_reply(msg);
                 }
                 Ok((revision, result, winner, terminal, rewind_targets, full_key)) => {
+                    #[cfg(test)]
+                    context.socket_hooks.before_terminal_prepare().await;
                     let terminal_deliveries = match terminal {
                         Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
                             Ok(deliveries) => deliveries,

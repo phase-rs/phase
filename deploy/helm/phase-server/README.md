@@ -161,6 +161,11 @@ a handoff waits, the server returns `DraftActionRejected` and the current draft
 view instead of an active-game bootstrap. This is an operation refusal, not a
 WebSocket disconnect.
 
+A Full connection installed during a draft handoff takes precedence over that
+older handoff. A database validation error does not leave an unowned seat
+marked connected: reconnect grace is retained or started, without replacing
+another current Full connection or resetting an existing deadline.
+
 ## Announcing to a public directory
 
 `server.announceTo` (`PHASE_ANNOUNCE_TO`) makes the server POST a heartbeat to a

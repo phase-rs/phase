@@ -10,33 +10,64 @@ use crate::issue_4548_full_create_tests::{
 };
 use crate::socket_test_hooks::{room_request, run_async_test};
 use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::player::PlayerId;
 use server_core::protocol::{ClientMessage, DeckChoice, DeckData, ServerMessage};
 
 #[derive(Clone, Copy)]
-enum TargetRoute {
+enum HandoffScenario {
     Vacant,
     ClosesDuringRetirement,
     EndsDuringRetirement,
+    TerminalCommitPending,
+    InterveningCloses,
+    InterveningLive,
+    ValidationFails,
+    ValidationFailsWithOwner,
 }
 
 #[test]
 fn draft_handoff_retires_the_prior_route_before_recapturing_its_target() {
-    assert_draft_handoff(TargetRoute::Vacant);
+    assert_draft_handoff(HandoffScenario::Vacant);
 }
 
 #[test]
 fn stale_target_close_during_draft_handoff_cannot_disconnect_the_replacement() {
-    assert_draft_handoff(TargetRoute::ClosesDuringRetirement);
+    assert_draft_handoff(HandoffScenario::ClosesDuringRetirement);
 }
 
 #[test]
 fn terminal_target_during_draft_handoff_is_refused_without_an_active_binding() {
-    assert_draft_handoff(TargetRoute::EndsDuringRetirement);
+    assert_draft_handoff(HandoffScenario::EndsDuringRetirement);
 }
 
-fn assert_draft_handoff(target_route: TargetRoute) {
+#[test]
+fn terminal_target_pending_commit_is_not_published_as_active() {
+    assert_draft_handoff(HandoffScenario::TerminalCommitPending);
+}
+
+#[test]
+fn intervening_full_reconnect_close_cannot_leave_handoff_disconnected() {
+    assert_draft_handoff(HandoffScenario::InterveningCloses);
+}
+
+#[test]
+fn intervening_live_full_owner_is_not_replaced_by_an_older_handoff() {
+    assert_draft_handoff(HandoffScenario::InterveningLive);
+}
+
+#[test]
+fn draft_handoff_validation_error_cleans_up_provisional_presence() {
+    assert_draft_handoff(HandoffScenario::ValidationFails);
+}
+
+#[test]
+fn draft_handoff_validation_error_preserves_an_intervening_owner() {
+    assert_draft_handoff(HandoffScenario::ValidationFailsWithOwner);
+}
+
+fn assert_draft_handoff(scenario: HandoffScenario) {
     run_async_test(move || async move {
-        let (url, server, _directory, app) =
+        let (url, server, directory, app) =
             spawn_full_mode_server_with_db(basic_land_test_database()).await;
         let outcome = tokio::time::timeout(Duration::from_secs(10), async {
             let names = DeckData {
@@ -50,7 +81,7 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                 Some(DeckChoice::DeckList(Box::new(names.clone()))),
             )
             .await;
-            let (target_token, stale_target_token) = {
+            let (target_token, mut target_host_token) = {
                 let mut session = crate::lock_session(&app.sessions, &target_key.game_code)
                     .await
                     .unwrap();
@@ -58,7 +89,7 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                 session.start_game(&app.db).unwrap();
                 (
                     session.player_tokens[1].clone(),
-                    session.player_tokens[0].clone(),
+                    Some(session.player_tokens[0].clone()),
                 )
             };
             // Model the interval before a pairing's Full route is published.
@@ -142,15 +173,21 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                     break;
                 }
             }
-            let mut stale_target = match target_route {
-                TargetRoute::Vacant | TargetRoute::EndsDuringRetirement => None,
-                TargetRoute::ClosesDuringRetirement => {
-                    let mut stale = connect_and_hello(url).await;
+            let mut stale_target = match scenario {
+                HandoffScenario::Vacant
+                | HandoffScenario::EndsDuringRetirement
+                | HandoffScenario::TerminalCommitPending
+                | HandoffScenario::InterveningCloses
+                | HandoffScenario::InterveningLive
+                | HandoffScenario::ValidationFails
+                | HandoffScenario::ValidationFailsWithOwner => None,
+                HandoffScenario::ClosesDuringRetirement => {
+                    let mut stale = connect_and_hello(url.clone()).await;
                     send_test_message(
                         &mut stale,
                         &ClientMessage::Reconnect {
                             game_code: target_key.game_code.clone(),
-                            player_token: stale_target_token,
+                            player_token: target_host_token.take().unwrap(),
                             full_key: target_key.clone(),
                         },
                         false,
@@ -220,25 +257,99 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                 .is_err(),
                 "new-game traffic overtook retirement of the prior route"
             );
-            if matches!(target_route, TargetRoute::EndsDuringRetirement) {
-                send_test_message(&mut target_player, &ClientMessage::Concede, false).await;
+            let mut intervening = if matches!(
+                scenario,
+                HandoffScenario::InterveningCloses
+                    | HandoffScenario::InterveningLive
+                    | HandoffScenario::ValidationFailsWithOwner
+            ) {
+                let mut peer = connect_and_hello(url).await;
+                send_test_message(
+                    &mut peer,
+                    &ClientMessage::Reconnect {
+                        game_code: target_key.game_code.clone(),
+                        player_token: target_host_token.take().unwrap(),
+                        full_key: target_key.clone(),
+                    },
+                    false,
+                )
+                .await;
                 loop {
-                    match recv_server_message(&mut target_player).await {
-                        ServerMessage::TerminalResult { delivery: Some(_) } => break,
-                        ServerMessage::ActionFailed { message } => panic!("concede: {message}"),
-                        ServerMessage::ActionRejected { rejection } => {
-                            panic!("concede: {rejection:?}")
-                        }
-                        _ => {}
+                    if matches!(
+                        recv_server_message(&mut peer).await,
+                        ServerMessage::GameStarted { .. }
+                    ) {
+                        break;
                     }
                 }
-                assert!(
-                    app.game_db
-                        .load_active_full_key(&target_key.game_code)
-                        .unwrap()
-                        .is_none(),
-                    "the real concede must durably retire the target before cutover"
-                );
+                if matches!(scenario, HandoffScenario::InterveningCloses) {
+                    let connected = app.player_count.load(Ordering::Acquire);
+                    peer.close(None).await.unwrap();
+                    while app.player_count.load(Ordering::Acquire) == connected {
+                        tokio::task::yield_now().await;
+                    }
+                    assert!(
+                        !crate::lock_session(&app.sessions, &target_key.game_code)
+                            .await
+                            .unwrap()
+                            .connected[0],
+                        "the intervening owner must really finish disconnecting"
+                    );
+                    assert!(app
+                        .sessions
+                        .lock()
+                        .await
+                        .reconnect
+                        .is_disconnected(&target_key.game_code, PlayerId(0),));
+                }
+                Some(peer)
+            } else {
+                None
+            };
+            if matches!(
+                scenario,
+                HandoffScenario::EndsDuringRetirement | HandoffScenario::TerminalCommitPending
+            ) {
+                let terminal_gate = matches!(scenario, HandoffScenario::TerminalCommitPending)
+                    .then(|| app.context.socket_hooks.arm_terminal_prepare());
+                send_test_message(&mut target_player, &ClientMessage::Concede, false).await;
+                if let Some(pending) = terminal_gate.as_ref() {
+                    pending.entered.notified().await;
+                    let target = crate::lock_session(&app.sessions, &target_key.game_code)
+                        .await
+                        .unwrap();
+                    assert!(matches!(
+                        target.state.waiting_for,
+                        engine::types::game_state::WaitingFor::GameOver { .. }
+                    ));
+                    drop(target);
+                    assert_eq!(
+                        app.game_db
+                            .load_active_full_key(&target_key.game_code)
+                            .unwrap()
+                            .as_ref(),
+                        Some(&target_key),
+                        "Concede must be paused before its terminal transaction"
+                    );
+                } else {
+                    loop {
+                        match recv_server_message(&mut target_player).await {
+                            ServerMessage::TerminalResult { delivery: Some(_) } => break,
+                            ServerMessage::ActionFailed { message } => panic!("concede: {message}"),
+                            ServerMessage::ActionRejected { rejection } => {
+                                panic!("concede: {rejection:?}")
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert!(
+                        app.game_db
+                            .load_active_full_key(&target_key.game_code)
+                            .unwrap()
+                            .is_none(),
+                        "the real concede must durably retire the target before cutover"
+                    );
+                }
                 gate.release.notify_one();
                 drop(prior_lease);
                 let mut refusal = None;
@@ -260,6 +371,19 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                         _ => {}
                     }
                 }
+                if let Some(pending) = terminal_gate {
+                    pending.release.notify_one();
+                    loop {
+                        match recv_server_message(&mut target_player).await {
+                            ServerMessage::TerminalResult { delivery: Some(_) } => break,
+                            ServerMessage::ActionFailed { message } => panic!("concede: {message}"),
+                            ServerMessage::ActionRejected { rejection } => {
+                                panic!("concede: {rejection:?}")
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 return;
             }
             send_test_message(
@@ -279,8 +403,136 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                     _ => {}
                 }
             };
+            let mut validation_database = None;
+            if matches!(
+                scenario,
+                HandoffScenario::ValidationFails | HandoffScenario::ValidationFailsWithOwner
+            ) {
+                // Break the actual SELECT on this server's own temporary DB,
+                // rather than replacing the validation result with a mock.
+                let database =
+                    rusqlite::Connection::open(directory.path().join("games.db")).unwrap();
+                database
+                    .execute_batch("ALTER TABLE game_sessions RENAME TO held_game_sessions")
+                    .unwrap();
+                assert!(app
+                    .game_db
+                    .load_active_full_key(&target_key.game_code)
+                    .is_err());
+                validation_database = Some(database);
+            }
             gate.release.notify_one();
             drop(prior_lease);
+            if matches!(
+                scenario,
+                HandoffScenario::InterveningLive
+                    | HandoffScenario::ValidationFails
+                    | HandoffScenario::ValidationFailsWithOwner
+            ) {
+                loop {
+                    match recv_server_message(&mut moving).await {
+                        ServerMessage::DraftActionRejected { .. } => break,
+                        ServerMessage::DraftMatchStart { .. }
+                        | ServerMessage::GameStarted { .. }
+                        | ServerMessage::StateUpdate { .. } => {
+                            panic!("a failed or superseded handoff published an active binding")
+                        }
+                        _ => {}
+                    }
+                }
+                if matches!(scenario, HandoffScenario::ValidationFails) {
+                    let target = crate::lock_session(&app.sessions, &target_key.game_code)
+                        .await
+                        .unwrap();
+                    assert!(
+                        !target.connected[0],
+                        "query failure left unpublished provisional presence connected"
+                    );
+                    drop(target);
+                    assert!(app
+                        .sessions
+                        .lock()
+                        .await
+                        .reconnect
+                        .is_disconnected(&target_key.game_code, PlayerId(0),));
+                    assert!(!app
+                        .connections
+                        .lock()
+                        .await
+                        .get(&target_key.game_code)
+                        .is_some_and(|players| players.contains_key(&PlayerId(0))));
+                    loop {
+                        if let ServerMessage::OpponentDisconnected {
+                            full_key,
+                            player: Some(PlayerId(0)),
+                            ..
+                        } = recv_server_message(&mut target_player).await
+                        {
+                            assert_eq!(full_key.as_ref(), Some(&target_key));
+                            break;
+                        }
+                    }
+                    validation_database
+                        .take()
+                        .unwrap()
+                        .execute_batch("ALTER TABLE held_game_sessions RENAME TO game_sessions")
+                        .unwrap();
+                    // A restored backend must let this same healthy draft
+                    // connection reclaim the coherently disconnected seat.
+                    send_test_message(&mut moving, &reconnect, false).await;
+                } else {
+                    if let Some(database) = validation_database.take() {
+                        database
+                            .execute_batch("ALTER TABLE held_game_sessions RENAME TO game_sessions")
+                            .unwrap();
+                    }
+                    let peer = intervening.as_mut().unwrap();
+                    send_test_message(
+                        peer,
+                        &ClientMessage::Action {
+                            action: GameAction::MulliganDecision {
+                                choice: MulliganChoice::Keep,
+                            },
+                        },
+                        false,
+                    )
+                    .await;
+                    loop {
+                        match recv_server_message(peer).await {
+                            ServerMessage::StateUpdate {
+                                state_revision,
+                                state,
+                                ..
+                            } if state_revision > target_revision => {
+                                assert_eq!(state_revision, target_revision + 1);
+                                assert!(matches!(
+                                    state.waiting_for,
+                                    engine::types::game_state::WaitingFor::Priority { .. }
+                                ));
+                                break;
+                            }
+                            ServerMessage::ActionFailed { message } => panic!("owner: {message}"),
+                            ServerMessage::ActionRejected { rejection } => {
+                                panic!("owner: {rejection:?}")
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert!(
+                        crate::lock_session(&app.sessions, &target_key.game_code)
+                            .await
+                            .unwrap()
+                            .connected[0]
+                    );
+                    assert!(!app
+                        .sessions
+                        .lock()
+                        .await
+                        .reconnect
+                        .is_disconnected(&target_key.game_code, PlayerId(0),));
+                    return;
+                }
+            }
             loop {
                 match recv_server_message(&mut moving).await {
                     ServerMessage::DraftMatchStart { full_key, .. } => {
@@ -308,7 +560,42 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                     _ => {}
                 }
             }
-            if matches!(target_route, TargetRoute::ClosesDuringRetirement) {
+            if matches!(
+                scenario,
+                HandoffScenario::ClosesDuringRetirement
+                    | HandoffScenario::InterveningCloses
+                    | HandoffScenario::ValidationFails
+            ) {
+                let target = crate::lock_session(&app.sessions, &target_key.game_code)
+                    .await
+                    .unwrap();
+                assert!(
+                    target.connected[0],
+                    "the installed replacement is disconnected"
+                );
+                drop(target);
+                assert!(!app
+                    .sessions
+                    .lock()
+                    .await
+                    .reconnect
+                    .is_disconnected(&target_key.game_code, engine::types::player::PlayerId(0),));
+                if matches!(
+                    scenario,
+                    HandoffScenario::InterveningCloses | HandoffScenario::ValidationFails
+                ) {
+                    loop {
+                        if matches!(
+                            recv_server_message(&mut target_player).await,
+                            ServerMessage::OpponentReconnected {
+                                player: Some(PlayerId(0)),
+                                ..
+                            }
+                        ) {
+                            break;
+                        }
+                    }
+                }
                 send_test_message(
                     &mut moving,
                     &ClientMessage::Action {
@@ -340,20 +627,6 @@ fn assert_draft_handoff(target_route: TargetRoute) {
                         _ => {}
                     }
                 }
-                let target = crate::lock_session(&app.sessions, &target_key.game_code)
-                    .await
-                    .unwrap();
-                assert!(
-                    target.connected[0],
-                    "the installed replacement is disconnected"
-                );
-                drop(target);
-                assert!(!app
-                    .sessions
-                    .lock()
-                    .await
-                    .reconnect
-                    .is_disconnected(&target_key.game_code, engine::types::player::PlayerId(0),));
             }
         })
         .await;

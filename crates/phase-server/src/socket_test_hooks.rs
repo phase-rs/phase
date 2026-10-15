@@ -10,6 +10,7 @@ use tokio::sync::Notify;
 pub(crate) struct Hooks {
     bootstrap: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     cutover: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    terminal_prepare: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
 }
 
 #[derive(Default)]
@@ -31,8 +32,22 @@ impl Hooks {
         gate
     }
 
+    pub(crate) fn arm_terminal_prepare(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.terminal_prepare.lock() = Some(gate.clone());
+        gate
+    }
+
     pub(crate) async fn before_bootstrap_cutover(&self) {
         let gate = self.cutover.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn before_terminal_prepare(&self) {
+        let gate = self.terminal_prepare.lock().take();
         if let Some(gate) = gate {
             gate.entered.notify_one();
             gate.release.notified().await;
