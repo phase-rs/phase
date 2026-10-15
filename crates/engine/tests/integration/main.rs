@@ -1437,6 +1437,7 @@ mod sacrifice_cost_context_identity;
 mod sacrifice_cost_selection_validation;
 mod saddle_become_effect;
 mod saddle_state_model;
+mod sarulf_realm_eater_upkeep_exile;
 mod saruman_white_hand_amass;
 mod satya_localized_destruction_commander_copy;
 mod sba_lethal_damage_redirect_single_application;

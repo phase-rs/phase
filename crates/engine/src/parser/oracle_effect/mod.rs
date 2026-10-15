@@ -2099,28 +2099,36 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
 }
 
-/// CR 608.2c: Excise the resolution-time payment-amount anaphors from a verb
+/// CR 608.2c: Excise the resolution-time bound quantity anaphors from a verb
 /// dispatcher's target span before the fail-closed check below runs.
 ///
 /// "the amount of {E} paid this way" is a quantity-position anaphor the
 /// quantity grammar binds to the payment channel (`QuantityRef::EventContextAmount`
 /// via `parse_paid_energy_this_way_ref`, CR 106 vs CR 122) — it is consumed,
 /// not dropped, so it must not trip the refusal (Wrath of the Skies' destroy
+/// threshold). So is "the number of [kind] counter(s) removed this way"
+/// (`QuantityRef::PreviousEffectAmount` via
+/// `parse_counters_removed_this_way_ref`, CR 122.1 — Sarulf's exile
 /// threshold). What remains after excision is the unbound text: a
 /// target-identity participle no filter binds ("put into graveyards this way",
 /// "of a type chosen this way") still trips it.
 ///
-/// Word-boundary scan over the existing quantity combinator — never a verbatim
+/// Word-boundary scan over the existing quantity combinators — never a verbatim
 /// sentence match. Every excised chunk is a complete combinator match (which
-/// always consumes its "paid this way" tail), so a partial match can never
-/// strand the "this way" it was meant to cover; anything the combinator does
+/// always consumes its "this way" tail), so a partial match can never
+/// strand the "this way" it was meant to cover; anything the combinators do
 /// not match stays in place and still trips the check (fail-closed).
-fn strip_bound_payment_amount_anaphors(span_lower: &str) -> String {
+fn strip_bound_quantity_anaphors(span_lower: &str) -> String {
     let mut stripped = String::with_capacity(span_lower.len());
     let mut cursor = 0usize;
     let mut remaining = span_lower;
     while !remaining.is_empty() {
-        if let Ok((after, _)) = nom_quantity::parse_paid_energy_this_way_ref(remaining) {
+        let bound = alt((
+            nom_quantity::parse_paid_energy_this_way_ref,
+            nom_quantity::parse_counters_removed_this_way_ref,
+        ))
+        .parse(remaining);
+        if let Ok((after, _)) = bound {
             let match_start = span_lower.len() - remaining.len();
             let match_end = span_lower.len() - after.len();
             stripped.push_str(&span_lower[cursor..match_start]);
@@ -2144,7 +2152,7 @@ fn strip_bound_payment_amount_anaphors(span_lower: &str) -> String {
 /// honest `Unimplemented` instead of a false-supported over-broad effect.
 ///
 /// "Unbound" is structural, not textual: a "this way" the quantity grammar
-/// consumed as a payment-amount threshold ([`strip_bound_payment_amount_anaphors`])
+/// consumed as a bound quantity threshold ([`strip_bound_quantity_anaphors`])
 /// is bound and never trips this, and neither is the reveal-choice anaphor
 /// ("a creature card they revealed this way") — owned by the reveal-choice
 /// binder ([`bind_revealed_this_way_consumer`], claimed through
@@ -2166,7 +2174,7 @@ fn target_span_dropped_this_way_anaphor(span: &str, target: &TargetFilter) -> bo
     if parse_revealed_this_way_card_filter(&span_lower).is_some() {
         return false;
     }
-    let unbound = strip_bound_payment_amount_anaphors(&span_lower);
+    let unbound = strip_bound_quantity_anaphors(&span_lower);
     scan_contains_phrase(&unbound, "this way")
 }
 

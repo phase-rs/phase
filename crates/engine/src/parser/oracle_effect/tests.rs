@@ -95023,6 +95023,58 @@ fn harsh_mercy_destroy_sentence_with_chosen_type_anaphor_is_refused() {
     );
 }
 
+/// Sarulf's exile threshold names a BOUND quantity-position anaphor ("the
+/// number of counters removed this way" → `PreviousEffectAmount` via the
+/// quantity authority, CR 608.2c + CR 122.1) — a numeric amount, not an
+/// unbound object-membership restriction. The mass-exile dispatcher must keep
+/// the sentence supported with the threshold intact, not refuse it.
+#[test]
+fn sarulf_exile_sentence_keeps_bound_numeric_threshold() {
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+    fn binds_removed_counter_threshold(target: &TargetFilter) -> bool {
+        match target {
+            TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::PreviousEffectAmount { .. }
+                        }
+                    }
+                )
+            }),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(binds_removed_counter_threshold)
+            }
+            TargetFilter::Not { filter } => binds_removed_counter_threshold(filter),
+            _ => false,
+        }
+    }
+
+    let lowered = parse_effect(
+        "Exile each other nonland permanent with mana value less than or equal to the number of counters removed this way.",
+    );
+    let Effect::ChangeZoneAll {
+        destination,
+        target,
+        ..
+    } = &lowered
+    else {
+        panic!("Sarulf's exile must stay a supported mass exile, got {lowered:?}");
+    };
+    assert_eq!(
+        *destination,
+        Zone::Exile,
+        "Sarulf's exile must go to exile, got {lowered:?}"
+    );
+    assert!(
+        binds_removed_counter_threshold(target),
+        "Sarulf's exile must cap MV at the removed-counters amount, got {lowered:?}"
+    );
+}
+
 /// Flickerform's delayed-trigger body: "the other" binds `TrackedSet` at the
 /// return dispatcher (so the Entry-35 guard passes), then "that creature" in
 /// the attach tail triggers the chunk-loop anaphoric rewriter, which would
@@ -95133,6 +95185,28 @@ fn dropped_this_way_predicate_fires_only_on_unbound_anaphors() {
             &unbound_target
         ),
         "Harsh Mercy's dropped chosen-type anaphor must trip the refusal"
+    );
+    // Sarulf: the counters-removed threshold is a BOUND quantity-position
+    // anaphor (PreviousEffectAmount via the quantity authority) — no refusal.
+    let sarulf_span = "each other nonland permanent with mana value less than or equal to the number of counters removed this way.";
+    assert!(
+        scan_contains_for_test(sarulf_span, "this way"),
+        "presence guard: the Sarulf span must name the anaphor, got {sarulf_span:?}"
+    );
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(sarulf_span, &unbound_target),
+        "Sarulf's quantity-bound counters anaphor must not trip the refusal"
+    );
+    // Simic Manipulator: same bound class with an explicit counter kind
+    // ("+1/+1") — no refusal.
+    let simic_span = "target creature with power less than or equal to the number of +1/+1 counters removed this way.";
+    assert!(
+        scan_contains_for_test(simic_span, "this way"),
+        "presence guard: the Simic span must name the anaphor, got {simic_span:?}"
+    );
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(simic_span, &unbound_target),
+        "a kind-qualified counters-removed anaphor must not trip the refusal"
     );
     // A tracked-set target passes through untouched even with "this way" present.
     assert!(

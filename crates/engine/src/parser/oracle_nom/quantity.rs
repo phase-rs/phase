@@ -1128,6 +1128,53 @@ pub(crate) fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, Qu
     .parse(input)
 }
 
+/// CR 608.2c + CR 122.1: the shared terminal for "… counter(s) removed this
+/// way" quantity references — an optional single-token counter kind (`+1/+1`,
+/// `charge`, `eyeball`, …) plus the bare plural/singular head. Both the
+/// quantity binder (`try_parse_counters_removed_this_way`) and the fail-closed
+/// excisor (`strip_bound_quantity_anaphors`) enter here, so the phrase shape
+/// cannot drift between binding and excision.
+pub(crate) fn parse_counters_removed_this_way_suffix(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        // Kind-qualified first ("+1/+1 counters", "charge counters") so the
+        // match covers the kind token; `alt` backtracks to the bare arm when
+        // the kind arm's terminal fails.
+        value(
+            (),
+            preceded(
+                terminated(parse_counter_type_typed, tag(" ")),
+                parse_counter_removed_terminal,
+            ),
+        ),
+        parse_counter_removed_terminal,
+    ))
+    .parse(input)
+}
+
+fn parse_counter_removed_terminal(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((value((), tag("counters")), value((), tag("counter")))).parse(input)?;
+    value((), tag(" removed this way")).parse(rest)
+}
+
+/// CR 608.2c + CR 122.1: "the number of [kind] counter(s) removed this way"
+/// as a bound previous-effect amount (Sarulf, Realm Eater; Simic Manipulator;
+/// Molten Hydra…). Returns the same [`QuantityRef::PreviousEffectAmount`]
+/// the quantity authority binds, so the fail-closed excisor consumes the
+/// phrase through this authority rather than redefining it.
+pub(crate) fn parse_counters_removed_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PreviousEffectAmount {
+            channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
+        },
+        preceded(
+            tag("the number of "),
+            parse_counters_removed_this_way_suffix,
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 101.4 + CR 608.2d: which cross-player extremum a "chosen number" phrase
 /// names. The two words are the only leaves of this axis; the aggregation is the
 /// existing [`AggregateFunction`], so no extremum enum is minted. Shared with the
