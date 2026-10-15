@@ -3838,9 +3838,10 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// dies half).
 ///
 /// An exile-until loop (`Effect::ExileFromTopUntil`, every `UntilCondition`)
-/// also returns `true`: it hands the exiled card(s) to the next instruction, so
-/// a later `ParentTarget` binds to them (Breaching Dragonstorm, Demonlord
-/// Belzenlok).
+/// also returns `true`: it hands what it exiled to the next instruction — a
+/// `NextMatches` hit as that instruction's targets, so a later `ParentTarget`
+/// binds to it (Breaching Dragonstorm, Demonlord Belzenlok); a
+/// `CumulativeThreshold` pile only through `ExiledBySource`.
 fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // CR 608.2c + CR 603.2g: Effects that populate state.last_revealed_ids
     // introduce revealed objects. Sub-ability ParentTarget binds to those
@@ -3879,10 +3880,10 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     }
     // CR 608.2c + CR 701.13a: an exile-until loop ("exile cards from the top of
     // your library until you exile a nonland card") hands the card it exiled to
-    // the next instruction — the hit as that instruction's targets, or the
-    // exiled pile through `ExiledBySource` — so a later "that card" names the
-    // exiled card, never the trigger event (Breaching Dragonstorm's "If you
-    // don't, put that card into your hand"; Demonlord Belzenlok).
+    // the next instruction — a `NextMatches` hit as that instruction's
+    // targets, or the exiled pile through `ExiledBySource` — so a later "that
+    // card" names the hit, never the trigger event (Breaching Dragonstorm's
+    // "If you don't, put that card into your hand"; Demonlord Belzenlok).
     if matches!(effect, Effect::ExileFromTopUntil { .. }) {
         return true;
     }
