@@ -740,6 +740,127 @@ fn danse_macabre_modifier_flows_when_sacrifice_pauses_for_choices() {
     );
 }
 
+/// B-2c — RUNTIME replacement-paused automatic path (F1). One eligible
+/// creature per side, so the sacrifice takes the all-automatic fast path with
+/// no `EffectZoneChoice` prompt — but two competing graveyard replacements
+/// (Rest in Peace + Leyline of the Void) force the simultaneous sacrifice to
+/// pause mid-batch on a CR 616.1 order choice. The detached roll tail must
+/// ride the continuation across that pause and resume exactly once: the cast
+/// rolls exactly one d20, and the differential against an identical control
+/// cast reads exactly the caster's sacrificed toughness (oak's 3) — not 0
+/// (tail dropped / members unpublished) and not 10 (elm's 7 leaked in).
+///
+/// The lying green this guards: the pre-fix automatic arm dropped
+/// `after_scope` on `PausedForReplacement`, so the cast finished the
+/// sacrifices and never rolled.
+#[test]
+fn danse_macabre_roll_tail_survives_automatic_sacrifice_replacement_pause() {
+    const RIP: &str =
+        "If a card or token would be put into a graveyard from anywhere, exile it instead.";
+    const LEYLINE: &str =
+        "If a card or token would be put into an opponent's graveyard from anywhere, exile it instead.";
+
+    // Reach: without a scripted answer the driver must stall on the CR 616.1
+    // order choice — proving the automatic path really pauses rather than
+    // completing synchronously.
+    let mut reach = GameScenario::new();
+    reach.at_phase(Phase::PreCombatMain);
+    reach.add_creature(P0, "Oak", 2, 3);
+    reach.add_creature(P1, "Elm", 1, 7);
+    reach
+        .add_creature(P0, "Rest in Peace", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(RIP);
+    reach
+        .add_creature(P0, "Leyline of the Void", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(LEYLINE);
+    let reach_danse = reach
+        .add_spell_to_hand_from_oracle(P0, "Danse Macabre", false, DANSE)
+        .id();
+    let mut reach_runner = reach.build();
+    let stalled = reach_runner.cast(reach_danse).resolve();
+    assert!(
+        matches!(
+            stalled.final_waiting_for(),
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach: the automatic sacrifice must pause on the replacement order choice, got {:?}",
+        stalled.final_waiting_for()
+    );
+
+    // Behavior: the identical board with the order choice answered — the
+    // pause resolves, both sacrifices complete, and the roll tail resumes.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature(P1, "Elm", 1, 7).id();
+    let rip = scenario
+        .add_creature(P0, "Rest in Peace", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(RIP)
+        .id();
+    let leyline = scenario
+        .add_creature(P0, "Leyline of the Void", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(LEYLINE)
+        .id();
+    let danse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Danse Macabre", false, DANSE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(danse).replacement_choice(0).resolve();
+
+    // Clean halt: resolution finished with no dangling prompt.
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "expected a clean return to priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    // Both edicts paid through the replacements: the sacrificed creatures
+    // were exiled instead of reaching a graveyard.
+    outcome.assert_zone(&[oak, elm], Zone::Exile);
+    // The resolving sorcery is itself a card put into a graveyard (CR
+    // 608.2n), so Rest in Peace exiles it too.
+    outcome.assert_zone(&[danse], Zone::Exile);
+    // Nothing reanimated: only the two replacement enchantments remain.
+    outcome.assert_zone(&[rip, leyline], Zone::Battlefield);
+    assert_eq!(
+        outcome.state().battlefield.len(),
+        2,
+        "no row may reanimate while the put-into-zone anaphor is unwired"
+    );
+
+    // Exactly one d20 (the resumed tail rolls once) with exactly the
+    // caster-side filtered bonus: oak's 3, read through LKI from exile.
+    let danse_total = d20_total(outcome.events());
+    let mut control_scenario = GameScenario::new();
+    control_scenario.at_phase(Phase::PreCombatMain);
+    control_scenario.add_creature(P0, "Oak", 2, 3);
+    control_scenario.add_creature(P1, "Elm", 1, 7);
+    control_scenario
+        .add_creature(P0, "Rest in Peace", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(RIP);
+    control_scenario
+        .add_creature(P0, "Leyline of the Void", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(LEYLINE);
+    let control_spell = control_scenario
+        .add_spell_to_hand_from_oracle(P0, "Control Die", false, "Roll a d20.")
+        .id();
+    let mut control_runner = control_scenario.build();
+    let control_outcome = control_runner.cast(control_spell).resolve();
+    let natural = d20_total(control_outcome.events());
+    assert_eq!(
+        danse_total as i32 - natural as i32,
+        3,
+        "the replacement-paused sacrifice must publish its members and resume the roll: \
+         post-modifier total {danse_total}, control natural {natural}"
+    );
+}
+
 /// B-3 — SHAPE. The interposed agent is part of the card-level binding, not
 /// just the combinator: Danse's "you" and Ossuary's "they" each narrow the
 /// chain set to that agent's members.

@@ -19853,7 +19853,13 @@ fn start_player_scope_sacrifice_choices(
 
     match perform_player_scope_sacrifices(state, template, selections, None, events)? {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
-            return Ok(ResolutionProgress::Waiting)
+            // CR 608.2c: park the detached tail before suspension, mirroring
+            // the prompt arm above — the resumed drain completes through
+            // `drain_pending_player_scope_sacrifice_after_replacement`, whose
+            // publication gate reads this parked tail and whose caller drains
+            // the continuation exactly once (Danse Macabre's roll).
+            append_to_pending_continuation(state, after_scope);
+            return Ok(ResolutionProgress::Waiting);
         }
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
