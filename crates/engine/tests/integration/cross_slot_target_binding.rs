@@ -51,7 +51,8 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, CastingVariant, ChainStep, GameState, RetargetSlotAddress, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::mana::ManaCost;
@@ -1042,5 +1043,181 @@ fn prior_object_controller_slot_is_rechecked_on_resolution() {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mutiny / Breaking of the Fellowship — "choose new targets" (CR 115.7d)
+// ---------------------------------------------------------------------------
+
+const REDIRECT: &str = "You may choose new targets for target spell.";
+
+/// Cast `spell` at `targets`, apply `before_response` to the board, then cast
+/// Redirect at the spell and accept its "you may" up to the CR 115.7d prompt.
+/// Returns that prompt's per-position pools, after asserting the positions are
+/// the first target (the root) and the second (its `DealDamage` sub).
+fn redirect_prompt_pools(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    redirect: ObjectId,
+    targets: &[ObjectId],
+    before_response: impl FnOnce(&mut GameState),
+) -> Vec<Vec<TargetRef>> {
+    runner.cast(spell).target_objects(targets).commit();
+    before_response(runner.state_mut());
+    runner.cast(redirect).target_objects(&[spell]).commit();
+    for _ in 0..12 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept");
+            }
+            WaitingFor::RetargetChoice {
+                ref slots,
+                ref slot_pools,
+                ..
+            } => {
+                assert_eq!(
+                    *slots,
+                    vec![
+                        RetargetSlotAddress {
+                            path: vec![],
+                            slot: 0
+                        },
+                        RetargetSlotAddress {
+                            path: vec![ChainStep::SubAbility],
+                            slot: 0
+                        },
+                    ],
+                    "the first target, then the second"
+                );
+                return slot_pools.clone();
+            }
+            ref other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("no retarget prompt opened");
+}
+
+fn retarget(runner: &mut GameRunner, picks: [Option<ObjectId>; 2]) -> bool {
+    runner
+        .act(GameAction::RetargetSpell {
+            new_targets: picks.map(|pick| pick.map(TargetRef::Object)).to_vec(),
+        })
+        .is_ok()
+}
+
+/// CR 115.7d + CR 601.2c: "choose new targets" may move "another target
+/// creature that player controls" only onto a creature the first target's
+/// controller controls. With the second target still legal, a creature of
+/// another player is neither offered nor accepted, and another creature of the
+/// first target's controller is. Once P0 has gained control of the second
+/// target, the second target is illegal, and the offer still follows the
+/// first target's controller rather than the second target's new controller.
+#[test]
+fn choose_new_targets_keeps_the_second_target_with_the_first_targets_controller() {
+    for (name, text) in PRIOR_OBJECT_CONTROLLER_CARDS {
+        for steal_b in [false, true] {
+            let label = format!("{name} / P0 steals B: {steal_b}");
+            // P1 controls A, B and B2; P0 controls D. B and B2 survive 3
+            // damage, so the damage is read from `damage_marked`.
+            let mut scenario = main_phase_scenario(2);
+            let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+            let b = scenario.add_creature(P1, "P1 B", 2, 5).id();
+            let b2 = scenario.add_creature(P1, "P1 B2", 2, 5).id();
+            let d = scenario.add_creature(P0, "P0 D", 2, 5).id();
+            let spell = add_free_sorcery(&mut scenario, name, text);
+            let redirect = scenario
+                .add_spell_to_hand_from_oracle(P0, "Redirect", true, REDIRECT)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let mut runner = scenario.build();
+
+            let pools = redirect_prompt_pools(&mut runner, spell, redirect, &[a, b], |state| {
+                if steal_b {
+                    gain_control(state, spell, b);
+                }
+            });
+            let second = offered_objects(&pools[1]);
+            assert!(second.contains(&b2), "{label}: B2 is offered, {second:?}");
+            assert!(
+                !second.contains(&d),
+                "{label}: D is not offered, {second:?}"
+            );
+
+            assert!(
+                !retarget(&mut runner, [None, Some(d)]),
+                "{label}: P0's D is not controlled by A's controller"
+            );
+            assert!(
+                retarget(&mut runner, [None, Some(b2)]),
+                "{label}: B2 is controlled by A's controller"
+            );
+            runner.advance_until_stack_empty();
+            let state = runner.state();
+            assert_eq!(
+                state.objects[&b2].damage_marked, 3,
+                "{label}: A deals 3 to B2"
+            );
+            assert_eq!(state.objects[&b].damage_marked, 0, "{label}: B");
+            assert_eq!(state.objects[&d].damage_marked, 0, "{label}: D");
+        }
+    }
+}
+
+/// CR 115.7d + CR 115.7e: only the final set of targets is evaluated. Moving
+/// the first target to P2's creature while the second stays on P1's makes the
+/// unchanged second target illegal, and moving only the second target to P2's
+/// creature is not legal for the unchanged first target; both are refused.
+/// Moving both to P2's creatures is accepted.
+#[test]
+fn choose_new_targets_judges_the_second_target_against_the_final_first_target() {
+    for (name, text) in PRIOR_OBJECT_CONTROLLER_CARDS {
+        // P1 controls A and B; P2 controls E1 and E2; P0 controls no creature,
+        // so the Ring needs no Ring-bearer prompt.
+        let mut scenario = main_phase_scenario(3);
+        let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+        let b = scenario.add_creature(P1, "P1 B", 2, 5).id();
+        let e1 = scenario.add_creature(P2, "P2 E1", 3, 3).id();
+        let e2 = scenario.add_creature(P2, "P2 E2", 2, 5).id();
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let redirect = scenario
+            .add_spell_to_hand_from_oracle(P0, "Redirect", true, REDIRECT)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+
+        let pools = redirect_prompt_pools(&mut runner, spell, redirect, &[a, b], |_| {});
+        let second = offered_objects(&pools[1]);
+        assert!(
+            second.contains(&e2),
+            "{name}: E2 is offered, since the same choice may move A to P2's E1; {second:?}"
+        );
+
+        assert!(
+            !retarget(&mut runner, [Some(e1), None]),
+            "{name}: B would no longer be controlled by the first target's controller"
+        );
+        assert!(
+            !retarget(&mut runner, [None, Some(e2)]),
+            "{name}: E2 is not controlled by A's controller"
+        );
+        assert!(
+            retarget(&mut runner, [Some(e1), Some(e2)]),
+            "{name}: E2 is controlled by E1's controller"
+        );
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&e2].damage_marked, 3,
+            "{name}: E1 deals 3 to E2"
+        );
+        assert_eq!(state.objects[&a].damage_marked, 0, "{name}: A");
+        assert_eq!(state.objects[&b].damage_marked, 0, "{name}: B");
+        assert_eq!(state.objects[&e1].damage_marked, 0, "{name}: E1");
     }
 }

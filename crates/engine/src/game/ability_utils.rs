@@ -12019,6 +12019,65 @@ pub(crate) fn retarget_declared_view(
         .collect()
 }
 
+/// CR 115.7d + CR 601.2c: the earlier target a retarget position at `path` of
+/// `chain` is judged against when its `filter` reads an object announced for
+/// an earlier slot that a DECLARING ANCESTOR holds ("another target creature
+/// that player controls": Mutiny) — that ancestor's address and first object
+/// occurrence, as `chain` holds them. The same referent the CR 608.2b recheck
+/// binds (`validate_targets_in_chain_inner`'s `parent_block`): the nearest
+/// ancestor that declares a target of its own, its first object, and no
+/// further ancestor when that one declares only players. `None` when the
+/// filter reads no earlier object or no ancestor declares one; the position's
+/// own node then supplies the referent, as it does when both slots share a
+/// node.
+fn retarget_prior_object_referent(
+    chain: &ResolvedAbility,
+    path: &[ChainStep],
+    filter: &TargetFilter,
+) -> Option<(RetargetSlotAddress, ObjectId)> {
+    if !target_filter_binds_prior_target(filter) {
+        return None;
+    }
+    // The walk is pre-order, so the last ancestor it reports is the nearest.
+    let mut nearest: Option<Vec<ChainStep>> = None;
+    walk_declared_slots(chain, &mut |node, node_path, first_slot| {
+        if first_slot.is_some()
+            && node_path.len() < path.len()
+            && path.starts_with(node_path)
+            && !chain_node_positions(node).is_empty()
+        {
+            nearest = Some(node_path.to_vec());
+        }
+    });
+    let ancestor_path = nearest?;
+    let ancestor = node_at(chain, &ancestor_path)?;
+    chain_node_positions(ancestor)
+        .into_iter()
+        .find_map(|slot| match ancestor.targets[slot] {
+            TargetRef::Object(id) => Some((
+                RetargetSlotAddress {
+                    path: ancestor_path.clone(),
+                    slot,
+                },
+                id,
+            )),
+            TargetRef::Player(_) => None,
+        })
+}
+
+/// CR 115.7d + CR 601.2c: `node` (the node at `path` of `chain`) bound to its
+/// [`retarget_prior_object_referent`], or `None` when the node itself is the
+/// referent's carrier.
+fn retarget_node_bound_to_prior_object(
+    chain: &ResolvedAbility,
+    path: &[ChainStep],
+    node: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<ResolvedAbility> {
+    retarget_prior_object_referent(chain, path, filter)
+        .map(|(_, referent)| resolved_ability_with_bound_object_target(node, referent))
+}
+
 /// CR 115.7d (second clause) + CR 115.7e ("only the final set of targets is
 /// evaluated"): every UNCHANGED addressed slot that was LEGAL in `pre` must
 /// still be legal in `post`. A slot that was ALREADY illegal — not in the
@@ -12027,7 +12086,9 @@ pub(crate) fn retarget_declared_view(
 /// CR 115.7d's FIRST clause. `Legacy` bindings are skipped (no filter).
 /// Legality uses the slot's addressed node and `pool_controller` (the
 /// retarget pool's controller authority); a filter that reads another declared
-/// slot is evaluated against [`retarget_declared_view`] of the respective chain.
+/// slot is evaluated against [`retarget_declared_view`] of the respective chain,
+/// and one that reads an ancestor's earlier object against
+/// [`retarget_prior_object_referent`] of the respective chain.
 ///
 /// Extracted from `engine::apply_retarget`'s unchanged-position pass so that
 /// copy retargeting (CR 707.10c, which "chooses new targets") applies the same
@@ -12041,6 +12102,7 @@ pub(crate) fn unchanged_targets_stay_legal(
     pool_controller: PlayerId,
 ) -> Result<(), EngineError> {
     let slot_is_legal = |chain: &ResolvedAbility,
+                         path: &[ChainStep],
                          node: &ResolvedAbility,
                          filter: &TargetFilter,
                          position: usize,
@@ -12052,12 +12114,18 @@ pub(crate) fn unchanged_targets_stay_legal(
         if !target_is_current_at(node, position, state) {
             return false;
         }
+        // CR 115.7d + CR 601.2c: a slot that reads an earlier object a
+        // declaring ancestor holds is judged against that ancestor's target in
+        // `chain`, so changing the ancestor's target is checked against the
+        // unchanged dependent one.
+        let bound = retarget_node_bound_to_prior_object(chain, path, node, filter);
+        let judged = bound.as_ref().unwrap_or(node);
         if crate::game::filter::filter_reads_declared_slot(filter) {
             let view = retarget_declared_view(pre, chain);
             targeting::find_legal_targets_for_ability_with_view(
                 state,
                 filter,
-                node,
+                judged,
                 pool_controller,
                 &view,
             )
@@ -12066,7 +12134,7 @@ pub(crate) fn unchanged_targets_stay_legal(
             targeting::find_legal_targets_for_ability_with_controller(
                 state,
                 filter,
-                node,
+                judged,
                 pool_controller,
             )
             .contains(current)
@@ -12089,7 +12157,14 @@ pub(crate) fn unchanged_targets_stay_legal(
         let Some(pre_current) = pre_node.targets.get(binding.address.slot) else {
             continue;
         };
-        if !slot_is_legal(pre, pre_node, filter, binding.address.slot, pre_current) {
+        if !slot_is_legal(
+            pre,
+            &binding.address.path,
+            pre_node,
+            filter,
+            binding.address.slot,
+            pre_current,
+        ) {
             // CR 115.7d FIRST clause: an already-illegal unchanged target
             // stays accepted.
             continue;
@@ -12100,7 +12175,14 @@ pub(crate) fn unchanged_targets_stay_legal(
         let Some(post_current) = post_node.targets.get(binding.address.slot) else {
             continue;
         };
-        if !slot_is_legal(post, post_node, filter, binding.address.slot, post_current) {
+        if !slot_is_legal(
+            post,
+            &binding.address.path,
+            post_node,
+            filter,
+            binding.address.slot,
+            post_current,
+        ) {
             return Err(EngineError::InvalidAction(
                 "Retarget: the change would make an unchanged target illegal".to_string(),
             ));
@@ -12110,11 +12192,13 @@ pub(crate) fn unchanged_targets_stay_legal(
 }
 
 /// CR 115.7a + CR 115.7d + CR 115.7e: every CHANGED addressed slot whose
-/// filter reads another declared slot must be legal for the EDITED referent —
-/// the final set is what is evaluated. A dependent slot's stored candidate
-/// pool over-approximates (it cannot know which referent the same submission
-/// elects), so this is the exact check for those slots. Slots whose filter
-/// reads no declared slot are untouched (the stored pool is already exact).
+/// filter reads another declared slot, or an earlier object a declaring
+/// ancestor holds ([`retarget_prior_object_referent`]), must be legal for the
+/// EDITED referent — the final set is what is evaluated. A dependent slot's
+/// stored candidate pool over-approximates (it cannot know which referent the
+/// same submission elects), so this is the exact check for those slots. Slots
+/// whose filter reads neither are untouched (the stored pool is already
+/// exact).
 pub(crate) fn changed_dependent_targets_are_legal(
     state: &GameState,
     pre: &ResolvedAbility,
@@ -12131,24 +12215,36 @@ pub(crate) fn changed_dependent_targets_are_legal(
         let SlotEnforcement::Filtered(filter) = &binding.enforcement else {
             continue;
         };
-        if !crate::game::filter::filter_reads_declared_slot(filter) {
-            continue;
-        }
         let Some(post_node) = node_at(post, &binding.address.path) else {
             continue;
         };
+        let bound =
+            retarget_node_bound_to_prior_object(post, &binding.address.path, post_node, filter);
+        let reads_declared_slot = crate::game::filter::filter_reads_declared_slot(filter);
+        if !reads_declared_slot && bound.is_none() {
+            continue;
+        }
         let Some(post_current) = post_node.targets.get(binding.address.slot) else {
             continue;
         };
-        if !targeting::find_legal_targets_for_ability_with_view(
-            state,
-            filter,
-            post_node,
-            pool_controller,
-            &view,
-        )
-        .contains(post_current)
-        {
+        let judged = bound.as_ref().unwrap_or(post_node);
+        let legal = if reads_declared_slot {
+            targeting::find_legal_targets_for_ability_with_view(
+                state,
+                filter,
+                judged,
+                pool_controller,
+                &view,
+            )
+        } else {
+            targeting::find_legal_targets_for_ability_with_controller(
+                state,
+                filter,
+                judged,
+                pool_controller,
+            )
+        };
+        if !legal.contains(post_current) {
             return Err(EngineError::InvalidAction(
                 "Retarget: a new target is illegal for the edited selection".to_string(),
             ));
@@ -12186,8 +12282,12 @@ pub(crate) fn declared_position_addresses(
 /// legal set with that referent in the declared view. A pool cannot know
 /// which referent the same submission elects, so it over-approximates;
 /// [`changed_dependent_targets_are_legal`] and [`unchanged_targets_stay_legal`]
-/// are the exact checks on the final set (CR 115.7e). Pools of positions whose
-/// filter reads no declared slot, or reads several, are left untouched.
+/// are the exact checks on the final set (CR 115.7e). A position whose filter
+/// instead reads an earlier object a declaring ancestor holds
+/// ([`retarget_prior_object_referent`]) is widened the same way, with each
+/// referent bound as at announcement (`resolved_ability_with_bound_object_target`).
+/// Pools of positions whose filter reads neither, or reads several declared
+/// slots, are left untouched.
 pub(crate) fn widen_dependent_retarget_pools(
     state: &GameState,
     stack_ability: &ResolvedAbility,
@@ -12201,6 +12301,48 @@ pub(crate) fn widen_dependent_retarget_pools(
         let SlotEnforcement::Filtered(filter) = &bindings[i].enforcement else {
             continue;
         };
+        // CR 115.7d + CR 601.2c: "another target creature that player
+        // controls" is legal only for the controller of the object the
+        // ancestor's slot holds after the edit — its current object or any
+        // member of its own addressed pool. A declared-slot read takes
+        // precedence, as it does when the targets are announced.
+        if !crate::game::filter::filter_reads_declared_slot(filter) {
+            if let Some((referent_address, current)) =
+                retarget_prior_object_referent(stack_ability, &bindings[i].address.path, filter)
+            {
+                let Some(node) = node_at(stack_ability, &bindings[i].address.path) else {
+                    continue;
+                };
+                let mut referents = vec![current];
+                let referent_pool = bindings
+                    .iter()
+                    .position(|b| b.address == referent_address)
+                    .and_then(|j| pools.get(j));
+                for target in referent_pool.into_iter().flatten() {
+                    if let TargetRef::Object(id) = target {
+                        if !referents.contains(id) {
+                            referents.push(*id);
+                        }
+                    }
+                }
+                let mut widened = Vec::new();
+                for referent in referents {
+                    let bound = resolved_ability_with_bound_object_target(node, referent);
+                    for target in targeting::find_legal_targets_for_ability_with_controller(
+                        state,
+                        filter,
+                        &bound,
+                        pool_controller,
+                    ) {
+                        if !widened.contains(&target) {
+                            widened.push(target);
+                        }
+                    }
+                }
+                pools[i] = widened;
+                continue;
+            }
+        }
         let [slot] = declared_slots_read_by(filter)[..] else {
             continue;
         };
