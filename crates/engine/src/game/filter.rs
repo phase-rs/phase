@@ -1450,6 +1450,30 @@ fn parent_target_mass_leg(state: &GameState, ability: &ResolvedAbility) -> Targe
     }
 }
 
+/// Suspended target context for indexed reads across a suspension.
+///
+/// CR 608.2c + CR 608.2b + CR 400.7: a resumed indexed read applies the same
+/// slot/legality/incarnation authority the live path would
+/// ([`referenced_targets_for_filter`]), from context captured at park time —
+/// the resolving ability itself does not survive the suspension. `local`
+/// keeps positional slice semantics for whole-population reads
+/// (`ParentTarget`); indexed reads (`ParentTargetSlot`) resolve against
+/// `root` (declared chain-root numbering), exclude `illegal_slots` (the
+/// carrier stamp), and check `root_pins` (announced pins aligned with
+/// `root`, evaluated live at resume).
+#[derive(Clone, Copy)]
+pub struct ParkedTargets<'a> {
+    /// The suspending node's own targets (positional, local numbering).
+    pub local: &'a [TargetRef],
+    /// The creating ability's chain-root targets (declared numbering).
+    pub root: &'a [TargetRef],
+    /// Declared slots stamped illegal as the chain began to resolve.
+    pub illegal_slots: &'a [usize],
+    /// Announced pins aligned position-for-position with `root` (`None` for
+    /// players and unpinned occurrences).
+    pub root_pins: &'a [Option<ObjectIncarnationRef>],
+}
+
 /// Context bundle passed into filter evaluation.
 ///
 /// Bundles the source object, its controller, and — when available — the resolving
@@ -1469,11 +1493,12 @@ pub struct FilterContext<'a> {
     /// CR 608.2c: ability targets that survived a suspension. Suspension-
     /// resume paths (`roll_die::resume_after_ignore` and its callers) have no
     /// `ResolvedAbility` in scope, but the parked die-roll frame carries the
-    /// resolving ability's targets; readers that need ability targets consult
-    /// this slice when `ability` is `None`. `None` everywhere else — in
+    /// resolving ability's targets plus the chain-root/legality/pin context
+    /// indexed reads need; readers that need ability targets consult this
+    /// context when `ability` is `None`. `None` everywhere else — in
     /// particular the combat-tax slice entry keeps its own meaning and never
     /// feeds this channel.
-    pub ability_targets: Option<&'a [TargetRef]>,
+    pub ability_targets: Option<ParkedTargets<'a>>,
     /// Exact event-time authority for a triggered source. When present, every
     /// source-relative filter fact must read through it rather than rebinding
     /// `source_id` to whichever object currently owns that storage slot.
@@ -10846,18 +10871,48 @@ fn matches_crew_relation(
 /// Shared with `game/quantity.rs` for `CardTypeSetSource::TargetedObjects`, whose
 /// resolver arm selects the resolving ability's object targets through this
 /// authority rather than re-deriving slot selection.
-/// CR 608.2c: the single authority for positional target-slot picking (every
-/// target vs. the i-th slot) over a raw target slice. Suspension-resume reads
-/// have the resolving ability's targets but not the ability itself, so they
-/// enter here; [`referenced_targets_for_filter`] delegates when an ability is
-/// present, so the two can never drift.
-pub(crate) fn referenced_target_slice_for_filter<'a>(
+/// CR 608.2c + CR 608.2b + CR 400.7: the single authority for target-slot
+/// picking across a suspension, mirroring [`referenced_targets_for_filter`]
+/// step for step from park-captured context (the resolving ability itself
+/// does not survive the suspension): whole-population reads take the local
+/// slice; indexed reads resolve against the chain-root list (declared
+/// numbering — indexing happens before checks, so an illegal earlier slot
+/// never renumbers the selection), exclude carrier-stamped slots, and check
+/// the aligned announced pin live at resume. An empty root list (legacy
+/// in-flight frames, attraction rolls) falls back to local positional
+/// indexing — the only numbering those frames ever carried.
+pub(crate) fn referenced_parked_targets_for_filter<'a>(
+    state: &GameState,
     target: &TargetFilter,
-    targets: &'a [TargetRef],
+    parked: ParkedTargets<'a>,
 ) -> Vec<&'a TargetRef> {
     match target {
-        TargetFilter::ParentTarget => targets.iter().collect(),
-        TargetFilter::ParentTargetSlot { index } => targets.get(*index).into_iter().collect(),
+        TargetFilter::ParentTarget => parked.local.iter().collect(),
+        TargetFilter::ParentTargetSlot { index } => {
+            let list = if parked.root.is_empty() {
+                parked.local
+            } else {
+                parked.root
+            };
+            let Some(referent) = list.get(*index) else {
+                return vec![];
+            };
+            // Indexing precedes checks: the stamp and pin judge the selected
+            // slot; they never shift which slot an index names.
+            if parked.illegal_slots.contains(index) {
+                return vec![];
+            }
+            // Pins align with the root list; a short or missing entry passes
+            // (legacy frames carry no pins). Players carry no incarnation.
+            if matches!(referent, TargetRef::Object(_)) {
+                if let Some(Some(pin)) = parked.root_pins.get(*index) {
+                    if !pin.is_current(state) {
+                        return vec![];
+                    }
+                }
+            }
+            vec![referent]
+        }
         _ => vec![],
     }
 }

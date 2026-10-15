@@ -59,9 +59,9 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
 /// CR 608.2c: the modifier resolves in the resolving ability's context, so a
 /// later instruction can name what an earlier target-selection clause chose
 /// (the ability's chosen targets). Suspension-resume paths have no ability in
-/// scope and pass `None`, in which case the parked `targets` feed the
-/// distinguished parked-targets channel — same members the ability would
-/// have named, frozen at park time.
+/// scope and pass `None`, in which case the parked context feeds the
+/// distinguished parked-targets channel — the local members plus the
+/// chain-root/legality/pin context indexed reads need, frozen at park time.
 fn apply_modifier(
     state: &mut GameState,
     natural: u8,
@@ -69,7 +69,7 @@ fn apply_modifier(
     controller: PlayerId,
     source_id: ObjectId,
     ability: Option<&ResolvedAbility>,
-    targets: &[TargetRef],
+    parked: crate::game::filter::ParkedTargets<'_>,
 ) -> u8 {
     let Some(m) = modifier else {
         return natural;
@@ -82,7 +82,7 @@ fn apply_modifier(
             crate::game::quantity::resolve_quantity_with_targets(state, value, ability)
         }
         None => crate::game::quantity::resolve_quantity_with_parked_targets(
-            state, value, controller, source_id, targets,
+            state, value, controller, source_id, parked,
         ),
     };
     let combined = match m {
@@ -252,6 +252,20 @@ pub(crate) fn resolve_step(
         // target once that branch runs (see
         // `build_resolved_from_def_with_chain_root`'s doc).
         chain_root_targets: ability.context.chain_root_targets.clone(),
+        // CR 608.2b + CR 400.7: capture the declared-slot legality stamp and
+        // the announced pins aligned with the chain-root list, so a resumed
+        // indexed read applies the same slot/legality/incarnation authority
+        // the live path would.
+        illegal_target_slots: crate::game::targeting::carrier_illegal_slots(state, ability),
+        chain_root_target_pins: ability
+            .context
+            .chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -359,6 +373,8 @@ fn execute_roll(
         // the results-table route by construction.
         continuation: _,
         chain_root_targets,
+        illegal_target_slots,
+        chain_root_target_pins,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -382,6 +398,8 @@ fn execute_roll(
         forced_ignored: outcome.forced.clone(),
         chain_root_targets,
         trigger_context,
+        illegal_target_slots,
+        chain_root_target_pins,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -616,6 +634,8 @@ pub(crate) fn resume_after_ignore(
         forced_ignored: _,
         chain_root_targets,
         trigger_context,
+        illegal_target_slots,
+        chain_root_target_pins,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -658,7 +678,12 @@ pub(crate) fn resume_after_ignore(
             controller,
             source_id,
             ability,
-            &targets,
+            crate::game::filter::ParkedTargets {
+                local: &targets,
+                root: &chain_root_targets,
+                illegal_slots: &illegal_target_slots,
+                root_pins: &chain_root_target_pins,
+            },
         );
 
         // CR 706.2 + CR 706.6: emit the authoritative die-roll event ONCE, with
@@ -742,6 +767,8 @@ pub(crate) fn resume_after_ignore(
                     forced_ignored: ignore_indices.clone(),
                     chain_root_targets: chain_root_targets.clone(),
                     trigger_context,
+                    illegal_target_slots: illegal_target_slots.clone(),
+                    chain_root_target_pins: chain_root_target_pins.clone(),
                 };
                 // CR 706.3a + CR 608.2c: the die owner waits outside the
                 // branch's entire child stack, not merely its top frame.
@@ -1635,6 +1662,8 @@ mod tests {
             forced_ignored: vec![],
             chain_root_targets: vec![],
             trigger_context: None,
+            illegal_target_slots: vec![],
+            chain_root_target_pins: vec![],
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();

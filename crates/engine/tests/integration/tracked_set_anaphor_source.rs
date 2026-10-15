@@ -1130,7 +1130,7 @@ fn targeted_objects_toughness_reads_live_for_unmoved_graveyard_target() {
     let ghoul = scenario.add_creature_to_graveyard(P0, "Ghoul", 3, 4).id();
     let source = scenario.add_creature(P0, "Source", 1, 1).id();
     let runner = scenario.build();
-    let mut state = runner.state().clone();
+    let state = runner.state().clone();
 
     let parsed = parse_oracle_text(
         "Destroy target nonblack creature.",

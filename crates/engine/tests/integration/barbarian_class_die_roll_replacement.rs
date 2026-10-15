@@ -754,6 +754,8 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
         forced_ignored: vec![],
         chain_root_targets: Vec::new(),
         trigger_context: None,
+        illegal_target_slots: Vec::new(),
+        chain_root_target_pins: Vec::new(),
     };
     runner.state_mut().push_die_roll_frame(pending);
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
@@ -1169,6 +1171,8 @@ fn ai_candidates_cover_every_ignore_count() {
                 forced_ignored: vec![],
                 chain_root_targets: Vec::new(),
                 trigger_context: None,
+                illegal_target_slots: Vec::new(),
+                chain_root_target_pins: Vec::new(),
             });
         runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
             player: P0,
@@ -1407,6 +1411,8 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
             forced_ignored: vec![0],
             chain_root_targets: Vec::new(),
             trigger_context: None,
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
         });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,

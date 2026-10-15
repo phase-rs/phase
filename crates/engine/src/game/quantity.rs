@@ -13,6 +13,7 @@ use crate::game::filter::{
     matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
     shared_quality_characteristic_reads, spell_record_matches_filter,
     target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
+    ParkedTargets,
 };
 use crate::game::speed::effective_speed;
 use crate::game::targeting::TriggeringSpell;
@@ -384,7 +385,7 @@ fn targeted_object_characteristic_view<'s>(
     ability: Option<&ResolvedAbility>,
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'s>> {
-    if let Some(pin) = ability.and_then(|ability| targeted_occurrence_pin(ability, object_id)) {
+    if let Some(pin) = ability.and_then(|ability| ability.occurrence_pin_for(object_id)) {
         if !pin.is_current(state) {
             return state
                 .lki_by_incarnation
@@ -394,29 +395,6 @@ fn targeted_object_characteristic_view<'s>(
         }
     }
     characteristic_view_for_object(state, object_id)
-}
-
-/// The announced incarnation for one targeted object: positional occurrence
-/// pins first (announced targets), then keyed pins (delayed-trigger
-/// referents). `None` when the ability never pinned the object.
-fn targeted_occurrence_pin(
-    ability: &ResolvedAbility,
-    object_id: ObjectId,
-) -> Option<ObjectIncarnationRef> {
-    if let Some(index) = ability
-        .targets
-        .iter()
-        .position(|target| matches!(target, TargetRef::Object(id) if *id == object_id))
-    {
-        if let Some(pin) = ability.target_pin_at(index) {
-            return Some(pin);
-        }
-    }
-    ability
-        .target_incarnations
-        .iter()
-        .find(|pin| pin.object_id == object_id)
-        .copied()
 }
 
 /// CR 109.2 + CR 400.1: Walk the population a [`CardTypeSetSource`] names,
@@ -711,8 +689,9 @@ fn visit_characteristic_leaf<'s>(
             };
             // CR 608.2c: the resolving ability's targets first; parked
             // ability-targets (suspension-resume reads, where the ability is
-            // gone but its targets survive on the parked frame) second. Both
-            // go through the one positional authority — never a census.
+            // gone but its targets survive on the parked frame) second. The
+            // parked path applies the equivalent slot/legality/incarnation
+            // authority from park-captured context — never a census.
             let selected: Vec<TargetRef> = match filter_ctx.ability {
                 Some(_) => crate::game::filter::referenced_targets_for_filter(
                     state,
@@ -720,12 +699,12 @@ fn visit_characteristic_leaf<'s>(
                     filter_ctx.ability,
                 ),
                 None => match filter_ctx.ability_targets {
-                    Some(slice) => {
-                        crate::game::filter::referenced_target_slice_for_filter(&selector, slice)
-                            .into_iter()
-                            .cloned()
-                            .collect()
-                    }
+                    Some(parked) => crate::game::filter::referenced_parked_targets_for_filter(
+                        state, &selector, parked,
+                    )
+                    .into_iter()
+                    .cloned()
+                    .collect(),
                     None => vec![],
                 },
             };
@@ -4579,17 +4558,17 @@ pub fn resolve_quantity_with_targets_slice(
 ///
 /// Suspension-resume paths (`roll_die::resume_after_ignore` and its callers)
 /// lose the `ResolvedAbility` across the suspension, but the parked frame
-/// carries its targets. Those targets feed ONLY the distinguished
-/// `ability_targets` channel (consumed by `TargetedObjects`); the ordinary
-/// `targets` slice stays empty so every other arm reads exactly as the
-/// ability-blind entry would. The combat-tax slice entry keeps its own
-/// meaning and is untouched.
+/// carries its targets plus the chain-root/legality/pin context indexed
+/// reads need. That context feeds ONLY the distinguished `ability_targets`
+/// channel (consumed by `TargetedObjects`); the ordinary `targets` slice
+/// stays empty so every other arm reads exactly as the ability-blind entry
+/// would. The combat-tax slice entry keeps its own meaning and is untouched.
 pub fn resolve_quantity_with_parked_targets(
     state: &GameState,
     expr: &QuantityExpr,
     controller: PlayerId,
     source_id: ObjectId,
-    targets: &[TargetRef],
+    parked: ParkedTargets<'_>,
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
@@ -4611,10 +4590,10 @@ pub fn resolve_quantity_with_parked_targets(
             &[],
             None,
             None,
-            Some(targets),
+            Some(parked),
         ),
         other => fold_compose(other, |inner| {
-            resolve_quantity_with_parked_targets(state, inner, controller, source_id, targets)
+            resolve_quantity_with_parked_targets(state, inner, controller, source_id, parked)
         }),
     }
 }
@@ -5275,9 +5254,10 @@ fn resolve_ref(
     ability: Option<&ResolvedAbility>,
     // CR 608.2c: parked ability-targets for suspension-resume reads, where
     // the ability is gone but its targets survive (the roll-die parked
-    // frame). `None` in every other context — in particular the combat-tax
-    // slice entry keeps its own meaning for `targets` and never feeds this.
-    ability_targets: Option<&[TargetRef]>,
+    // frame), plus the chain-root/legality/pin context indexed reads need.
+    // `None` in every other context — in particular the combat-tax slice
+    // entry keeps its own meaning for `targets` and never feeds this.
+    ability_targets: Option<ParkedTargets<'_>>,
 ) -> i32 {
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
@@ -26183,6 +26163,8 @@ mod tests {
             forced_ignored: Vec::new(),
             chain_root_targets: root.context.chain_root_targets.clone(),
             trigger_context: None,
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
         };
 
         let mut events = Vec::new();
