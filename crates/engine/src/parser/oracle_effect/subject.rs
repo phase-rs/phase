@@ -2703,7 +2703,9 @@ enum AnaphorConsumer {
     /// The affected object of a continuous grant, restriction or type/P&T change
     /// ("That creature can't be blocked this turn"): an anaphor naming the chain's
     /// declared object target binds that target (CR 601.2c), and nothing when the
-    /// optional target was declined (CR 115.6).
+    /// optional target was declined (CR 115.6). A bare "they" in this position
+    /// whose nearest earlier clause acted on an object set names that set, not an
+    /// iterated-player frame (`resolve_they_pronoun`).
     AffectedObject,
     /// Every other reader (the imperative fallback, damage source and recipient
     /// stamps): keeps the trigger-source stamp.
@@ -3713,7 +3715,7 @@ fn parse_subject_application_for(
     .parse(lower.as_str())
     {
         return Some(SubjectApplication {
-            affected: resolve_they_pronoun(ctx),
+            affected: resolve_they_pronoun(ctx, consumer),
             target: None,
             multi_target: None,
             inherits_parent: false,
@@ -4159,9 +4161,25 @@ fn strip_possessive_subject_suffix(subject: &str) -> &str {
 /// ref (e.g., `controller: Opponent`). For object-type subjects, "they" refers
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
-fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> TargetFilter {
+    // CR 608.2c + CR 611.2c: an iterated-player frame (a fan-out vote body, an
+    // each-player or each-upkeep scope) is the referent of a bare "they" unless
+    // the nearest earlier clause acted on an object set and "they" is the affected
+    // object of a continuous modification. Then the frame yields and the object
+    // rules below read "they" as they do in a frameless body: with no trigger
+    // subject that is ParentTarget, which binds the set (Seize the Spotlight:
+    // "Untap those creatures and they gain haste until end of turn"); an object
+    // trigger subject still takes precedence, as it does without a frame. A player
+    // action keeps the frame whatever precedes it, and so does a modification
+    // with no object antecedent (Champions of Minas Tirith: "If they don't, they
+    // can't attack you this combat").
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
-        return TargetFilter::ScopedPlayer;
+        match consumer {
+            AnaphorConsumer::AffectedObject if ctx.chain_prior_object_set.is_some() => {}
+            AnaphorConsumer::AffectedObject | AnaphorConsumer::Other => {
+                return TargetFilter::ScopedPlayer;
+            }
+        }
     }
     // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after body "its
     // controller may … if they do, they draw" refers to that creature's
@@ -8325,6 +8343,7 @@ mod tests {
         QuantityRef, TypeFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::identifiers::TrackedSetId;
     use crate::types::statics::BlockExceptionKind;
 
     /// CR 613.1d: "isn't"/"aren't" head a type-removal predicate only when no
@@ -8368,7 +8387,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve_they_pronoun(&mut only_empty),
+            resolve_they_pronoun(&mut only_empty, AnaphorConsumer::Other),
             TargetFilter::ParentTarget,
             "an empty object filter must not masquerade as a player slot"
         );
@@ -8381,7 +8400,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve_they_pronoun(&mut with_opponent),
+            resolve_they_pronoun(&mut with_opponent, AnaphorConsumer::Other),
             TargetFilter::ParentTargetSlot { index: 1 },
             "the sole genuine player slot must remain unambiguous"
         );
@@ -8392,12 +8411,15 @@ mod tests {
     #[test]
     fn they_after_a_declared_player_yields_to_scope_and_trigger_readings() {
         let they = |scope: Option<ControllerRef>, subject: Option<TargetFilter>, declared| {
-            resolve_they_pronoun(&mut ParseContext {
-                prior_player_declaration: declared,
-                relative_player_scope: scope,
-                subject,
-                ..Default::default()
-            })
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    prior_player_declaration: declared,
+                    relative_player_scope: scope,
+                    subject,
+                    ..Default::default()
+                },
+                AnaphorConsumer::Other,
+            )
         };
         assert_eq!(they(None, None, true), TargetFilter::ParentTargetController);
         assert_eq!(they(None, None, false), TargetFilter::ParentTarget);
@@ -8421,6 +8443,68 @@ mod tests {
         assert_eq!(
             they(None, Some(TargetFilter::Player), true),
             TargetFilter::TriggeringPlayer
+        );
+    }
+
+    /// CR 608.2c + CR 611.2c: under an iterated-player frame, a bare "they" names
+    /// the frame's player unless it is the affected object of a modification AND
+    /// the nearest earlier clause acted on an object set; then the frameless
+    /// object rules read it.
+    #[test]
+    fn they_names_an_iterated_player_unless_it_is_an_affected_object_set() {
+        let object_set = Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        });
+        let framed = |chain_prior_object_set: Option<TargetFilter>| ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            chain_prior_object_set,
+            ..Default::default()
+        };
+
+        // (1) A player action keeps the frame even after an object set.
+        assert_eq!(
+            resolve_they_pronoun(&mut framed(object_set.clone()), AnaphorConsumer::Other),
+            TargetFilter::ScopedPlayer,
+        );
+        // (2) The affected object after an object set names that set.
+        assert_eq!(
+            resolve_they_pronoun(
+                &mut framed(object_set.clone()),
+                AnaphorConsumer::AffectedObject
+            ),
+            TargetFilter::ParentTarget,
+        );
+        // (3) Once the frame yields, an object trigger subject still defers to a
+        // nearer mass population, as in a frameless body.
+        let population =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        assert_eq!(
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    chain_prior_mass_population: Some(population.clone()),
+                    ..framed(object_set.clone())
+                },
+                AnaphorConsumer::AffectedObject,
+            ),
+            population,
+        );
+        // (4) ... and a declared player still reads as "that player".
+        assert_eq!(
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    prior_player_declaration: true,
+                    ..framed(object_set)
+                },
+                AnaphorConsumer::AffectedObject,
+            ),
+            TargetFilter::ParentTargetController,
+        );
+        // (5) With no object antecedent, the affected "they" is the frame's player
+        // (Champions of Minas Tirith: "they can't attack you this combat").
+        assert_eq!(
+            resolve_they_pronoun(&mut framed(None), AnaphorConsumer::AffectedObject),
+            TargetFilter::ScopedPlayer,
         );
     }
 

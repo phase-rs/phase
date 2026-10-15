@@ -818,6 +818,13 @@ pub(crate) struct ParseContext {
     /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
     /// no such producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_mass_population: Option<TargetFilter>,
+    /// CR 608.2c: the object set the NEAREST earlier clause of this chain acts on,
+    /// when that clause's direct operand is the chain's tracked set ("Untap those
+    /// creatures" → `TrackedSet`). A following bare "they" that a continuous
+    /// modification affects names this set, even under an iterated-player frame
+    /// (`subject.rs` · `resolve_they_pronoun`). Seeded per chunk from the chain;
+    /// `None` on every standalone parse.
+    pub chain_prior_object_set: Option<TargetFilter>,
     /// True when the SAME chain's most recent producer was a self-library peek
     /// (look at the top N cards of YOUR library without exiling/moving them).
     /// The bare "from among them" cast anaphor that follows must route to the

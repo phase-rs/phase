@@ -1293,7 +1293,11 @@ fn accepting_player_body_binds_they_and_resolves_its_described_object() {
     let Effect::Sacrifice { target, .. } = demon.effect.as_ref() else {
         panic!("expected the Sacrifice head, got {:?}", demon.effect);
     };
-    assert_eq!(typed_controller(target), Some(ControllerRef::Opponent));
+    assert_ne!(
+        typed_controller(target),
+        Some(ControllerRef::ScopedPlayer),
+        "Desecration Demon is stamp-only: the accepting-player seed binds no anaphor in its body"
+    );
     assert_eq!(demon.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 

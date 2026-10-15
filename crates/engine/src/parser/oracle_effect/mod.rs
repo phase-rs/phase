@@ -26765,6 +26765,23 @@ fn bare_they_player_declaration(clauses: &[ClauseIr]) -> bool {
     })
 }
 
+/// CR 608.2c: the object set the nearest earlier clause acts on, when its direct
+/// operand is the chain's tracked set ("Untap those creatures"), so a following
+/// bare "they" can name it. Only the nearest clause counts: any other operand
+/// there is the nearer antecedent.
+fn chain_prior_object_set(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+    clauses
+        .last()
+        .and_then(|prev| prev.parsed.effect.target_filter())
+        .filter(|operand| {
+            matches!(
+                operand,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            )
+        })
+        .cloned()
+}
+
 /// CR 608.2c: a bare "they" names one player only when the declaring clause
 /// announces exactly one, as a player and not as "any target" or a plural
 /// ("two target players each ... They each ...").
@@ -43618,6 +43635,7 @@ fn parse_effect_chain_ir_body(
             // counters on it"). Cleared by an intervening explicit typed target.
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
             prior_player_declaration: bare_they_player_declaration(builder.clauses()),
+            chain_prior_object_set: chain_prior_object_set(builder.clauses()),
             declared_player_scope,
             clause_declared_group: None,
             // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
@@ -48953,11 +48971,14 @@ mod change_targets_stack_object_tests {
 /// fixture these tests use to separate returning from continuing.
 #[cfg(test)]
 mod chain_declared_object_target_tests {
-    use super::chain_declared_object_target;
+    use super::{chain_declared_object_target, chain_prior_object_set};
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseIrBuilder};
-    use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        Effect, EffectScope, QuantityExpr, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::counter::CounterType;
+    use crate::types::identifiers::TrackedSetId;
 
     fn emit() -> ClauseDisposition {
         ClauseDisposition::Emit {
@@ -49223,6 +49244,131 @@ mod chain_declared_object_target_tests {
             None,
             "a nearer player-target clause must BLOCK the walk and return None",
         );
+    }
+
+    /// "Untap those creatures": the chain's tracked set as a direct operand.
+    fn untap_those_creatures() -> Effect {
+        Effect::SetTapState {
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        }
+    }
+
+    /// CR 608.2c: `chain_prior_object_set` reads only the NEAREST earlier clause,
+    /// and only its tracked-set operand. (a)/(d) are the paired positives for the
+    /// `None` legs; (b) is the nearer player-action antecedent; (c) is number
+    /// agreement (a single typed object is "it", not "they").
+    #[test]
+    fn chain_prior_object_set_reads_only_the_nearest_operand() {
+        let tracked = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+
+        // (a) [gain control of target artifact, untap those creatures] → the set.
+        let mut builder =
+            ClauseIrBuilder::new("gain control of target artifact. untap those creatures");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_prior_object_set(builder.clauses()),
+            Some(tracked.clone()),
+            "the nearest clause's tracked-set operand is the antecedent",
+        );
+
+        // (b) [untap those creatures, draw a card] → None: the nearer clause's
+        // operand is the nearer antecedent, so the walk never reaches past it.
+        let mut builder = ClauseIrBuilder::new("untap those creatures. draw a card");
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "draw a card",
+                parsed_clause(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_prior_object_set(builder.clauses()),
+            None,
+            "a farther tracked set must not reach past a nearer clause",
+        );
+
+        // (c) [gain control of target artifact] → None: a typed operand is a
+        // single object, not a set.
+        let mut builder = ClauseIrBuilder::new("gain control of target artifact");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(
+            chain_prior_object_set(builder.clauses()),
+            None,
+            "a typed operand is not an object set",
+        );
+
+        // (d) a filtered tracked-set operand is admitted too.
+        let filtered = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                ..Default::default()
+            })),
+            caused_by: None,
+        };
+        let mut builder = ClauseIrBuilder::new("untap the creatures revealed this way");
+        builder
+            .clause(
+                "untap the creatures revealed this way",
+                parsed_clause(Effect::SetTapState {
+                    target: filtered.clone(),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(chain_prior_object_set(builder.clauses()), Some(filtered));
+
+        // (e) no earlier clause → None.
+        let builder = ClauseIrBuilder::new("untap those creatures");
+        assert_eq!(builder.clauses().len(), 0);
+        assert_eq!(chain_prior_object_set(builder.clauses()), None);
     }
 }
 

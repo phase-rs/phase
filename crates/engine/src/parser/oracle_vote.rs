@@ -1095,8 +1095,11 @@ fn read_effect_until_each_class<'a>(input: &'a str, choices: &[String]) -> (&'a 
 /// CR 608.2c: a per-choice body that fans out over the players who chose its
 /// option (`PlayerFilter::VotedFor`, run once per such player by the
 /// `player_scope` driver) is parsed with the iterated player as its
-/// third-person antecedent, so "they" / "that player" name that player. A body
-/// that does not fan out (`None`) parses on a default context.
+/// third-person antecedent, so "that player", "they control" and a "they" that
+/// acts as a player name that player; a "they" that a continuous modification
+/// affects right after a clause acting on an object set ("Untap those creatures
+/// and they gain haste") names that set (`subject.rs` · `resolve_they_pronoun`).
+/// A body that does not fan out (`None`) parses on a default context.
 fn parse_per_choice_body(
     text: &str,
     kind: AbilityKind,
@@ -2141,6 +2144,105 @@ mod tests {
             "reach-guard: the classic body's \"they control\" must bind a controller, got {grace:?}"
         );
         assert_ne!(grace.controller, Some(ControllerRef::ScopedPlayer));
+    }
+
+    /// Seize the Spotlight's fame body, verbatim.
+    const SEIZE_THE_SPOTLIGHT: &str = "Each opponent chooses fame or fortune. For each player who chose fame, gain control of a creature that player controls until end of turn. Untap those creatures and they gain haste until end of turn. For each player who chose fortune, you draw a card and create a Treasure token.";
+
+    /// The fame body of a Seize-shaped vote: its `player_scope`, its head, and
+    /// the node after the head ("Untap those creatures").
+    fn fame_body(text: &str) -> AbilityDefinition {
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        let Effect::Vote {
+            mut per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        let fame = per_choice_effect.swap_remove(0);
+        assert_eq!(
+            fame.player_scope,
+            Some(PlayerFilter::VotedFor { choice_index: 0 }),
+            "reach-guard: the fame body fans out over the players who chose it"
+        );
+        let untap = fame
+            .sub_ability
+            .as_deref()
+            .expect("reach-guard: the fame body continues past its head");
+        assert!(
+            matches!(
+                *untap.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
+            ),
+            "reach-guard: \"Untap those creatures\" acts on the tracked set, got {:?}",
+            untap.effect
+        );
+        *fame
+    }
+
+    /// CR 608.2c + CR 611.2c: in a fan-out body, "they" right after "Untap those
+    /// creatures" is the affected object of the haste grant, so it names those
+    /// creatures (`ParentTarget`), not the iterated player.
+    #[test]
+    fn fan_out_continuous_grant_they_keeps_its_object_antecedent() {
+        let fame = fame_body(SEIZE_THE_SPOTLIGHT);
+        let Effect::GainControl {
+            target: TargetFilter::Typed(ref stolen),
+        } = *fame.effect
+        else {
+            panic!("reach-guard: expected GainControl, got {:?}", fame.effect);
+        };
+        assert_eq!(
+            stolen.controller,
+            Some(ControllerRef::ScopedPlayer),
+            "reach-guard: the per-choice seed reached the body"
+        );
+        let grant = fame
+            .sub_ability
+            .as_deref()
+            .and_then(|untap| untap.sub_ability.as_deref())
+            .expect("the haste grant follows the untap");
+        let Effect::GenericEffect {
+            ref static_abilities,
+            ..
+        } = *grant.effect
+        else {
+            panic!("expected the haste GenericEffect, got {:?}", grant.effect);
+        };
+        let haste = &static_abilities[0];
+        assert!(haste
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+        assert_ne!(haste.affected, Some(TargetFilter::ScopedPlayer));
+        assert_eq!(haste.affected, Some(TargetFilter::ParentTarget));
+    }
+
+    /// CR 608.2c: under the same seed and right after the same object-set clause,
+    /// a "they" that acts as a player still names the iterated player.
+    #[test]
+    fn fan_out_player_action_they_after_an_object_set_names_the_player() {
+        let fame = fame_body(
+            "Each opponent chooses fame or fortune. For each player who chose fame, gain control of a creature that player controls until end of turn. Untap those creatures, then they draw a card. For each player who chose fortune, you create a Treasure token.",
+        );
+        let draw = fame
+            .sub_ability
+            .as_deref()
+            .and_then(|untap| untap.sub_ability.as_deref())
+            .expect("reach-guard: the draw follows the untap");
+        assert!(
+            draw.sub_ability.is_none(),
+            "reach-guard: the draw ends the body"
+        );
+        let Effect::Draw { ref target, .. } = *draw.effect else {
+            panic!("reach-guard: expected Draw, got {:?}", draw.effect);
+        };
+        assert_eq!(*target, TargetFilter::ScopedPlayer);
     }
 
     /// Rejects single-class openers — every friend-or-foe card prints two
