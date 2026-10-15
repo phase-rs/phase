@@ -7481,14 +7481,15 @@ fn characteristic_source_target_slot_filter(
             CardTypeSetSource::TrackedSet { filter, .. } => {
                 filter.as_ref().and_then(filter_target_slot_filter)
             }
-            // CR 608.2c + CR 115.1: a targeted-objects population IS a target
-            // slot, so it wires the canonical filter for its own slot axis
-            // via the single `targeted_objects_filter` authority rather than
-            // re-deriving the mapping here.
-            CardTypeSetSource::TargetedObjects { slot } => Some(QuantitySlotDerivation {
-                filter: CardTypeSetSource::targeted_objects_filter(slot),
-                binding: None,
-            }),
+            // CR 601.2c + CR 115.1: a targeted-objects population READS the
+            // chain's announced targets — it never declares its own slot. The
+            // declaring head surfaces the announcement through the generic
+            // path; a ParentTarget-derived slot here would be unfillable at
+            // announcement (nothing is chosen yet) and wrongly reject
+            // well-formed chains (Command the Dreadhorde). The parser only
+            // emits this population behind a proven target-set publisher, so
+            // no dangling read can reach this arm.
+            CardTypeSetSource::TargetedObjects { .. } => None,
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::AnyOf { .. } => None,
@@ -24389,6 +24390,27 @@ mod tests {
                     "TargetZoneCardCount{{TargetPlayer}} must surface the any-player slot",
                 );
             }
+        }
+
+        // F10 (CR 601.2c + CR 115.1): a targeted-objects population reads the
+        // chain's announced targets — it never declares its own slot. The
+        // declaring head surfaces the announcement; a ParentTarget-derived
+        // slot here would be unfillable at announcement (nothing chosen yet)
+        // and wrongly reject well-formed chains (Command the Dreadhorde).
+        for slot in [None, Some(0)] {
+            let aggregate = QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    crate::types::ability::AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::ManaValue,
+                    CardTypeSetSource::TargetedObjects { slot },
+                )
+                .expect("statically valid property aggregate"),
+            );
+            assert_eq!(
+                quantity_ref_target_slot_spec(&aggregate),
+                None,
+                "TargetedObjects {{ slot: {slot:?} }} must surface NO slot",
+            );
         }
     }
 

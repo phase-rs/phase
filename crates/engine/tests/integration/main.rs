@@ -205,6 +205,7 @@ mod combustible_gearhulk;
 mod come_back_wrong_finality_counter;
 mod comet_stellar_pup;
 mod comeuppance;
+mod command_the_dreadhorde_production;
 mod commander_draft_deck_legality;
 mod commander_draft_filler;
 mod companion_special_action;
