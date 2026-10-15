@@ -2,16 +2,17 @@ import { useEffect, useRef } from "react";
 
 import {
   acknowledgeInput,
-  announceHiddenWindow,
   escalateAttention,
   escalationDeadline,
   initialAttentionMachine,
   attentionCue,
+  noteElsewhere,
   observeLocalDecision,
   stepAttention,
   type AttentionCue,
   type AttentionMachine,
   type AttentionObservation,
+  type Presence,
 } from "../game/priorityAttention";
 import { useGameStore } from "../stores/gameStore";
 import { usePriorityAttentionStore } from "../stores/priorityAttentionStore";
@@ -23,10 +24,10 @@ import { useCanActForWaitingState } from "./usePlayerId";
  * Read side of the priority-attention cues. Components that render a cue
  * (pill, pass button) call this; the controller below is the single writer.
  */
-export function usePriorityAttention(): { cue: AttentionCue; fireCount: number } {
+export function usePriorityAttention(): { cue: AttentionCue; chimeCount: number } {
   const cue = usePriorityAttentionStore((s) => s.cue);
-  const fireCount = usePriorityAttentionStore((s) => s.fireCount);
-  return { cue, fireCount };
+  const chimeCount = usePriorityAttentionStore((s) => s.chimeCount);
+  return { cue, chimeCount };
 }
 
 /**
@@ -48,6 +49,12 @@ export function usePriorityAttentionClass(canAct: boolean): string {
   }
 }
 
+/** A hidden tab, or a window that lost focus (another monitor, another app), is
+ *  not in front of the player. */
+function currentPresence(): Presence {
+  return document.hidden || !document.hasFocus() ? "elsewhere" : "attending";
+}
+
 /** Keys whose press alone says nothing about the player being at the game. */
 const MODIFIER_KEYS: ReadonlySet<string> = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph"]);
 
@@ -57,10 +64,10 @@ const MODIFIER_KEYS: ReadonlySet<string> = new Set(["Shift", "Control", "Alt", "
  * observations, user input, the timer and resets cannot publish inconsistently.
  */
 function createAttentionDriver() {
-  // `fireCount` only ever rises for the page's lifetime: the chime hook reads a
-  // rise as an announcement, so a restart must not take the count back down.
+  // `chimeCount` only ever rises for the page's lifetime: the chime hook reads a
+  // rise as a chime, so a restart must not take the count back down.
   const startOver = () =>
-    initialAttentionMachine(Date.now(), usePriorityAttentionStore.getState().fireCount);
+    initialAttentionMachine(Date.now(), usePriorityAttentionStore.getState().chimeCount);
   let machine = startOver();
   let timer: { deadline: number; id: ReturnType<typeof setTimeout> } | null = null;
 
@@ -71,8 +78,8 @@ function createAttentionDriver() {
 
   const publish = () => {
     const store = usePriorityAttentionStore.getState();
-    const next = { cue: attentionCue(machine), fireCount: machine.fireCount };
-    if (store.cue !== next.cue || store.fireCount !== next.fireCount) store.publish(next);
+    const next = { cue: attentionCue(machine), chimeCount: machine.chimeCount };
+    if (store.cue !== next.cue || store.chimeCount !== next.chimeCount) store.publish(next);
   };
 
   // One timer per reminder deadline: re-commits of the same window keep it,
@@ -99,9 +106,10 @@ function createAttentionDriver() {
 
   return {
     observe: (observation: AttentionObservation) =>
-      apply(stepAttention(machine, observation, Date.now(), document.hidden ? "hidden" : "visible")),
-    /** The tab was hidden: a window held quiet is not being watched. */
-    hidden: () => apply(announceHiddenWindow(machine)),
+      apply(stepAttention(machine, observation, Date.now(), currentPresence())),
+    /** The player left (tab hidden, window unfocused): a window still pending
+     *  is not being watched, so it announces and chimes now. */
+    left: () => apply(noteElsewhere(machine, currentPresence())),
     /** Real input: answers a held window, or restarts the idle clock. */
     input: () => apply(acknowledgeInput(machine, Date.now())),
     /** A replaced game is a fresh session: nothing pending, no idle time carried over. */
@@ -110,7 +118,7 @@ function createAttentionDriver() {
     dispose: () => {
       disarm();
       const store = usePriorityAttentionStore.getState();
-      store.publish({ cue: "none", fireCount: store.fireCount });
+      store.publish({ cue: "none", chimeCount: store.chimeCount });
     },
   };
 }
@@ -120,7 +128,7 @@ function createAttentionDriver() {
  * game screen. Watches the engine-committed pair (`waitingFor`, with
  * `autoPassRecommended` from the same commit) and announces a meaningful
  * priority window only when it opens after the local player had been away for
- * a while — see `stepAttention`. Reuses `shouldAutoPass`, the game loop's own
+ * a while, chiming only for a player who is elsewhere — see `stepAttention`. Reuses `shouldAutoPass`, the game loop's own
  * predicate, so "meaningful" is never re-derived on the frontend.
  */
 export function usePriorityAttentionController(): void {
@@ -149,7 +157,9 @@ export function usePriorityAttentionController(): void {
   // propagation still counts; passive because nothing is prevented. A bare
   // modifier, a shortcut chord or a held-down key is the player leaving (Ctrl+Tab,
   // Alt+Tab, Cmd+Tab) or nothing at all, not presence. And a tab that goes
-  // hidden is not being watched, whatever the clock says.
+  // hidden, or a window that loses focus, is not being watched, whatever the
+  // clock says. The focus check guards against `blur` firing for focus moving
+  // into an embedded frame, which leaves the page in front of the player.
   useEffect(() => {
     const options = { capture: true, passive: true } as const;
     const pointer = () => driverRef.current?.input();
@@ -158,16 +168,16 @@ export function usePriorityAttentionController(): void {
       if (MODIFIER_KEYS.has(event.key)) return;
       driverRef.current?.input();
     };
-    const visibility = () => {
-      if (document.hidden) driverRef.current?.hidden();
-    };
+    const left = () => driverRef.current?.left();
     document.addEventListener("pointerdown", pointer, options);
     document.addEventListener("keydown", key, options);
-    document.addEventListener("visibilitychange", visibility);
+    document.addEventListener("visibilitychange", left);
+    window.addEventListener("blur", left);
     return () => {
       document.removeEventListener("pointerdown", pointer, options);
       document.removeEventListener("keydown", key, options);
-      document.removeEventListener("visibilitychange", visibility);
+      document.removeEventListener("visibilitychange", left);
+      window.removeEventListener("blur", left);
     };
   }, []);
 

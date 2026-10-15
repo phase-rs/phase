@@ -78,17 +78,17 @@ describe("usePriorityAttentionController", () => {
     });
     useUiStore.setState({ fullControl: false });
     useMultiplayerStore.setState({ isSpectator: false, activePlayerId: null });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
 
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
     useGameStore.setState({ gameState: null, waitingFor: null, autoPassRecommended: false });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
 
-  it("announces a meaningful local priority window after a long idle wait", () => {
+  it("announces a meaningful local priority window after a long idle wait, with the glow and no chime", () => {
     const { result } = mount();
 
     act(() => {
@@ -96,7 +96,7 @@ describe("usePriorityAttentionController", () => {
     });
     commit(LOCAL, false);
 
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it("stays silent when the wait was shorter than the minimum", () => {
@@ -107,7 +107,7 @@ describe("usePriorityAttentionController", () => {
     });
     commit(LOCAL, false);
 
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("stays silent when the engine recommends auto-passing the window", () => {
@@ -118,7 +118,7 @@ describe("usePriorityAttentionController", () => {
     });
     commit(LOCAL, true);
 
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("announces an auto-pass recommended window under Full Control", () => {
@@ -131,7 +131,7 @@ describe("usePriorityAttentionController", () => {
     commit(LOCAL, true);
 
     expect(result.current.cue).toBe("announced");
-    expect(result.current.fireCount).toBe(1);
+    expect(result.current.chimeCount).toBe(0);
   });
 
   it("stays silent when the opponent holds priority", () => {
@@ -142,7 +142,7 @@ describe("usePriorityAttentionController", () => {
     });
     commit(OPPONENT, false);
 
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("escalates after ESCALATE_AFTER_MS and clears when the window closes", () => {
@@ -163,11 +163,11 @@ describe("usePriorityAttentionController", () => {
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
 
     // The player passes; priority moves to the opponent and the window closes.
     commit(OPPONENT, false);
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 1 });
   });
 
   it("keeps the announcement through re-commits of the same decision", () => {
@@ -183,13 +183,13 @@ describe("usePriorityAttentionController", () => {
     // equal-sequence re-read of the same engine state: no clear, no re-fire.
     commit(LOCAL, false);
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it.each([
     ["pointerdown", () => new Event("pointerdown", { bubbles: true })],
     ["keydown", () => new KeyboardEvent("keydown", { key: "a", bubbles: true })],
-  ])("clears the announcement on a real %s and does not re-fire", (_name, makeEvent) => {
+  ])("clears the announcement on a real %s and stays silent", (_name, makeEvent) => {
     const { result } = mount();
 
     act(() => {
@@ -201,11 +201,11 @@ describe("usePriorityAttentionController", () => {
     act(() => {
       document.body.dispatchEvent(makeEvent());
     });
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     // Still holding priority after acting (e.g. played a land): stays quiet.
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     // A later window after a long wait announces again.
     commit(OPPONENT, false);
@@ -213,7 +213,7 @@ describe("usePriorityAttentionController", () => {
       vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
     });
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "announced", fireCount: 2 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it("does not escalate once the player has answered", () => {
@@ -228,7 +228,7 @@ describe("usePriorityAttentionController", () => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS * 2);
     });
 
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("clears a pending announcement on unmount", () => {
@@ -242,7 +242,7 @@ describe("usePriorityAttentionController", () => {
 
     unmount();
 
-    expect(usePriorityAttentionStore.getState()).toMatchObject({ cue: "none", fireCount: 1 });
+    expect(usePriorityAttentionStore.getState()).toMatchObject({ cue: "none", chimeCount: 0 });
   });
 
   it("is silent for a controlled player: the window's authorized submitter is their controller", () => {
@@ -266,7 +266,7 @@ describe("usePriorityAttentionController", () => {
           autoPassRecommended,
         });
       });
-      expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+      expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
     }
   });
 
@@ -283,7 +283,7 @@ describe("usePriorityAttentionController", () => {
       vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS * 3);
     });
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     // A genuine opponent wait afterwards still announces.
     commit(OPPONENT, false);
@@ -291,7 +291,7 @@ describe("usePriorityAttentionController", () => {
       vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
     });
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it("resets on a new game session: nothing pending, no idle time carried over", () => {
@@ -311,8 +311,8 @@ describe("usePriorityAttentionController", () => {
         autoPassRecommended: false,
       });
     });
-    // Nothing pending and no idle time carried over; the count keeps rising.
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    // Nothing pending and no idle time carried over.
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("never escalates an own-turn window the player may simply be thinking about", () => {
@@ -321,12 +321,12 @@ describe("usePriorityAttentionController", () => {
       vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
     });
     commit(LOCAL, false, LOCAL); // my turn, empty stack: the open main-phase window
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
 
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS * 10);
     });
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it("never escalates a planning window even with something on the stack", () => {
@@ -351,7 +351,7 @@ describe("usePriorityAttentionController", () => {
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS * 10);
     });
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it("treats planning on behalf of a controlled active player as planning, not reactive", () => {
@@ -394,21 +394,21 @@ describe("usePriorityAttentionController", () => {
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
   });
 
-  it("reminds a reactive window that opened too soon to announce, without a chime", () => {
+  it("reminds a reactive window that opened too soon to announce, and chimes with the reminder", () => {
     const { result } = mount();
     act(() => {
       vi.advanceTimersByTime(1_000);
     });
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
   });
 
   it("does not remind a quiet window the player answered", () => {
@@ -421,7 +421,7 @@ describe("usePriorityAttentionController", () => {
       document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
       vi.advanceTimersByTime(ESCALATE_AFTER_MS * 2);
     });
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("keeps one reminder timer across re-commits of the same window", () => {
@@ -482,11 +482,11 @@ describe("usePriorityAttentionController", () => {
     expect(result.current.cue).toBe("reminded");
     expect(vi.getTimerCount()).toBe(0);
 
-    // The reminder does not repeat, and unmounting leaves nothing running or showing.
+    // The reminder, and its chime, do not repeat, and unmounting leaves nothing running or showing.
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS * 4);
     });
-    expect(usePriorityAttentionStore.getState().fireCount).toBe(0);
+    expect(usePriorityAttentionStore.getState().chimeCount).toBe(1);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
     expect(usePriorityAttentionStore.getState()).toMatchObject({ cue: "none" });
@@ -506,7 +506,7 @@ describe("usePriorityAttentionController", () => {
       vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS * 3);
     });
     commit(LOCAL, false);
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("does not treat time spent on a mulligan as waiting before the first window", () => {
@@ -532,7 +532,7 @@ describe("usePriorityAttentionController", () => {
       document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     });
     commit(LOCAL, false, LOCAL); // the first main phase, on the play
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
   });
 
   it("gives a window that follows an answered one its own reminder", () => {
@@ -561,12 +561,12 @@ describe("usePriorityAttentionController", () => {
         autoPassRecommended: false,
       });
     });
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
   });
 
   it("keeps an unanswered announcement when the window changes under the player", () => {
@@ -587,7 +587,7 @@ describe("usePriorityAttentionController", () => {
         autoPassRecommended: false,
       });
     });
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 });
 
@@ -597,13 +597,13 @@ describe("windows that differ only below the phase", () => {
     useGameStore.setState({ gameMode: null, gameState: null, waitingFor: null, autoPassRecommended: false });
     useUiStore.setState({ fullControl: false });
     useMultiplayerStore.setState({ isSpectator: false, activePlayerId: null });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
     useGameStore.setState({ gameState: null, waitingFor: null, autoPassRecommended: false });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
 
   const answer = () =>
@@ -640,12 +640,12 @@ describe("windows that differ only below the phase", () => {
 
     answer();
     commitControlled(LOCAL); // priority passes to seat 0 itself, same turn, step and stack
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
   });
 
   it("gives the regular combat damage step its own reminder after the first-strike step was answered", () => {
@@ -676,12 +676,12 @@ describe("windows that differ only below the phase", () => {
     // The opponent is yielding, so the engine hands priority straight back at
     // the regular damage step: same turn, phase, seat and (empty) stack.
     commitDamageStep(2);
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
   });
 
   it("never reminds in a team format, where a teammate's window is the team's own planning window", () => {
@@ -707,7 +707,7 @@ describe("windows that differ only below the phase", () => {
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS * 4);
     });
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it("gives a window whose stack changed at the same depth its own reminder", () => {
@@ -725,7 +725,7 @@ describe("windows that differ only below the phase", () => {
     act(() => {
       vi.advanceTimersByTime(ESCALATE_AFTER_MS);
     });
-    expect(result.current).toEqual({ cue: "reminded", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "reminded", chimeCount: 1 });
   });
 });
 
@@ -735,14 +735,14 @@ describe("presence and visibility", () => {
     useGameStore.setState({ gameMode: null, gameState: null, waitingFor: null, autoPassRecommended: false });
     useUiStore.setState({ fullControl: false });
     useMultiplayerStore.setState({ isSpectator: false, activePlayerId: null });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
     vi.useRealTimers();
     useGameStore.setState({ gameState: null, waitingFor: null, autoPassRecommended: false });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
 
   const press = (init: KeyboardEventInit) =>
@@ -750,40 +750,40 @@ describe("presence and visibility", () => {
       document.body.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
     });
 
-  it("announces a window that opens in a hidden tab sooner than the away gate", () => {
+  it("announces and chimes a window that opens in a hidden tab sooner than the away gate", () => {
     vi.spyOn(document, "hidden", "get").mockReturnValue(true);
     const { result } = mount();
     act(() => {
       vi.advanceTimersByTime(1_000);
     });
     commit(LOCAL, false, LOCAL); // my own turn, planning: no reminder ever, but a hidden tab still hears it
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 1 });
   });
 
-  it("announces a window held quiet when the tab is then hidden", () => {
+  it("announces and chimes a window held quiet when the tab is then hidden", () => {
     const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
     const { result } = mount();
     act(() => {
       vi.advanceTimersByTime(1_000);
     });
     commit(LOCAL, false, LOCAL);
-    expect(result.current).toEqual({ cue: "none", fireCount: 0 });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
 
     hidden.mockReturnValue(true);
     act(() => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 1 });
   });
 
-  it("announces a window that replaces an answered one while the tab is hidden", () => {
+  it("announces and chimes a window that replaces an answered one while the tab is hidden", () => {
     const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
     const { result } = mount();
     act(() => {
       vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
     });
     commit(LOCAL, false, LOCAL);
-    expect(result.current).toEqual({ cue: "announced", fireCount: 1 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
 
     // The player answers, then leaves the tab; priority comes straight back at the
     // next step with no away commit in between.
@@ -794,7 +794,7 @@ describe("presence and visibility", () => {
     act(() => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    expect(result.current).toEqual({ cue: "none", fireCount: 1 }); // the answered window stays answered
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 }); // the answered window stays answered
 
     act(() => {
       useGameStore.setState({
@@ -808,15 +808,95 @@ describe("presence and visibility", () => {
         autoPassRecommended: false,
       });
     });
-    expect(result.current).toEqual({ cue: "announced", fireCount: 2 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 1 });
   });
 
   it("keeps counting upward across a restart, so an announcement in the restarting commit still chimes", () => {
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 3 }); // a previous game's count
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 3 }); // a previous game's count
     vi.spyOn(document, "hidden", "get").mockReturnValue(true);
     const { result } = mount();
     commit(LOCAL, false, LOCAL);
-    expect(result.current).toEqual({ cue: "announced", fireCount: 4 });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 4 });
+  });
+
+  it("announces and chimes a window that opens while the window is unfocused, sooner than the away gate", () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = mount();
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    commit(LOCAL, false, LOCAL);
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 1 });
+  });
+
+  it("chimes a window the player was looking at the moment the window loses focus", () => {
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const { result } = mount();
+    act(() => {
+      vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
+    });
+    commit(LOCAL, false, LOCAL);
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
+
+    focus.mockReturnValue(false);
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 1 });
+
+    // Leaving and returning never sounds the same window twice.
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    focus.mockReturnValue(false);
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(result.current.chimeCount).toBe(1);
+  });
+
+  it("ignores a blur while the page still has focus (focus moved into an embedded frame)", () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const { result } = mount();
+    act(() => {
+      vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
+    });
+    commit(LOCAL, false, LOCAL);
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
+  });
+
+  it("does not chime an answered window when the player then leaves", () => {
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const { result } = mount();
+    act(() => {
+      vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
+    });
+    commit(LOCAL, false, LOCAL);
+    act(() => {
+      document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    });
+    focus.mockReturnValue(false);
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
+  });
+
+  it("does not chime a window the player is looking at, however long it sits", () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const { result } = mount();
+    act(() => {
+      vi.advanceTimersByTime(MIN_WAIT_BEFORE_ALERT_MS);
+    });
+    commit(LOCAL, false, LOCAL); // own turn: planning, never reminded
+    act(() => {
+      vi.advanceTimersByTime(ESCALATE_AFTER_MS * 10);
+    });
+    expect(result.current).toEqual({ cue: "announced", chimeCount: 0 });
   });
 
   it.each([
@@ -854,12 +934,12 @@ describe("presence and visibility", () => {
 describe("usePriorityAttentionClass", () => {
   beforeEach(() => {
     usePreferencesStore.setState({ priorityAlertVisual: true });
-    usePriorityAttentionStore.setState({ cue: "announced", fireCount: 1 });
+    usePriorityAttentionStore.setState({ cue: "announced", chimeCount: 1 });
   });
   afterEach(() => {
     cleanup();
     usePreferencesStore.setState({ priorityAlertVisual: true });
-    usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
   });
 
   it("is the base glow for an announced window the viewer can act on", () => {

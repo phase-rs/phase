@@ -12,15 +12,15 @@ import type { AttentionCue } from "../game/priorityAttention";
 interface PriorityAttentionState {
   /** What is currently shown: nothing, an announced window, or its stronger reminder. */
   cue: AttentionCue;
-  /** Increments once per announcement and never goes back down while the page
-   *  lives, across session replacements and remounts. Effects key on a rise in
-   *  this, not on `cue`, so back-to-back announcements each fire. */
-  fireCount: number;
-  publish: (next: Pick<PriorityAttentionState, "cue" | "fireCount">) => void;
+  /** Increments once per chime and never goes back down while the page lives,
+   *  across session replacements and remounts. Effects key on a rise in this,
+   *  not on `cue`, so back-to-back chimes each sound. */
+  chimeCount: number;
+  publish: (next: Pick<PriorityAttentionState, "cue" | "chimeCount">) => void;
 }
 
 export const usePriorityAttentionStore = create<PriorityAttentionState>((set) => ({
   cue: "none",
-  fireCount: 0,
+  chimeCount: 0,
   publish: (next) => set(next),
 }));

@@ -49,14 +49,14 @@ describe("TurnStatusLine", () => {
   beforeEach(() => {
     useGameStore.getState().reset();
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false, playerNames: new Map() });
-    usePriorityAttentionStore.getState().publish({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 0 });
     usePreferencesStore.setState({ priorityAlertVisual: true });
   });
   afterEach(() => {
     cleanup();
     useGameStore.getState().reset();
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false, playerNames: new Map() });
-    usePriorityAttentionStore.getState().publish({ cue: "none", fireCount: 0 });
+    usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 0 });
     usePreferencesStore.setState({ priorityAlertVisual: initialVisualPreference });
   });
 
@@ -107,11 +107,11 @@ describe("TurnStatusLine", () => {
     const region = screen.getByRole("status");
     expect(region).not.toHaveClass("priority-attention-glow");
 
-    act(() => usePriorityAttentionStore.getState().publish({ cue: "announced", fireCount: 1 }));
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "announced", chimeCount: 1 }));
     expect(region).toHaveClass("priority-attention-glow");
     expect(region).not.toHaveClass("priority-attention-glow-escalated");
 
-    act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", fireCount: 1 }));
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 }));
     expect(region).toHaveClass("priority-attention-glow", "priority-attention-glow-escalated");
 
     act(() => usePreferencesStore.getState().setPriorityAlertVisual(false));
@@ -121,7 +121,7 @@ describe("TurnStatusLine", () => {
     act(() => usePreferencesStore.getState().setPriorityAlertVisual(true));
     expect(region).toHaveClass("priority-attention-glow", "priority-attention-glow-escalated");
 
-    act(() => usePriorityAttentionStore.getState().publish({ cue: "none", fireCount: 1 }));
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 1 }));
     expect(region).not.toHaveClass("priority-attention-glow");
     expect(region).not.toHaveClass("priority-attention-glow-escalated");
   });
@@ -131,7 +131,7 @@ describe("TurnStatusLine", () => {
     { player: 0, spectate: true },
   ])("never cues another player's decision or a spectator ($player, $spectate)", ({ player, spectate }) => {
     setup({ seat: 0, waitingFor: { type: "Priority", data: { player } }, spectate });
-    usePriorityAttentionStore.getState().publish({ cue: "reminded", fireCount: 1 });
+    usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 });
     render(<TurnStatusLine />);
     expect(screen.getByRole("status")).not.toHaveClass("priority-attention-glow");
     expect(screen.getByRole("status")).not.toHaveClass("priority-attention-glow-escalated");

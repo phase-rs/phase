@@ -25,7 +25,7 @@ beforeEach(() => {
   );
   document.title = ORIGINAL_TITLE;
   usePreferencesStore.setState({ priorityAlertTitle: true });
-  usePriorityAttentionStore.setState({ cue: "announced", fireCount: 1 });
+  usePriorityAttentionStore.setState({ cue: "announced", chimeCount: 1 });
 });
 
 afterEach(() => {
@@ -33,7 +33,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   document.title = "";
   usePreferencesStore.setState({ priorityAlertTitle: true });
-  usePriorityAttentionStore.setState({ cue: "none", fireCount: 0 });
+  usePriorityAttentionStore.setState({ cue: "none", chimeCount: 0 });
 });
 
 describe("usePriorityTabTitle", () => {

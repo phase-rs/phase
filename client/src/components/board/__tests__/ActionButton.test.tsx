@@ -531,7 +531,7 @@ describe("ActionButton", () => {
 
   describe("priority attention", () => {
     beforeEach(() => {
-      usePriorityAttentionStore.getState().publish({ cue: "none", fireCount: 0 });
+      usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 0 });
       usePreferencesStore.setState({ priorityAlertVisual: true });
       useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false, actionPending: false });
       useGameStore.setState({
@@ -548,7 +548,7 @@ describe("ActionButton", () => {
     });
 
     afterEach(() => {
-      usePriorityAttentionStore.getState().publish({ cue: "none", fireCount: 0 });
+      usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 0 });
       usePreferencesStore.setState({ priorityAlertVisual: initialVisualPreference });
     });
 
@@ -563,12 +563,12 @@ describe("ActionButton", () => {
       const secondary = screen.getByRole("button", { name: stackMode === "stack" ? "Resolve All" : "Pass" });
       expect(primary).not.toHaveClass("priority-attention-glow");
 
-      act(() => usePriorityAttentionStore.getState().publish({ cue: "announced", fireCount: 1 }));
+      act(() => usePriorityAttentionStore.getState().publish({ cue: "announced", chimeCount: 1 }));
       expect(primary).toHaveClass("priority-attention-glow");
       expect(primary).not.toHaveClass("priority-attention-glow-escalated");
       expect(secondary).not.toHaveClass("priority-attention-glow");
 
-      act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", fireCount: 1 }));
+      act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 }));
       expect(primary).toHaveClass("priority-attention-glow", "priority-attention-glow-escalated");
       expect(secondary).not.toHaveClass("priority-attention-glow");
 
@@ -579,7 +579,7 @@ describe("ActionButton", () => {
       act(() => usePreferencesStore.getState().setPriorityAlertVisual(true));
       expect(primary).toHaveClass("priority-attention-glow", "priority-attention-glow-escalated");
 
-      act(() => usePriorityAttentionStore.getState().publish({ cue: "none", fireCount: 1 }));
+      act(() => usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 1 }));
       expect(primary).not.toHaveClass("priority-attention-glow");
       expect(primary).not.toHaveClass("priority-attention-glow-escalated");
     });
