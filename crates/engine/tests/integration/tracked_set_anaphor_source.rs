@@ -742,6 +742,107 @@ fn danse_macabre_modifier_flows_when_sacrifice_pauses_for_choices() {
     );
 }
 
+/// M1 — RUNTIME modified-toughness read (CR 608.2h). Oak (2/3) is pumped by
+/// a parsed, resolved Giant Growth to 5/6 before Danse is cast; both players
+/// then sacrifice through the real pipeline. Danse's modifier must read
+/// Oak's departure (last-known) toughness 6 — not the retained base 3 the
+/// zone-exit revert leaves live, and not 0 (unpublished) or 10 (Elm leaked).
+#[test]
+fn danse_macabre_modifier_reads_modified_toughness_from_departure_lki() {
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature(P1, "Elm", 1, 7).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+        .id();
+    let danse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Danse Macabre", false, DANSE)
+        .id();
+    let mut runner = scenario.build();
+
+    // Pump first, through the real cast pipeline.
+    runner.cast(growth).target_objects(&[oak]).resolve();
+    // Reach guard: Oak stands 5/6 before the sacrifice, so a 6 below reads
+    // the modification and a 3 reads the reverted base.
+    let pumped = runner.state().objects.get(&oak).expect("Oak stands");
+    assert_eq!(
+        (pumped.power, pumped.toughness),
+        (Some(5), Some(6)),
+        "Giant Growth must resolve to 5/6 before Danse is cast"
+    );
+
+    let outcome = runner.cast(danse).resolve();
+    outcome.assert_zone(&[oak, elm], Zone::Graveyard);
+
+    let danse_total = d20_total(outcome.events());
+    let mut control_scenario = GameScenario::new();
+    control_scenario.at_phase(Phase::PreCombatMain);
+    control_scenario.add_creature(P0, "Oak", 2, 3);
+    control_scenario.add_creature(P1, "Elm", 1, 7);
+    let control_spell = control_scenario
+        .add_spell_to_hand_from_oracle(P0, "Control Die", false, "Roll a d20.")
+        .id();
+    let mut control_runner = control_scenario.build();
+    let control_outcome = control_runner.cast(control_spell).resolve();
+    let natural = d20_total(control_outcome.events());
+    assert_eq!(
+        danse_total as i32 - natural as i32,
+        6,
+        "Danse's d20 modifier must read Oak's last-known toughness 6: \
+         post-modifier total {danse_total}, control natural {natural}"
+    );
+}
+
+/// M1 unchanged control — the other side's modification must not leak, and
+/// an unmodified sacrifice keeps its base read. Elm (1/7) is pumped to 4/10
+/// while Oak stays 2/3: the modifier must be exactly Oak's 3.
+#[test]
+fn danse_macabre_modifier_ignores_other_players_modified_toughness() {
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature(P1, "Elm", 1, 7).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+        .id();
+    let danse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Danse Macabre", false, DANSE)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(growth).target_objects(&[elm]).resolve();
+    let pumped = runner.state().objects.get(&elm).expect("Elm stands");
+    assert_eq!(
+        (pumped.power, pumped.toughness),
+        (Some(4), Some(10)),
+        "Giant Growth must resolve to 4/10 before Danse is cast"
+    );
+
+    let outcome = runner.cast(danse).resolve();
+    outcome.assert_zone(&[oak, elm], Zone::Graveyard);
+
+    let danse_total = d20_total(outcome.events());
+    let mut control_scenario = GameScenario::new();
+    control_scenario.at_phase(Phase::PreCombatMain);
+    control_scenario.add_creature(P0, "Oak", 2, 3);
+    control_scenario.add_creature(P1, "Elm", 1, 7);
+    let control_spell = control_scenario
+        .add_spell_to_hand_from_oracle(P0, "Control Die", false, "Roll a d20.")
+        .id();
+    let mut control_runner = control_scenario.build();
+    let control_outcome = control_runner.cast(control_spell).resolve();
+    let natural = d20_total(control_outcome.events());
+    assert_eq!(
+        danse_total as i32 - natural as i32,
+        3,
+        "Danse's d20 modifier must stay Oak's unmodified 3: \
+         post-modifier total {danse_total}, control natural {natural}"
+    );
+}
+
 /// B-2c — RUNTIME replacement-paused automatic path (F1). One eligible
 /// creature per side, so the sacrifice takes the all-automatic fast path with
 /// no `EffectZoneChoice` prompt — but two competing graveyard replacements

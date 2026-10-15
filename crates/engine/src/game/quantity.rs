@@ -371,6 +371,58 @@ fn characteristic_view_for_object(
     }
 }
 
+/// CR 608.2h + CR 400.7: the latest departure snapshot for an object that
+/// left a snapshot zone (battlefield/exile/stack) — the greatest recorded
+/// incarnation strictly below the live one. Every battlefield departure
+/// records under its pre-move incarnation and incarnations bump
+/// monotonically, so this is always the most recent departure's
+/// characteristics; later non-recording moves (graveyard→exile) change no
+/// characteristics. `None` when no departure was recorded (genuine
+/// graveyard-origin members) or the object is gone without history.
+fn departure_lki_for_object(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<&crate::types::game_state::LKISnapshot> {
+    let live = state.objects.get(&object_id)?.incarnation;
+    state
+        .lki_by_incarnation
+        .get(&object_id)
+        .and_then(|history| {
+            history
+                .iter()
+                .filter(|(incarnation, _)| **incarnation < live)
+                .max_by_key(|(incarnation, _)| **incarnation)
+        })
+        .map(|(_, lki)| lki)
+}
+
+/// CR 608.2h + CR 400.7: the characteristic view for one tracked-set member.
+///
+/// A member that left a snapshot zone reads its latest departure LKI: the
+/// retained live entry was reverted to base characteristics on exit
+/// (`revert_layered_characteristics_to_base`), so a live-first read loses
+/// battlefield modifications (Danse Macabre reading a pumped sacrifice's
+/// base toughness). Selection is from exact incarnation history — never the
+/// legacy cache slot, which may describe a later incarnation (same rule as
+/// the `filter.rs` entrant dispatch and
+/// `targeted_object_characteristic_view`).
+///
+/// A member with no departure history — genuine graveyard-origin reads — or
+/// still on the battlefield keeps the shared live-or-LKI helper, matching
+/// the filter sibling in the tracked arm, which likewise consults LKI only
+/// off the battlefield.
+fn tracked_member_characteristic_view<'s>(
+    state: &'s GameState,
+    object_id: ObjectId,
+) -> Option<CharacteristicView<'s>> {
+    if !state.battlefield.contains(&object_id) {
+        if let Some(lki) = departure_lki_for_object(state, object_id) {
+            return Some(CharacteristicView::Lki(lki));
+        }
+    }
+    characteristic_view_for_object(state, object_id)
+}
+
 /// CR 608.2h + CR 400.7: the characteristic view for one targeted object.
 ///
 /// A target whose announced incarnation has departed is read from its
@@ -615,7 +667,7 @@ fn visit_characteristic_leaf<'s>(
                     }
                 };
                 if cause_ok && filter_ok {
-                    let view = characteristic_view_for_object(state, oid);
+                    let view = tracked_member_characteristic_view(state, oid);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(oid), view, false);
                     }
