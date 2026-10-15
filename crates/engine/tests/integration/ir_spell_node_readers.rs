@@ -175,7 +175,7 @@ fn typed_props(filter: &TargetFilter, out: &mut Vec<FilterProp>) {
     }
 }
 
-/// CR 102.1 + CR 603.7c + CR 608.2c: the coerce clause's subject is the
+/// CR 102.1 + CR 608.2c: the coerce clause's subject is the
 /// document antecedent of the delayed punisher's "that player controls", so the
 /// anaphor binds to `ActivePlayer` at parse time; the `ActivePlayerPunisher`
 /// relation then pairs the two items and folds the continuity exemption.
