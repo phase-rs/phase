@@ -155,6 +155,12 @@ connections' plain-text and raw-envelope JSON Pings bypass this command budget;
 their replies are coalesced. Compressed envelopes still consume the raw decode
 quota before decompression.
 
+Reattachment bootstraps precede updates from the new room, and a successful
+spectator switch stops routing the previous room. If a draft match ends while
+a handoff waits, the server returns `DraftActionRejected` and the current draft
+view instead of an active-game bootstrap. This is an operation refusal, not a
+WebSocket disconnect.
+
 ## Announcing to a public directory
 
 `server.announceTo` (`PHASE_ANNOUNCE_TO`) makes the server POST a heartbeat to a

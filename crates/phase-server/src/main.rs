@@ -16,6 +16,8 @@ mod socket_heartbeat;
 mod socket_ingress;
 mod socket_io;
 #[cfg(test)]
+mod socket_spectator_order_tests;
+#[cfg(test)]
 mod socket_test_hooks;
 mod wire;
 
@@ -211,7 +213,8 @@ type SharedDraftSpectators = Arc<
     >,
 >;
 /// Spectator senders keyed by game code (live games only).
-type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+type GameSpectatorRegistry = HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>;
+type SharedGameSpectators = Arc<Mutex<GameSpectatorRegistry>>;
 
 /// Deserializing a persisted session is deeply nested and stack-hungry — and
 /// boxing a field does not help here, because `Box<T>::deserialize` still
@@ -415,6 +418,14 @@ async fn remove_game_spectator_sender(
     tx: &mpsc::UnboundedSender<ServerMessage>,
 ) {
     let mut specs = game_spectators.lock().await;
+    remove_game_spectator_sender_in_registry(&mut specs, game_code, tx);
+}
+
+fn remove_game_spectator_sender_in_registry(
+    specs: &mut GameSpectatorRegistry,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) {
     if let Some(spectators) = specs.get_mut(game_code) {
         spectators.retain(|sender| !sender.same_channel(tx) && !sender.is_closed());
         if spectators.is_empty() {
@@ -423,6 +434,7 @@ async fn remove_game_spectator_sender(
     }
 }
 
+#[cfg(test)]
 async fn reserve_game_spectator_slot(
     game_spectators: &SharedGameSpectators,
     game_code: &str,
@@ -430,6 +442,15 @@ async fn reserve_game_spectator_slot(
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     let mut specs = game_spectators.lock().await;
+    reserve_game_spectator_slot_in_registry(&mut specs, game_code, tx, bootstrap)
+}
+
+fn reserve_game_spectator_slot_in_registry(
+    specs: &mut GameSpectatorRegistry,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+    bootstrap: Option<ServerMessage>,
+) -> Result<(), String> {
     let spectators = specs.entry(game_code.to_string()).or_default();
     spectators.retain(|sender| !sender.is_closed());
 
@@ -454,10 +475,13 @@ async fn switch_game_spectator_slot(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
-    reserve_game_spectator_slot(game_spectators, game_code, tx, bootstrap).await?;
+    // The target bootstrap and both route changes are one publication fence.
+    // An old-game broadcaster queued on this mutex must see the old route gone.
+    let mut specs = game_spectators.lock().await;
+    reserve_game_spectator_slot_in_registry(&mut specs, game_code, tx, bootstrap)?;
     if previous_game_code != Some(game_code) {
         if let Some(previous_game_code) = previous_game_code {
-            remove_game_spectator_sender(game_spectators, previous_game_code, tx).await;
+            remove_game_spectator_sender_in_registry(&mut specs, previous_game_code, tx);
         }
     }
     Ok(())
@@ -2328,6 +2352,7 @@ async fn attach_current_draft_match(
     draft_manager: tokio::sync::OwnedMutexGuard<DraftSessionManager>,
     draft_view: draft_core::view::DraftPlayerView,
     state: &SharedState,
+    game_db: &SharedGameDb,
     connections: &SharedConnections,
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
@@ -2413,6 +2438,15 @@ async fn attach_current_draft_match(
 
     reconnect_seat_while_session_locked(state, &mut session, &player_token, received_at).await?;
     if let Some((previous_game, previous_player)) = previous_full.as_ref() {
+        // Revoke the old target socket without exposing the replacement yet.
+        // Its late close must not create a new grace record while this handoff
+        // waits for the previous game; the fresh bootstrap still precedes install.
+        {
+            let mut routes = connections.lock().await;
+            if let Some(players) = routes.get_mut(&game_code) {
+                players.remove(&game_player);
+            }
+        }
         drop(session);
         #[cfg(test)]
         hooks.before_bootstrap_cutover().await;
@@ -2444,6 +2478,19 @@ async fn attach_current_draft_match(
         {
             return Err("Draft match Full identity changed during attachment".to_string());
         }
+    }
+    // A terminal finalizer can retire this lifetime while prior-game departure
+    // waits. Reuse Full reconnect's durable active-key authority, not just the
+    // still-resident session's unchanged token and generation.
+    let active_key = game_db
+        .load_active_full_key(&game_code)
+        .map_err(|error| format!("Failed to validate draft match identity: {error}"))?;
+    if active_key.as_ref() != Some(&full_key) {
+        let _ = tx.send(ServerMessage::DraftActionRejected {
+            reason: "Draft match is no longer active".to_string(),
+        });
+        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        return Ok(());
     }
     let decision = DecisionSnapshot::from_state(&session.state);
     let game_started =
@@ -11972,6 +12019,7 @@ async fn handle_client_message(
                         draft_manager,
                         draft_view,
                         state,
+                        game_db,
                         connections,
                         lobby,
                         lobby_subscribers,
