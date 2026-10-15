@@ -15489,6 +15489,21 @@ fn counter_tail_family_has_runtime_evidence(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c + CR 614.1a (issue #8762): does the counter rider branch in
+/// [`resolve_chain_body`] run `link`/`effect`, the link hung directly after a
+/// counter's graveyard-exile rider? It runs a `SequentialSibling` tail whose
+/// family [`counter_tail_family_has_runtime_evidence`] admits, and drops every
+/// other tail: an unadmitted family (Devious Cover-Up's `ChangeZone`), or a
+/// `ContinuationStep` link (Transcendent Dragon's ", then you may cast it").
+/// Coverage reads the same answer (`coverage::counter_exile_rider_drops_its_tail`),
+/// so a tail this drops is reported as a resolver gap. Asked of the link's
+/// fields because the resolver holds a `ResolvedAbility` and coverage an
+/// `AbilityDefinition` (the same convention as
+/// `cast_from_zone::is_graveyard_exile_rider_subability`).
+pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effect) -> bool {
+    link == SubAbilityLink::SequentialSibling && counter_tail_family_has_runtime_evidence(effect)
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -18227,11 +18242,13 @@ fn resolve_chain_body(
         // (which had run such a tail for Diluvian Primordial's fanout alone,
         // #6945).
         //
-        // Scope, measured over the corpus (20 counter heads carry the exile
-        // rider, 6 of them a tail): the rider's DIRECT sequential tail, and only
-        // when its family is one an integration test drives end to end through
-        // this branch (`counter_tail_family_has_runtime_evidence`). Five of the
-        // six tails are admitted; Devious Cover-Up is named there, not here. No
+        // Scope: the rider's DIRECT sequential tail, and only when its family is
+        // one an integration test drives end to end through this branch —
+        // `counter_exile_rider_runs_tail` decides, and coverage reads the same
+        // answer, so every tail it drops is a `ResolverFeature` gap
+        // (`StructuralFeature::CounterExileRiderTailDropped`). The families it
+        // refuses are named at the allowlist
+        // (`counter_tail_family_has_runtime_evidence`), not here. No
         // separate last-link rule: a multi-link tail is admitted with its
         // evidence like any other, or not at all.
         //
@@ -18251,8 +18268,8 @@ fn resolve_chain_body(
         // A tail with a printed condition of its own is gated by
         // `resolve_chain_body`'s top-level `ability.condition` read, with the
         // tail as its own context — Delay's "If it doesn't have suspend"
-        // (`TargetMatchesFilter { WithoutKeywordKind Suspend }`, the only
-        // conditioned tail in the corpus) reads the tail's first object target,
+        // (`TargetMatchesFilter { WithoutKeywordKind Suspend }`, at #8795 the
+        // only conditioned tail in the corpus) reads the tail's first object target,
         // which is why the tail is handed its targets below.
         //
         // No park site, and none is needed. `counter::resolve` returns early on
@@ -18312,8 +18329,7 @@ fn resolve_chain_body(
             let direct_sequential_tail = sub
                 .sub_ability
                 .as_deref()
-                .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
-                .filter(|tail| counter_tail_family_has_runtime_evidence(&tail.effect))
+                .filter(|tail| counter_exile_rider_runs_tail(tail.sub_link, &tail.effect))
                 .cloned();
             if let Some(mut tail) = direct_sequential_tail {
                 if should_propagate_parent_targets(ability, &tail) {
@@ -22485,6 +22501,57 @@ mod tests {
             "ChangeZone has no test that fails when the branch is reverted — admitting it \
              would change Devious Cover-Up on an unmeasured path"
         );
+    }
+
+    /// Issue #8762: the counter rider branch runs a tail only when it is a
+    /// `SequentialSibling` link of an admitted family — both axes, so coverage
+    /// (which reads the same authority) reports exactly the tails the branch
+    /// drops. Effects lifted from `client/public/card-data.json`; Transcendent
+    /// Dragon's tail is its ", then you may cast it" `CastFromZone`.
+    #[test]
+    fn counter_exile_rider_runs_only_an_admitted_sequential_tail() {
+        fn effect(json: &str) -> Effect {
+            serde_json::from_str(json).expect("tail effect lifted from card-data.json must parse")
+        }
+        // Transcendent Dragon.
+        let cast = effect(
+            r#"{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"}"#,
+        );
+        // No Escape.
+        let scry = effect(
+            r#"{"type":"Scry","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+        );
+        // Delay.
+        let generic = effect(
+            r#"{"type":"GenericEffect","static_abilities":[],"duration":"Permanent","target":{"type":"ParentTarget"}}"#,
+        );
+        // Devious Cover-Up — the first link of its two-link tail.
+        let change_zone = effect(
+            r#"{"type":"ChangeZone","origin":"Graveyard","destination":"Library","target":{"type":"Typed","type_filters":["Card"],"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}]}}"#,
+        );
+
+        for (family, admitted) in [
+            ("CastFromZone", &cast),
+            ("Scry", &scry),
+            ("GenericEffect", &generic),
+        ] {
+            assert!(
+                counter_exile_rider_runs_tail(SubAbilityLink::SequentialSibling, admitted),
+                "a sequential {family} tail runs"
+            );
+            assert!(
+                !counter_exile_rider_runs_tail(SubAbilityLink::ContinuationStep, admitted),
+                "a continuation-step {family} tail is dropped"
+            );
+        }
+        assert!(
+            !counter_exile_rider_runs_tail(SubAbilityLink::SequentialSibling, &change_zone),
+            "an unadmitted family is dropped even as a sequential sibling"
+        );
+        assert!(!counter_exile_rider_runs_tail(
+            SubAbilityLink::ContinuationStep,
+            &change_zone
+        ));
     }
 
     /// Issue #8762: a counter that carries the exile rider stamps its countered

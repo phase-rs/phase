@@ -3813,7 +3813,8 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// CR 608.2c: Does this effect introduce a freshly *chosen* object target — one
 /// that a subsequent "that <object>" (`ParentTarget`) anaphor binds to, rather
 /// than the trigger event? True for player-selected object filters (`Typed`,
-/// and `Or`/`And` combinations of them); false for anaphoric/contextual refs
+/// the stack-object targets `StackSpell` / `StackAbility`, and `Or`/`And`
+/// combinations of them); false for anaphoric/contextual refs
 /// (`ParentTarget`, `TriggeringSource`, `SelfRef`, …) and untargeted effects.
 ///
 /// Effects that write `state.last_revealed_ids` also return `true`: sub-abilities
@@ -3835,6 +3836,11 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// hands the chosen card(s) to the next instruction, so a later `ParentTarget`
 /// binds to the pick and never to the trigger event (Gorex, the Tombshell's
 /// dies half).
+///
+/// An exile-until loop (`Effect::ExileFromTopUntil`, every `UntilCondition`)
+/// also returns `true`: it hands the exiled card(s) to the next instruction, so
+/// a later `ParentTarget` binds to them (Breaching Dragonstorm, Demonlord
+/// Belzenlok).
 fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // CR 608.2c + CR 603.2g: Effects that populate state.last_revealed_ids
     // introduce revealed objects. Sub-ability ParentTarget binds to those
@@ -3871,9 +3877,25 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     if matches!(effect, Effect::ChooseFromZone { .. }) {
         return true;
     }
+    // CR 608.2c + CR 701.13a: an exile-until loop ("exile cards from the top of
+    // your library until you exile a nonland card") hands the card it exiled to
+    // the next instruction — the hit as that instruction's targets, or the
+    // exiled pile through `ExiledBySource` — so a later "that card" names the
+    // exiled card, never the trigger event (Breaching Dragonstorm's "If you
+    // don't, put that card into your hand"; Demonlord Belzenlok).
+    if matches!(effect, Effect::ExileFromTopUntil { .. }) {
+        return true;
+    }
     fn is_chosen(filter: &TargetFilter) -> bool {
         match filter {
-            TargetFilter::Typed(_) => true,
+            // CR 115.1a + CR 115.1d: "target spell" / "target activated
+            // ability" names a stack object the player chose, as a `Typed`
+            // filter names a chosen permanent or card ("counter target spell.
+            // If that spell is countered this way, exile it" — Transcendent
+            // Dragon, CR 608.2c + CR 614.1a).
+            TargetFilter::Typed(_)
+            | TargetFilter::StackSpell
+            | TargetFilter::StackAbility { .. } => true,
             TargetFilter::Or { filters } | TargetFilter::And { filters } => {
                 filters.iter().any(is_chosen)
             }

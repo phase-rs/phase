@@ -9334,6 +9334,13 @@ enum StructuralFeature {
     /// `parse_protection_target_monocolored_is_quality_not_card_type`, which
     /// notes that such a grant "would do nothing".
     InertProtectionQualityGrant,
+    /// A counter's graveyard-exile rider (CR 608.2c + CR 614.1a) carries a tail
+    /// the resolver drops (`effects::counter_exile_rider_runs_tail`). The card
+    /// parses, every node is a real variant, and the printed instruction after
+    /// the rider never happens: Devious Cover-Up's "You may shuffle up to four
+    /// target cards from your graveyard into your library", Transcendent
+    /// Dragon's ", then you may cast it without paying its mana cost".
+    CounterExileRiderTailDropped,
 }
 
 impl StructuralFeature {
@@ -9357,6 +9364,7 @@ impl StructuralFeature {
                 "structural:tracked_set_return_after_battlefield_exit"
             }
             InertProtectionQualityGrant => "structural:inert_protection_quality_grant",
+            CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
         }
     }
 
@@ -9381,6 +9389,11 @@ impl StructuralFeature {
             // only against core-type words and parseable subtypes, so a quality
             // outside both can never match any source and the grant does nothing.
             InertProtectionQualityGrant => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `counter_rider_tail_8762::devious_cover_up_tail_is_parsed_but_inert`
+            // (the graveyard is untouched) and
+            // `event_source_lift_referent_stops::transcendent_dragon_does_not_run_the_cast_coverage_reports_as_a_gap`
+            // (Transcendent Dragon's cast is never offered).
+            CounterExileRiderTailDropped => FeatureSupport::Unhandled,
         }
     }
 }
@@ -9547,6 +9560,24 @@ fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
     scan_stranded_tracked_set(def, false)
 }
 
+/// CR 608.2c + CR 614.1a: true when `def` is a counter whose graveyard-exile
+/// rider (`cast_from_zone::is_graveyard_exile_rider_subability`, the shape
+/// `resolve_chain_body`'s counter rider branch consumes) carries a tail the
+/// resolver drops (`effects::counter_exile_rider_runs_tail`). The rider and the
+/// tail are asked of the resolver's own authorities; the `Effect::Counter`
+/// head match mirrors the branch's guard.
+fn counter_exile_rider_drops_its_tail(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Counter { .. })
+        && def.sub_ability.as_deref().is_some_and(|rider| {
+            crate::game::effects::cast_from_zone::is_graveyard_exile_rider_subability(
+                &rider.effect,
+                rider.condition.as_ref(),
+            ) && rider.sub_ability.as_deref().is_some_and(|tail| {
+                !crate::game::effects::counter_exile_rider_runs_tail(tail.sub_link, &tail.effect)
+            })
+        })
+}
+
 /// TRACKED-SET-RETURN-DEFECT's sibling honesty marker: a `Protection` grant the
 /// runtime can never satisfy.
 ///
@@ -9667,6 +9698,9 @@ fn extract_ability_features_with_token_statics(
             features,
             StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
         );
+    }
+    if counter_exile_rider_drops_its_tail(def) {
+        emit_structural(features, StructuralFeature::CounterExileRiderTailDropped);
     }
 
     // Condition
@@ -13762,6 +13796,182 @@ mod tests {
         assert!(
             !clean_features.contains_key(TAG),
             "reach-guard: a face with no replacements must not emit the tag"
+        );
+    }
+
+    const TRANSCENDENT_DRAGON_ORACLE: &str = "Flash\nFlying\nWhen this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.";
+
+    /// A face built from `oracle` the way the export carries it: parsed with the
+    /// card's MTGJSON keywords and types, and the parse copied onto the face.
+    /// The keywords must be copied too — without them a face whose text carries
+    /// keyword lines (Transcendent Dragon's "Flash", "Flying") reads as a silent
+    /// drop.
+    fn counter_rider_face(name: &str, oracle: &str, keywords: &[&str], types: &[&str]) -> CardFace {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let parsed = crate::parser::parse_oracle_text(oracle, name, &keywords, &types, &[]);
+        let mut face = make_face();
+        face.name = name.to_string();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        face.static_abilities = parsed.statics;
+        face.replacements = parsed.replacements;
+        face.parse_warnings = parsed.parse_warnings;
+        face.keywords = parsed.extracted_keywords;
+        face
+    }
+
+    /// Whether `face` has a counter whose direct sub is the graveyard-exile
+    /// rider, printed or under a trigger — the head the resolver's counter rider
+    /// branch consumes.
+    fn has_counter_exile_rider_head(face: &CardFace) -> bool {
+        let rider_head = |def: &AbilityDefinition| {
+            matches!(&*def.effect, Effect::Counter { .. })
+                && def.sub_ability.as_deref().is_some_and(|rider| {
+                    crate::game::effects::cast_from_zone::is_graveyard_exile_rider_subability(
+                        &rider.effect,
+                        rider.condition.as_ref(),
+                    )
+                })
+        };
+        face.abilities.iter().any(rider_head)
+            || face
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .any(rider_head)
+    }
+
+    /// CR 608.2c + CR 614.1a: coverage reports a counter's exile-rider tail as a
+    /// resolver gap exactly when the resolver drops it
+    /// (`effects::counter_exile_rider_runs_tail`). Transcendent Dragon's
+    /// `ContinuationStep` cast and Devious Cover-Up's unadmitted `ChangeZone`
+    /// carry the tag; the admitted tails (Spelljack, No Escape, Delay,
+    /// Thranduil's Decree, Kheru Spellsnatcher) and the tail-less riders (Force
+    /// of Negation, Dissipate) do not.
+    #[test]
+    fn counter_exile_rider_tail_the_resolver_drops_is_a_coverage_gap() {
+        const TAG: &str = "structural:counter_exile_rider_tail_dropped";
+        // (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types, tail dropped)
+        let cards: [(&str, &str, &[&str], &[&str], bool); 9] = [
+            (
+                "Transcendent Dragon",
+                TRANSCENDENT_DRAGON_ORACLE,
+                &["Flash", "Flying"],
+                &["Creature"],
+                true,
+            ),
+            (
+                "Devious Cover-Up",
+                "Counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard. You may shuffle up to four target cards from your graveyard into your library.",
+                &[],
+                &["Instant"],
+                true,
+            ),
+            (
+                "Spelljack",
+                "Counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard. You may play it without paying its mana cost for as long as it remains exiled. (If it has X in its mana cost, X is 0.)",
+                &[],
+                &["Instant"],
+                false,
+            ),
+            (
+                "No Escape",
+                "Counter target creature or planeswalker spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.\nScry 1.",
+                &["Scry"],
+                &["Instant"],
+                false,
+            ),
+            (
+                "Delay",
+                "Counter target spell. If the spell is countered this way, exile it with three time counters on it instead of putting it into its owner's graveyard. If it doesn't have suspend, it gains suspend. (At the beginning of its owner's upkeep, they remove a time counter. When the last is removed, they may play it without paying its mana cost. If it's a creature, it has haste.)",
+                &[],
+                &["Instant"],
+                false,
+            ),
+            (
+                "Thranduil's Decree",
+                "Counter target spell. If a permanent spell is countered this way, exile it instead of putting it into its owner's graveyard. You may cast that card without paying its mana cost for as long as it remains exiled.",
+                &[],
+                &["Instant"],
+                false,
+            ),
+            (
+                "Kheru Spellsnatcher",
+                "Morph {4}{U}{U} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)\nWhen this creature is turned face up, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard. You may cast that card without paying its mana cost for as long as it remains exiled.",
+                &["Morph"],
+                &["Creature"],
+                false,
+            ),
+            (
+                "Force of Negation",
+                "If it's not your turn, you may exile a blue card from your hand rather than pay this spell's mana cost.\nCounter target noncreature spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.",
+                &[],
+                &["Instant"],
+                false,
+            ),
+            (
+                "Dissipate",
+                "Counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.",
+                &[],
+                &["Instant"],
+                false,
+            ),
+        ];
+        for (name, oracle, keywords, types, dropped) in cards {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            assert!(
+                has_counter_exile_rider_head(&face),
+                "{name}: reach guard — the parse has a counter whose sub is the exile rider"
+            );
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(TAG),
+                dropped.then_some(&FeatureSupport::Unhandled),
+                "{name}: the tag must be present exactly when the resolver drops the rider's tail"
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 614.1a: the card-level verdict. Transcendent Dragon's
+    /// "exile it instead" is represented (the rider), so it reports no swallowed
+    /// clause; its ", then you may cast it without paying its mana cost" is a
+    /// `ContinuationStep` tail the counter rider branch drops, so the card is
+    /// unsupported with exactly that resolver gap.
+    #[test]
+    fn transcendent_dragon_reports_its_dropped_counter_rider_tail() {
+        let card = coverage_result_for_face(counter_rider_face(
+            "Transcendent Dragon",
+            TRANSCENDENT_DRAGON_ORACLE,
+            &["Flash", "Flying"],
+            &["Creature"],
+        ));
+        // Reach guard: the card reached coverage with its trigger and counter.
+        assert!(
+            card.parse_details.iter().any(|item| {
+                item.category == ParseCategory::Trigger
+                    && item.label == "ChangesZone"
+                    && item.children.iter().any(|child| {
+                        child.category == ParseCategory::Ability && child.label == "Counter"
+                    })
+            }),
+            "the enters trigger and its counter must reach coverage"
+        );
+        let gaps: Vec<&str> = card
+            .gap_details
+            .iter()
+            .map(|gap| gap.handler.as_str())
+            .collect();
+        assert!(
+            !card.supported,
+            "the dropped free cast must leave the card unsupported; gaps: {gaps:?}"
+        );
+        assert_eq!(
+            gaps,
+            ["ResolverFeature:structural:counter_exile_rider_tail_dropped"],
+            "the dropped tail is the only gap — in particular no Swallow:Replacement_Instead"
         );
     }
 

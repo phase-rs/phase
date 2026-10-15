@@ -2069,14 +2069,14 @@ pub(crate) fn is_graveyard_exile_rider_subability(
 ///
 /// Asked and recorded per `counter::resolve` call: a `player_scope` or
 /// `repeat_for` counter would keep only its last iteration's answer — no
-/// corpus counter head is scoped or repeated (measured: all 20 are chain
-/// heads), so that shape must be decided with its evidence, not inherited.
+/// corpus exile-rider counter head is scoped or repeated (measured over
+/// `card-data.json`: each is a chain head), so that shape must be decided with its evidence, not inherited.
 ///
 /// Fail closed on every other shape: a rider with `destination: Some(_)` names
 /// an arrival this pre-move question cannot see, and a condition of another
-/// kind is one no corpus rider carries (measured over all 20 exile-rider heads:
-/// 18 `Typed[Card]`, 1 `Typed[Permanent]`, 1 whose condition the parser does
-/// not carry — Delay; its printed "if the spell is countered this way" is
+/// kind is one no corpus rider carries (measured over every exile-rider head:
+/// `Typed[Card]`, `Typed[Permanent]` (Thranduil's Decree alone), and Delay
+/// alone, whose condition the parser does not carry; its printed "if the spell is countered this way" is
 /// always true for the countered spell). A new kind must be decided here, not
 /// inherited from the form.
 pub(crate) fn graveyard_exile_rider_applies_to(
@@ -2118,7 +2118,7 @@ pub(crate) fn graveyard_exile_rider_applies_to(
 /// `conditional_enter_with_counters` through the shared
 /// `enter_with_counters_for_object`, in the same bound context. Asked only where
 /// `graveyard_exile_rider_applies_to` answered yes; a rider that names no
-/// counters (Force of Negation, Spelljack — 19 of the 20 corpus heads, measured
+/// counters (Force of Negation, Spelljack — every corpus head but Delay, measured
 /// over `card-data.json`) yields an empty list and the move carries none.
 pub(crate) fn graveyard_exile_rider_entry_counters(
     state: &GameState,
