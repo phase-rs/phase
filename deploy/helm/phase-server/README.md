@@ -59,6 +59,7 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure` and `ingress_overflow` |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -141,8 +142,18 @@ if a firewall or Cloudflare Tunnel already guarantees it. Traefik falls back to 
 router serves the same host with different options, so keep all Ingresses for
 the host in this chart.
 
-Cloudflare closes idle WebSockets after ~100 s; the client's 5 s application
-ping keeps game connections alive.
+The server sends a native WebSocket Ping every 10 s, independently of the
+client's JavaScript ping timer. Its 30 s response budget begins only after an
+unanswered Ping has flushed. Any inbound frame clears it; actual in-flight
+writes pause the remaining budget, but later Pings or application writes do
+not renew it.
+
+Queued application ingress is limited to 64 commands and 1 MiB of retained
+payload across the raw and decoded queues. Overflow closes the connection with
+WebSocket code 1013 rather than silently discarding a command. Established
+connections' plain-text and raw-envelope JSON Pings bypass this command budget;
+their replies are coalesced. Compressed envelopes still consume the raw decode
+quota before decompression.
 
 ## Announcing to a public directory
 

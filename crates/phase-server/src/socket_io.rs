@@ -2,7 +2,7 @@
 //! Application messages retain their FIFO mailbox; only transport control and
 //! application Pong replies may overtake a frame that has not started writing.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::socket_control::{CloseOrigin, Control, ControlLane, Liveness};
+use crate::socket_control::{CloseOrigin, Control, ControlLane, Encoding, Liveness};
 use crate::socket_disconnect::{Cause, Death, Disconnect};
 use crate::socket_ingress::{Admission, IngressBudget, MAX_COMMANDS};
 use crate::wire;
@@ -105,21 +105,18 @@ impl Drop for PendingWrite {
 pub(crate) struct NegotiatedSocket {
     messages: mpsc::UnboundedSender<ServerMessage>,
     control: ControlLane,
-    envelope: Arc<AtomicBool>,
     death: Death,
+    #[cfg(test)]
+    hooks: crate::socket_test_hooks::Hooks,
 }
 
 impl NegotiatedSocket {
     pub(crate) fn set_wire_format(&mut self, format: Option<WireFormat>) {
-        let envelope = match format {
-            Some(WireFormat::GzipEnvelopeV1) => true,
-            Some(WireFormat::Unknown) | None => false,
-        };
-        self.envelope.store(envelope, Ordering::Release);
+        self.control.accept_wire_format(format);
     }
 
     pub(crate) fn uses_gzip_envelope(&self) -> bool {
-        self.envelope.load(Ordering::Acquire)
+        self.control.encoding() == Encoding::GzipEnvelope
     }
 
     pub(crate) fn enqueue_reply(
@@ -137,6 +134,20 @@ impl NegotiatedSocket {
             self.uses_gzip_envelope()
                 .then_some(WireFormat::GzipEnvelopeV1),
         );
+    }
+
+    pub(crate) async fn application_activity(&self) {
+        self.control.application_activity().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn before_bootstrap_cutover(&self) {
+        self.hooks.before_bootstrap_cutover().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bootstrap_hooks(&self) -> crate::socket_test_hooks::Hooks {
+        self.hooks.clone()
     }
 
     pub(crate) fn ingress_overflow(&self) {
@@ -226,7 +237,6 @@ pub(crate) fn start(
     let (sink, stream) = socket.split();
     let death = Death::new(config.metrics, connection);
     let liveness = Liveness::default();
-    let envelope = Arc::new(AtomicBool::new(false));
     let metrics = Arc::new(PendingMetrics::default());
     let (application, application_rx) = mpsc::channel::<PendingWrite>(1);
     let control = ControlLane::default();
@@ -234,8 +244,9 @@ pub(crate) fn start(
     let facade = NegotiatedSocket {
         messages: config.replies,
         control: control.clone(),
-        envelope: envelope.clone(),
         death: death.clone(),
+        #[cfg(test)]
+        hooks: hooks.clone(),
     };
 
     let reader = tokio::spawn(read_socket(
@@ -252,6 +263,7 @@ pub(crate) fn start(
         let death = death.clone();
         let mut closed = death.closed();
         let metrics = metrics.clone();
+        let control = control.clone();
         #[cfg(test)]
         let hooks = hooks.clone();
         async move {
@@ -271,7 +283,8 @@ pub(crate) fn start(
                 sample_backlog(connection, messages.len() + 1, &metrics, &mut warned);
                 #[cfg(test)]
                 hooks.before_encode(&message).await;
-                let encoding = encode_application(message, envelope.load(Ordering::Acquire));
+                let encoding =
+                    encode_application(message, control.encoding() == Encoding::GzipEnvelope);
                 tokio::pin!(encoding);
                 let frame = loop {
                     tokio::select! {
@@ -519,6 +532,21 @@ async fn read_socket<S>(
                 break;
             }
             Some(Ok(frame @ (Message::Text(_) | Message::Binary(_)))) => {
+                // wireEnvelope.ts keeps <256-byte Pings text/FORMAT_RAW.
+                // Exempt established controls before retaining command slots;
+                // GZIP frames stay subject to the decoder's raw CPU quota.
+                let encoding = control.encoding();
+                let ping = match encoding {
+                    Encoding::Pending => None,
+                    Encoding::Plain | Encoding::GzipEnvelope => {
+                        crate::socket_heartbeat::timestamp(&frame, encoding.wire_format())
+                    }
+                };
+                if let Some(timestamp) = ping {
+                    control.application_pong(timestamp, encoding.wire_format());
+                    control.note_application_activity();
+                    continue;
+                }
                 let bytes = match &frame {
                     Message::Text(text) => text.len(),
                     Message::Binary(bytes) => bytes.len(),
@@ -850,6 +878,80 @@ mod tests {
         assert_eq!(first.unwrap().cause, Cause::ReadDeadline);
     }
 
+    async fn assert_silent_peer_expires(application_interval: Option<Duration>) {
+        let (written, mut writes) = mpsc::unbounded_channel();
+        let sink = Box::pin(futures_util::sink::unfold(
+            written,
+            |written, frame| async {
+                written.send(frame).unwrap();
+                Ok::<_, axum::Error>(written)
+            },
+        ));
+        let control = ControlLane::default();
+        let counters = Arc::new(crate::metrics::ServerMetrics::default());
+        let death = Death::new(counters.clone(), 0);
+        let mut closed = death.closed();
+        let liveness = Liveness::default();
+        let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+        let reader = tokio::spawn(read_socket(
+            futures_util::stream::pending::<Result<Message, axum::Error>>(),
+            control.clone(),
+            incoming,
+            death.clone(),
+            liveness.clone(),
+            IngressBudget::default(),
+            0,
+        ));
+        let (application, application_rx) = mpsc::channel(1);
+        let metrics = Arc::new(PendingMetrics::default());
+        let writer = tokio::spawn(write_socket(
+            sink,
+            application_rx,
+            control,
+            death.clone(),
+            metrics.clone(),
+            liveness,
+        ));
+        assert!(matches!(writes.recv().await, Some(Message::Ping(_))));
+        let first_flush = tokio::time::Instant::now();
+        let mut next_application = application_interval.map(|interval| first_flush + interval);
+        for _ in 1..RESPONSE_TIMEOUT.as_secs() {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            if next_application.is_some_and(|next| next <= tokio::time::Instant::now()) {
+                application
+                    .send(PendingWrite::new(Message::text("state"), None, &metrics))
+                    .await
+                    .unwrap();
+                next_application =
+                    application_interval.map(|interval| tokio::time::Instant::now() + interval);
+            }
+            tokio::task::yield_now().await;
+            assert!(death.event().is_none(), "response budget expired early");
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let event =
+            *tokio::time::timeout(Duration::from_millis(1), closed.wait_for(Option::is_some))
+                .await
+                .expect("outbound traffic renewed a silent peer's response budget")
+                .unwrap();
+        assert_eq!(event.unwrap().cause, Cause::ReadDeadline);
+        assert_eq!(tokio::time::Instant::now(), first_flush + RESPONSE_TIMEOUT);
+        reader.await.unwrap();
+        writer.await.unwrap();
+        death.record(Cause::ApplicationEnd);
+        assert_eq!(counters.ws_disconnect_count(Cause::ReadDeadline), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_pings_do_not_renew_a_silent_peers_response_budget() {
+        assert_silent_peer_expires(None).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn application_writes_do_not_renew_a_silent_peers_response_budget() {
+        assert_silent_peer_expires(Some(Duration::from_secs(1))).await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn buffered_native_response_wins_after_runtime_starvation_without_client_json_ping() {
         let liveness = Liveness::default();
@@ -1167,5 +1269,173 @@ mod transport_fixup_tests {
             "a server that never flushed a Ping cannot time out its response"
         );
         reader.abort();
+    }
+
+    #[tokio::test]
+    async fn mode_rejection_preserves_the_operation_failure_channel() {
+        let (url, server, _directory, _app) =
+            crate::issue_4548_full_create_tests::spawn_server_with_mode(
+                server_core::protocol::ServerMode::LobbyOnly,
+            )
+            .await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = connect_and_hello(url).await;
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::ExportAuthoritativeState)
+                        .unwrap()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::AuthoritativeStateExportFailed { .. }
+            ));
+        })
+        .await;
+        server.abort();
+        result.expect("mode rejection did not complete its operation");
+    }
+
+    async fn assert_buffered_heartbeats_survive(format: Option<server_core::protocol::WireFormat>) {
+        use crate::issue_4548_full_create_tests::{
+            recv_enveloped_server_message, send_test_message, test_client_hello,
+        };
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            send_test_message(
+                &mut socket,
+                &test_client_hello(format.into_iter().collect()),
+                false,
+            )
+            .await;
+            send_test_message(
+                &mut socket,
+                &ClientMessage::Ping { timestamp: 0 },
+                format.is_some(),
+            )
+            .await;
+            let warmup = if format.is_some() {
+                recv_enveloped_server_message(&mut socket).await
+            } else {
+                recv_server_message(&mut socket).await
+            };
+            assert!(matches!(warmup, ServerMessage::Pong { timestamp: 0 }));
+            let held = app.lobby.lock().await;
+            send_test_message(
+                &mut socket,
+                &ClientMessage::SubscribeLobby,
+                format.is_some(),
+            )
+            .await;
+            let mut deck = serde_json::to_value(ClientMessage::CreateGame {
+                deck: Default::default(),
+            })
+            .unwrap();
+            deck.as_object_mut().unwrap().insert(
+                "padding".to_string(),
+                serde_json::Value::String("x".repeat(63 * 1024)),
+            );
+            let deck = serde_json::to_string(&deck).unwrap();
+            if format.is_some() {
+                let frame = wire::encode_json_message(deck, true).await.unwrap();
+                let Message::Binary(bytes) = frame else {
+                    panic!("expected envelope")
+                };
+                socket.send(WsMessage::Binary(bytes)).await.unwrap();
+            } else {
+                socket.send(WsMessage::Text(deck.into())).await.unwrap();
+            }
+            // All these heartbeats can be buffered while a game/server is
+            // stalled. They are not pending application commands.
+            for timestamp in 1..=128 {
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::Ping { timestamp },
+                    format.is_some(),
+                )
+                .await;
+            }
+            loop {
+                let reply = if format.is_some() {
+                    recv_enveloped_server_message(&mut socket).await
+                } else {
+                    recv_server_message(&mut socket).await
+                };
+                if matches!(reply, ServerMessage::Pong { timestamp: 128 }) {
+                    break;
+                }
+            }
+            drop(held);
+        })
+        .await;
+        server.abort();
+        result.expect("buffered heartbeats caused command admission overflow");
+    }
+
+    #[tokio::test]
+    async fn buffered_text_heartbeats_do_not_consume_command_admission() {
+        assert_buffered_heartbeats_survive(None).await;
+    }
+
+    #[tokio::test]
+    async fn buffered_raw_envelope_heartbeats_do_not_consume_command_admission() {
+        assert_buffered_heartbeats_survive(Some(server_core::protocol::WireFormat::GzipEnvelopeV1))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn malformed_binary_envelopes_consume_the_raw_decode_quota() {
+        use crate::issue_4548_full_create_tests::{
+            recv_enveloped_server_message, send_test_message, test_client_hello,
+        };
+        use server_core::protocol::WireFormat;
+        let (url, server, _directory, _app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+            recv_server_message(&mut socket).await;
+            send_test_message(
+                &mut socket,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            for _ in 0..crate::RATE_LIMIT_MESSAGES {
+                socket
+                    .send(WsMessage::Binary(vec![1, 1, 2, 3].into()))
+                    .await
+                    .unwrap();
+            }
+            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, true).await;
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 91 }, true).await;
+            assert!(matches!(
+                recv_enveloped_server_message(&mut socket).await,
+                ServerMessage::Pong { timestamp: 91 }
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), async {
+                    loop {
+                        if matches!(
+                            recv_enveloped_server_message(&mut socket).await,
+                            ServerMessage::LobbyUpdate { .. }
+                        ) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "invalid binary traffic bypassed the quota for the next command"
+            );
+        })
+        .await;
+        server.abort();
+        result.expect("malformed traffic prevented its control reply");
     }
 }

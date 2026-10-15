@@ -6,7 +6,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 // Keep this aligned with client/src/network/wireEnvelope.ts.
-const FORMAT_RAW: u8 = 0x00;
+pub(crate) const FORMAT_RAW: u8 = 0x00;
 const FORMAT_GZIP: u8 = 0x01;
 const COMPRESSION_THRESHOLD: usize = 256;
 /// Deflate level for the outgoing envelope, and the only place it is chosen. Measured

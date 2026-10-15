@@ -9,12 +9,13 @@ use tokio::sync::Notify;
 #[derive(Clone, Default)]
 pub(crate) struct Hooks {
     bootstrap: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    cutover: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
 }
 
 #[derive(Default)]
 pub(crate) struct BootstrapGate {
-    entered: Notify,
-    release: Notify,
+    pub(crate) entered: Notify,
+    pub(crate) release: Notify,
 }
 
 impl Hooks {
@@ -22,6 +23,20 @@ impl Hooks {
         let gate = Arc::new(BootstrapGate::default());
         *self.bootstrap.lock() = Some(gate.clone());
         gate
+    }
+
+    pub(crate) fn arm_cutover(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.cutover.lock() = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) async fn before_bootstrap_cutover(&self) {
+        let gate = self.cutover.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
     }
 
     pub(crate) async fn before_encode(&self, message: &ServerMessage) {
@@ -55,6 +70,31 @@ pub(crate) fn run_async_test<F: std::future::Future<Output = ()>>(
         .unwrap()
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+pub(crate) fn room_request(
+    deck: server_core::protocol::DeckData,
+    player_count: u8,
+    requested_code: Option<String>,
+) -> server_core::protocol::ClientMessage {
+    server_core::protocol::ClientMessage::CreateGameWithSettings {
+        deck,
+        display_name: "host".to_string(),
+        public: false,
+        password: None,
+        timer_seconds: None,
+        player_count,
+        match_config: Default::default(),
+        ai_seats: Vec::new(),
+        format_config: Some(engine::types::format::FormatConfig::free_for_all()),
+        room_name: None,
+        host_peer_id: None,
+        draft_metadata: None,
+        start_when_full: true,
+        ranked: false,
+        requested_code,
+        booster_pack_pool: None,
+    }
 }
 
 #[test]
@@ -212,5 +252,495 @@ fn reconnect_bootstrap_precedes_a_concurrent_newer_action() {
         .await;
         server.abort();
         result.expect("reconnect/action barrier did not complete");
+    });
+}
+
+#[test]
+fn fresh_join_bootstrap_precedes_a_concurrent_room_start() {
+    run_async_test(|| async {
+        use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
+        use crate::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server_with_db,
+        };
+        use engine::types::format::FormatConfig;
+        use server_core::protocol::{ClientMessage, DeckData};
+        use std::time::Duration;
+
+        let (url, server, _directory, app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let mut host = connect_and_hello(url.clone()).await;
+            send_test_message(
+                &mut host,
+                &ClientMessage::CreateGameWithSettings {
+                    deck: deck.clone(),
+                    display_name: "host".to_string(),
+                    public: false,
+                    password: None,
+                    timer_seconds: None,
+                    player_count: 3,
+                    match_config: Default::default(),
+                    ai_seats: Vec::new(),
+                    format_config: Some(FormatConfig::free_for_all()),
+                    room_name: None,
+                    host_peer_id: None,
+                    draft_metadata: None,
+                    start_when_full: true,
+                    ranked: false,
+                    requested_code: None,
+                    booster_pack_pool: None,
+                },
+                false,
+            )
+            .await;
+            let code = loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::GameCreated { game_code, .. } => break game_code,
+                    ServerMessage::Error { message, .. } => panic!("create: {message}"),
+                    _ => {}
+                }
+            };
+            let gate = app.context.socket_hooks.arm_cutover();
+            let mut waiting = connect_and_hello(url.clone()).await;
+            send_test_message(
+                &mut waiting,
+                &ClientMessage::JoinGame {
+                    game_code: code.clone(),
+                    deck: deck.clone(),
+                },
+                false,
+            )
+            .await;
+            gate.entered.notified().await;
+            let mut final_guest = connect_and_hello(url).await;
+            send_test_message(
+                &mut final_guest,
+                &ClientMessage::JoinGame {
+                    game_code: code,
+                    deck,
+                },
+                false,
+            )
+            .await;
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        if matches!(
+                            recv_server_message(&mut host).await,
+                            ServerMessage::GameStarted { .. }
+                        ) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "the room started before the joining seat's bootstrap cutover"
+            );
+            gate.release.notify_one();
+            let bootstrap_revision = loop {
+                match recv_server_message(&mut waiting).await {
+                    ServerMessage::StateUpdate { state_revision, .. } => break state_revision,
+                    ServerMessage::GameStarted { .. } => panic!("start overtook fresh bootstrap"),
+                    ServerMessage::Error { message, .. } => panic!("join: {message}"),
+                    _ => {}
+                }
+            };
+            loop {
+                if let ServerMessage::GameStarted { state_revision, .. } =
+                    recv_server_message(&mut waiting).await
+                {
+                    assert!(state_revision >= bootstrap_revision);
+                    break;
+                }
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("fresh-join bootstrap or room start stalled");
+    });
+}
+
+#[test]
+fn creator_bootstrap_does_not_wait_for_unrelated_lobby_work() {
+    run_async_test(|| async {
+        use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
+        use crate::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server_with_db,
+        };
+        use server_core::protocol::DeckData;
+        use std::time::Duration;
+
+        let (url, server, _directory, app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut host = connect_and_hello(url).await;
+            let held = app.lobby.lock().await;
+            send_test_message(
+                &mut host,
+                &room_request(
+                    DeckData {
+                        main_deck: vec!["Network Test Land".to_string(); 60],
+                        ..Default::default()
+                    },
+                    2,
+                    Some("BOOT01".to_string()),
+                ),
+                false,
+            )
+            .await;
+            loop {
+                if app.sessions.lock().await.contains_game("BOOT01") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(matches!(
+                recv_server_message(&mut host).await,
+                ServerMessage::GameCreated { game_code, .. } if game_code == "BOOT01"
+            ));
+            assert!(matches!(
+                recv_server_message(&mut host).await,
+                ServerMessage::SessionAttached {
+                    player_id: engine::types::player::PlayerId(0),
+                    ..
+                }
+            ));
+            drop(held);
+        })
+        .await;
+        server.abort();
+        outcome.expect("a published creator had no bootstrap while the lobby was busy");
+    });
+}
+
+#[test]
+fn starting_join_bootstrap_precedes_an_existing_players_action() {
+    run_async_test(|| async {
+        use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
+        use crate::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server_with_db,
+        };
+        use engine::types::actions::{GameAction, MulliganChoice};
+        use server_core::protocol::{ClientMessage, DeckData};
+        use std::time::Duration;
+
+        let (url, server, _directory, app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let mut host = connect_and_hello(url.clone()).await;
+            send_test_message(&mut host, &room_request(deck.clone(), 2, None), false).await;
+            let code = loop {
+                if let ServerMessage::GameCreated { game_code, .. } =
+                    recv_server_message(&mut host).await
+                {
+                    break game_code;
+                }
+            };
+            let gate = app.context.socket_hooks.arm_cutover();
+            let mut guest = connect_and_hello(url).await;
+            send_test_message(
+                &mut guest,
+                &ClientMessage::JoinGame {
+                    game_code: code,
+                    deck,
+                },
+                false,
+            )
+            .await;
+            gate.entered.notified().await;
+            send_test_message(
+                &mut host,
+                &ClientMessage::Action {
+                    action: GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    },
+                },
+                false,
+            )
+            .await;
+            let action_revision = loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::StateUpdate { state_revision, .. } => break state_revision,
+                    ServerMessage::ActionRejected { rejection } => panic!("action: {rejection:?}"),
+                    _ => {}
+                }
+            };
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), async {
+                    loop {
+                        if matches!(
+                            recv_server_message(&mut guest).await,
+                            ServerMessage::StateUpdate { .. }
+                        ) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "an unbootstrapped joining socket received an action update"
+            );
+            gate.release.notify_one();
+            loop {
+                match recv_server_message(&mut guest).await {
+                    ServerMessage::GameStarted { state_revision, .. } => {
+                        assert!(state_revision >= action_revision);
+                        break;
+                    }
+                    ServerMessage::StateUpdate { .. } => panic!("update overtook startup"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        server.abort();
+        outcome.expect("starting join or concurrent action did not complete");
+    });
+}
+
+#[test]
+fn pregame_return_bootstrap_precedes_a_concurrent_room_start() {
+    run_async_test(|| async {
+        use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
+        use crate::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server_with_db,
+        };
+        use server_core::protocol::{ClientMessage, DeckData};
+        use std::time::Duration;
+
+        let (url, server, _directory, app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let mut host = connect_and_hello(url.clone()).await;
+            send_test_message(&mut host, &room_request(deck.clone(), 3, None), false).await;
+            let (code, token, key) = loop {
+                if let ServerMessage::GameCreated {
+                    game_code,
+                    player_token,
+                    full_key: Some(key),
+                } = recv_server_message(&mut host).await
+                {
+                    break (game_code, player_token, key);
+                }
+            };
+            let mut first_guest = connect_and_hello(url.clone()).await;
+            send_test_message(
+                &mut first_guest,
+                &ClientMessage::JoinGame {
+                    game_code: code.clone(),
+                    deck: deck.clone(),
+                },
+                false,
+            )
+            .await;
+            while !matches!(
+                recv_server_message(&mut first_guest).await,
+                ServerMessage::StateUpdate { .. }
+            ) {}
+            host.close(None).await.unwrap();
+            let gate = app.context.socket_hooks.arm_cutover();
+            let mut returning = connect_and_hello(url.clone()).await;
+            send_test_message(
+                &mut returning,
+                &ClientMessage::Reconnect {
+                    game_code: code.clone(),
+                    player_token: token,
+                    full_key: key.clone(),
+                },
+                false,
+            )
+            .await;
+            gate.entered.notified().await;
+            let mut final_guest = connect_and_hello(url).await;
+            send_test_message(
+                &mut final_guest,
+                &ClientMessage::JoinGame {
+                    game_code: code.clone(),
+                    deck,
+                },
+                false,
+            )
+            .await;
+            while !matches!(
+                recv_server_message(&mut final_guest).await,
+                ServerMessage::GameStarted { .. }
+            ) {}
+            loop {
+                match recv_server_message(&mut returning).await {
+                    ServerMessage::GameCreated {
+                        game_code,
+                        full_key: Some(actual),
+                        ..
+                    } => {
+                        assert_eq!(game_code, code);
+                        assert_eq!(actual, key);
+                        break;
+                    }
+                    ServerMessage::GameStarted { .. } => panic!("start overtook room bootstrap"),
+                    _ => {}
+                }
+            }
+            while !matches!(
+                recv_server_message(&mut returning).await,
+                ServerMessage::GameStarted { .. }
+            ) {}
+            gate.release.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), async {
+                    loop {
+                        if matches!(
+                            recv_server_message(&mut returning).await,
+                            ServerMessage::GameCreated { .. }
+                        ) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "late duplicate creation acknowledgement could reset the running client"
+            );
+        })
+        .await;
+        server.abort();
+        outcome.expect("pregame return did not receive its ordered bootstrap");
+    });
+}
+
+#[test]
+fn draft_full_bootstrap_precedes_a_concurrent_full_action() {
+    run_async_test(|| async {
+        use crate::draft_socket_authority_tests::start_draft_match_with_deck;
+        use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
+        use crate::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server_with_db,
+        };
+        use engine::types::actions::{GameAction, MulliganChoice};
+        use engine::types::format::FormatConfig;
+        use server_core::protocol::{ClientMessage, DeckChoice, DeckData};
+        use std::time::Duration;
+
+        let (url, server, _directory, app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            let names = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let deck = crate::resolve_deck(&app.db, &names).unwrap();
+            let (draft_code, draft_token, key, _) = start_draft_match_with_deck(
+                &app,
+                deck,
+                Some(DeckChoice::DeckList(Box::new(names))),
+            )
+            .await;
+            let opponent_token = {
+                let mut session = crate::lock_session(&app.sessions, &key.game_code)
+                    .await
+                    .unwrap();
+                session.state.format_config = FormatConfig::freeform();
+                session.start_game(&app.db).unwrap();
+                session.player_tokens[1].clone()
+            };
+            let mut draft_player = connect_and_hello(url.clone()).await;
+            let reconnect = ClientMessage::ReconnectDraft {
+                draft_code,
+                player_token: draft_token,
+            };
+            send_test_message(&mut draft_player, &reconnect, false).await;
+            while !matches!(
+                recv_server_message(&mut draft_player).await,
+                ServerMessage::DraftStateUpdate { .. }
+            ) {}
+            let mut opponent = connect_and_hello(url).await;
+            send_test_message(
+                &mut opponent,
+                &ClientMessage::Reconnect {
+                    game_code: key.game_code.clone(),
+                    player_token: opponent_token,
+                    full_key: key.clone(),
+                },
+                false,
+            )
+            .await;
+            loop {
+                if let ServerMessage::GameStarted { legal_actions, .. } =
+                    recv_server_message(&mut opponent).await
+                {
+                    assert!(
+                        legal_actions.contains(&GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        }),
+                        "the opponent must have a real mulligan action before the race"
+                    );
+                    break;
+                }
+            }
+            let gate = app.context.socket_hooks.arm_cutover();
+            send_test_message(&mut draft_player, &reconnect, false).await;
+            gate.entered.notified().await;
+            send_test_message(
+                &mut opponent,
+                &ClientMessage::Action {
+                    action: GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    },
+                },
+                false,
+            )
+            .await;
+            let action_revision = loop {
+                match recv_server_message(&mut opponent).await {
+                    ServerMessage::StateUpdate { state_revision, .. } => break state_revision,
+                    ServerMessage::ActionRejected { rejection } => panic!("action: {rejection:?}"),
+                    _ => {}
+                }
+            };
+            loop {
+                match recv_server_message(&mut draft_player).await {
+                    ServerMessage::DraftMatchStart { full_key, .. } => {
+                        assert_eq!(full_key, key);
+                        break;
+                    }
+                    ServerMessage::StateUpdate { .. } => panic!("update overtook draft binding"),
+                    _ => {}
+                }
+            }
+            let bootstrap_revision = loop {
+                match recv_server_message(&mut draft_player).await {
+                    ServerMessage::GameStarted { state_revision, .. } => break state_revision,
+                    ServerMessage::StateUpdate { .. } => {
+                        panic!("update overtook draft GameStarted")
+                    }
+                    _ => {}
+                }
+            };
+            loop {
+                if let ServerMessage::StateUpdate { state_revision, .. } =
+                    recv_server_message(&mut draft_player).await
+                {
+                    assert_eq!(state_revision, action_revision);
+                    assert!(state_revision > bootstrap_revision);
+                    break;
+                }
+            }
+            gate.release.notify_one();
+        })
+        .await;
+        server.abort();
+        outcome.expect("draft attachment or concurrent Full action stalled");
     });
 }

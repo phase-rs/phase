@@ -5,9 +5,14 @@ mod jev_relay;
 mod logging;
 mod metrics;
 mod persistence;
+#[cfg(test)]
+mod socket_bootstrap_audit_tests;
 mod socket_control;
 mod socket_decode;
 mod socket_disconnect;
+#[cfg(test)]
+mod socket_handoff_tests;
+mod socket_heartbeat;
 mod socket_ingress;
 mod socket_io;
 #[cfg(test)]
@@ -422,17 +427,23 @@ async fn reserve_game_spectator_slot(
     game_spectators: &SharedGameSpectators,
     game_code: &str,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     let mut specs = game_spectators.lock().await;
     let spectators = specs.entry(game_code.to_string()).or_default();
     spectators.retain(|sender| !sender.is_closed());
 
-    if spectators.iter().any(|sender| sender.same_channel(tx)) {
-        return Ok(());
+    let registered = spectators.iter().any(|sender| sender.same_channel(tx));
+    if !registered {
+        guard_game_spectator_capacity(spectators.len())?;
     }
-
-    guard_game_spectator_capacity(spectators.len())?;
-    spectators.push(tx.clone());
+    if let Some(message) = bootstrap {
+        tx.send(message)
+            .map_err(|_| "Spectator connection closed".to_string())?;
+    }
+    if !registered {
+        spectators.push(tx.clone());
+    }
     Ok(())
 }
 
@@ -441,8 +452,9 @@ async fn switch_game_spectator_slot(
     previous_game_code: Option<&str>,
     game_code: &str,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
-    reserve_game_spectator_slot(game_spectators, game_code, tx).await?;
+    reserve_game_spectator_slot(game_spectators, game_code, tx, bootstrap).await?;
     if previous_game_code != Some(game_code) {
         if let Some(previous_game_code) = previous_game_code {
             remove_game_spectator_sender(game_spectators, previous_game_code, tx).await;
@@ -480,21 +492,26 @@ async fn reserve_draft_spectator_slot(
     draft_code: &str,
     visibility: draft_core::types::SpectatorVisibility,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     let mut specs = draft_spectators.lock().await;
     let spectators = specs.entry(draft_code.to_string()).or_default();
     spectators.retain(|(_, sender)| !sender.is_closed());
 
-    if let Some((existing_visibility, _)) = spectators
-        .iter_mut()
-        .find(|(_, sender)| sender.same_channel(tx))
-    {
-        *existing_visibility = visibility;
-        return Ok(());
+    let existing = spectators
+        .iter()
+        .position(|(_, sender)| sender.same_channel(tx));
+    if existing.is_none() {
+        guard_draft_spectator_capacity(spectators.len())?;
     }
-
-    guard_draft_spectator_capacity(spectators.len())?;
-    spectators.push((visibility, tx.clone()));
+    if let Some(message) = bootstrap {
+        tx.send(message)
+            .map_err(|_| "Spectator connection closed".to_string())?;
+    }
+    match existing {
+        Some(index) => spectators[index].0 = visibility,
+        None => spectators.push((visibility, tx.clone())),
+    }
     Ok(())
 }
 
@@ -504,8 +521,9 @@ async fn switch_draft_spectator_slot(
     draft_code: &str,
     visibility: draft_core::types::SpectatorVisibility,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
-    reserve_draft_spectator_slot(draft_spectators, draft_code, visibility, tx).await?;
+    reserve_draft_spectator_slot(draft_spectators, draft_code, visibility, tx, bootstrap).await?;
     if previous_draft_code != Some(draft_code) {
         if let Some(previous_draft_code) = previous_draft_code {
             remove_draft_spectator_sender(draft_spectators, previous_draft_code, tx).await;
@@ -1650,16 +1668,15 @@ fn draft_socket_admission_rejection(
 ///
 /// **The declared total lock order, once, here.**
 ///
-/// > `draft_spectators` -> `draft_sessions` -> one `GameSession` ->
-/// > `sessions` (the registry) -> `lobby` -> `connections` ->
-/// > `game_spectators` -> `lobby_subscribers`.
+/// > `draft_sessions` -> one `GameSession` -> `sessions` (the registry) ->
+/// > `lobby` -> `connections` -> `game_spectators` -> `draft_spectators` ->
+/// > `lobby_subscribers`.
 /// >
-/// > This is the topological order of the production nesting edges a
-/// > one-time survey of this crate found, with the session tier inserted
-/// > above the registry; `lobby`'s position below the registry is
-/// > unconstrained by any observed edge and is fixed here so the order is
-/// > total. A guard is never re-acquired at a lower level; a site that needs
-/// > a lower level again releases first. Nesting *downward* is legal at every
+/// > Draft projection and spectator registration hold `draft_sessions` through
+/// > their enqueue cutover, then take `draft_spectators`; spectator guards never
+/// > await draft state. The other tiers retain the existing production nesting
+/// > order. A guard is never re-acquired at a lower level; a site that needs a
+/// > lower level again releases first. Nesting *downward* is legal at every
 /// > tier, session -> registry included. Nesting *upward* is never legal — in
 /// > particular nothing awaits a session guard while holding the registry,
 /// > which is why this function releases the registry in its own block. One
@@ -1894,6 +1911,8 @@ async fn full_socket_is_current_preflight(
 /// Install a Full-seat sender while the caller owns the session-state lock.
 /// The state -> connections nesting makes sender replacement and any related
 /// session mutation one transaction.
+/// Enqueue the connection's bootstrap before publishing its sender, under this
+/// same state lease, so a later state update cannot overtake the binding.
 async fn install_full_sender_while_state_locked(
     connections: &SharedConnections,
     game_code: &str,
@@ -1907,8 +1926,9 @@ async fn install_full_sender_while_state_locked(
         .insert(player_id, tx.clone());
 }
 
-/// Resolve and install Full-seat authority before mutating per-socket identity.
-/// Token resolution comes from `SessionManager`, never a client-supplied seat.
+/// Authority-fixture attachment without a wire bootstrap. Production operations
+/// enqueue their own bootstrap before publishing a Full-seat sender.
+#[cfg(test)]
 async fn attach_full_seat(
     state: &SharedState,
     connections: &SharedConnections,
@@ -2073,12 +2093,30 @@ async fn return_full_seat_while_session_locked(
     session: &mut GameSession,
     player: PlayerId,
     tx: &mpsc::UnboundedSender<ServerMessage>,
+    full_key: &server_core::FullSessionKey,
     hello: Option<&ClientHelloInfo>,
     received_at: Instant,
 ) -> Result<(), String> {
     let game_code = session.game_code.clone();
     let was_disconnected = !session.connected[player.0 as usize];
     admit_seat_return_while_session_locked(state, session, player, received_at).await?;
+    let player_token = session.player_tokens[usize::from(player.0)].clone();
+    for message in [
+        ServerMessage::GameCreated {
+            game_code: game_code.clone(),
+            player_token: player_token.clone(),
+            full_key: Some(full_key.clone()),
+        },
+        ServerMessage::SessionAttached {
+            game_code: game_code.clone(),
+            player_id: player,
+            player_token,
+            full_key: Some(full_key.clone()),
+        },
+    ] {
+        let _ = tx.send(message);
+    }
+    send_player_slots(std::iter::once((&player, tx)), &session.player_slot_info());
     install_full_sender_while_state_locked(connections, &game_code, player, tx).await;
     if player == PlayerId(0) {
         let (host_version, host_build_commit) = hello
@@ -2205,6 +2243,8 @@ async fn draft_socket_is_current_preflight(
 /// Install a draft-seat sender while the caller owns the draft-state lock.
 /// The draft state -> connections nesting makes replacement and reconnect one
 /// transaction, so later broadcasts and match launches observe the new sender.
+/// Keep this lease through bootstrap enqueue; draft-to-Full returns retain it
+/// until the matching Full binding has also been captured and enqueued.
 async fn install_draft_sender_while_state_locked(
     connections: &SharedConnections,
     draft_code: &str,
@@ -2222,6 +2262,7 @@ async fn install_draft_sender_while_state_locked(
 /// identity. The session operation and map replacement share draft-state ->
 /// connections lock ordering, preventing a fan-out from observing a renewed
 /// seat paired with its former socket.
+/// The caller owns the returned draft lease through its bootstrap enqueue.
 #[allow(clippy::too_many_arguments)]
 async fn reconnect_draft_seat(
     draft_state: &SharedDraftState,
@@ -2233,8 +2274,14 @@ async fn reconnect_draft_seat(
     player_token: String,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     received_at: Instant,
-) -> Result<draft_core::view::DraftPlayerView, String> {
-    let mut manager = draft_state.lock().await;
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<DraftSessionManager>,
+        draft_core::view::DraftPlayerView,
+    ),
+    String,
+> {
+    let mut manager = draft_state.clone().lock_owned().await;
     if let Some((attached_code, _attached_seat, attached_token)) = identity.draft_seat() {
         if attached_code != draft_code
             || attached_token != player_token
@@ -2262,18 +2309,13 @@ async fn reconnect_draft_seat(
         })
         .await;
     }
-    drop(manager);
 
     identity.draft_code = Some(draft_code);
     identity.draft_seat = Some(seat);
     identity.draft_token = Some(player_token);
-    Ok(view)
-}
-
-#[derive(Debug)]
-struct DraftMatchAttachment {
-    match_start: ServerMessage,
-    game_started: ServerMessage,
+    // Keep the draft lease through Full reattachment and bootstrap enqueue.
+    // Otherwise a newer draft view can overtake this captured reconnect view.
+    Ok((manager, view))
 }
 
 /// Attach an authenticated draft seat to its current spawned Full game.
@@ -2283,7 +2325,8 @@ struct DraftMatchAttachment {
 /// from the client.
 #[allow(clippy::too_many_arguments)]
 async fn attach_current_draft_match(
-    draft_state: &SharedDraftState,
+    draft_manager: tokio::sync::OwnedMutexGuard<DraftSessionManager>,
+    draft_view: draft_core::view::DraftPlayerView,
     state: &SharedState,
     connections: &SharedConnections,
     lobby: &SharedLobby,
@@ -2292,7 +2335,8 @@ async fn attach_current_draft_match(
     draft_code: &str,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     received_at: Instant,
-) -> Result<Option<DraftMatchAttachment>, String> {
+    #[cfg(test)] hooks: &socket_test_hooks::Hooks,
+) -> Result<(), String> {
     let (attached_draft, draft_seat, draft_token) = identity
         .draft_seat()
         .ok_or_else(|| "Socket is not attached to a draft seat".to_string())?;
@@ -2301,7 +2345,6 @@ async fn attach_current_draft_match(
         return Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string());
     }
 
-    let draft_manager = draft_state.lock().await;
     if !draft_socket_is_current_while_state_locked(&draft_manager, connections, identity, tx).await
     {
         return Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string());
@@ -2312,7 +2355,8 @@ async fn attach_current_draft_match(
         .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
     let Some((pairing, game_code, game_player)) = draft_session.active_match_for_seat(draft_seat)
     else {
-        return Ok(None);
+        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        return Ok(());
     };
     let opponent_index = match game_player {
         PlayerId(0) => 1,
@@ -2331,79 +2375,103 @@ async fn attach_current_draft_match(
         .unwrap_or_else(|| format!("Player {opponent_seat}"));
     let previous_full = identity
         .full_seat()
+        .filter(|(code, player, _)| *code != game_code.as_str() || *player != game_player)
         .map(|(code, player, _)| (code.to_string(), player));
 
-    let (player_token, full_key, game_started, was_disconnected) = {
-        let player_index = usize::from(game_player.0);
-        // The one site that touches two games. It takes them one at a time, in
-        // this order: the new game's guard first (reconnect, sender install),
-        // released, then the previous game's guard (sender removal,
-        // disconnect). Two guards are never held at once. The order is chosen
-        // so the socket is briefly current for *both* seats rather than for
-        // neither — the base version, atomic under one mutex, was current for
-        // exactly one, and of the two available windows the one that can
-        // reject a legitimate in-flight message is the worse.
-        //
-        // The first crossing keeps its base answer: a warning and `Ok(None)`,
-        // not the relocated refusal.
-        let (player_token, full_key, game_started, was_disconnected) = {
-            let Ok(mut session) = lock_session(state, &game_code).await else {
-                warn!(
-                    draft = %draft_code,
-                    game = %game_code,
-                    "draft pairing references a game that is no longer resident"
-                );
-                return Ok(None);
-            };
-            let full_key = session
-                .full_runtime
-                .as_ref()
-                .map(|runtime| runtime.key.clone())
-                .ok_or_else(|| "Draft match Full identity is unavailable".to_string())?;
-            if full_key.game_code != game_code {
-                return Err("Draft match Full identity is inconsistent".to_string());
-            }
-            let player_token = session
-                .player_tokens
-                .get(player_index)
-                .filter(|token| !token.is_empty())
-                .cloned()
-                .ok_or_else(|| "Draft match player identity is unavailable".to_string())?;
-            if session.player_for_token(&player_token) != Some(game_player) {
-                return Err("Draft match player identity is inconsistent".to_string());
-            }
-            let was_disconnected = !session.connected[player_index];
-
-            reconnect_seat_while_session_locked(state, &mut session, &player_token, received_at)
-                .await?;
-            let decision = DecisionSnapshot::from_state(&session.state);
-            let game_started =
-                build_game_started_message(&session, &decision, game_player, None, Vec::new());
-            install_full_sender_while_state_locked(connections, &game_code, game_player, tx).await;
-
-            (player_token, full_key, game_started, was_disconnected)
-        };
-
-        if let Some((previous_game, previous_player)) = previous_full {
-            if previous_game != game_code || previous_player != game_player {
-                if let Ok(mut previous) = lock_session(state, &previous_game).await {
-                    depart_full_seat_while_session_locked(
-                        state,
-                        connections,
-                        lobby,
-                        lobby_subscribers,
-                        &mut previous,
-                        previous_player,
-                        tx,
-                        std::time::Instant::now(),
-                    )
-                    .await;
-                }
-            }
-        }
-
-        (player_token, full_key, game_started, was_disconnected)
+    let player_index = usize::from(game_player.0);
+    // Admit the target, retire any prior route without holding two game
+    // leases, then recapture and publish the target under its final lease.
+    // Queued game commands cannot observe the intermediate handoff: this
+    // connection's application dispatcher is serial.
+    let Ok(mut session) = lock_session(state, &game_code).await else {
+        warn!(
+            draft = %draft_code,
+            game = %game_code,
+            "draft pairing references a game that is no longer resident"
+        );
+        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        return Ok(());
     };
+    let full_key = session
+        .full_runtime
+        .as_ref()
+        .map(|runtime| runtime.key.clone())
+        .ok_or_else(|| "Draft match Full identity is unavailable".to_string())?;
+    if full_key.game_code != game_code {
+        return Err("Draft match Full identity is inconsistent".to_string());
+    }
+    let player_token = session
+        .player_tokens
+        .get(player_index)
+        .filter(|token| !token.is_empty())
+        .cloned()
+        .ok_or_else(|| "Draft match player identity is unavailable".to_string())?;
+    if session.player_for_token(&player_token) != Some(game_player) {
+        return Err("Draft match player identity is inconsistent".to_string());
+    }
+    let was_disconnected = !session.connected[player_index];
+
+    reconnect_seat_while_session_locked(state, &mut session, &player_token, received_at).await?;
+    if let Some((previous_game, previous_player)) = previous_full.as_ref() {
+        drop(session);
+        #[cfg(test)]
+        hooks.before_bootstrap_cutover().await;
+        if let Ok(mut previous) = lock_session(state, previous_game).await {
+            depart_full_seat_while_session_locked(
+                state,
+                connections,
+                lobby,
+                lobby_subscribers,
+                &mut previous,
+                *previous_player,
+                tx,
+                std::time::Instant::now(),
+            )
+            .await;
+        }
+        let Ok(current) = lock_session(state, &game_code).await else {
+            warn!(
+                draft = %draft_code,
+                game = %game_code,
+                "draft pairing disappeared during prior-route retirement"
+            );
+            let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+            return Ok(());
+        };
+        session = current;
+        if session.full_runtime.as_ref().map(|runtime| &runtime.key) != Some(&full_key)
+            || session.player_for_token(&player_token) != Some(game_player)
+        {
+            return Err("Draft match Full identity changed during attachment".to_string());
+        }
+    }
+    let decision = DecisionSnapshot::from_state(&session.state);
+    let game_started =
+        build_game_started_message(&session, &decision, game_player, None, Vec::new());
+    // Bind the draft capability and its Full snapshot before publishing
+    // this sender. The same leases fence both captured revisions.
+    for message in [
+        ServerMessage::DraftMatchStart {
+            match_id,
+            round,
+            game_code: game_code.clone(),
+            full_key: full_key.clone(),
+            player_token: draft_token,
+            your_player: game_player,
+            opponent_name,
+        },
+        game_started,
+        ServerMessage::DraftStateUpdate { view: draft_view },
+    ] {
+        let _ = tx.send(message);
+    }
+    install_full_sender_while_state_locked(connections, &game_code, game_player, tx).await;
+    drop(session);
+    #[cfg(test)]
+    if previous_full.is_none() {
+        hooks.before_bootstrap_cutover().await;
+    }
+
     drop(draft_manager);
 
     identity.set_session(game_code.clone(), game_player, player_token);
@@ -2428,18 +2496,7 @@ async fn attach_current_draft_match(
         }
     }
 
-    Ok(Some(DraftMatchAttachment {
-        match_start: ServerMessage::DraftMatchStart {
-            match_id,
-            round,
-            game_code,
-            full_key,
-            player_token: draft_token,
-            your_player: game_player,
-            opponent_name,
-        },
-        game_started,
-    }))
+    Ok(())
 }
 
 /// Mark a draft seat disconnected only if this socket still owns its sender
@@ -5648,6 +5705,21 @@ async fn create_and_connect_multiplayer_session(
         }
 
         drop_residual_routes_while_state_locked(connections, &game_code).await;
+        for message in [
+            ServerMessage::GameCreated {
+                game_code: game_code.clone(),
+                player_token: player_token.clone(),
+                full_key: Some(full_key.clone()),
+            },
+            ServerMessage::SessionAttached {
+                game_code: game_code.clone(),
+                player_id: host_player,
+                player_token: player_token.clone(),
+                full_key: Some(full_key.clone()),
+            },
+        ] {
+            let _ = host_tx.send(message);
+        }
         install_full_sender_while_state_locked(connections, &game_code, host_player, &host_tx)
             .await;
 
@@ -5676,13 +5748,12 @@ async fn broadcast_draft_spectator_views(
     draft_state: &SharedDraftState,
     draft_spectators: &SharedDraftSpectators,
 ) {
-    let mut specs = draft_spectators.lock().await;
-    let Some(spectators) = specs.get_mut(draft_code) else {
-        return;
-    };
-
     let mgr = draft_state.lock().await;
     let Some(session) = mgr.sessions.get(draft_code) else {
+        return;
+    };
+    let mut specs = draft_spectators.lock().await;
+    let Some(spectators) = specs.get_mut(draft_code) else {
         return;
     };
 
@@ -7145,36 +7216,38 @@ async fn broadcast_game_started(
     game_spectators: &SharedGameSpectators,
     game_db: &SharedGameDb,
     game_code: &str,
-    joiner: Option<(PlayerId, &str)>,
-) {
-    let (player_messages, spectator_msg, ai_failure) = {
-        // An absent game answers nothing here, as at base; the refusal is
-        // discarded.
-        let Ok(mut session) = lock_session(state, game_code).await else {
-            return;
-        };
-
-        let ai_outcome = session.run_ai();
-        persist_full_session_async(game_db, &mut session);
-        let decision = game_started_decision(&session, &ai_outcome);
-        let player_messages = build_game_started_messages(&mut session, &decision, joiner);
-        drop(decision);
-        (
-            player_messages,
-            build_spectator_game_started_message(&session),
-            ai_outcome.fault,
-        )
-    };
-
-    {
-        let conns = connections.lock().await;
-        if let Some(players) = conns.get(game_code) {
-            for (pid, msg) in &player_messages {
-                if let Some(sender) = players.get(pid) {
-                    let _ = sender.send(msg.clone());
-                }
-            }
+    joiner: Option<(PlayerId, &str, &mpsc::UnboundedSender<ServerMessage>)>,
+) -> Result<(), String> {
+    // Retain this game's ordering lease until every bootstrap is enqueued.
+    // A concurrent action must not publish N+1 before startup snapshot N.
+    let mut session = lock_session(state, game_code).await?;
+    let ai_outcome = session.run_ai();
+    persist_full_session_async(game_db, &mut session);
+    let decision = game_started_decision(&session, &ai_outcome);
+    let player_messages = build_game_started_messages(
+        &mut session,
+        &decision,
+        joiner.map(|(player, token, _)| (player, token)),
+    );
+    drop(decision);
+    let spectator_msg = build_spectator_game_started_message(&session);
+    let senders = connections
+        .lock()
+        .await
+        .get(game_code)
+        .cloned()
+        .unwrap_or_default();
+    for (player, message) in player_messages {
+        let sender = joiner
+            .filter(|(joining_player, _, _)| *joining_player == player)
+            .map(|(_, _, sender)| sender)
+            .or_else(|| senders.get(&player));
+        if let Some(sender) = sender {
+            let _ = sender.send(message);
         }
+    }
+    if let Some((player, _, sender)) = joiner {
+        install_full_sender_while_state_locked(connections, game_code, player, sender).await;
     }
 
     match spectator_msg {
@@ -7192,7 +7265,9 @@ async fn broadcast_game_started(
         }
     }
 
-    broadcast_ai_failure(connections, game_code, ai_failure).await;
+    drop(session);
+    broadcast_ai_failure(connections, game_code, ai_outcome.fault).await;
+    Ok(())
 }
 
 async fn require_host(identity: &SocketIdentity, socket: &mut NegotiatedSocket) -> Result<(), ()> {
@@ -7604,24 +7679,27 @@ fn session_action_error_message(error: SessionActionError) -> ServerMessage {
 /// is waiting for it. Engine legality remains on the structured rejection
 /// frames above; this function is only for failures outside the engine action
 /// boundary.
-fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<ServerMessage> {
+fn operation_failed_message(
+    msg: &ClientMessage,
+    message: impl Into<String>,
+) -> Option<ServerMessage> {
     match msg {
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
-        | ClientMessage::Concede => Some(ServerMessage::ActionFailed { message }),
+        | ClientMessage::Concede => Some(ServerMessage::ActionFailed { message: message.into() }),
         ClientMessage::PreviewManaPayment { request_id, .. } => {
             Some(ServerMessage::ManaPaymentPreviewFailed {
                 request_id: *request_id,
-                message,
+                message: message.into(),
             })
         }
         ClientMessage::ExportAuthoritativeState => {
-            Some(ServerMessage::AuthoritativeStateExportFailed { message })
+            Some(ServerMessage::AuthoritativeStateExportFailed { message: message.into() })
         }
         ClientMessage::PreviewInteraction { request } => {
             Some(ServerMessage::InteractionPreviewFailed {
                 request_id: request.request_id.clone(),
-                message,
+                message: message.into(),
             })
         }
         ClientMessage::ClientHello { .. }
@@ -8585,12 +8663,7 @@ async fn seat_guest_and_start(
         Waiting {
             player_token: String,
             joiner: PlayerId,
-            full_key: server_core::FullSessionKey,
-            slot_info: Vec<server_core::PlayerSlotInfo>,
             current_count: u32,
-            raw_state: Box<engine::types::game_state::GameState>,
-            filtered_state: Box<engine::types::game_state::GameState>,
-            state_revision: u64,
         },
         Started {
             player_token: String,
@@ -8662,16 +8735,79 @@ async fn seat_guest_and_start(
                     })
                 } else {
                     match session.full_runtime.as_ref() {
-                        Some(runtime) => Ok(JoinOutcome::Waiting {
-                            player_token,
-                            joiner,
-                            full_key: runtime.key.clone(),
-                            slot_info: session.player_slot_info(),
-                            current_count: session.current_player_count(),
-                            raw_state: Box::new(session.state.clone()),
-                            filtered_state: Box::new(filtered_state),
-                            state_revision: session.state_revision,
-                        }),
+                        Some(runtime) => {
+                            let full_key = runtime.key.clone();
+                            let slot_info = session.player_slot_info();
+                            let current_count = session.current_player_count();
+                            // The join projection predates the card-name refresh.
+                            // Capture the bootstrap here, retaining this exact lease
+                            // until it is queued and its sender is installed.
+                            drop(filtered_state);
+                            let filtered_state =
+                                server_core::filter_state_for_player(&session.state, joiner);
+                            let derived = derive_transport_views(
+                                &session.state,
+                                &filtered_state,
+                                Some(joiner),
+                            );
+                            let viewer_interaction =
+                                derive_viewer_interaction(&session.state, &filtered_state, joiner);
+                            #[cfg(test)]
+                            socket.before_bootstrap_cutover().await;
+                            let _ = tx.send(ServerMessage::SessionAttached {
+                                game_code: game_code.clone(),
+                                player_id: joiner,
+                                player_token: player_token.clone(),
+                                full_key: Some(full_key.clone()),
+                            });
+                            let slot_senders = connections
+                                .lock()
+                                .await
+                                .get(&game_code)
+                                .cloned()
+                                .unwrap_or_default();
+                            send_player_slots(
+                                slot_senders
+                                    .iter()
+                                    .filter(|(player, _)| **player != joiner)
+                                    .chain(std::iter::once((&joiner, tx))),
+                                &slot_info,
+                            );
+                            let _ = tx.send(ServerMessage::StateUpdate {
+                                full_key: Some(full_key),
+                                state_revision: session.state_revision,
+                                state: filtered_state,
+                                events: vec![],
+                                legal_actions: vec![],
+                                auto_pass_recommended: false,
+                                end_continuous_effect_offers: vec![],
+                                mana_payment_shortcut_actions: vec![],
+                                eliminated_players: vec![],
+                                log_entries: vec![],
+                                spell_costs: HashMap::new(),
+                                legal_actions_by_object: HashMap::new(),
+                                // CR 117.1b: the game has not started, so no
+                                // player has priority to activate an ability.
+                                activation_block_reasons: HashMap::new(),
+                                derived,
+                                viewer_interaction,
+                                // No authoritative transition or turn boundary
+                                // exists before the first GameStarted.
+                                rewind_targets: Vec::new(),
+                            });
+                            install_full_sender_while_state_locked(
+                                connections,
+                                &game_code,
+                                joiner,
+                                tx,
+                            )
+                            .await;
+                            Ok(JoinOutcome::Waiting {
+                                player_token,
+                                joiner,
+                                current_count,
+                            })
+                        }
                         None => Err("Full session runtime is unavailable".to_string()),
                     }
                 }
@@ -8684,59 +8820,9 @@ async fn seat_guest_and_start(
         Ok(JoinOutcome::Waiting {
             player_token,
             joiner,
-            full_key,
-            slot_info,
             current_count,
-            raw_state,
-            filtered_state,
-            state_revision,
         }) => {
-            let raw_state = *raw_state;
-            let filtered_state = *filtered_state;
-            let attached_player = match attach_full_seat(
-                state,
-                connections,
-                identity,
-                game_code.clone(),
-                player_token.clone(),
-                tx,
-            )
-            .await
-            {
-                Ok(player) => player,
-                Err(error) => {
-                    let msg = ServerMessage::error(error);
-                    let _ = socket.enqueue_reply(msg);
-                    return;
-                }
-            };
-            debug_assert_eq!(joiner, attached_player);
-
-            let attached = ServerMessage::SessionAttached {
-                game_code: game_code.clone(),
-                player_id: joiner,
-                player_token,
-                full_key: Some(full_key.clone()),
-            };
-            let _ = socket.enqueue_reply(attached);
-
-            // Notify all connected players about the updated room state
-            let slot_senders = {
-                let conns = connections.lock().await;
-                conns
-                    .get(&game_code)
-                    .map(|players| {
-                        players
-                            .iter()
-                            .map(|(pid, sender)| (*pid, sender.clone()))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            };
-            send_player_slots(
-                slot_senders.iter().map(|(pid, sender)| (pid, sender)),
-                &slot_info,
-            );
+            identity.set_session(game_code.clone(), joiner, player_token);
 
             {
                 let mut lob_guard = lobby.lock().await;
@@ -8753,37 +8839,6 @@ async fn seat_guest_and_start(
                 }
             }
 
-            let derived = derive_transport_views(&raw_state, &filtered_state, Some(joiner));
-            let viewer_interaction = derive_viewer_interaction(&raw_state, &filtered_state, joiner);
-            let msg = ServerMessage::StateUpdate {
-                full_key: Some(full_key),
-                state_revision,
-                state: filtered_state,
-                events: vec![],
-                legal_actions: vec![],
-                auto_pass_recommended: false,
-                end_continuous_effect_offers: vec![],
-                mana_payment_shortcut_actions: vec![],
-                eliminated_players: vec![],
-                log_entries: vec![],
-                spell_costs: HashMap::new(),
-                legal_actions_by_object: HashMap::new(),
-                // CR 117.1b: the game has not started, so no player has
-                // priority and no activated ability can be activated —
-                // the read-out has nothing to describe. Empty by the
-                // same existing design as its two siblings above.
-                activation_block_reasons: HashMap::new(),
-                derived,
-                viewer_interaction,
-                // `JoinOutcome::Waiting` — the game has not started, so
-                // no authoritative transition has happened and no turn
-                // boundary can exist. Empty by construction, not by
-                // omission; the first `GameStarted` publishes the real
-                // list.
-                rewind_targets: Vec::new(),
-            };
-            let _ = socket.enqueue_reply(msg);
-
             let count = player_count.load(Ordering::Relaxed);
             broadcast_player_count(lobby_subscribers, count).await;
         }
@@ -8792,24 +8847,8 @@ async fn seat_guest_and_start(
             joiner,
             public_before,
         }) => {
-            let attached_player = match attach_full_seat(
-                state,
-                connections,
-                identity,
-                game_code.clone(),
-                player_token.clone(),
-                tx,
-            )
-            .await
-            {
-                Ok(player) => player,
-                Err(error) => {
-                    let msg = ServerMessage::error(error);
-                    let _ = socket.enqueue_reply(msg);
-                    return;
-                }
-            };
-            debug_assert_eq!(joiner, attached_player);
+            #[cfg(test)]
+            socket.before_bootstrap_cutover().await;
 
             {
                 let mut lob_guard = lobby.lock().await;
@@ -8827,15 +8866,24 @@ async fn seat_guest_and_start(
                     .await;
                 }
             }
-            broadcast_game_started(
+            match broadcast_game_started(
                 state,
                 connections,
                 game_spectators,
                 game_db,
                 &game_code,
-                Some((joiner, &player_token)),
+                Some((joiner, &player_token, tx)),
             )
-            .await;
+            .await
+            {
+                Ok(()) => {
+                    identity.set_session(game_code, joiner, player_token);
+                    return;
+                }
+                Err(error) => {
+                    let _ = socket.enqueue_reply(ServerMessage::error(error));
+                }
+            }
         }
         Err(e) => {
             error!(game = %game_code, error = %e, "guest join failed");
@@ -8845,8 +8893,8 @@ async fn seat_guest_and_start(
     }
 
     // If the auto-start was refused, fan the error out to every player
-    // connected to the room. The joiner is one of them: `attach_full_seat`
-    // on the `JoinOutcome::Waiting` arm registered their sender, so this is
+    // connected to the room. The waiting joiner was registered under the same
+    // session lease as their bootstrap, so this is
     // the single delivery of the refusal to them — the room-wide message and
     // their own notice are the same message, not a duplicate pair.
     if let Some(err_msg) = start_error_broadcast {
@@ -8889,8 +8937,7 @@ async fn handle_client_message(
     // need to second-guess whether the message should reach them.
     if let Some(reason) = reject_if_disabled(&client_msg, mode) {
         warn!(?mode, msg = ?std::mem::discriminant(&client_msg), %reason, "rejecting message disabled by server mode");
-        let reason = reason.to_string();
-        let msg = operation_failed_message(&client_msg, reason.clone())
+        let msg = operation_failed_message(&client_msg, reason)
             .unwrap_or_else(|| ServerMessage::error(reason));
         let _ = socket.enqueue_reply(msg);
         return;
@@ -8909,8 +8956,8 @@ async fn handle_client_message(
         if let Some(reason) =
             full_socket_authority_rejection(&client_msg, state, connections, identity, tx).await
         {
-            let msg = operation_failed_message(&client_msg, reason.to_string())
-                .unwrap_or_else(|| ServerMessage::error(reason.to_string()));
+            let msg = operation_failed_message(&client_msg, reason)
+                .unwrap_or_else(|| ServerMessage::error(reason));
             let _ = socket.enqueue_reply(msg);
             return;
         }
@@ -9029,36 +9076,24 @@ async fn handle_client_message(
                 return;
             }
             info!(game = %game_code, "game created");
-            drop(mgr);
-
-            if let Err(error) = attach_full_seat(
-                state,
-                connections,
-                identity,
-                game_code.clone(),
-                player_token.clone(),
-                tx,
-            )
-            .await
-            {
-                let msg = ServerMessage::error(error);
-                let _ = socket.enqueue_reply(msg);
-                return;
+            for message in [
+                ServerMessage::GameCreated {
+                    game_code: game_code.clone(),
+                    player_token: player_token.clone(),
+                    full_key: Some(full_key.clone()),
+                },
+                ServerMessage::SessionAttached {
+                    game_code: game_code.clone(),
+                    player_id: PlayerId(0),
+                    player_token: player_token.clone(),
+                    full_key: Some(full_key),
+                },
+            ] {
+                let _ = tx.send(message);
             }
-
-            let msg = ServerMessage::GameCreated {
-                game_code: game_code.clone(),
-                player_token: player_token.clone(),
-                full_key: Some(full_key.clone()),
-            };
-            let _ = socket.enqueue_reply(msg);
-            let attached = ServerMessage::SessionAttached {
-                game_code,
-                player_id: PlayerId(0),
-                player_token,
-                full_key: Some(full_key),
-            };
-            let _ = socket.enqueue_reply(attached);
+            install_full_sender_while_state_locked(connections, &game_code, PlayerId(0), tx).await;
+            drop(mgr);
+            identity.set_session(game_code, PlayerId(0), player_token);
         }
 
         ClientMessage::JoinGame { game_code, deck } => {
@@ -9324,7 +9359,6 @@ async fn handle_client_message(
             enum ReconnectOutcome {
                 HostingOk {
                     player: PlayerId,
-                    slot_info: Vec<server_core::PlayerSlotInfo>,
                 },
                 InGame {
                     player: PlayerId,
@@ -9381,15 +9415,13 @@ async fn handle_client_message(
                                         &mut session,
                                         player,
                                         tx,
+                                        &full_key,
                                         identity.client_hello.as_ref(),
                                         received_at,
                                     )
                                     .await
                                     {
-                                        Ok(()) => ReconnectOutcome::HostingOk {
-                                            player,
-                                            slot_info: session.player_slot_info(),
-                                        },
+                                        Ok(()) => ReconnectOutcome::HostingOk { player },
                                         Err(e) => ReconnectOutcome::Err(e),
                                     },
                                     None => {
@@ -9463,27 +9495,11 @@ async fn handle_client_message(
             }; // lock dropped
 
             match outcome {
-                ReconnectOutcome::HostingOk { player, slot_info } => {
+                ReconnectOutcome::HostingOk { player } => {
+                    #[cfg(test)]
+                    socket.before_bootstrap_cutover().await;
                     info!(game = %game_code, player = ?player, "hosting reconnect succeeded");
                     identity.set_session(game_code.clone(), player, player_token.clone());
-
-                    // Re-send GameCreated so the client resumes hosting state
-                    let msg = ServerMessage::GameCreated {
-                        game_code: game_code.clone(),
-                        player_token: player_token.clone(),
-                        full_key: Some(full_key.clone()),
-                    };
-                    let _ = socket.enqueue_reply(msg);
-                    let attached = ServerMessage::SessionAttached {
-                        game_code,
-                        player_id: player,
-                        player_token,
-                        full_key: Some(full_key),
-                    };
-                    let _ = socket.enqueue_reply(attached);
-
-                    // Send current room state
-                    send_player_slots(std::iter::once((&player, tx)), &slot_info);
                 }
 
                 ReconnectOutcome::InGame {
@@ -9859,7 +9875,7 @@ async fn handle_client_message(
                 // `JoinGame` arm already follows. Under the registry they
                 // blocked `lock_session` for every other game in the pod for the
                 // whole batch.
-                let (game_started_msg, ai_failure) = {
+                let ai_failure = {
                     let mut session = match lock_session(state, &game_code).await {
                         Ok(session) => session,
                         Err(error) => {
@@ -9883,39 +9899,32 @@ async fn handle_client_message(
                     );
                     drop(decision);
 
-                    (game_started_msg, ai_outcome.fault)
-                }; // session guard dropped
-
-                if let Err(error) = attach_full_seat(
-                    state,
-                    connections,
-                    identity,
-                    game_code.clone(),
-                    player_token.clone(),
-                    tx,
-                )
-                .await
-                {
-                    let msg = ServerMessage::error(error);
-                    let _ = socket.enqueue_reply(msg);
-                    return;
-                }
-
-                // Send GameCreated, then GameStarted (no lobby registration for AI games)
-                let created_msg = ServerMessage::GameCreated {
-                    game_code: game_code.clone(),
-                    player_token: player_token.clone(),
-                    full_key: Some(full_key.clone()),
-                };
-                let _ = socket.enqueue_reply(created_msg);
-                let attached_msg = ServerMessage::SessionAttached {
-                    game_code: game_code.clone(),
-                    player_id: PlayerId(0),
-                    player_token,
-                    full_key: Some(full_key),
-                };
-                let _ = socket.enqueue_reply(attached_msg);
-                let _ = socket.enqueue_reply(game_started_msg);
+                    for message in [
+                        ServerMessage::GameCreated {
+                            game_code: game_code.clone(),
+                            player_token: player_token.clone(),
+                            full_key: Some(full_key.clone()),
+                        },
+                        ServerMessage::SessionAttached {
+                            game_code: game_code.clone(),
+                            player_id: PlayerId(0),
+                            player_token: player_token.clone(),
+                            full_key: Some(full_key),
+                        },
+                        game_started_msg,
+                    ] {
+                        let _ = tx.send(message);
+                    }
+                    install_full_sender_while_state_locked(
+                        connections,
+                        &game_code,
+                        PlayerId(0),
+                        tx,
+                    )
+                    .await;
+                    ai_outcome.fault
+                }; // snapshot and sender publication share the same session lease
+                identity.set_session(game_code.clone(), PlayerId(0), player_token);
                 if let Some(fault) = ai_failure {
                     let _ = tx.send(ServerMessage::AiDriverFault { fault });
                 }
@@ -9946,7 +9955,7 @@ async fn handle_client_message(
                 // are released inside `create_and_connect_multiplayer_session`
                 // before it returns, so `broadcast_player_slots` (Phase 4) can
                 // re-acquire them without deadlocking.
-                let (game_code, player_token, host_player, initial_player_count, full_key) =
+                let (game_code, player_token, host_player, initial_player_count, _) =
                     match create_and_connect_multiplayer_session(
                         state,
                         connections,
@@ -9983,7 +9992,7 @@ async fn handle_client_message(
                 // `create_and_connect_multiplayer_session` installs the host
                 // sender before returning, so local identity is intentionally
                 // recorded only after the sender-map authority exists.
-                identity.set_session(game_code.clone(), host_player, player_token.clone());
+                identity.set_session(game_code.clone(), host_player, player_token);
 
                 // Phase 3 ── register with the lobby broker and announce the
                 // public entry inside the same lobby critical section.
@@ -10052,23 +10061,8 @@ async fn handle_client_message(
                     }
                 }
 
-                // Phase 4 ── all locks are free; send replies and the slot and
-                // player-count broadcasts.
-                // `broadcast_player_slots` re-acquires state + connections —
-                // both are available now.
-                let msg = ServerMessage::GameCreated {
-                    game_code: game_code.clone(),
-                    player_token: player_token.clone(),
-                    full_key: Some(full_key.clone()),
-                };
-                let _ = socket.enqueue_reply(msg);
-                let attached = ServerMessage::SessionAttached {
-                    game_code: game_code.clone(),
-                    player_id: host_player,
-                    player_token,
-                    full_key: Some(full_key),
-                };
-                let _ = socket.enqueue_reply(attached);
+                // The creator bootstrap was enqueued before publication in
+                // phases 1–2. Broadcast current slots only after all locks drop.
 
                 // Send initial slot state so host sees themselves in the room.
                 broadcast_player_slots(state, connections, &game_code).await;
@@ -11132,62 +11126,40 @@ async fn handle_client_message(
             }
 
             debug!(game = %game_code, "spectator join request");
-            {
-                // This crossing's base answer to an absent game *is* the
-                // relocated refusal, so `lock_session`'s `Err` is the message.
-                let session = match lock_session(state, &game_code).await {
-                    Ok(session) => session,
-                    Err(error) => {
-                        let msg = ServerMessage::error(error);
-                        let _ = socket.enqueue_reply(msg);
-                        return;
-                    }
-                };
-                if !session.game_started {
-                    let msg = ServerMessage::error("Game has not started yet".to_string());
-                    let _ = socket.enqueue_reply(msg);
+            let session = match lock_session(state, &game_code).await {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = socket.enqueue_reply(ServerMessage::error(error));
                     return;
                 }
+            };
+            if !session.game_started {
+                let _ = socket
+                    .enqueue_reply(ServerMessage::error("Game has not started yet".to_string()));
+                return;
             }
-
+            let message = match build_spectator_game_started_message(&session) {
+                Ok(message) => message,
+                Err(reason) => {
+                    let _ = socket.enqueue_reply(ServerMessage::error(reason));
+                    return;
+                }
+            };
             if let Err(reason) = switch_game_spectator_slot(
                 game_spectators,
                 identity.spectator_game_code.as_deref(),
                 &game_code,
                 tx,
+                Some(message),
             )
             .await
             {
-                let msg = ServerMessage::error(reason);
-                let _ = socket.enqueue_reply(msg);
+                let _ = socket.enqueue_reply(ServerMessage::error(reason));
                 return;
             }
-
-            let snapshot_result = {
-                match lock_session(state, &game_code).await {
-                    Ok(session) if session.game_started => {
-                        build_spectator_game_started_message(&session)
-                    }
-                    Ok(_) => Err("Game has not started yet".to_string()),
-                    // This crossing's base answer *is* the relocated refusal.
-                    Err(error) => Err(error),
-                }
-            };
-
-            let spectator_msg = match snapshot_result {
-                Ok(msg) => msg,
-                Err(message) => {
-                    remove_game_spectator_sender(game_spectators, &game_code, tx).await;
-                    let msg = ServerMessage::error(message);
-                    let _ = socket.enqueue_reply(msg);
-                    return;
-                }
-            };
-
-            if tx.send(spectator_msg).is_err() {
-                remove_game_spectator_sender(game_spectators, &game_code, tx).await;
-                return;
-            }
+            drop(session);
+            #[cfg(test)]
+            socket.before_bootstrap_cutover().await;
             identity.spectator_game_code = Some(game_code.clone());
             info!(game = %game_code, "spectator connected to live game");
         }
@@ -11429,7 +11401,7 @@ async fn handle_client_message(
                         .await;
                     }
                 }
-                broadcast_game_started(
+                let _ = broadcast_game_started(
                     state,
                     connections,
                     game_spectators,
@@ -11639,21 +11611,24 @@ async fn handle_client_message(
                         ranked: false,
                     });
                 }
+                let _ = tx.send(ServerMessage::DraftCreated {
+                    draft_code: draft_code.clone(),
+                    player_token: player_token.clone(),
+                    seat_index,
+                });
+                install_draft_sender_while_state_locked(
+                    connections,
+                    &draft_code,
+                    usize::from(seat_index),
+                    tx,
+                )
+                .await;
                 (draft_code, player_token, seat_index)
             };
 
             identity.draft_code = Some(draft_code.clone());
             identity.draft_seat = Some(seat_index as usize);
-            identity.draft_token = Some(player_token.clone());
-
-            // Register this connection in the connections map under draft_code
-            {
-                let mut conns = connections.lock().await;
-                conns
-                    .entry(draft_code.clone())
-                    .or_default()
-                    .insert(PlayerId(seat_index), tx.clone());
-            }
+            identity.draft_token = Some(player_token);
 
             // Register in lobby so draft appears in the lobby list
             {
@@ -11688,13 +11663,6 @@ async fn handle_client_message(
                     &SysEnv,
                 );
             }
-
-            let msg = ServerMessage::DraftCreated {
-                draft_code: draft_code.clone(),
-                player_token,
-                seat_index,
-            };
-            let _ = socket.enqueue_reply(msg);
 
             if public {
                 {
@@ -11735,25 +11703,36 @@ async fn handle_client_message(
                 // Deciding under the draft guard orders the check with a returning host's re-stamp.
                 let admitted =
                     build_admission(lobby.lock().await.lobby(), &draft_code, &guest_commit);
-                admitted.and_then(|()| {
+                match admitted.and_then(|()| {
                     mgr.join_draft(&draft_code, display_name.clone(), password.as_deref())
-                })
+                }) {
+                    Ok((player_token, seat_index, view)) => {
+                        let _ = tx.send(ServerMessage::DraftJoined {
+                            draft_code: draft_code.clone(),
+                            player_token: player_token.clone(),
+                            seat_index,
+                            view,
+                        });
+                        install_draft_sender_while_state_locked(
+                            connections,
+                            &draft_code,
+                            usize::from(seat_index),
+                            tx,
+                        )
+                        .await;
+                        Ok((player_token, seat_index))
+                    }
+                    Err(reason) => Err(reason),
+                }
             };
 
             match result {
-                Ok((player_token, seat_index, view)) => {
+                Ok((player_token, seat_index)) => {
                     identity.draft_code = Some(draft_code.clone());
                     identity.draft_seat = Some(seat_index as usize);
-                    identity.draft_token = Some(player_token.clone());
-
-                    // Register this connection in the connections map under draft_code
-                    {
-                        let mut conns = connections.lock().await;
-                        conns
-                            .entry(draft_code.clone())
-                            .or_default()
-                            .insert(PlayerId(seat_index), tx.clone());
-                    }
+                    identity.draft_token = Some(player_token);
+                    #[cfg(test)]
+                    socket.before_bootstrap_cutover().await;
 
                     // Update lobby seats_filled count
                     {
@@ -11777,14 +11756,6 @@ async fn handle_client_message(
                             }
                         }
                     }
-
-                    let msg = ServerMessage::DraftJoined {
-                        draft_code,
-                        player_token,
-                        seat_index,
-                        view,
-                    };
-                    let _ = socket.enqueue_reply(msg);
                 }
                 Err(reason) => {
                     if reason == "password_required" {
@@ -11996,9 +11967,10 @@ async fn handle_client_message(
             .await;
 
             match result {
-                Ok(view) => {
+                Ok((draft_manager, draft_view)) => {
                     match attach_current_draft_match(
-                        draft_state,
+                        draft_manager,
+                        draft_view,
                         state,
                         connections,
                         lobby,
@@ -12007,24 +11979,18 @@ async fn handle_client_message(
                         &draft_code,
                         tx,
                         received_at,
+                        #[cfg(test)]
+                        &socket.bootstrap_hooks(),
                     )
                     .await
                     {
-                        Ok(Some(attachment)) => {
-                            for message in [attachment.match_start, attachment.game_started] {
-                                let _ = socket.enqueue_reply(message);
-                            }
-                        }
-                        Ok(None) => {}
+                        Ok(()) => {}
                         Err(reason) => {
                             let msg = ServerMessage::DraftActionRejected { reason };
                             let _ = socket.enqueue_reply(msg);
                             return;
                         }
                     }
-
-                    let msg = ServerMessage::DraftStateUpdate { view };
-                    let _ = socket.enqueue_reply(msg);
 
                     info!(draft = %draft_code, "draft reconnect succeeded");
                 }
@@ -12042,60 +12008,29 @@ async fn handle_client_message(
                 return;
             }
 
-            let visibility = {
-                let drafts = draft_state.lock().await;
-                match drafts.sessions.get(&draft_code) {
-                    Some(session) => session.config.spectator_visibility,
-                    None => {
-                        let msg = ServerMessage::error("Draft not found".to_string());
-                        let _ = socket.enqueue_reply(msg);
-                        return;
-                    }
-                }
+            let drafts = draft_state.lock().await;
+            let Some(session) = drafts.sessions.get(&draft_code) else {
+                let _ = socket.enqueue_reply(ServerMessage::error("Draft not found".to_string()));
+                return;
             };
-
+            let visibility = session.config.spectator_visibility;
+            let view = draft_core::view::filter_for_spectator(&session.session, visibility);
             if let Err(reason) = switch_draft_spectator_slot(
                 draft_spectators,
                 identity.spectator_draft_code.as_deref(),
                 &draft_code,
                 visibility,
                 tx,
+                Some(ServerMessage::DraftSpectatorView { view }),
             )
             .await
             {
-                let msg = ServerMessage::error(reason);
-                let _ = socket.enqueue_reply(msg);
+                let _ = socket.enqueue_reply(ServerMessage::error(reason));
                 return;
             }
-
-            let snapshot_result = {
-                let drafts = draft_state.lock().await;
-                match drafts.sessions.get(&draft_code) {
-                    Some(session) => {
-                        let visibility = session.config.spectator_visibility;
-                        let view =
-                            draft_core::view::filter_for_spectator(&session.session, visibility);
-                        Ok((visibility, view))
-                    }
-                    None => Err("Draft not found".to_string()),
-                }
-            };
-
-            let (visibility, view) = match snapshot_result {
-                Ok(snapshot) => snapshot,
-                Err(message) => {
-                    remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
-                    let msg = ServerMessage::error(message);
-                    let _ = socket.enqueue_reply(msg);
-                    return;
-                }
-            };
-
-            let msg = ServerMessage::DraftSpectatorView { view };
-            if socket.enqueue_reply(msg).is_err() {
-                remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
-                return;
-            }
+            drop(drafts);
+            #[cfg(test)]
+            socket.before_bootstrap_cutover().await;
             identity.spectator_draft_code = Some(draft_code.clone());
             identity.spectator_visibility = Some(visibility);
             info!(draft = %draft_code, ?visibility, "spectator connected to draft");
@@ -12798,9 +12733,8 @@ mod interaction_preview_route_tests {
         panic!("a started session must publish a progress witness for some seat");
     }
 
-    /// Two seats, both senders installed through the production
-    /// `attach_full_seat`, plus a live engine-minted preview request for
-    /// whichever seat holds the capability.
+    /// Two fixture seats installed through `attach_full_seat`, plus a live
+    /// engine-minted preview request for whichever seat holds the capability.
     async fn two_seat_table() -> (
         SharedState,
         SharedConnections,
@@ -13750,6 +13684,14 @@ mod draft_socket_authority_tests {
     pub(super) async fn start_draft_match(
         app_state: &AppState,
     ) -> (String, String, server_core::FullSessionKey, ServerMessage) {
+        start_draft_match_with_deck(app_state, Default::default(), None).await
+    }
+
+    pub(super) async fn start_draft_match_with_deck(
+        app_state: &AppState,
+        deck: engine::game::deck_loading::PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+    ) -> (String, String, server_core::FullSessionKey, ServerMessage) {
         let mut drafts = app_state.draft_sessions.lock().await;
         let config = DraftConfig {
             source: DraftSource::single_set("TST".to_string()),
@@ -13769,8 +13711,8 @@ mod draft_socket_authority_tests {
         let mut games = app_state.sessions.lock().await;
         let (game_code, _host_token) = games
             .create_game_n_players(
-                engine::game::deck_loading::PlayerDeckPayload::default(),
-                None,
+                deck.clone(),
+                deck_choice.clone(),
                 "Alice".to_string(),
                 None,
                 2,
@@ -13781,12 +13723,7 @@ mod draft_socket_authority_tests {
         let (guest_token, _) = games
             .try_session(&game_code)
             .expect("draft match game exists")
-            .join_with_reservation(
-                engine::game::deck_loading::PlayerDeckPayload::default(),
-                None,
-                "Bob".to_string(),
-                None,
-            )
+            .join_with_reservation(deck, deck_choice, "Bob".to_string(), None)
             .expect("join draft match game");
         games.index_token(guest_token, &game_code);
         games
@@ -14277,7 +14214,8 @@ mod draft_socket_authority_tests {
             std::time::Instant::now(),
         )
         .await
-        .expect_err("superseded A must not replace B after a stale reconnect");
+        .err()
+        .expect("superseded A must not replace B after a stale reconnect");
         assert_eq!(err, DRAFT_SOCKET_AUTHORITY_REJECTION);
         assert!(
             connections
@@ -14524,7 +14462,7 @@ mod live_spectator_tests {
         }
         let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
 
-        let err = reserve_game_spectator_slot(&spectators, "FULL", &overflow_tx)
+        let err = reserve_game_spectator_slot(&spectators, "FULL", &overflow_tx, None)
             .await
             .unwrap_err();
 
@@ -14550,7 +14488,7 @@ mod live_spectator_tests {
         }
         let (new_tx, _new_rx) = mpsc::unbounded_channel();
 
-        reserve_game_spectator_slot(&spectators, "PRUNE", &new_tx)
+        reserve_game_spectator_slot(&spectators, "PRUNE", &new_tx, None)
             .await
             .expect("closed senders should be pruned before enforcing cap");
 
@@ -14562,10 +14500,10 @@ mod live_spectator_tests {
         let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        reserve_game_spectator_slot(&spectators, "SAME", &tx)
+        reserve_game_spectator_slot(&spectators, "SAME", &tx, None)
             .await
             .unwrap();
-        reserve_game_spectator_slot(&spectators, "SAME", &tx)
+        reserve_game_spectator_slot(&spectators, "SAME", &tx, None)
             .await
             .unwrap();
 
@@ -14591,9 +14529,10 @@ mod live_spectator_tests {
             }
         }
 
-        let err = switch_game_spectator_slot(&spectators, Some("CURRENT"), "FULL", &current_tx)
-            .await
-            .unwrap_err();
+        let err =
+            switch_game_spectator_slot(&spectators, Some("CURRENT"), "FULL", &current_tx, None)
+                .await
+                .unwrap_err();
 
         assert!(err.contains("maximum"));
         let specs = spectators.lock().await;
@@ -14620,7 +14559,7 @@ mod live_spectator_tests {
         }
         let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
 
-        let err = reserve_draft_spectator_slot(&spectators, "FULL", visibility, &overflow_tx)
+        let err = reserve_draft_spectator_slot(&spectators, "FULL", visibility, &overflow_tx, None)
             .await
             .unwrap_err();
 
@@ -14647,7 +14586,7 @@ mod live_spectator_tests {
         }
         let (new_tx, _new_rx) = mpsc::unbounded_channel();
 
-        reserve_draft_spectator_slot(&spectators, "PRUNE", visibility, &new_tx)
+        reserve_draft_spectator_slot(&spectators, "PRUNE", visibility, &new_tx, None)
             .await
             .expect("closed senders should be pruned before enforcing cap");
 
@@ -14660,10 +14599,10 @@ mod live_spectator_tests {
         let visibility = draft_core::types::SpectatorVisibility::default();
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx)
+        reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx, None)
             .await
             .unwrap();
-        reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx)
+        reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx, None)
             .await
             .unwrap();
 
@@ -14950,7 +14889,7 @@ mod issue_4548_full_create_tests {
         result.expect("an unhosted socket must answer Ping independently of the broker");
     }
 
-    async fn spawn_server(
+    pub(super) async fn spawn_server(
         mode: ServerMode,
         pools: draft_pools::DraftPools,
         db: Arc<CardDatabase>,
@@ -15015,7 +14954,9 @@ mod issue_4548_full_create_tests {
         }
     }
 
-    async fn recv_enveloped_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    pub(super) async fn recv_enveloped_server_message<S>(
+        socket: &mut WebSocketStream<S>,
+    ) -> ServerMessage
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -15033,7 +14974,7 @@ mod issue_4548_full_create_tests {
         serde_json::from_str(&json).expect("server message")
     }
 
-    fn test_client_hello(wire_formats: Vec<WireFormat>) -> ClientMessage {
+    pub(super) fn test_client_hello(wire_formats: Vec<WireFormat>) -> ClientMessage {
         ClientMessage::ClientHello {
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             build_commit: build_commit().to_string(),
@@ -15043,7 +14984,7 @@ mod issue_4548_full_create_tests {
         }
     }
 
-    async fn send_test_message<S>(
+    pub(super) async fn send_test_message<S>(
         socket: &mut WebSocketStream<S>,
         message: &ClientMessage,
         enveloped: bool,
@@ -17090,7 +17031,7 @@ mod issue_4548_full_create_tests {
     // ── Draft pods under the listing authority ─────────────────────────────
 
     /// A one-sheet `TST` pool, so a test server can create and start pods.
-    fn tst_draft_pools() -> draft_pools::DraftPools {
+    pub(super) fn tst_draft_pools() -> draft_pools::DraftPools {
         let cards: Vec<SheetCard> = (0..40)
             .map(|i| SheetCard {
                 name: format!("Card {i}"),

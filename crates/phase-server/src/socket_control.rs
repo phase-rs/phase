@@ -1,5 +1,6 @@
 //! Constant-space control traffic, separate from the application FIFO.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,23 @@ pub(crate) const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) enum CloseOrigin {
     Server,
     Peer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Encoding {
+    Pending = 0,
+    Plain = 1,
+    GzipEnvelope = 2,
+}
+
+impl Encoding {
+    pub(crate) fn wire_format(self) -> Option<WireFormat> {
+        match self {
+            Self::Pending | Self::Plain => None,
+            Self::GzipEnvelope => Some(WireFormat::GzipEnvelopeV1),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -52,12 +70,39 @@ impl Default for Pending {
 struct Shared {
     pending: Mutex<Pending>,
     changed: Notify,
+    application_activity: Notify,
+    encoding: AtomicU8,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct ControlLane(Arc<Shared>);
 
 impl ControlLane {
+    pub(crate) fn accept_wire_format(&self, format: Option<WireFormat>) {
+        let encoding = match format {
+            Some(WireFormat::GzipEnvelopeV1) => Encoding::GzipEnvelope,
+            Some(WireFormat::Unknown) | None => Encoding::Plain,
+        };
+        self.0.encoding.store(encoding as u8, Ordering::Release);
+    }
+
+    pub(crate) fn encoding(&self) -> Encoding {
+        match self.0.encoding.load(Ordering::Acquire) {
+            0 => Encoding::Pending,
+            1 => Encoding::Plain,
+            2 => Encoding::GzipEnvelope,
+            _ => unreachable!("only typed negotiated encodings are stored"),
+        }
+    }
+
+    pub(crate) fn note_application_activity(&self) {
+        self.0.application_activity.notify_one();
+    }
+
+    pub(crate) async fn application_activity(&self) {
+        self.0.application_activity.notified().await;
+    }
+
     pub(crate) fn close(
         &self,
         frame: Option<CloseFrame>,
@@ -183,12 +228,18 @@ impl Liveness {
     pub(crate) fn write_finished(&self, ping_started: Option<Instant>) {
         let now = Instant::now();
         self.0.send_modify(|state| {
-            state.write_started = None;
+            if let (Some(started), Some(deadline)) =
+                (state.write_started.take(), state.response_deadline.as_mut())
+            {
+                // Pause the remaining response budget for actual write time;
+                // an ordinary flush must not mint a fresh response window.
+                *deadline += now.duration_since(started);
+            }
             // A response may already have arrived before the writer's flush
             // future is repolled. Do not start a fresh unanswered challenge.
             let unanswered_ping = ping_started
                 .is_some_and(|started| state.last_read.is_none_or(|read| read < started));
-            if unanswered_ping || state.response_deadline.is_some() {
+            if unanswered_ping && state.response_deadline.is_none() {
                 state.response_deadline = Some(now + RESPONSE_TIMEOUT);
             }
         });

@@ -20,6 +20,16 @@ use crate::{
     HelloGateOutcome, SharedLobby, SysEnv, MAX_WS_MESSAGE_BYTES,
 };
 
+enum DecoderWake {
+    Heartbeat,
+    Frame(Option<Received<Message>>),
+}
+
+enum RateCharge {
+    Required,
+    Applied,
+}
+
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
     mut socket: NegotiatedSocket,
@@ -32,19 +42,45 @@ pub(crate) async fn run(
     let mut hello = Some(hello);
     let mut limiter = IngressRateLimiter::new();
     let mut refresh: Option<HostRefresh> = None;
-    while let Some(Received {
-        message: frame,
-        received_at,
-        mut admission,
-    }) = frames.recv().await
-    {
+    loop {
+        let wake = tokio::select! {
+            _ = socket.application_activity() => DecoderWake::Heartbeat,
+            frame = frames.recv() => DecoderWake::Frame(frame),
+        };
+        let Received {
+            message: frame,
+            received_at,
+            mut admission,
+        } = match wake {
+            DecoderWake::Heartbeat => {
+                if host.borrow().is_some() {
+                    refresh
+                        .get_or_insert_with(|| HostRefresh::start(lobby.clone(), host.clone()))
+                        .notify();
+                }
+                continue;
+            }
+            DecoderWake::Frame(Some(frame)) => frame,
+            DecoderWake::Frame(None) => break,
+        };
+        // The client's <256-byte Pings are text or FORMAT_RAW and have already
+        // bypassed command admission in the reader. GZIP frames, whatever their
+        // content, must spend raw quota before decompression or warning work.
+        let charge = if matches!(&frame, Message::Binary(_)) {
+            if !limiter.allow() {
+                continue;
+            }
+            RateCharge::Applied
+        } else {
+            RateCharge::Required
+        };
         let text = match frame {
             Message::Text(text) => text,
             Message::Binary(bytes) if socket.uses_gzip_envelope() => {
                 match wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES).await {
                     Ok(text) => text.into(),
                     Err(error) => {
-                        warn!(%error, "failed to decode client binary envelope");
+                        limiter.warn_malformed_envelope(&error);
                         continue;
                     }
                 }
@@ -64,7 +100,7 @@ pub(crate) async fn run(
         let message: ClientMessage = match serde_json::from_str(&text) {
             Ok(message) => message,
             Err(error) => {
-                if !limiter.allow() {
+                if matches!(charge, RateCharge::Required) && !limiter.allow() {
                     continue;
                 }
                 warn!(%error, "failed to parse client message");
@@ -79,7 +115,10 @@ pub(crate) async fn run(
         };
         // JSON heartbeats are a control-plane message, not an application-rate
         // quota consumer. Their replies are coalesced by the bounded control lane.
-        if !matches!(&message, ClientMessage::Ping { .. }) && !limiter.allow() {
+        if matches!(charge, RateCharge::Required)
+            && !(hello.is_none() && matches!(&message, ClientMessage::Ping { .. }))
+            && !limiter.allow()
+        {
             continue;
         }
         let rejection = match classify_hello_gate(hello.is_none(), &message, hello_acceptance(mode))
@@ -137,7 +176,10 @@ pub(crate) async fn run(
         // Apply the existing cheap shape guards before a decoded command can
         // wait behind a long handler. Authorization remains in the handler.
         let rejection = if let Some(reason) = reject_if_disabled(&message, mode) {
-            Some(ServerMessage::error(reason.to_string()))
+            Some(
+                crate::operation_failed_message(&message, reason)
+                    .unwrap_or_else(|| ServerMessage::error(reason)),
+            )
         } else if let Err(reason) = guard_client_message_before_dispatch(&message, mode) {
             Some(wire_rejection_message(&message, reason))
         } else {
@@ -177,6 +219,8 @@ struct IngressRateLimiter {
     inner: crate::RateLimiter,
     dropped: u64,
     last_warning: Option<std::time::Instant>,
+    malformed: u64,
+    last_malformed_warning: Option<std::time::Instant>,
 }
 
 impl IngressRateLimiter {
@@ -185,6 +229,8 @@ impl IngressRateLimiter {
             inner: crate::RateLimiter::new(),
             dropped: 0,
             last_warning: None,
+            malformed: 0,
+            last_malformed_warning: None,
         }
     }
 
@@ -205,6 +251,22 @@ impl IngressRateLimiter {
             self.last_warning = Some(now);
         }
         false
+    }
+
+    fn warn_malformed_envelope(&mut self, error: &str) {
+        self.malformed += 1;
+        let now = std::time::Instant::now();
+        if self
+            .last_malformed_warning
+            .is_none_or(|last| now.duration_since(last).as_secs() >= crate::RATE_LIMIT_WINDOW_SECS)
+        {
+            warn!(
+                %error,
+                malformed_binary_frames = self.malformed,
+                "failed to decode client binary envelope"
+            );
+            self.last_malformed_warning = Some(now);
+        }
     }
 }
 
