@@ -586,13 +586,21 @@ fn visit_characteristic_leaf<'s>(
         CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::TriggeringBatch,
             caused_by,
-            // Declaration-record members are event records, not tracked
-            // objects: member narrowing has nothing to bind to here. A
-            // TriggeringBatch aggregate with a member filter is rejected at
-            // the `PropertyAggregate` constructor, which every producer and
-            // decoder routes through — a filtered batch cannot arrive here.
-            filter: _,
+            filter,
         } => {
+            // M4: a FILTERED TriggeringBatch leaf has no agreed-upon reading
+            // (the batch is an event population, CR 603.10a, while `filter`
+            // speaks of members), so the leaf contributes nothing — fail
+            // closed. The `PropertyAggregate` constructor rejects this form
+            // for the producers and decoders that route through it, but
+            // struct-literal construction and the Distinct / Shared /
+            // Subtypes / Colors resolvers reach this arm directly, so the
+            // refusal lives HERE: the common boundary every aggregate kind
+            // and nested-union descent passes through.
+            if filter.is_some() {
+                let _ = caused_by;
+                return;
+            }
             // CR 603.4: detection checks must prefer their explicit TLS event;
             // resolution checks instead see the current trigger event(s). For
             // attackers, use declaration records so repeated declarations and
@@ -21658,6 +21666,132 @@ mod tests {
                 source,
             ),
             5,
+        );
+    }
+
+    /// M4: a FILTERED `TriggeringBatch` tracked source has no agreed-upon
+    /// reading — the batch is an event population (CR 603.10a) while `filter`
+    /// speaks of members — so no aggregate kind may consume the leaf: it
+    /// contributes nothing. The hostile filter below is SATISFIED by the
+    /// batch member (it is a creature), which distinguishes fail-closed (0)
+    /// from both wrong readings — apply-the-filter (1) and
+    /// ignore-the-filter (1). The nested-union arm pins that a well-formed
+    /// sibling leaf still contributes while the poisoned leaf does not, and
+    /// the ChainSet control pins that the refusal is scoped to the batch:
+    /// legitimate filtered chain sets (Occult Epiphany) still consume.
+    #[test]
+    fn filtered_triggering_batch_leaf_contributes_nothing_to_any_aggregate_kind() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(523),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let batch_member = create_object(
+            &mut state,
+            CardId(524),
+            PlayerId(0),
+            "Batch member".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&batch_member).unwrap();
+            object.card_types.core_types = vec![CoreType::Creature];
+            object.card_types.subtypes.push("Goblin".to_string());
+            object.color = vec![ManaColor::Red];
+        }
+        let exile_member = create_object(
+            &mut state,
+            CardId(525),
+            PlayerId(0),
+            "Exile member".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exile_member)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Enchantment];
+        state.current_trigger_events = vec![GameEvent::AttackersDeclared {
+            attacker_ids: vec![batch_member],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: Vec::new(),
+        }];
+        let chain_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(chain_id, vec![batch_member]);
+
+        // Hostile but SATISFIED: the batch member is a red Goblin creature.
+        let satisfied_creature = || {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+        };
+        let poisoned = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+            filter: Some(satisfied_creature()),
+        };
+        let resolve = |qty: QuantityRef| {
+            resolve_quantity(&state, &QuantityExpr::Ref { qty }, PlayerId(0), source)
+        };
+        assert_eq!(
+            resolve(QuantityRef::DistinctCardTypes {
+                source: poisoned.clone()
+            }),
+            0,
+            "DistinctCardTypes must not consume a filtered batch leaf"
+        );
+        assert_eq!(
+            resolve(QuantityRef::SharedCardTypes {
+                source: poisoned.clone()
+            }),
+            0,
+            "SharedCardTypes must not consume a filtered batch leaf"
+        );
+        assert_eq!(
+            resolve(QuantityRef::DistinctSubtypes {
+                source: poisoned.clone(),
+                exclude: SubtypeExclusion::None,
+            }),
+            0,
+            "DistinctSubtypes must not consume a filtered batch leaf"
+        );
+        assert_eq!(
+            resolve(QuantityRef::DistinctColorsAmong {
+                source: poisoned.clone()
+            }),
+            0,
+            "DistinctColorsAmong must not consume a filtered batch leaf"
+        );
+        let union = QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Exile,
+                    scope: CountScope::Controller,
+                },
+                poisoned.clone(),
+            ])
+            .expect("two-member union"),
+        };
+        assert_eq!(
+            resolve(union),
+            1,
+            "the well-formed exile leaf contributes Enchantment while the poisoned batch leaf contributes nothing"
+        );
+        let chained = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(satisfied_creature()),
+        };
+        assert_eq!(
+            resolve(QuantityRef::DistinctCardTypes { source: chained }),
+            1,
+            "the refusal is scoped to the batch: a satisfied filtered ChainSet still consumes"
         );
     }
 
