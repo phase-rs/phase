@@ -6518,6 +6518,73 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
       Array<{ revision?: number; state?: { filteredFor?: number } }>;
   }
 
+  it("accepts a guest acknowledgement during a suspended AI loop without redundant sweep sends", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } } });
+    await adapter.initializeGame();
+    await guest.getSentMessages();
+    guest.stopAcking();
+    const held = deferred<void>();
+    const ai = vi.spyOn(adapter as unknown as { runAiLoop(): Promise<void> }, "runAiLoop")
+      .mockImplementationOnce(() => held.promise);
+    const action = guest.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    let acknowledgement = Promise.resolve();
+    try {
+      await vi.waitFor(() => expect(ai).toHaveBeenCalled(), { interval: 10, timeout: 2000 });
+      const published = await guest.getSentMessages();
+      const publishedCount = published.length;
+      const frame = published.find((msg) => (msg as P2PMessage).type === "state_update") as Extract<P2PMessage, { type: "state_update" }>;
+      expect(frame.revision).toEqual(expect.any(Number));
+      expect(frame.authority).toBeDefined();
+      acknowledgement = guest.simulateData({ type: "state_ack", revision: frame.revision, authority: frame.authority });
+      await vi.advanceTimersByTimeAsync(15000);
+      await (adapter as unknown as { deliveryQueue: Promise<void> }).deliveryQueue;
+      expect(statesSentTo((await guest.getSentMessages()).slice(publishedCount))).toHaveLength(0);
+    } finally {
+      held.resolve(undefined);
+      await Promise.all([action, acknowledgement]);
+      ai.mockRestore();
+      adapter.dispose();
+    }
+  });
+
+  it.each(["queued", "in flight"] as const)("keeps redelivery single-flight while %s and permits the next retry", async (phase) => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } } });
+    await adapter.initializeGame();
+    await guest.getSentMessages();
+    guest.stopAcking();
+    await guest.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    const before = (await guest.getSentMessages()).length;
+    const held = deferred<unknown>();
+    const queue = adapter as unknown as {
+      deliveryQueue: Promise<void>;
+      enqueueDelivery(operation: () => Promise<unknown>): Promise<unknown>;
+    };
+    if (phase === "queued") {
+      void queue.enqueueDelivery(() => held.promise);
+    } else {
+      (mockGetViewerSnapshot as unknown as { mockImplementationOnce(fn: () => Promise<unknown>): void })
+        .mockImplementationOnce(() => held.promise);
+    }
+    try {
+      await vi.advanceTimersByTimeAsync(15000);
+      const drained = queue.deliveryQueue;
+      held.resolve({ state: { filteredFor: 1, players: [] }, actions: [], autoPassRecommended: false });
+      await drained;
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5000);
+      await queue.deliveryQueue;
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    } finally {
+      held.resolve({ state: { filteredFor: 1, players: [] }, actions: [], autoPassRecommended: false });
+      await queue.deliveryQueue;
+      adapter.dispose();
+    }
+  });
+
   it("redelivers the applied action's state after the guest's viewer read rejected", async () => {
     const { adapter, emitConnection } = makeHost(2, 5_000);
     await adapter.initialize();
