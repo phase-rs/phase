@@ -254,8 +254,9 @@ impl ResolvedAbility {
     /// CR 400.7: the announced incarnation for one targeted object —
     /// positional occurrence pins first (announced targets), then keyed pins
     /// (delayed-trigger referents). `None` when nothing pinned the object.
-    /// Shared by live targeted-object reads and suspension capture so the
-    /// two can never disagree on which pin an object carries.
+    /// First-match by id: suspension capture's fallback only. Live
+    /// characteristic reads select positionally (`target_pin_at` /
+    /// `DeclaredTargetEntry`) and never consult this.
     pub fn occurrence_pin_for(&self, object_id: ObjectId) -> Option<ObjectIncarnationRef> {
         if let Some(index) = self
             .targets

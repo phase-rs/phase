@@ -448,24 +448,6 @@ fn tracked_member_characteristic_view<'s>(
     }
 }
 
-/// CR 608.2h + CR 400.7: the characteristic view for one targeted object.
-///
-/// A target whose announced incarnation has departed is read from its
-/// departure LKI — never from the retained live entry (a different object)
-/// and never from the legacy cache slot (which may describe a later
-/// incarnation); this mirrors the exact-history selection in `filter.rs`. A
-/// current or unpinned target resolves through the shared live-or-LKI helper,
-/// preserving live reads for cards targeted where they stand (including
-/// graveyard targets).
-fn targeted_object_characteristic_view<'s>(
-    state: &'s GameState,
-    ability: Option<&ResolvedAbility>,
-    object_id: ObjectId,
-) -> Option<CharacteristicView<'s>> {
-    let pin = ability.and_then(|ability| ability.occurrence_pin_for(object_id));
-    pinned_target_characteristic_view(state, object_id, pin)
-}
-
 /// CR 608.2h + CR 400.7: the characteristic view for one selected target
 /// occurrence. A stale pin reads the occurrence's departure LKI from exact
 /// incarnation history — never the retained live entry (a different object)
@@ -810,18 +792,20 @@ fn visit_characteristic_leaf<'s>(
             // so the read below measures the SELECTED occurrence.
             match filter_ctx.ability {
                 Some(_) => {
-                    let selected = crate::game::filter::referenced_targets_for_filter(
+                    // Positional pins: each selected occurrence carries the
+                    // pin that selected it into the same pinned reader the
+                    // parked path uses — never a first-match re-derivation
+                    // by id.
+                    let selected = crate::game::filter::referenced_targets_with_pins_for_filter(
                         state,
                         &selector,
                         filter_ctx.ability,
                     );
-                    for target in selected {
+                    for (target, pin) in selected {
                         let TargetRef::Object(oid) = target else {
                             continue;
                         };
-                        if let Some(view) =
-                            targeted_object_characteristic_view(state, filter_ctx.ability, oid)
-                        {
+                        if let Some(view) = pinned_target_characteristic_view(state, oid, pin) {
                             visit(CharacteristicMember::Object(oid), view, false);
                         }
                     }
@@ -21974,6 +21958,75 @@ mod tests {
             resolve_quantity(&state, &aggregate, PlayerId(0), source),
             0,
             "live power 2 fails the power-3 floor; the stale pumped 5 must not admit the member"
+        );
+    }
+
+    /// M2r2: live slot selection keeps repeated-id pins positional — the
+    /// same repeated-identifier/differing-pin shape as the parked control,
+    /// read WITHOUT suspension. Slot 0 selected the live return (power 2),
+    /// slot 1 the pumped departure (power 5); a first-match pin lookup
+    /// reads slot 0's live pin for slot 1 (2), the positional read 5.
+    /// (Every-target sums dedup by member, so only slot selection can
+    /// distinguish the two occurrences live.)
+    #[test]
+    fn live_slot_selection_reads_the_selected_occurrence_pin() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        // Force the incarnation break through a real exit and return: the
+        // departure records pumped 5, the live return resets to base 2.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        // The test-helper move does not run the production battlefield-exit
+        // revert; model it explicitly so the live return reads base 2 while
+        // the recorded departure keeps pumped 5.
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            5,
+            "slot 1 reads its own pumped-departure pin, not slot 0's live pin"
         );
     }
 

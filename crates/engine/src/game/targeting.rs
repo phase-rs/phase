@@ -1656,6 +1656,19 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     ability: &ResolvedAbility,
     index: usize,
 ) -> Option<TargetRef> {
+    resolve_live_parent_slot_entry_from_root(state, ability, index).map(|entry| entry.target)
+}
+
+/// CR 608.2c + CR 608.2b + CR 400.7: [`resolve_live_parent_slot_from_root`]
+/// with the selected occurrence's announced pin — the entry carries the
+/// declaring node's `target_pin_at` pin, so repeated identifiers keep their
+/// own pins. Same legality and staleness checks; the target-only sibling
+/// delegates here so the authority stays single.
+pub(crate) fn resolve_live_parent_slot_entry_from_root(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    index: usize,
+) -> Option<super::ability_utils::DeclaredTargetEntry> {
     let illegal_at_resolution = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
         .is_some_and(|root| {
@@ -1670,10 +1683,13 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     if illegal_at_resolution {
         return None;
     }
-    resolve_parent_slot_from_root(state, ability, index).filter(|target| match target {
-        TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
-        TargetRef::Player(_) => true,
-    })
+    super::ability_utils::declared_target_entries_in_chain(parent_slot_base(state, ability))
+        .into_iter()
+        .nth(index)
+        .filter(|entry| match &entry.target {
+            TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+            TargetRef::Player(_) => true,
+        })
 }
 
 /// CR 608.2c + CR 608.2b: the instruction-time read of the player announced by the clause

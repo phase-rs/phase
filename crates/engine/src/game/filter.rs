@@ -11015,6 +11015,39 @@ pub(crate) fn referenced_targets_for_filter(
     }
 }
 
+/// CR 400.7: [`referenced_targets_for_filter`] with each occurrence's
+/// announced pin — the live counterpart of
+/// [`referenced_parked_targets_for_filter`]. Every-target selection pairs
+/// occurrence `i` with `target_pin_at(i)`; slot selection carries the
+/// declaring node's pin from the shared chain-root authority. Repeated
+/// identifiers keep their own pins, so the characteristic read below
+/// measures the SELECTED occurrence instead of re-deriving a first-match
+/// pin by id.
+pub(crate) fn referenced_targets_with_pins_for_filter(
+    state: &GameState,
+    target: &TargetFilter,
+    ability: Option<&ResolvedAbility>,
+) -> Vec<(TargetRef, Option<ObjectIncarnationRef>)> {
+    let Some(ability) = ability else {
+        return vec![];
+    };
+    match target {
+        TargetFilter::ParentTarget => ability
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| (target.clone(), ability.target_pin_at(index)))
+            .collect(),
+        TargetFilter::ParentTargetSlot { index } => {
+            crate::game::targeting::resolve_live_parent_slot_entry_from_root(state, ability, *index)
+                .map(|entry| (entry.target, entry.pin))
+                .into_iter()
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
 fn aura_can_enchant_referenced_target(
     state: &GameState,
     aura: &GameObject,
