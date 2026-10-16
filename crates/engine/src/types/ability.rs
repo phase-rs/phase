@@ -9328,7 +9328,7 @@ pub enum TurnJournalKind {
 /// and colors (CR 105.1). The CHARACTERISTIC axis stays partitioned by CR
 /// section in `QuantityRef`; this axis names only "the set whose members are
 /// read".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum CardTypeSetSource {
     /// CR 109.2a + CR 400.1: Cards in a specific zone, scoped by player.
@@ -9418,6 +9418,123 @@ impl CardTypeSetSource {
             None => TargetFilter::ParentTarget,
             Some(index) => TargetFilter::ParentTargetSlot { index: *index },
         }
+    }
+
+    /// Shared source admission: a member filter on a triggering-batch leaf
+    /// has no agreed-upon reading (the batch is an event population while
+    /// `filter` speaks of members), so no source admits the combination —
+    /// for every head that embeds a source, at any union depth. Decoding
+    /// routes through here; resolution keeps a fail-closed skip behind it
+    /// for hand-built in-memory values only.
+    pub(crate) fn validate_admission(&self) -> Result<(), CardTypeSetSourceError> {
+        let mut invalid_batch_filter = false;
+        let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            if matches!(
+                leaf,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    filter: Some(_),
+                    ..
+                }
+            ) {
+                invalid_batch_filter = true;
+            }
+        });
+        if !complete {
+            return Err(CardTypeSetSourceError::SourceDepthExceeded);
+        }
+        if invalid_batch_filter {
+            return Err(CardTypeSetSourceError::FilteredTriggeringBatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CardTypeSetSourceError {
+    #[error("triggering-batch sources accept no member filter")]
+    FilteredTriggeringBatch,
+    #[error("card-type-set source exceeds the supported union depth")]
+    SourceDepthExceeded,
+}
+
+/// Derived decode shape for [`CardTypeSetSource`]: byte-compatible with the
+/// derived form it replaces (same tag, same field defaults, no
+/// deny-unknown-fields), so previously accepted payloads decode identically
+/// and only the admission check below can newly fail.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum CardTypeSetSourceRepr {
+    Zone {
+        zone: ZoneRef,
+        scope: CountScope,
+    },
+    ExiledBySource,
+    Objects {
+        filter: TargetFilter,
+    },
+    TrackedSet {
+        #[serde(default)]
+        set: TrackedAnaphorSource,
+        #[serde(default)]
+        caused_by: Option<ThisWayCause>,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    TurnJournal {
+        journal: TurnJournalKind,
+        scope: CountScope,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    TargetedObjects {
+        #[serde(default)]
+        slot: Option<usize>,
+    },
+    AnyOf {
+        sources: UnionSources,
+    },
+}
+
+impl From<CardTypeSetSourceRepr> for CardTypeSetSource {
+    fn from(repr: CardTypeSetSourceRepr) -> Self {
+        match repr {
+            CardTypeSetSourceRepr::Zone { zone, scope } => CardTypeSetSource::Zone { zone, scope },
+            CardTypeSetSourceRepr::ExiledBySource => CardTypeSetSource::ExiledBySource,
+            CardTypeSetSourceRepr::Objects { filter } => CardTypeSetSource::Objects { filter },
+            CardTypeSetSourceRepr::TrackedSet {
+                set,
+                caused_by,
+                filter,
+            } => CardTypeSetSource::TrackedSet {
+                set,
+                caused_by,
+                filter,
+            },
+            CardTypeSetSourceRepr::TurnJournal {
+                journal,
+                scope,
+                filter,
+            } => CardTypeSetSource::TurnJournal {
+                journal,
+                scope,
+                filter,
+            },
+            CardTypeSetSourceRepr::TargetedObjects { slot } => {
+                CardTypeSetSource::TargetedObjects { slot }
+            }
+            CardTypeSetSourceRepr::AnyOf { sources } => CardTypeSetSource::AnyOf { sources },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CardTypeSetSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let source = CardTypeSetSource::from(CardTypeSetSourceRepr::deserialize(deserializer)?);
+        source
+            .validate_admission()
+            .map_err(serde::de::Error::custom)?;
+        Ok(source)
     }
 }
 
@@ -9807,28 +9924,24 @@ impl PropertyAggregate {
         property: ObjectProperty,
         source: CardTypeSetSource,
     ) -> Result<Self, PropertyAggregateError> {
+        // Shared source admission first: the batch-filter verdict lives on
+        // the source so every head inherits it, mapped here to this
+        // constructor's long-standing error values.
+        match source.validate_admission() {
+            Ok(()) => {}
+            Err(CardTypeSetSourceError::FilteredTriggeringBatch) => {
+                return Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter)
+            }
+            Err(CardTypeSetSourceError::SourceDepthExceeded) => {
+                return Err(PropertyAggregateError::SourceDepthExceeded)
+            }
+        }
         let mut invalid_journal = false;
-        let mut invalid_batch_filter = false;
         let complete = source.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
             if matches!(leaf, CardTypeSetSource::TurnJournal { .. })
                 && property != ObjectProperty::ManaValue
             {
                 invalid_journal = true;
-            }
-            // F6 verdict: no producer emits a member filter on a
-            // triggering-batch source, and batch snapshots have no member
-            // binding for one — reject the combination here (all decoding
-            // routes through this constructor) rather than silently ignore
-            // the filter at resolution.
-            if matches!(
-                leaf,
-                CardTypeSetSource::TrackedSet {
-                    set: TrackedAnaphorSource::TriggeringBatch,
-                    filter: Some(_),
-                    ..
-                }
-            ) {
-                invalid_batch_filter = true;
             }
         });
         if !complete {
@@ -9838,9 +9951,6 @@ impl PropertyAggregate {
             return Err(PropertyAggregateError::UnsupportedTurnJournalProperty(
                 property,
             ));
-        }
-        if invalid_batch_filter {
-            return Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter);
         }
         Ok(Self {
             function,
@@ -41700,9 +41810,10 @@ mod tests {
 
     /// PR-C F6 — VERDICT (reject). No producer emits a member filter on a
     /// triggering-batch source, and batch snapshots have no member binding
-    /// for one — so the constructor rejects the combination (all decoding
-    /// routes through it) rather than silently ignore the filter at
-    /// resolution. An unfiltered batch still constructs and decodes.
+    /// for one — so the combination is rejected rather than silently ignored
+    /// at resolution. The constructor keeps its long-standing error value;
+    /// decoding refuses at shared source admission (M4r2), which runs before
+    /// the constructor. An unfiltered batch still constructs and decodes.
     #[test]
     fn property_aggregate_rejects_filtered_triggering_batch() {
         let batch = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
@@ -41734,8 +41845,8 @@ mod tests {
             .expect_err("decoding a filtered batch must fail");
         assert!(
             err.to_string()
-                .contains("triggering-batch property aggregates accept no member filter"),
-            "decoding must fail on the constructor rejection, not a shape error: {err}"
+                .contains("triggering-batch sources accept no member filter"),
+            "decoding must fail on the shared admission rejection, not a shape error: {err}"
         );
         let valid_json = wrap(
             r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TrackedSet","set":"TriggeringBatch"}}"#,
@@ -41743,6 +41854,81 @@ mod tests {
         assert!(
             serde_json::from_str::<QuantityExpr>(&valid_json).is_ok(),
             "an unfiltered batch still decodes"
+        );
+    }
+
+    /// M4r2 — VERDICT (reject at shared admission). A member filter on a
+    /// triggering-batch source has no agreed-upon reading, so the SOURCE
+    /// admits no such leaf — for every head that embeds it (all four direct
+    /// heads, not just `PropertyAggregate`) and at any union depth. Decoding
+    /// refuses the payload; unfiltered batches and legitimately filtered
+    /// chain sets still decode.
+    #[test]
+    fn source_admission_rejects_filtered_triggering_batch_for_every_head() {
+        let wrap = |qty: &str| format!(r#"{{"type":"Ref","qty":{qty}}}"#);
+        let batch = |set: &str, filter: &str| {
+            format!(r#"{{"type":"TrackedSet","set":"{set}","filter":{filter}}}"#)
+        };
+        let filtered_batch = batch("TriggeringBatch", r#"{"type":"Any"}"#);
+        // Every direct head refuses the form (PropertyAggregate's own
+        // constructor rejection is pinned by the F6 test above).
+        for (head, payload) in [
+            (
+                "DistinctCardTypes",
+                format!(r#"{{"type":"DistinctCardTypes","source":{filtered_batch}}}"#),
+            ),
+            (
+                "SharedCardTypes",
+                format!(r#"{{"type":"SharedCardTypes","source":{filtered_batch}}}"#),
+            ),
+            (
+                "DistinctSubtypes",
+                format!(r#"{{"type":"DistinctSubtypes","source":{filtered_batch}}}"#),
+            ),
+        ] {
+            let err = serde_json::from_str::<QuantityExpr>(&wrap(&payload))
+                .expect_err(&format!("{head} must refuse a filtered batch at decode"));
+            assert!(
+                err.to_string().contains("triggering-batch"),
+                "{head} must fail on the admission rejection, not a shape error: {err}"
+            );
+        }
+        // DistinctColorsAmong routes its source through the legacy-fallback
+        // untagged reader, which swallows the admission message into its
+        // generic no-match error — but the refusal itself holds: neither
+        // arm admits the form.
+        let colors = format!(r#"{{"type":"DistinctColorsAmong","source":{filtered_batch}}}"#);
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(&colors)).is_err(),
+            "DistinctColorsAmong must refuse a filtered batch at decode"
+        );
+        // Nested unions refuse too: the poisoned leaf cannot hide behind a
+        // well-formed sibling.
+        let union = format!(
+            r#"{{"type":"DistinctCardTypes","source":{{"type":"AnyOf","sources":[{{"type":"Zone","zone":"Exile","scope":"Controller"}},{filtered_batch}]}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(&union)).is_err(),
+            "a filtered batch nested in a union must refuse at decode"
+        );
+        let clean_union = r#"{"type":"DistinctCardTypes","source":{"type":"AnyOf","sources":[{"type":"Zone","zone":"Exile","scope":"Controller"},{"type":"TrackedSet","set":"TriggeringBatch"}]}}"#;
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(clean_union)).is_ok(),
+            "the union shape itself decodes: the refusal above names the form, not the shape"
+        );
+        // Positive controls: the refusal is scoped to the form.
+        let unfiltered = r#"{"type":"DistinctCardTypes","source":{"type":"TrackedSet","set":"TriggeringBatch"}}"#;
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(unfiltered)).is_ok(),
+            "an unfiltered batch still decodes"
+        );
+        let chained = format!(
+            r#"{{"type":"DistinctCardTypes","source":{}}}"#,
+            batch("ChainSet", r#"{"type":"Any"}"#)
+        );
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(&chained)).is_ok(),
+            "a legitimately filtered chain set still decodes"
         );
     }
 

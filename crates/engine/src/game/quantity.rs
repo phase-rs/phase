@@ -595,15 +595,13 @@ fn visit_characteristic_leaf<'s>(
             caused_by,
             filter,
         } => {
-            // M4: a FILTERED TriggeringBatch leaf has no agreed-upon reading
-            // (the batch is an event population, CR 603.10a, while `filter`
-            // speaks of members), so the leaf contributes nothing — fail
-            // closed. The `PropertyAggregate` constructor rejects this form
-            // for the producers and decoders that route through it, but
-            // struct-literal construction and the Distinct / Shared /
-            // Subtypes / Colors resolvers reach this arm directly, so the
-            // refusal lives HERE: the common boundary every aggregate kind
-            // and nested-union descent passes through.
+            // M4r2: a FILTERED TriggeringBatch leaf has no agreed-upon
+            // reading (the batch is an event population, CR 603.10a, while
+            // `filter` speaks of members). Admission refuses the form
+            // (`CardTypeSetSource::validate_admission`, enforced at decode
+            // for every head) and coverage reports it unsupported; this skip
+            // is defense-in-depth for hand-built in-memory values only, and
+            // its zero must never count as support.
             if filter.is_some() {
                 let _ = caused_by;
                 return;

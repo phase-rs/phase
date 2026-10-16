@@ -10717,6 +10717,17 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
     }
 }
 
+/// The support class of a source-bearing head: `Unhandled` when the source
+/// carries a filtered triggering batch anywhere (nested unions included),
+/// since admission refuses the form and resolution can only fail closed.
+fn batch_filter_support(source: &CardTypeSetSource) -> FeatureSupport {
+    if source.validate_admission().is_ok() {
+        FeatureSupport::Handled
+    } else {
+        FeatureSupport::Unhandled
+    }
+}
+
 /// Map a `QuantityRef` variant to its tag name and resolver-support class.
 /// Handled variants are resolved by `game::quantity::resolve_quantity`.
 fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
@@ -10957,14 +10968,27 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
-        QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
-        QuantityRef::SharedCardTypes { .. } => ("SharedCardTypes", Handled),
-        QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
+        // M4r2: a filtered triggering batch has no agreed-upon reading and
+        // is refused at source admission — a head carrying one anywhere in
+        // its source (nested unions included) is unsupported, not handled.
+        // (`PropertyAggregate` needs no arm here: its constructor admits no
+        // such source.)
+        QuantityRef::DistinctCardTypes { source } => {
+            ("DistinctCardTypes", batch_filter_support(source))
+        }
+        QuantityRef::SharedCardTypes { source } => {
+            ("SharedCardTypes", batch_filter_support(source))
+        }
+        QuantityRef::DistinctSubtypes { source, .. } => {
+            ("DistinctSubtypes", batch_filter_support(source))
+        }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
-        QuantityRef::DistinctColorsAmong { .. } => ("DistinctColorsAmong", Handled),
+        QuantityRef::DistinctColorsAmong { source } => {
+            ("DistinctColorsAmong", batch_filter_support(source))
+        }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
@@ -21050,6 +21074,61 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             }),
             ("StartingLifeTotal", FeatureSupport::Handled),
             "starting-life totals resolve through the selected player's format topology"
+        );
+    }
+
+    /// M4r2: heads carrying a filtered triggering batch anywhere in their
+    /// source classify unsupported — admission refuses the form, so coverage
+    /// must not report it handled. The unfiltered twin is the control
+    /// (handled).
+    #[test]
+    fn filtered_triggering_batch_heads_classify_unsupported() {
+        use crate::types::ability::TrackedAnaphorSource;
+
+        let source = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+            filter,
+        };
+        let poisoned = source(Some(TargetFilter::Any));
+        let clean = source(None);
+        for (name, qty) in [
+            (
+                "DistinctCardTypes",
+                QuantityRef::DistinctCardTypes {
+                    source: poisoned.clone(),
+                },
+            ),
+            (
+                "SharedCardTypes",
+                QuantityRef::SharedCardTypes {
+                    source: poisoned.clone(),
+                },
+            ),
+            (
+                "DistinctSubtypes",
+                QuantityRef::DistinctSubtypes {
+                    source: poisoned.clone(),
+                    exclude: crate::types::ability::SubtypeExclusion::None,
+                },
+            ),
+            (
+                "DistinctColorsAmong",
+                QuantityRef::DistinctColorsAmong {
+                    source: poisoned.clone(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                quantity_ref_feature(&qty),
+                (name, FeatureSupport::Unhandled),
+                "{name} over a filtered batch is unsupported, not handled"
+            );
+        }
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::DistinctCardTypes { source: clean }),
+            ("DistinctCardTypes", FeatureSupport::Handled),
+            "the unfiltered twin stays handled"
         );
     }
 
