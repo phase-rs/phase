@@ -59,7 +59,7 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
-| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow` and `raw_decode_quota` |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow`, `raw_decode_quota` and `quota_refusal_overflow` |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -181,7 +181,11 @@ Exceeding that quota also closes with 1013 and records the distinct
 `raw_decode_quota` disconnect cause. Normal client JSON Pings are smaller than
 the 256-byte compression threshold and use the exempt plain/raw form.
 Decoded Action/Interaction quota failures instead receive an owned
-`ActionFailed`, without closing the transport.
+`ActionFailed`. Up to eight such refusals may remain unflushed per connection;
+that admission is released only after socket flush, so a draining client may
+receive later refusals without a lifetime strike limit. Exhausting it closes
+with 1013 and records `quota_refusal_overflow` rather than retaining an
+unbounded reply backlog.
 
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level

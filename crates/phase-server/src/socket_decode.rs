@@ -103,17 +103,14 @@ pub(crate) async fn run(
             Err(error) => {
                 let command_id = crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text);
                 let allowed = !matches!(charge, RateCharge::Required) || limiter.allow();
-                if !allowed && command_id.is_none() {
+                if !allowed {
+                    if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
+                        break;
+                    }
                     continue;
                 }
-                if allowed {
-                    warn!(%error, "failed to parse client message");
-                }
-                let message = if allowed {
-                    format!("Invalid message: {error}")
-                } else {
-                    "Command rate quota exceeded".to_string()
-                };
+                warn!(%error, "failed to parse client message");
+                let message = format!("Invalid message: {error}");
                 let rejection = if command_id.is_some() {
                     ServerMessage::ActionFailed { message }
                 } else {
@@ -133,16 +130,7 @@ pub(crate) async fn run(
             && !(hello.is_none() && matches!(message, ClientMessage::Ping { .. }))
             && !limiter.allow()
         {
-            if command_id.is_some()
-                && socket
-                    .enqueue_completion(
-                        ServerMessage::ActionFailed {
-                            message: "Command rate quota exceeded".to_string(),
-                        },
-                        command_id,
-                    )
-                    .is_err()
-            {
+            if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
                 break;
             }
             continue;

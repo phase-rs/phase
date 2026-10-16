@@ -4,7 +4,16 @@
 
 use serde::{Deserialize, Serialize};
 use server_core::protocol::{ClientMessage, CommandId, ServerMessage};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+
+pub(crate) const MAX_PENDING_QUOTA_REFUSALS: usize = 8;
+
+#[derive(Debug)]
+pub(crate) enum RefusalError {
+    Full,
+    Closed,
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClientEnvelope {
@@ -51,14 +60,19 @@ pub(crate) struct Envelope {
     pub(crate) message: ServerMessage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) command_id: Option<CommandId>,
+    #[serde(skip)]
+    pub(crate) quota_refusal: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Sender(mpsc::UnboundedSender<Envelope>);
+pub(crate) struct Sender(mpsc::UnboundedSender<Envelope>, Arc<Semaphore>);
 
 pub(crate) fn channel() -> (Sender, Receiver) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (Sender(tx), Receiver(rx))
+    (
+        Sender(tx, Arc::new(Semaphore::new(MAX_PENDING_QUOTA_REFUSALS))),
+        Receiver(rx),
+    )
 }
 
 impl Sender {
@@ -71,7 +85,21 @@ impl Sender {
         message: ServerMessage,
         command_id: Option<CommandId>,
     ) -> Result<(), mpsc::error::SendError<()>> {
-        self.enqueue(message, command_id, drop)
+        self.enqueue(message, command_id, None, drop)
+    }
+
+    pub(crate) fn send_refusal(
+        &self,
+        message: ServerMessage,
+        command_id: Option<CommandId>,
+    ) -> Result<(), RefusalError> {
+        let permit = self
+            .1
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RefusalError::Full)?;
+        self.enqueue(message, command_id, Some(permit), drop)
+            .map_err(|_| RefusalError::Closed)
     }
 
     /// Preserve failed payload ownership for callers that defer large drops
@@ -81,19 +109,21 @@ impl Sender {
         message: ServerMessage,
         on_closed: impl FnOnce(ServerMessage),
     ) -> Result<(), mpsc::error::SendError<()>> {
-        self.enqueue(message, None, on_closed)
+        self.enqueue(message, None, None, on_closed)
     }
 
     fn enqueue(
         &self,
         message: ServerMessage,
         command_id: Option<CommandId>,
+        quota_refusal: Option<OwnedSemaphorePermit>,
         on_closed: impl FnOnce(ServerMessage),
     ) -> Result<(), mpsc::error::SendError<()>> {
         self.0
             .send(Envelope {
                 message,
                 command_id,
+                quota_refusal,
             })
             .map_err(|error| {
                 on_closed(error.0.message);
@@ -155,6 +185,40 @@ impl Receiver {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn unflushed_refusal_admission_survives_dequeue_and_is_reusable_after_flush() {
+        let (sender, mut receiver) = channel();
+        for id in 0..MAX_PENDING_QUOTA_REFUSALS {
+            sender
+                .send_refusal(ServerMessage::ActionNoOp, Some(CommandId(id as u64)))
+                .unwrap();
+        }
+        let mut in_flight = receiver.recv_envelope().await.unwrap();
+        let flushed = in_flight.quota_refusal.take();
+        // Consuming the encoded envelope does not release the writer's
+        // unflushed frame capacity.
+        let _wire = serde_json::to_string(&in_flight).unwrap();
+        drop(in_flight);
+        assert!(matches!(
+            sender.send_refusal(ServerMessage::ActionNoOp, Some(CommandId(99))),
+            Err(RefusalError::Full),
+        ));
+        drop(flushed);
+        sender
+            .send_refusal(ServerMessage::ActionNoOp, Some(CommandId(100)))
+            .unwrap();
+        while let Ok(envelope) = receiver.0.try_recv() {
+            drop(envelope);
+        }
+        // A healthy consumer has no lifetime strike count.
+        for id in 0..MAX_PENDING_QUOTA_REFUSALS * 3 {
+            sender
+                .send_refusal(ServerMessage::ActionNoOp, Some(CommandId(id as u64)))
+                .unwrap();
+            drop(receiver.recv_envelope().await.unwrap());
+        }
+    }
+
     #[test]
     fn command_metadata_does_not_change_the_canonical_action_payload() {
         let command: ClientEnvelope = serde_json::from_value(serde_json::json!({
@@ -186,6 +250,7 @@ mod tests {
         let envelope = Envelope {
             message: ServerMessage::ActionNoOp,
             command_id: Some(CommandId(37)),
+            quota_refusal: None,
         };
         let wire = serde_json::to_value(envelope).unwrap();
         assert_eq!(wire["command_id"], 37);
@@ -200,6 +265,7 @@ mod tests {
         let plain = serde_json::to_value(Envelope {
             message: ServerMessage::ActionNoOp,
             command_id: None,
+            quota_refusal: None,
         })
         .unwrap();
         assert!(

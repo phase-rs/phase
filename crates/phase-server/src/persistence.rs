@@ -43,6 +43,8 @@ pub struct GameDb {
     full_save_hook: Mutex<Option<FullSaveHook>>,
     #[cfg(test)]
     full_save_io_hook: Mutex<Option<FullSaveIoHook>>,
+    #[cfg(test)]
+    full_currency_entry: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
 }
 
 /// CPU-prepared SQL inputs. The full game snapshot is released before I/O.
@@ -152,6 +154,8 @@ impl GameDb {
             full_save_hook: Mutex::new(None),
             #[cfg(test)]
             full_save_io_hook: Mutex::new(None),
+            #[cfg(test)]
+            full_currency_entry: Mutex::new(None),
         })
     }
 
@@ -163,6 +167,23 @@ impl GameDb {
     #[cfg(test)]
     pub(crate) fn set_full_save_io_hook(&self, hook: FullSaveIoHook) {
         *self.full_save_io_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_currency_entry(&self, entered: std::sync::Arc<tokio::sync::Notify>) {
+        *self.full_currency_entry.lock().unwrap() = Some(entered);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_connection_for_test(
+        &self,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        let _connection = self.conn.lock().unwrap();
+        entered.notify_one();
+        // Sender teardown unblocks the worker even if the test assertion fails.
+        let _ = release.recv();
     }
 
     /// Legacy persistence path retained while Full runtime callers migrate to
@@ -329,6 +350,10 @@ impl GameDb {
         revision: u64,
         activation_epoch: Option<u64>,
     ) -> rusqlite::Result<FullPersistDisposition> {
+        #[cfg(test)]
+        if let Some(entered) = self.full_currency_entry.lock().unwrap().clone() {
+            entered.notify_one();
+        }
         let conn = self.conn.lock().unwrap();
         if !Self::current_activation(&conn, key, activation_epoch)? {
             return Ok(FullPersistDisposition::NotCurrentActivation);

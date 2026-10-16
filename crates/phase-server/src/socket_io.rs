@@ -51,6 +51,8 @@ struct PendingWrite {
     acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
     payload_bytes: usize,
     metrics: Arc<PendingMetrics>,
+    #[cfg(test)]
+    flush_gate: Option<Arc<crate::socket_test_hooks::BootstrapGate>>,
 }
 
 impl PendingWrite {
@@ -60,6 +62,15 @@ impl PendingWrite {
         metrics: &Arc<PendingMetrics>,
     ) -> Self {
         Self::from_operation(WriteOperation::Frame(frame), acknowledgement, metrics)
+    }
+
+    #[cfg(test)]
+    fn with_flush_gate(
+        mut self,
+        gate: Option<Arc<crate::socket_test_hooks::BootstrapGate>>,
+    ) -> Self {
+        self.flush_gate = gate;
+        self
     }
 
     fn from_operation(
@@ -86,6 +97,8 @@ impl PendingWrite {
             acknowledgement,
             payload_bytes,
             metrics: metrics.clone(),
+            #[cfg(test)]
+            flush_gate: None,
         }
     }
 }
@@ -126,6 +139,22 @@ impl NegotiatedSocket {
         command_id: Option<server_core::protocol::CommandId>,
     ) -> Result<(), mpsc::error::SendError<()>> {
         self.messages.send_completion(message, command_id)
+    }
+
+    pub(crate) fn enqueue_quota_refusal(
+        &self,
+        command_id: Option<server_core::protocol::CommandId>,
+    ) -> Result<(), crate::socket_mailbox::RefusalError> {
+        let result = self.messages.send_refusal(
+            ServerMessage::ActionFailed {
+                message: "Command rate quota exceeded".to_string(),
+            },
+            command_id,
+        );
+        if matches!(result, Err(crate::socket_mailbox::RefusalError::Full)) {
+            self.close_for_ingress(Cause::QuotaRefusalOverflow);
+        }
+        result
     }
 
     pub(crate) fn set_wire_format(&mut self, format: Option<WireFormat>) {
@@ -297,7 +326,7 @@ pub(crate) fn start(
             sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut warned = false;
             loop {
-                let message = tokio::select! {
+                let mut message = tokio::select! {
                     biased;
                     _ = closed.wait_for(Option::is_some) => break,
                     _ = sample.tick() => {
@@ -306,6 +335,14 @@ pub(crate) fn start(
                     }
                     message = messages.recv_envelope() => match message { Some(message) => message, None => break },
                 };
+                #[cfg(test)]
+                let flush_gate = message
+                    .quota_refusal
+                    .as_ref()
+                    .and_then(|_| hooks.take_quota_flush());
+                // Retain refusal admission through the actual socket flush,
+                // not merely until the encoder has removed the mailbox entry.
+                let _quota_refusal = message.quota_refusal.take();
                 sample_backlog(
                     connection,
                     messages.queued_frames() + 1,
@@ -343,11 +380,10 @@ pub(crate) fn start(
                     }
                 };
                 let (flushed, mut completion) = oneshot::channel();
-                if application
-                    .send(PendingWrite::new(frame, Some(flushed), &metrics))
-                    .await
-                    .is_err()
-                {
+                let pending = PendingWrite::new(frame, Some(flushed), &metrics);
+                #[cfg(test)]
+                let pending = pending.with_flush_gate(flush_gate);
+                if application.send(pending).await.is_err() {
                     break;
                 }
                 // Preserve the old mailbox's one-frame-at-a-time encoding:
@@ -448,10 +484,17 @@ async fn write_socket<S>(
         );
         let server_ping = matches!(&operation, WriteOperation::Frame(Message::Ping(_)));
         let started = liveness.write_started();
+        #[cfg(test)]
+        let flush_gate = pending.flush_gate.take();
         // A control operation cannot preempt the current RFC 6455 frame.
         let write = async {
             match operation {
-                WriteOperation::Frame(frame) => sink.send(frame).await,
+                WriteOperation::Frame(frame) => {
+                    #[cfg(test)]
+                    let mut sink =
+                        crate::socket_test_hooks::FlushGateSink::new(&mut sink, flush_gate);
+                    sink.send(frame).await
+                }
                 // Reading Close already queued the library's echo. poll_close
                 // flushes it without attempting a second SendAfterClosing.
                 WriteOperation::FinishPeerClose(_) => sink.close().await,
@@ -1492,25 +1535,26 @@ mod transport_fixup_tests {
             for _ in 0..crate::RATE_LIMIT_MESSAGES {
                 send_test_message(&mut socket, &ClientMessage::SubscribeLobby, false).await;
             }
-            for (command_id, message) in [
-                (
-                    37,
-                    ClientMessage::Action {
-                        action: engine::types::actions::GameAction::PassPriority,
-                    },
-                ),
-                (
-                    38,
-                    ClientMessage::Interaction {
-                        submission: InteractionSubmission {
-                            interaction_id: InteractionId("quota-interaction".to_string()),
-                            response: InteractionResponse::Choose {
-                                choice_id: InteractionChoiceId("quota-choice".to_string()),
-                            },
+            let commands = [
+                ClientMessage::Action {
+                    action: engine::types::actions::GameAction::PassPriority,
+                },
+                ClientMessage::Interaction {
+                    submission: InteractionSubmission {
+                        interaction_id: InteractionId("quota-interaction".to_string()),
+                        response: InteractionResponse::Choose {
+                            choice_id: InteractionChoiceId("quota-choice".to_string()),
                         },
                     },
-                ),
-            ] {
+                },
+            ];
+            for (index, message) in commands
+                .into_iter()
+                .cycle()
+                .take(crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS * 2 + 1)
+                .enumerate()
+            {
+                let command_id = 37 + index as u64;
                 let mut frame = serde_json::to_value(message).unwrap();
                 frame["command_id"] = serde_json::json!(command_id);
                 socket

@@ -34,8 +34,12 @@ struct NativeTable {
 
 impl NativeTable {
     async fn new() -> Self {
+        Self::with_parallelism(NonZeroUsize::MIN).await
+    }
+
+    async fn with_parallelism(parallelism: NonZeroUsize) -> Self {
         let context = crate::ServerContext {
-            game_executor: GameExecutor::new(NonZeroUsize::MIN),
+            game_executor: GameExecutor::new(parallelism),
             ..Default::default()
         };
         let (url, server, directory, app) = spawn_server(
@@ -749,5 +753,366 @@ fn terminal_retirement_cancels_pending_saves_before_serialization() {
         .await;
         table.server.abort();
         outcome.expect("retirement must cancel the persistence backlog");
+    });
+}
+
+async fn assert_quota_refusal_backlog_is_bounded(payload: serde_json::Value) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let table = NativeTable::new().await;
+    let gate = table.app.context.socket_hooks.arm_bootstrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut socket = connect_and_hello(table.url.clone()).await;
+        send_test_message(
+            &mut socket,
+            &ClientMessage::Reconnect {
+                game_code: table.key.game_code.clone(),
+                player_token: table.tokens[0].clone(),
+                full_key: table.key.clone(),
+            },
+            false,
+        )
+        .await;
+        // The encoder cannot flush application replies, but controls stay live.
+        gate.entered.notified().await;
+        for _ in 0..crate::RATE_LIMIT_MESSAGES {
+            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, false).await;
+        }
+        for id in 0..crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS {
+            let mut frame = payload.clone();
+            frame["command_id"] = serde_json::json!(100 + id);
+            socket
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .unwrap();
+        }
+        send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 91 }, false).await;
+        loop {
+            if matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::Pong { timestamp: 91 }
+            ) {
+                break;
+            }
+        }
+        let mut frame = payload;
+        frame["command_id"] = serde_json::json!(999);
+        socket
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .unwrap();
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Close(Some(close)) => {
+                    assert_eq!(u16::from(close.code), 1013);
+                    break;
+                }
+                Message::Ping(_) | Message::Pong(_) | Message::Text(_) => {}
+                frame => panic!("unexpected refusal transport frame: {frame:?}"),
+            }
+        }
+        assert_eq!(
+            table
+                .app
+                .context
+                .metrics
+                .ws_disconnect_count(crate::socket_disconnect::Cause::QuotaRefusalOverflow),
+            1,
+        );
+    })
+    .await;
+    gate.release.notify_one();
+    table.server.abort();
+    outcome.expect("unflushed quota replies must close with a bounded backlog");
+}
+
+#[test]
+fn correlated_quota_refusals_bound_the_slow_consumer_backlog() {
+    run_async_test(|| async {
+        assert_quota_refusal_backlog_is_bounded(serde_json::json!({
+            "type": "Action", "data": { "action": { "type": "PassPriority" } },
+        }))
+        .await;
+    });
+}
+
+#[test]
+fn malformed_correlated_quota_refusals_bound_the_slow_consumer_backlog() {
+    run_async_test(|| async {
+        assert_quota_refusal_backlog_is_bounded(serde_json::json!({
+            "type": "Action", "data": { "action": { "type": "NotAnAction" } },
+        }))
+        .await;
+    });
+}
+
+#[test]
+fn serialized_checkpoints_commit_during_sustained_mutation() {
+    run_async_test(|| async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const ROUNDS: usize = 3;
+
+        let table = NativeTable::with_parallelism(NonZeroUsize::new(2).unwrap()).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let executor = table.app.context.game_executor.clone();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (entered, mut preparations) = tokio::sync::mpsc::unbounded_channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let blocked = parking_lot::Mutex::new(blocked);
+            table
+                .app
+                .game_db
+                .set_full_save_hook(Arc::new(move |snapshot| {
+                    if calls.fetch_add(1, Ordering::SeqCst) < ROUNDS {
+                        entered.send(snapshot.mutation_revision).unwrap();
+                        // Dropping the sender also releases this gate on test failure.
+                        let _ = blocked.lock().recv();
+                    }
+                }));
+            queue_named_revision(&table, "checkpoint-0".to_string()).await;
+            let mut observations = Vec::new();
+            for round in 0..ROUNDS {
+                let prepared_revision = preparations.recv().await.unwrap();
+                queue_named_revision(&table, format!("checkpoint-{}", round + 1)).await;
+                let admission = executor.admit_persistence_io();
+                tokio::pin!(admission);
+                // Enqueue behind this serializer before releasing it; the next
+                // checkpoint cannot overtake our durable-read observation.
+                tokio::select! {
+                    biased;
+                    _ = &mut admission => panic!("serialization must retain I/O admission"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                release.send(()).unwrap();
+                let io = admission.await;
+                let db = table.app.game_db.clone();
+                let loaded =
+                    tokio::task::spawn_blocking(move || db.load_active_full_sessions().unwrap())
+                        .await
+                        .unwrap();
+                let saved = loaded
+                    .into_iter()
+                    .find(|save| save.key == table.key)
+                    .unwrap();
+                observations.push((prepared_revision, saved.mutation_revision));
+                drop(io);
+            }
+            drop(release);
+            assert!(
+                observations
+                    .iter()
+                    .all(|(prepared, saved)| saved >= prepared),
+                "newer mutations starved already-prepared durable checkpoints: {observations:?}",
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("durability must progress without waiting for quiescence");
+    });
+}
+
+#[test]
+fn persistence_preflight_waits_for_io_admission_before_using_blocking_threads() {
+    crate::socket_test_hooks::run_async_test_with_blocking_limit(Some(2), || async {
+        let table = NativeTable::new().await;
+        let io = table.app.context.game_executor.admit_persistence_io().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, blocked) = std::sync::mpsc::channel();
+        let db = table.app.game_db.clone();
+        let held = tokio::task::spawn_blocking({
+            let entered = entered.clone();
+            move || db.hold_connection_for_test(entered, blocked)
+        });
+        entered.notified().await;
+        queue_named_revision(&table, "waiting-for-admission".to_string()).await;
+        tokio::task::yield_now().await;
+        // One blocking worker holds SQLite's real mutex. An unadmitted
+        // currency query would consume the other and strand Hello encoding.
+        let hello =
+            tokio::time::timeout(Duration::from_secs(2), connect_and_hello(table.url.clone()))
+                .await;
+        drop(release);
+        held.await.unwrap();
+        drop(io);
+        table.server.abort();
+        assert!(
+            hello.is_ok(),
+            "unadmitted persistence preflight starved ServerHello"
+        );
+    });
+}
+
+#[test]
+fn removed_session_releases_its_pending_persistence_worker() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let executor = table.app.context.game_executor.clone();
+        let io = executor.admit_persistence_io().await;
+        queue_named_revision(&table, "removed-before-capture".to_string()).await;
+        assert_eq!(table.app.game_db.full_saves.pending_games(), 1);
+        table
+            .app
+            .sessions
+            .lock()
+            .await
+            .remove_game(&table.key.game_code);
+        drop(io);
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
+            while table.app.game_db.full_saves.pending_games() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        table.server.abort();
+        cleanup.expect("dead weak session must not strand a worker or sender entry");
+    });
+}
+
+#[test]
+fn retiring_old_persistence_worker_cannot_remove_its_replacement() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let executor = table.app.context.game_executor.clone();
+        let db = table.app.game_db.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, blocked) = std::sync::mpsc::channel();
+        let held = tokio::task::spawn_blocking({
+            let db = db.clone();
+            let entered = entered.clone();
+            move || db.hold_connection_for_test(entered, blocked)
+        });
+        entered.notified().await;
+        queue_named_revision(&table, "cancelled-worker".to_string()).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while executor.persistence_io.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old worker must enter preflight before cancellation");
+        // Its real DB query cannot finish until the replacement is registered.
+        // This makes stale-owner cleanup run after, not before, the cutover.
+        table.app.game_db.full_saves.cancel(&table.key);
+        let latest = queue_named_revision(&table, "replacement-worker".to_string()).await;
+        drop(release);
+        held.await.unwrap();
+        let key = table.key.clone();
+        let progress = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let loaded = tokio::task::spawn_blocking({
+                    let db = db.clone();
+                    move || db.load_active_full_sessions().unwrap()
+                })
+                .await
+                .unwrap();
+                if loaded
+                    .iter()
+                    .any(|save| save.key == key && save.mutation_revision == latest)
+                    && db.full_saves.pending_games() == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        table.server.abort();
+        progress.expect("old worker cleanup must preserve the replacement and retire on idle");
+    });
+}
+
+async fn exhaust_application_quota(socket: &mut ClientSocket) {
+    for _ in 0..crate::RATE_LIMIT_MESSAGES {
+        send_test_message(socket, &ClientMessage::SubscribeLobby, false).await;
+    }
+}
+
+async fn receive_quota_refusal(socket: &mut ClientSocket, command_id: u64) {
+    loop {
+        let frame = receive_command_frame(socket).await;
+        if owns_command_completion(&frame, command_id) {
+            assert_eq!(
+                frame["type"], "ActionFailed",
+                "expected quota refusal: {frame}"
+            );
+            return;
+        }
+    }
+}
+
+#[test]
+fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
+    run_async_test(|| async {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let table = NativeTable::new().await;
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut socket = table.connect(PlayerId(0)).await;
+                let count = crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS as u64;
+                exhaust_application_quota(&mut socket).await;
+                let first = table.app.context.socket_hooks.arm_quota_flush();
+                send_command_frame(&mut socket, &GameAction::PassPriority, 100).await;
+                // The real sink has accepted the encoded frame via start_send and
+                // entered poll_flush; this is not a pre-encoding mailbox barrier.
+                first.entered.notified().await;
+                for id in 101..100 + count {
+                    send_command_frame(&mut socket, &GameAction::PassPriority, id).await;
+                }
+                first.release.notify_one();
+                for id in 100..100 + count {
+                    receive_quota_refusal(&mut socket, id).await;
+                }
+                exhaust_application_quota(&mut socket).await;
+                send_command_frame(&mut socket, &GameAction::PassPriority, 100 + count).await;
+                receive_quota_refusal(&mut socket, 100 + count).await;
+                assert_eq!(
+                    table
+                        .app
+                        .context
+                        .metrics
+                        .ws_disconnect_count(crate::socket_disconnect::Cause::QuotaRefusalOverflow),
+                    0,
+                    "a flushed budget must be reusable on the same live socket",
+                );
+
+                exhaust_application_quota(&mut socket).await;
+                let blocked = table.app.context.socket_hooks.arm_quota_flush();
+                send_command_frame(&mut socket, &GameAction::PassPriority, 200).await;
+                blocked.entered.notified().await;
+                for id in 201..200 + count {
+                    send_command_frame(&mut socket, &GameAction::PassPriority, id).await;
+                }
+                send_command_frame(&mut socket, &GameAction::PassPriority, 200 + count).await;
+                let overflow =
+                    tokio::time::timeout(Duration::from_millis(500), async {
+                        while table.app.context.metrics.ws_disconnect_count(
+                            crate::socket_disconnect::Cause::QuotaRefusalOverflow,
+                        ) == 0
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await;
+                // A control Close cannot preempt an in-flight RFC 6455 frame.
+                // Release the flush before asserting, including negative controls.
+                blocked.release.notify_one();
+                overflow.expect("the encoded, unflushed refusal lost its admission permit");
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        Message::Close(Some(close)) => {
+                            assert_eq!(u16::from(close.code), 1013);
+                            break;
+                        }
+                        Message::Text(_) | Message::Ping(_) | Message::Pong(_) => {}
+                        frame => panic!("unexpected transport frame: {frame:?}"),
+                    }
+                }
+            })
+            .await;
+        table.server.abort();
+        outcome.expect("actual socket flush must own refusal admission");
     });
 }

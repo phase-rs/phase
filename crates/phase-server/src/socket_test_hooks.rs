@@ -1,6 +1,12 @@
 //! Test-only barriers observe real socket delivery without delaying game work.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use axum::extract::ws::Message;
+use futures_util::future::BoxFuture;
+use futures_util::{FutureExt, Sink};
 
 use parking_lot::Mutex;
 use server_core::protocol::ServerMessage;
@@ -11,9 +17,10 @@ pub(crate) struct Hooks {
     bootstrap: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     cutover: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     terminal_prepare: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct BootstrapGate {
     pub(crate) entered: Notify,
     pub(crate) release: Notify,
@@ -36,6 +43,16 @@ impl Hooks {
         let gate = Arc::new(BootstrapGate::default());
         *self.terminal_prepare.lock() = Some(gate.clone());
         gate
+    }
+
+    pub(crate) fn arm_quota_flush(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.quota_flush.lock() = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) fn take_quota_flush(&self) -> Option<Arc<BootstrapGate>> {
+        self.quota_flush.lock().take()
     }
 
     pub(crate) async fn before_bootstrap_cutover(&self) {
@@ -65,22 +82,78 @@ impl Hooks {
     }
 }
 
+/// Pause only poll_flush: poll_ready and start_send still reach the real sink.
+/// The test therefore holds an encoded refusal in the actual writer path.
+pub(crate) struct FlushGateSink<'a, S> {
+    inner: &'a mut S,
+    waiting: Option<BoxFuture<'static, ()>>,
+}
+
+impl<'a, S> FlushGateSink<'a, S> {
+    pub(crate) fn new(inner: &'a mut S, gate: Option<Arc<BootstrapGate>>) -> Self {
+        Self {
+            inner,
+            waiting: gate.map(|gate| {
+                async move {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+                .boxed()
+            }),
+        }
+    }
+}
+
+impl<S: Sink<Message> + Unpin> Sink<Message> for FlushGateSink<'_, S> {
+    type Error = S::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut *self.get_mut().inner).poll_ready(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        Pin::new(&mut *self.get_mut().inner).start_send(item)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if let Some(waiting) = this.waiting.as_mut() {
+            std::task::ready!(std::future::Future::poll(waiting.as_mut(), cx));
+            this.waiting = None;
+        }
+        Pin::new(&mut *this.inner).poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut *self.get_mut().inner).poll_close(cx)
+    }
+}
+
 /// Match the production owner and blocking-worker stack without mutating the
 /// process environment or imposing a stack requirement on other libtest cases.
 /// A current-thread runtime makes the I/O liveness proof strictly single-worker.
 pub(crate) fn run_async_test<F: std::future::Future<Output = ()>>(
     test: impl FnOnce() -> F + Send + 'static,
 ) {
+    run_async_test_with_blocking_limit(None, test);
+}
+
+pub(crate) fn run_async_test_with_blocking_limit<F: std::future::Future<Output = ()>>(
+    blocking_limit: Option<usize>,
+    test: impl FnOnce() -> F + Send + 'static,
+) {
     std::thread::Builder::new()
         .name("socket-test-runtime".to_string())
         .stack_size(crate::RUNTIME_THREAD_STACK_BYTES)
         .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
+            let mut runtime = tokio::runtime::Builder::new_current_thread();
+            runtime
                 .enable_all()
-                .thread_stack_size(crate::RUNTIME_THREAD_STACK_BYTES)
-                .build()
-                .unwrap()
-                .block_on(test());
+                .thread_stack_size(crate::RUNTIME_THREAD_STACK_BYTES);
+            if let Some(limit) = blocking_limit {
+                runtime.max_blocking_threads(limit);
+            }
+            runtime.build().unwrap().block_on(test());
         })
         .unwrap()
         .join()
