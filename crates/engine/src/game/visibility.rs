@@ -4110,7 +4110,7 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
         WaitingFor::MultiTargetSelection {
             pending_ability, ..
         }
-        // CR 400.2 + CR 701.10a: the batch-semantics token-host pause
+        // CR 400.2: the batch-semantics token-host pause
         // (`effects/token.rs` clones the raw creating ability into
         // `pending_ability`) carries the same trigger-source payment
         // snapshots as the multi-target pause and needs the same
@@ -6609,7 +6609,7 @@ mod tests {
                 }),
             ),
             (
-                // CR 400.2 + CR 701.10a: the batch token-host pause carries
+                // CR 400.2: the batch token-host pause carries
                 // the same trigger-source payment snapshots as the
                 // multi-target pause (production path: `effects/token.rs`
                 // clones the raw creating ability) and gets the same

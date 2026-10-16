@@ -1136,7 +1136,7 @@ fn dunbarrow_two_entrants_offer_host_choice() {
     assert!(held_boons(&runner).is_empty());
 }
 
-/// CR 400.2 + CR 701.10a production reach control: the real Dunbarrow
+/// CR 400.2 production reach control: the real Dunbarrow
 /// batch prompt pauses at `ChooseTokenHost` with the cloned creating
 /// ability in `pending_ability`, and the viewer projections carry the
 /// prompt through the payment redaction authority — opponent and
