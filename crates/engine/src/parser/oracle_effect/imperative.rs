@@ -1189,8 +1189,9 @@ fn parse_single_loyalty_permission(lower: &str) -> nom::IResult<&str, (), Oracle
 ///     path, so only `SelfRef` is accepted.
 ///   - count: "an additional time" / "one more time" → 1, "<number> more times" →
 ///     N. (An "an additional <number> times" form is not accepted: the chunk
-///     loop's repeat-count peel strips a trailing " times" before this grammar
-///     runs, so it could never be reached through the chain.)
+///     loop's repeat-count peel strips a trailing "<count> times" before this
+///     grammar runs, so it could never be reached through the chain. "more" is
+///     not a count, so "two more times" survives the peel.)
 ///   - "this turn" is optional because the clause shell peels a trailing "this
 ///     turn" into the ability's duration before this grammar sees the clause.
 fn parse_extra_loyalty_activation_grant(

@@ -11,10 +11,11 @@ use crate::types::zones::Zone;
 /// - `Controller` (the printed default): the resolved player may activate each
 ///   planeswalker they control `amount` additional times. Raises the
 ///   per-planeswalker CR 606.3 cap for every planeswalker the player controls.
-///   The Chain Veil's printed class: "{4}, {T}: You may activate each
-///   planeswalker's loyalty ability an additional time this turn." A future card
-///   reading "an additional two times" or "an additional N times for each
-///   [type]" lands here unchanged via `QuantityExpr::resolve`.
+///   The Chain Veil: "{4}, {T}: For each planeswalker you control, you may
+///   activate one of its loyalty abilities once this turn as though none of its
+///   loyalty abilities have been activated this turn." A larger or dynamic
+///   `amount` resolves here unchanged via `QuantityExpr::resolve`, once a parser
+///   arm produces it.
 /// - `SelfRef`: only the resolving permanent may be activated `amount` additional
 ///   times (Comet, Stellar Pup: "you may activate ~'s loyalty ability two more
 ///   times this turn"). Stored on the permanent itself and read, for that

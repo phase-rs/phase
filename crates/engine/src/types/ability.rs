@@ -20473,8 +20473,9 @@ pub enum Effect {
     ///
     /// `target` is the recipient axis (absent in serialized data means `Controller`):
     /// - `Controller` — every planeswalker the controller controls (The Chain
-    ///   Veil: "...activate each planeswalker's loyalty ability an additional
-    ///   time this turn"). Stored in the per-player map
+    ///   Veil: "For each planeswalker you control, you may activate one of its
+    ///   loyalty abilities once this turn as though none of its loyalty abilities
+    ///   have been activated this turn."). Stored in the per-player map
     ///   `GameState::extra_loyalty_activations_this_turn`.
     /// - `SelfRef` — only the resolving permanent ("You may activate ~'s loyalty
     ///   ability two more times this turn"). Stored in

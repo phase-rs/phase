@@ -1835,8 +1835,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         available_mana_pips: _,
         blocked_abilities: _,
         loyalty_activations_this_turn: _,
-        // omitted-safe-by-write-site: runtime-only, wire-skipped; compensated
-        // analysis-locally by `loyalty_activation_counts_match`, like the sibling.
+        // Per-turn accumulator, omitted from the strict comparator like the sibling
+        // above: runtime-only and wire-skipped, compensated analysis-locally by
+        // `loyalty_activation_counts_match`.
         extra_loyalty_activations_this_turn: _,
         is_commander: _,
         signature_spell: _,
