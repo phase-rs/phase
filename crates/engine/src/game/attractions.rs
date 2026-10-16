@@ -213,6 +213,10 @@ pub fn roll_to_visit_attractions(
         chain_root_targets: Vec::new(),
         illegal_target_slots: Vec::new(),
         chain_root_target_pins: Vec::new(),
+        declared_targets: Vec::new(),
+        declared_target_pins: Vec::new(),
+        declared_ahead: 0,
+        local_target_pins: Vec::new(),
     }));
     let proposal = roll_die::propose_roll(state, player, 1, 6, events);
     if !matches!(proposal, roll_die::RollProposal::Suspended) {

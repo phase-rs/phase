@@ -437,7 +437,24 @@ fn targeted_object_characteristic_view<'s>(
     ability: Option<&ResolvedAbility>,
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'s>> {
-    if let Some(pin) = ability.and_then(|ability| ability.occurrence_pin_for(object_id)) {
+    let pin = ability.and_then(|ability| ability.occurrence_pin_for(object_id));
+    pinned_target_characteristic_view(state, object_id, pin)
+}
+
+/// CR 608.2h + CR 400.7: the characteristic view for one selected target
+/// occurrence. A stale pin reads the occurrence's departure LKI from exact
+/// incarnation history — never the retained live entry (a different object)
+/// and never the legacy cache slot (which may describe a later incarnation).
+/// A current or unpinned target resolves through the shared live-or-LKI
+/// helper. The live path proves the pin from the ability in scope; the
+/// parked path carries it in the frame — both select through here so the
+/// occurrence that was SELECTED is the occurrence that is READ.
+fn pinned_target_characteristic_view<'s>(
+    state: &'s GameState,
+    object_id: ObjectId,
+    pin: Option<ObjectIncarnationRef>,
+) -> Option<CharacteristicView<'s>> {
+    if let Some(pin) = pin {
         if !pin.is_current(state) {
             return state
                 .lki_by_incarnation
@@ -744,31 +761,43 @@ fn visit_characteristic_leaf<'s>(
             // ability-targets (suspension-resume reads, where the ability is
             // gone but its targets survive on the parked frame) second. The
             // parked path applies the equivalent slot/legality/incarnation
-            // authority from park-captured context — never a census.
-            let selected: Vec<TargetRef> = match filter_ctx.ability {
-                Some(_) => crate::game::filter::referenced_targets_for_filter(
-                    state,
-                    &selector,
-                    filter_ctx.ability,
-                ),
-                None => match filter_ctx.ability_targets {
-                    Some(parked) => crate::game::filter::referenced_parked_targets_for_filter(
-                        state, &selector, parked,
-                    )
-                    .into_iter()
-                    .cloned()
-                    .collect(),
-                    None => vec![],
-                },
-            };
-            for target in selected {
-                let TargetRef::Object(oid) = target else {
-                    continue;
-                };
-                if let Some(view) =
-                    targeted_object_characteristic_view(state, filter_ctx.ability, oid)
-                {
-                    visit(CharacteristicMember::Object(oid), view, false);
+            // authority from park-captured context — never a census. Each
+            // parked referent carries the occurrence pin that selected it,
+            // so the read below measures the SELECTED occurrence.
+            match filter_ctx.ability {
+                Some(_) => {
+                    let selected = crate::game::filter::referenced_targets_for_filter(
+                        state,
+                        &selector,
+                        filter_ctx.ability,
+                    );
+                    for target in selected {
+                        let TargetRef::Object(oid) = target else {
+                            continue;
+                        };
+                        if let Some(view) =
+                            targeted_object_characteristic_view(state, filter_ctx.ability, oid)
+                        {
+                            visit(CharacteristicMember::Object(oid), view, false);
+                        }
+                    }
+                }
+                None => {
+                    if let Some(parked) = filter_ctx.ability_targets {
+                        let selected = crate::game::filter::referenced_parked_targets_for_filter(
+                            state, &selector, parked,
+                        );
+                        for referent in selected {
+                            let TargetRef::Object(oid) = referent.target else {
+                                continue;
+                            };
+                            if let Some(view) =
+                                pinned_target_characteristic_view(state, *oid, referent.pin)
+                            {
+                                visit(CharacteristicMember::Object(*oid), view, false);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -26262,6 +26291,10 @@ mod tests {
             trigger_context: None,
             illegal_target_slots: Vec::new(),
             chain_root_target_pins: Vec::new(),
+            declared_targets: Vec::new(),
+            declared_target_pins: Vec::new(),
+            declared_ahead: 0,
+            local_target_pins: Vec::new(),
         };
 
         let mut events = Vec::new();

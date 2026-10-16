@@ -351,7 +351,27 @@ pub struct PendingDieRoll {
     /// evaluated at resume, not at park. `#[serde(default)]` for
     /// in-flight states serialized before this field existed.
     #[serde(default)]
-    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>,
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared (target, pin) entries counted from the slot
+    /// base, captured via `targeting::capture_parked_slot_context`. Resume
+    /// indexes these — never the legacy chain-root list — so modal bases,
+    /// downstream offsets, and repeated IDs resolve exactly like the live
+    /// authority. Empty on pre-M2 frames, which keep the legacy root path.
+    #[serde(default)]
+    pub declared_targets: Vec<TargetRef>,
+    /// CR 400.7: the announced pin of each declared entry, aligned with
+    /// `declared_targets`. Positional — repeated IDs keep distinct pins.
+    #[serde(default)]
+    pub declared_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, so resume judges
+    /// the root-numbered illegality stamp at `ahead + index` like the live
+    /// authority. Zero on pre-M2 frames (raw root indexing).
+    #[serde(default)]
+    pub declared_ahead: usize,
+    /// CR 400.7: the suspending node's own positional pins, aligned with
+    /// `targets`, for the local fallback and occurrence-aware parked reads.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -420,6 +440,28 @@ pub struct PendingDieRollInstruction {
     /// serialized before this field existed.
     #[serde(default)]
     pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared entries counted from the slot base (see
+    /// `PendingDieRoll::declared_targets`), carried across the CR 616.1
+    /// choice so they survive into the `PendingDieRoll` this instruction
+    /// produces. `#[serde(default)]` for in-flight states serialized before
+    /// this field existed.
+    #[serde(default)]
+    pub declared_targets: Vec<TargetRef>,
+    /// CR 400.7: announced pins aligned with `declared_targets`, carried
+    /// across the CR 616.1 choice. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub declared_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, carried across
+    /// the CR 616.1 choice. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub declared_ahead: usize,
+    /// CR 400.7: the suspending node's positional pins aligned with
+    /// `targets`, carried across the CR 616.1 choice. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1

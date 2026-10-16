@@ -615,6 +615,10 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         chain_root_targets: vec![],
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        local_target_pins: vec![],
     });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,
@@ -666,7 +670,7 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
 }
 
 /// PR-C F4 — RESUME. A paused indexed roll resolves its slot against the
-/// carried chain-root list (declared numbering), not the local slice: slot 1
+/// carried declared list (slot-base numbering), not the local slice: slot 1
 /// names B even though the local list holds only B at position 0, and the
 /// earlier illegal slot 0 does not renumber the selection (CR 608.2b
 /// indexing happens before checks). Natural 10 + B's power 5 = 15; raw
@@ -698,7 +702,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         controller: P0,
         roller: P0,
         // Local slice holds only the roller's own target; declared slot 1
-        // still names the brute through the chain-root list.
+        // still names the brute through the declared list.
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -710,11 +714,15 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         running_total: 0,
         rolled_any: false,
         forced_ignored: vec![],
-        chain_root_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        chain_root_targets: vec![],
         // The carrier stamped slot 0 illegal as the chain began to resolve;
         // indexing still counts it (no renumbering).
         illegal_target_slots: vec![0],
-        chain_root_target_pins: vec![None, None],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        declared_target_pins: vec![None, None],
+        declared_ahead: 0,
+        local_target_pins: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -778,9 +786,13 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         running_total: 0,
         rolled_any: false,
         forced_ignored: vec![],
-        chain_root_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        chain_root_targets: vec![],
         illegal_target_slots: vec![0],
-        chain_root_target_pins: vec![None, None],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        declared_target_pins: vec![None, None],
+        declared_ahead: 0,
+        local_target_pins: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -871,9 +883,13 @@ fn parked_indexed_roll_drops_selected_slot_with_stale_pin() {
         running_total: 0,
         rolled_any: false,
         forced_ignored: vec![],
-        chain_root_targets: vec![TargetRef::Object(brute)],
+        chain_root_targets: vec![],
         illegal_target_slots: vec![],
-        chain_root_target_pins: vec![Some(pin)],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Object(brute)],
+        declared_target_pins: vec![Some(pin)],
+        declared_ahead: 0,
+        local_target_pins: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -892,5 +908,526 @@ fn parked_indexed_roll_drops_selected_slot_with_stale_pin() {
         rolls,
         vec![10],
         "the stale-pinned slot contributes nothing; raw local indexing reads the retained 2/2 and emits 12"
+    );
+}
+
+/// M2 — RESUME. Pins must align with the list they gate: the frame below
+/// carries an EMPTY root with a live local target, plus a stale root pin
+/// left over for another slot. The stale root pin must not judge the local
+/// referent — the local read proceeds (10 + 2 = 12). Pre-fix the lookup
+/// applied root pins to the local list and dropped the slot (10).
+#[test]
+fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
+    let ghost = scenario.add_creature(P0, "Ghost", 3, 3).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    // A stale pin for GHOST (exited through the real pipeline); brute never moves.
+    let parsed = parse_oracle_text(
+        "Destroy target nonblack creature.",
+        "Doom Blade",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Doom Blade parses an ability");
+    let mut ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+        def,
+        roller,
+        P0,
+        vec![TargetRef::Object(ghost)],
+    );
+    ability.announce_target_pins(&state);
+    let ghost_pin = ability.target_pin_at(0).expect("pin announced");
+    let mut zone_events = Vec::new();
+    engine::game::zones::move_to_zone(&mut state, ghost, Zone::Graveyard, &mut zone_events);
+    assert!(
+        !ghost_pin.is_current(&state),
+        "reach guard: the battlefield exit must stale the ghost pin"
+    );
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(0) },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(brute)],
+        sides: 20,
+        results: vec![10],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![Some(ghost_pin)],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        local_target_pins: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![12],
+        "the live local brute reads 2; judging it by the ghost's stale root pin drops the slot and emits 10"
+    );
+}
+
+/// M2 legacy guard — RESUME. A frame carrying only the chain-root list (no
+/// declared entries, as all pre-M2 frames do) keeps the established root
+/// behavior through the refactor: stamped slot 0 drops, so the slot-0 read
+/// contributes nothing (natural 10 stays 10). Green before and after.
+#[test]
+fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let condemned = scenario.add_creature(P0, "Condemned", 2, 2).id();
+    let brute = scenario.add_creature(P0, "Brute", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(0) },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(brute)],
+        sides: 20,
+        results: vec![10],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        illegal_target_slots: vec![0],
+        chain_root_target_pins: vec![None, None],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        local_target_pins: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![10],
+        "the stamped-illegal root slot contributes nothing"
+    );
+}
+
+/// M2 — RESUME (modal slot base + downstream offset). Mode 1 of a modal
+/// spell declares slot 0 naming Brute 5/5; mode 0 declares slot 0 naming
+/// Condemned 2/2 (stamped illegal at resolution). The parked read of the
+/// mode-1 slot must resolve Brute (10 + 5 = 15): the stamp judges root
+/// numbering (ahead 1 + index 0 = 1, not stamped), and the read counts from
+/// the mode base, not the chain root. Pre-fix the lookup indexes the root
+/// list raw and checks the raw stamp: root[0] is Condemned, stamped → drop
+/// → 10. (Pre-fix frames cannot express modal facts — that absence was
+/// the bug — so this frame carries the declared list and offset.)
+#[test]
+fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let condemned = scenario.add_creature(P0, "Condemned", 2, 2).id();
+    let brute = scenario.add_creature(P0, "Brute", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(0) },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(brute)],
+        sides: 20,
+        results: vec![10],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        illegal_target_slots: vec![0],
+        chain_root_target_pins: vec![None, None],
+        declared_targets: vec![TargetRef::Object(brute)],
+        declared_target_pins: vec![None],
+        declared_ahead: 1,
+        local_target_pins: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![15],
+        "the mode-1 slot-0 read resolves Brute (10 + 5); raw root indexing drops the stamped root slot 0 and emits 10"
+    );
+}
+
+/// M2 guard — RESUME. Repeated IDs with divergent pins select positionally:
+/// slot 0's pin went stale while slot 1's pin for the same object is
+/// current, so the slot-1 read proceeds live (10 + 2 = 12). The pins here
+/// are staged per-slot (as retarget capture produces); the capture half is
+/// pinned separately against the real capture helper.
+#[test]
+fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let parsed = parse_oracle_text(
+        "Destroy target nonblack creature.",
+        "Doom Blade",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Doom Blade parses an ability");
+    let mut ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+        def,
+        roller,
+        P0,
+        vec![TargetRef::Object(brute)],
+    );
+    ability.announce_target_pins(&state);
+    let stale_pin = ability.target_pin_at(0).expect("pin announced");
+    let mut zone_events = Vec::new();
+    engine::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+    engine::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+    let current_pin = engine::types::identifiers::ObjectIncarnationRef::from_object(
+        state.objects.get(&brute).expect("brute returned"),
+    );
+    assert!(
+        !stale_pin.is_current(&state) && current_pin.is_current(&state),
+        "reach guard: stale/current pin pair required"
+    );
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+        sides: 20,
+        results: vec![10],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+        declared_target_pins: vec![Some(stale_pin), Some(current_pin)],
+        declared_ahead: 0,
+        local_target_pins: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![12],
+        "slot 1 reads through its own current pin (10 + 2); first-match pinning would judge it by slot 0's stale pin and emit 10"
+    );
+}
+
+/// M2 — RESUME. A parked every-target read preserves the selected occurrence
+/// into characteristics: Brute 2/2 is pumped to 5/5 by a parsed, resolved
+/// Giant Growth, pinned, then departed through the real pipeline. The
+/// unslotted aggregate must read its departure LKI power 5 (10 + 5 = 15) —
+/// not the retained reverted base 2 (12). Pre-fix the parked read was
+/// pin-blind and emitted 12.
+#[test]
+fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[brute]).resolve();
+    let pumped = runner.state().objects.get(&brute).expect("Brute stands");
+    assert_eq!(
+        (pumped.power, pumped.toughness),
+        (Some(5), Some(5)),
+        "reach guard: Giant Growth must resolve to 5/5"
+    );
+
+    // Pin the pumped incarnation, then depart through the real pipeline.
+    let mut state = runner.state().clone();
+    let parsed = parse_oracle_text(
+        "Destroy target nonblack creature.",
+        "Doom Blade",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Doom Blade parses an ability");
+    let mut ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+        def,
+        roller,
+        P0,
+        vec![TargetRef::Object(brute)],
+    );
+    ability.announce_target_pins(&state);
+    let pin = ability.target_pin_at(0).expect("pin announced");
+    let mut zone_events = Vec::new();
+    engine::game::zones::move_to_zone(&mut state, brute, Zone::Graveyard, &mut zone_events);
+    assert!(
+        !pin.is_current(&state),
+        "reach guard: the battlefield exit must stale the pin"
+    );
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: None },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(brute)],
+        sides: 20,
+        results: vec![10],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![TargetRef::Object(brute)],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        local_target_pins: vec![Some(pin)],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![15],
+        "the unslotted parked read measures departure power 5 (10 + 5); a pin-blind live read emits 12"
+    );
+}
+
+/// M2 — RESUME. Mixed player/object slots keep declared numbering: slot 0
+/// names a player (no characteristics, no pin) and slot 1 names Brute 2/2,
+/// so the slot-1 read contributes 2 (10 + 2 = 12). Compressing players out
+/// of the numbering would read slot 1 out of range and emit 10.
+#[test]
+fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![
+            TargetRef::Player(engine::game::scenario::P1),
+            TargetRef::Object(brute),
+        ],
+        sides: 20,
+        results: vec![10],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![
+            TargetRef::Player(engine::game::scenario::P1),
+            TargetRef::Object(brute),
+        ],
+        declared_target_pins: vec![None, None],
+        declared_ahead: 0,
+        local_target_pins: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![12],
+        "slot 1 names Brute through the player slot 0 (10 + 2)"
     );
 }

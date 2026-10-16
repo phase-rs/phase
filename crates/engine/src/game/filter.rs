@@ -1465,6 +1465,10 @@ fn parent_target_mass_leg(state: &GameState, ability: &ResolvedAbility) -> Targe
 pub struct ParkedTargets<'a> {
     /// The suspending node's own targets (positional, local numbering).
     pub local: &'a [TargetRef],
+    /// The node's own positional pins, aligned with `local`. Selected local
+    /// referents read occurrence-aware through these; a short or missing
+    /// entry passes unpinned (legacy frames carry no local pins).
+    pub local_pins: &'a [Option<ObjectIncarnationRef>],
     /// The creating ability's chain-root targets (declared numbering).
     pub root: &'a [TargetRef],
     /// Declared slots stamped illegal as the chain began to resolve.
@@ -1472,6 +1476,16 @@ pub struct ParkedTargets<'a> {
     /// Announced pins aligned position-for-position with `root` (`None` for
     /// players and unpinned occurrences).
     pub root_pins: &'a [Option<ObjectIncarnationRef>],
+    /// The declared (target, pin) entries counted from the slot base —
+    /// resume's preferred indexed list. Empty on pre-M2 frames, which keep
+    /// the legacy root path.
+    pub declared: &'a [TargetRef],
+    /// Announced pins aligned with `declared`. Positional — repeated IDs
+    /// keep distinct pins.
+    pub declared_pins: &'a [Option<ObjectIncarnationRef>],
+    /// The slot base's offset in root numbering: resume judges the
+    /// root-numbered stamp at `ahead + index`. Zero on pre-M2 frames.
+    pub ahead: usize,
 }
 
 /// Context bundle passed into filter evaluation.
@@ -10902,37 +10916,70 @@ fn matches_crew_relation(
 /// the aligned announced pin live at resume. An empty root list (legacy
 /// in-flight frames, attraction rolls) falls back to local positional
 /// indexing — the only numbering those frames ever carried.
+/// One parked referent with the occurrence pin that selected it. The pin
+/// travels into characteristic reads so a resumed aggregate measures the
+/// SELECTED occurrence (departure LKI when it departed) rather than
+/// whichever incarnation happens to be live.
+pub(crate) struct ParkedReferent<'a> {
+    pub target: &'a TargetRef,
+    pub pin: Option<ObjectIncarnationRef>,
+}
+
 pub(crate) fn referenced_parked_targets_for_filter<'a>(
     state: &GameState,
     target: &TargetFilter,
     parked: ParkedTargets<'a>,
-) -> Vec<&'a TargetRef> {
+) -> Vec<ParkedReferent<'a>> {
     match target {
-        TargetFilter::ParentTarget => parked.local.iter().collect(),
+        // Every-target: the node's own targets, each with its positional pin
+        // for occurrence-aware reads. A short pin list passes the tail
+        // unpinned (legacy frames carry no local pins).
+        TargetFilter::ParentTarget => parked
+            .local
+            .iter()
+            .enumerate()
+            .map(|(position, target)| ParkedReferent {
+                target,
+                pin: parked.local_pins.get(position).copied().flatten(),
+            })
+            .collect(),
         TargetFilter::ParentTargetSlot { index } => {
-            let list = if parked.root.is_empty() {
-                parked.local
+            // Preferred list first: declared-from-base entries with the base
+            // offset; then the legacy chain-root list (pre-M2 frames); then
+            // the local list with the node's own pins. Each list is judged
+            // by the pins aligned with IT — never a neighbor's.
+            let (list, pins, ahead) = if !parked.declared.is_empty() {
+                (parked.declared, parked.declared_pins, parked.ahead)
+            } else if !parked.root.is_empty() {
+                (parked.root, parked.root_pins, 0)
             } else {
-                parked.root
+                (parked.local, parked.local_pins, 0)
             };
             let Some(referent) = list.get(*index) else {
                 return vec![];
             };
             // Indexing precedes checks: the stamp and pin judge the selected
-            // slot; they never shift which slot an index names.
-            if parked.illegal_slots.contains(index) {
+            // slot; they never shift which slot an index names. The stamp is
+            // root-numbered, so the base offset applies — exactly like
+            // `resolve_live_parent_slot_from_root`.
+            if parked.illegal_slots.contains(&(ahead + *index)) {
                 return vec![];
             }
-            // Pins align with the root list; a short or missing entry passes
-            // (legacy frames carry no pins). Players carry no incarnation.
+            // A short or missing pin entry passes (legacy frames carry no
+            // pins). Players carry no incarnation. A stale pin drops the
+            // slot, mirroring the live slot authority.
+            let pin = pins.get(*index).copied().flatten();
             if matches!(referent, TargetRef::Object(_)) {
-                if let Some(Some(pin)) = parked.root_pins.get(*index) {
+                if let Some(pin) = pin {
                     if !pin.is_current(state) {
                         return vec![];
                     }
                 }
             }
-            vec![referent]
+            vec![ParkedReferent {
+                target: referent,
+                pin,
+            }]
         }
         _ => vec![],
     }

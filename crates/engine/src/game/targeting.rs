@@ -1561,6 +1561,52 @@ pub(crate) fn carrier_illegal_slots(state: &GameState, ability: &ResolvedAbility
         .unwrap_or_default()
 }
 
+/// CR 608.2c + CR 608.2b + CR 400.7: the slot context a suspension frame
+/// parks for a node that leaves the stack. The ONLY capture authority — every
+/// die-roll suspension captures through here, so capture and resume can never
+/// disagree on numbering:
+///
+/// - `declared_targets` / `declared_pins`: the (target, pin) entries counted
+///   from the slot base ([`parent_slot_base`]), via
+///   [`super::ability_utils::declared_target_entries_in_chain`]. Each entry
+///   carries its OWN occurrence pin, so repeated IDs keep distinct pins
+///   (first-match lookup would collapse them), and mixed player/object slots
+///   stay aligned (players pin `None`).
+/// - `declared_ahead`: the base's offset in root numbering
+///   ([`super::ability_utils::declared_slots_ahead_of`]), so resume judges
+///   the root-numbered illegality stamp at `ahead + index`, exactly like
+///   [`resolve_live_parent_slot_from_root`].
+/// - `local_pins`: the node's own positional pins, aligned with its announced
+///   targets, for the local fallback and for occurrence-aware parked reads.
+pub(crate) struct ParkedSlotCapture {
+    pub declared_targets: Vec<TargetRef>,
+    pub declared_pins: Vec<Option<ObjectIncarnationRef>>,
+    pub declared_ahead: usize,
+    pub local_pins: Vec<Option<ObjectIncarnationRef>>,
+}
+
+/// Capture the slot context for `ability` suspending mid-resolution. With no
+/// carrier (an already-detached node) the base is the node itself and the
+/// offset is zero — the same degenerate shape the live authority reads.
+pub(crate) fn capture_parked_slot_context(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> ParkedSlotCapture {
+    let root = resolving_root_ability(state, ability);
+    let base = parent_slot_base(state, ability);
+    let (declared_targets, declared_pins): (Vec<_>, Vec<_>) =
+        super::ability_utils::declared_target_entries_in_chain(base)
+            .into_iter()
+            .map(|entry| (entry.target, entry.pin))
+            .unzip();
+    ParkedSlotCapture {
+        declared_targets,
+        declared_pins,
+        declared_ahead: super::ability_utils::declared_slots_ahead_of(root, base),
+        local_pins: ability.aligned_target_pins(),
+    }
+}
+
 /// CR 608.2c: The DECLARED target of slot `index`, counted from `parent_slot_base`,
 /// with no legality or pin check. `None` when the index is out of range. Only
 /// for reading the chain's declared shape (the dual-fighter recovery in
@@ -9038,6 +9084,173 @@ mod tests {
         );
         crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
         assert_eq!(read(&state), (None, vec![], None));
+    }
+
+    /// M2 — CAPTURE. Repeated IDs keep distinct pins: slot 0's stale pin and
+    /// slot 1's current pin for the same object capture positionally, and the
+    /// node's own pins align the same way. First-match pin lookup would
+    /// collapse both slots to slot 0's stale pin.
+    #[test]
+    fn capture_parked_slot_context_keeps_repeated_id_pins_distinct() {
+        use super::capture_parked_slot_context;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::TargetRef;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::zones::Zone;
+
+        let mut scenario = GameScenario::new();
+        let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
+        let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+        let mut runner = scenario.build();
+        let parsed = crate::parser::parse_oracle_text(
+            "Destroy target nonblack creature.",
+            "Doom Blade",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let def = parsed.abilities.first().expect("Doom Blade parses");
+        let mut ability = crate::game::ability_utils::build_resolved_from_def_with_targets(
+            def,
+            roller,
+            P0,
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+        );
+        ability.announce_target_pins(runner.state());
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        // Force the incarnation break through a real exit and return.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(runner.state_mut(), brute, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(runner.state_mut(), brute, Zone::Battlefield, &mut events);
+        let current = ObjectIncarnationRef::from_object(
+            runner.state().objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        // Retarget-shaped divergence via the production occurrence writer.
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(stale)),
+            (TargetRef::Object(brute), Some(current)),
+        ]);
+
+        let captured = capture_parked_slot_context(runner.state(), &ability);
+        assert_eq!(
+            captured.declared_targets,
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            "both occurrences are declared positions"
+        );
+        assert_eq!(
+            captured.declared_pins,
+            vec![Some(stale), Some(current)],
+            "each occurrence keeps its OWN pin"
+        );
+        assert_eq!(captured.declared_ahead, 0, "no modal base: zero offset");
+        assert_eq!(
+            captured.local_pins,
+            vec![Some(stale), Some(current)],
+            "the node's own pins align the same way"
+        );
+    }
+
+    /// M2 — CAPTURE (modal slot base + downstream offset). Mode 0 declares
+    /// slot 0 (Condemned) and mode 1 declares slot 0 (Brute); with the mode-1
+    /// ordinal resolving under a staged carrier, capture counts from the
+    /// mode base with ahead 1 — exactly the numbering the live slot
+    /// authority reads.
+    #[test]
+    fn capture_parked_slot_context_counts_modal_slots_from_the_mode_base() {
+        use super::{capture_parked_slot_context, resolve_live_parent_slot_from_root};
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::TargetRef;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::identifiers::CardId;
+
+        let mut scenario = GameScenario::new();
+        let condemned = scenario.add_creature(P0, "Condemned", 2, 2).id();
+        let brute = scenario.add_creature(P0, "Brute", 5, 5).id();
+        let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+        let mut runner = scenario.build();
+        let mode_def = || {
+            crate::parser::parse_oracle_text(
+                "Destroy target nonblack creature.",
+                "Doom Blade",
+                &[],
+                &["Instant".to_string()],
+                &[],
+            )
+            .abilities
+            .into_iter()
+            .next()
+            .expect("Doom Blade parses")
+        };
+        let mut chain = crate::game::ability_utils::build_chained_resolved(
+            &[mode_def(), mode_def()],
+            &[0, 1],
+            roller,
+            P0,
+        )
+        .expect("two modes chain");
+        assert_eq!(chain.modal_instruction_ordinal, Some(0));
+        assert_eq!(
+            chain
+                .sub_ability
+                .as_ref()
+                .expect("second mode chained")
+                .modal_instruction_ordinal,
+            Some(1)
+        );
+        chain.set_unpinned_targets(vec![TargetRef::Object(condemned)]);
+        chain
+            .sub_ability
+            .as_mut()
+            .expect("second mode")
+            .set_unpinned_targets(vec![TargetRef::Object(brute)]);
+        chain.announce_target_pins(runner.state());
+        chain
+            .sub_ability
+            .as_mut()
+            .expect("second mode")
+            .announce_target_pins(runner.state());
+        // Stage the carrier + ordinal exactly as modal resolution stamps them.
+        runner.state_mut().resolving_stack_entry = Some(StackEntry {
+            id: roller,
+            source_id: roller,
+            controller: P0,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(chain.clone())),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        runner.state_mut().resolving_modal_instruction = Some(1);
+
+        let mode1 = chain.sub_ability.as_ref().expect("second mode");
+        let captured = capture_parked_slot_context(runner.state(), mode1);
+        assert_eq!(
+            captured.declared_targets,
+            vec![TargetRef::Object(brute)],
+            "mode-1 slot 0 names Brute, not the mode-0 Condemned"
+        );
+        assert_eq!(captured.declared_pins.len(), 1, "one entry carries one pin");
+        assert_eq!(
+            captured.declared_pins[0],
+            mode1.target_pin_at(0),
+            "the entry pin is the mode-1 occurrence pin"
+        );
+        assert_eq!(
+            captured.declared_ahead, 1,
+            "one mode-0 slot sits ahead of the base"
+        );
+        assert_eq!(
+            captured.local_pins,
+            vec![mode1.target_pin_at(0)],
+            "local pins are the suspending node's own"
+        );
+        // The live authority agrees: Brute at base index 0.
+        assert_eq!(
+            resolve_live_parent_slot_from_root(runner.state(), mode1, 0),
+            Some(TargetRef::Object(brute)),
+        );
     }
 }
 
