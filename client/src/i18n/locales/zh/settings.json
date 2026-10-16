@@ -147,7 +147,7 @@
     "priorityAlertVisual": "发光",
     "priorityAlertSound": "提示音",
     "priorityAlertTitle": "标签页标题",
-    "priorityAlertsDescription": "在等待之后优先权回到你手上时通知你。在对手的回合中，未处理的窗口会在{{seconds}}秒后发出更强的光效。",
+    "priorityAlertsDescription": "在等待之后优先权回到你手上时通知你。当你在其他标签页或窗口，或对手回合中的窗口{{seconds}}秒内未处理时会响起提示音，此时光效也会增强。",
     "skipLowUsePriorityWindows": "跳过少用的优先权窗口（实验性）",
     "skipLowUsePriorityWindowsDescription": "自动让过你在堆叠为空时的维持、抓牌和结束步骤优先权窗口。阶段停止点和完全控制仍会暂停。",
     "spellPayment": "咒语支付",

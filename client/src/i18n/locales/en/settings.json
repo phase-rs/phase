@@ -38,7 +38,7 @@
     "priorityAlertVisual": "Glow",
     "priorityAlertSound": "Sound",
     "priorityAlertTitle": "Tab title",
-    "priorityAlertsDescription": "Get notified when priority returns after a wait. On an opponent's turn, a window you leave unanswered glows stronger after {{seconds}} seconds.",
+    "priorityAlertsDescription": "Get notified when priority returns after a wait. Sound plays when you're in another tab or window, or when a window on an opponent's turn sits unanswered for {{seconds}} seconds; its glow then gets stronger too.",
     "logDockSide": "Game Log Position",
     "spellPayment": "Spell Payment",
     "manualManaPayment": "Manual mana payment for spells",

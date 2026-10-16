@@ -38,7 +38,7 @@
     "priorityAlertVisual": "Brilho",
     "priorityAlertSound": "Som",
     "priorityAlertTitle": "Título da aba",
-    "priorityAlertsDescription": "Receba um aviso quando a prioridade voltar a você após uma espera. No turno de um oponente, uma janela que você deixa sem resposta brilha mais forte após {{seconds}} segundos.",
+    "priorityAlertsDescription": "Receba um aviso quando a prioridade voltar a você após uma espera. O som toca quando você está em outra aba ou janela, ou quando uma janela no turno de um oponente fica sem resposta por {{seconds}} segundos; nesse momento o brilho dela também fica mais forte.",
     "logDockSide": "Posição do registro do jogo",
     "spellPayment": "Pagamento de Mágicas",
     "manualManaPayment": "Pagamento manual de mana para mágicas",

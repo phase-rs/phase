@@ -38,7 +38,7 @@
     "priorityAlertVisual": "Bagliore",
     "priorityAlertSound": "Suono",
     "priorityAlertTitle": "Titolo della scheda",
-    "priorityAlertsDescription": "Ricevi un avviso quando la priorità torna a te dopo un'attesa. Durante il turno di un avversario, una finestra che lasci senza risposta brilla più forte dopo {{seconds}} secondi.",
+    "priorityAlertsDescription": "Ricevi un avviso quando la priorità torna a te dopo un'attesa. Il suono si attiva quando sei in un'altra scheda o finestra, oppure quando una finestra durante il turno di un avversario resta senza risposta per {{seconds}} secondi; allora anche il suo bagliore si intensifica.",
     "logDockSide": "Posizione del registro di gioco",
     "spellPayment": "Pagamento magie",
     "manualManaPayment": "Pagamento manuale del mana per le magie",

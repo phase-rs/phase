@@ -32,7 +32,7 @@ describe("PreferencesModal priority alerts", () => {
     expect(screen.getByText("Priority alerts")).toBeInTheDocument();
     expect(
       screen.getByText(
-        /on an opponent's turn, a window you leave unanswered glows stronger after 15 seconds/i,
+        /sound plays when you're in another tab or window, or when a window on an opponent's turn sits unanswered for 15 seconds; its glow then gets stronger too/i,
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Priority alerts" })).toBeInTheDocument();

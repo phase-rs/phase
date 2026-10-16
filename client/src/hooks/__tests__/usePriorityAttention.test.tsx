@@ -29,6 +29,15 @@ import {
 const LOCAL: PlayerId = 0;
 const OPPONENT: PlayerId = 1;
 
+// The page reads as in front of the player unless a test says otherwise, rather
+// than relying on the DOM implementation's default for `hasFocus()`.
+beforeEach(() => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 /** `shouldAutoPass` treats an object-less state as "not loaded yet" and never
  *  auto-passes it, so every fixture carries one object. */
 function stateWithPriorityOn(player: PlayerId, activePlayer: PlayerId = OPPONENT): GameState {
@@ -884,6 +893,20 @@ describe("presence and visibility", () => {
       window.dispatchEvent(new Event("blur"));
     });
     expect(result.current).toEqual({ cue: "none", chimeCount: 0 });
+  });
+
+  it("keeps the chime count and removes its listeners when the game screen unmounts", () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const removeFromWindow = vi.spyOn(window, "removeEventListener");
+    const removeFromDocument = vi.spyOn(document, "removeEventListener");
+    const { result, unmount } = mount();
+    commit(LOCAL, false, LOCAL); // opens while the window is unfocused: sounds at once
+    expect(result.current.chimeCount).toBe(1);
+
+    unmount();
+    expect(usePriorityAttentionStore.getState().chimeCount).toBe(1);
+    expect(removeFromWindow).toHaveBeenCalledWith("blur", expect.any(Function));
+    expect(removeFromDocument).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
   });
 
   it("does not chime a window the player is looking at, however long it sits", () => {

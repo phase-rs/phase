@@ -128,8 +128,9 @@ function createAttentionDriver() {
  * game screen. Watches the engine-committed pair (`waitingFor`, with
  * `autoPassRecommended` from the same commit) and announces a meaningful
  * priority window only when it opens after the local player had been away for
- * a while, chiming only for a player who is elsewhere — see `stepAttention`. Reuses `shouldAutoPass`, the game loop's own
- * predicate, so "meaningful" is never re-derived on the frontend.
+ * a while. It chimes only for a player who is elsewhere, or at a reactive
+ * window's reminder — see `stepAttention`. Reuses `shouldAutoPass`, the game
+ * loop's own predicate, so "meaningful" is never re-derived on the frontend.
  */
 export function usePriorityAttentionController(): void {
   const gameState = useGameStore((s) => s.gameState);

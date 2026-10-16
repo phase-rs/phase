@@ -38,7 +38,7 @@
     "priorityAlertVisual": "Poświata",
     "priorityAlertSound": "Dźwięk",
     "priorityAlertTitle": "Tytuł zakładki",
-    "priorityAlertsDescription": "Otrzymasz powiadomienie, gdy priorytet wróci do ciebie po oczekiwaniu. W turze przeciwnika okno, na które nie zareagujesz, świeci mocniej po {{seconds}} sekundach.",
+    "priorityAlertsDescription": "Otrzymasz powiadomienie, gdy priorytet wróci do ciebie po oczekiwaniu. Dźwięk odtwarza się, gdy jesteś w innej karcie lub oknie albo gdy okno w turze przeciwnika pozostaje bez reakcji przez {{seconds}} sekund; wtedy jego poświata też się wzmacnia.",
     "logDockSide": "Pozycja dziennika gry",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",

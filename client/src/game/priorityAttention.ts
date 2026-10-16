@@ -21,7 +21,8 @@ import { shouldAutoPass } from "./autoPass";
  *  was watching anyway — an instant AI reply or an opponent's quick pass. */
 export const MIN_WAIT_BEFORE_ALERT_MS = 4_000;
 
-/** How long a reactive window can sit unanswered before the glow strengthens.
+/** How long a reactive window can sit unanswered before the glow strengthens
+ *  and, if it has not chimed yet, the chime sounds (the opponent is waiting).
  *  Planning windows never escalate: sitting on priority while planning a main
  *  phase is thinking, not forgetting. */
 export const ESCALATE_AFTER_MS = 15_000;
@@ -109,11 +110,13 @@ export function observeLocalDecision(
 export type WindowKind = Extract<AttentionObservation, { key: string }>["kind"];
 
 /** Where a held window stands. `quiet` windows did not announce (the player was
- *  not away long enough) but may still earn the reminder. */
+ *  not away long enough) but may still earn the reminder, or announce when the
+ *  player leaves. */
 export type WindowStatus = "quiet" | "announced" | "reminded" | "answered";
 
 /** Whether a held window has chimed yet. It chimes at most once per unanswered
- *  stretch, however many cues and reminders follow. */
+ *  stretch, however many cues and reminders follow. A `quiet` window has never
+ *  chimed: announcing without chiming happens only while the player attends. */
 export type WindowSound = "pending" | "sounded";
 
 /** A meaningful window currently held. */
@@ -165,8 +168,7 @@ export function escalationDeadline(machine: AttentionMachine): number | null {
 }
 
 /** A new window that replaces one the player had not yet answered keeps its
- *  announcement, a reminder starts over, and an answered one starts quiet. A
- *  chime already given for the unanswered stretch is not given again. */
+ *  announcement, a reminder starts over, and an answered one starts quiet. */
 function carriedStatus(previous: WindowStatus): WindowStatus {
   if (previous === "answered") return "quiet";
   if (previous === "reminded") return "announced";
@@ -261,10 +263,11 @@ function stepWindow(
 export function noteElsewhere(prev: AttentionMachine, presence: Presence): AttentionMachine {
   const held = heldWindow(prev);
   if (presence !== "elsewhere" || held === null || held.status === "answered") return prev;
+  // A quiet window has never chimed, so only a window that already did is left alone.
+  if (held.sound === "sounded") return prev;
   const status = held.status === "quiet" ? "announced" : held.status;
-  if (status === held.status && held.sound === "sounded") return prev;
   return {
-    chimeCount: held.sound === "pending" ? prev.chimeCount + 1 : prev.chimeCount,
+    chimeCount: prev.chimeCount + 1,
     phase: { kind: "holding", window: { ...held, status, sound: "sounded" } },
   };
 }

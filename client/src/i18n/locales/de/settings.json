@@ -38,7 +38,7 @@
     "priorityAlertVisual": "Leuchten",
     "priorityAlertSound": "Ton",
     "priorityAlertTitle": "Tab-Titel",
-    "priorityAlertsDescription": "Du wirst benachrichtigt, wenn die Priorität nach einer Wartezeit zu dir zurückkehrt. Im Zug eines Gegners leuchtet ein Fenster, das du unbeantwortet lässt, nach {{seconds}} Sekunden stärker.",
+    "priorityAlertsDescription": "Du wirst benachrichtigt, wenn die Priorität nach einer Wartezeit zu dir zurückkehrt. Der Ton erklingt, wenn du in einem anderen Tab oder Fenster bist oder wenn ein Fenster im Zug eines Gegners {{seconds}} Sekunden lang unbeantwortet bleibt; dann leuchtet es auch stärker.",
     "logDockSide": "Position des Spielprotokolls",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
