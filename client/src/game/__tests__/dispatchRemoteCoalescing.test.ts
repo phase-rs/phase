@@ -28,10 +28,12 @@ import type {
   SubmitResult,
 } from "../../adapter/types";
 import { nextSnapshotSeq } from "../../adapter/types";
+import { normalizeEvents } from "../../animation/eventNormalizer";
 import { audioManager } from "../../audio/AudioManager";
 import { useAnimationStore } from "../../stores/animationStore";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
+import { getPlayerId } from "../../hooks/usePlayerId";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import {
   buildGameState,
@@ -54,9 +56,21 @@ function snapshot(turn: number): EngineSnapshot {
   };
 }
 
-/** An event that normalizes to a real (timed) animation step. */
-function lifeEvent(): GameEvent[] {
-  return [{ type: "LifeChanged", data: { player_id: 1, amount: -1 } }];
+/** An event that normalizes to a real (timed) animation step; `amount` tags it. */
+function lifeEvent(amount = -1): GameEvent[] {
+  return [{ type: "LifeChanged", data: { player_id: 1, amount } }];
+}
+
+/** An event that always starts its own animation step (and flashes the turn banner). */
+function turnStarted(playerId: number): GameEvent {
+  return { type: "TurnStarted", data: { player_id: playerId, turn_number: 2 } };
+}
+
+/** The `amount` tag of every committed `LifeChanged`, in history order. */
+function lifeAmounts(): number[] {
+  return useGameStore
+    .getState()
+    .eventHistory.flatMap((event) => (event.type === "LifeChanged" ? [event.data.amount] : []));
 }
 
 function logEntry(label: string): GameLogEntry {
@@ -94,6 +108,13 @@ function recordCommits(): number[] {
   return turns;
 }
 
+// `vi.spyOn` on a zustand store method only patches the current state object;
+// every later `set` copies the spy into the next one, out of reach of
+// `vi.restoreAllMocks`. The originals are reinstalled after each test instead.
+const originalEnqueueSteps = useAnimationStore.getState().enqueueSteps;
+const originalFlashTurnBanner = useUiStore.getState().flashTurnBanner;
+const originalFlashDiceRoll = useUiStore.getState().flashDiceRoll;
+
 describe("processRemoteUpdate queue coalescing", () => {
   let originalCommit: ReturnType<typeof useGameStore.getState>["commitEngineSnapshot"];
 
@@ -108,6 +129,11 @@ describe("processRemoteUpdate queue coalescing", () => {
   afterEach(async () => {
     await vi.runAllTimersAsync();
     useGameStore.setState({ commitEngineSnapshot: originalCommit });
+    useAnimationStore.setState({ enqueueSteps: originalEnqueueSteps });
+    useUiStore.setState({
+      flashTurnBanner: originalFlashTurnBanner,
+      flashDiceRoll: originalFlashDiceRoll,
+    });
     setDocumentHidden(false);
     vi.restoreAllMocks();
     vi.useRealTimers();
@@ -117,12 +143,12 @@ describe("processRemoteUpdate queue coalescing", () => {
     const commits = recordCommits();
 
     // Update 1 starts animating immediately and holds the mutex on a timer.
-    const settled: boolean[] = [];
+    const settled: number[] = [];
     const calls: Promise<void>[] = [];
     for (let i = 1; i <= 50; i++) {
       calls.push(
-        processRemoteUpdate(snapshot(i), lifeEvent(), [logEntry(`log-${i}`)]).then(() => {
-          settled[i] = true;
+        processRemoteUpdate(snapshot(i), lifeEvent(-i), [logEntry(`log-${i}`)]).then(() => {
+          settled.push(i);
         }),
       );
     }
@@ -136,8 +162,10 @@ describe("processRemoteUpdate queue coalescing", () => {
     expect(commits.length).toBeLessThanOrEqual(2);
     expect(useGameStore.getState().gameState?.turn_number).toBe(50);
     expect(logLabels()).toEqual(Array.from({ length: 50 }, (_, i) => `log-${i + 1}`));
-    // Every caller's promise resolved.
-    expect(Array.from({ length: 50 }, (_, i) => settled[i + 1])).toEqual(Array(50).fill(true));
+    // No event lost or duplicated by the merge, and history keeps arrival order.
+    expect(lifeAmounts()).toEqual(Array.from({ length: 50 }, (_, i) => -(i + 1)));
+    // Every caller's promise resolved, in arrival order.
+    expect(settled).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
     expect(isDispatchIdle()).toBe(true);
   });
 
@@ -215,11 +243,14 @@ describe("processRemoteUpdate queue coalescing", () => {
   it("(g2) hiding mid-animation clears the queued animation steps and pending step SFX", async () => {
     useAnimationStore.getState().clearQueue();
     const sfx = vi.spyOn(audioManager, "playSfxForStep");
-    const steps: GameEvent[] = [...lifeEvent(), ...lifeEvent(), ...lifeEvent()];
+    // Several steps, so later steps' SFX are scheduled on timers (the first plays at once).
+    const steps: GameEvent[] = [...lifeEvent(), turnStarted(1), ...lifeEvent(), turnStarted(0)];
+    expect(normalizeEvents(steps).length).toBeGreaterThanOrEqual(2);
     const running = processRemoteUpdate(snapshot(1), steps, []);
     await vi.advanceTimersByTimeAsync(0);
     expect(useAnimationStore.getState().activeStep).not.toBeNull();
     const playedBeforeHide = sfx.mock.calls.length;
+    expect(playedBeforeHide).toBe(1); // only the first step's SFX so far; the rest wait on timers
 
     setDocumentHidden(true);
     document.dispatchEvent(new Event("visibilitychange"));
@@ -275,6 +306,45 @@ describe("processRemoteUpdate queue coalescing", () => {
     await vi.runAllTimersAsync();
     await visible;
     expect(useGameStore.getState().gameState?.turn_number).toBe(2);
+  });
+
+  it("(k) a visible client animates a small merged batch but commits a deeper catch-up batch at once", async () => {
+    const enqueue = vi.spyOn(useAnimationStore.getState(), "enqueueSteps");
+    const sfx = vi.spyOn(audioManager, "playSfxForStep");
+
+    // In flight + a merge of exactly MAX_ANIMATED_BACKLOG (2) updates: both animate.
+    const small = [1, 2, 3].map((i) => processRemoteUpdate(snapshot(i), lifeEvent(-i), []));
+    await vi.runAllTimersAsync();
+    await Promise.all(small);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(sfx).toHaveBeenCalledTimes(2);
+
+    // In flight + a merge of 3: the merged batch commits without animation or SFX.
+    enqueue.mockClear();
+    sfx.mockClear();
+    const deep = [4, 5, 6, 7].map((i) => processRemoteUpdate(snapshot(i), lifeEvent(-i), []));
+    await vi.runAllTimersAsync();
+    await Promise.all(deep);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(sfx).toHaveBeenCalledTimes(1);
+    expect(useGameStore.getState().gameState?.turn_number).toBe(7);
+    expect(lifeAmounts()).toEqual([-1, -2, -3, -4, -5, -6, -7]);
+  });
+
+  it("(l) a merged batch spanning several turn starts flashes only the latest turn's banner", async () => {
+    const me = getPlayerId();
+    const opponent = me === 0 ? 1 : 0;
+    const banner = vi.spyOn(useUiStore.getState(), "flashTurnBanner");
+    const calls = [
+      processRemoteUpdate(snapshot(1), lifeEvent(), []), // in flight
+      processRemoteUpdate(snapshot(2), [turnStarted(opponent)], []),
+      processRemoteUpdate(snapshot(3), [turnStarted(me)], []),
+    ];
+    await vi.runAllTimersAsync();
+    await Promise.all(calls);
+
+    expect(banner).toHaveBeenCalledTimes(1);
+    expect(banner.mock.calls[0][0]).toBe("YOUR TURN");
   });
 
   it("(c) never reorders a remote update across a queued local action", async () => {
@@ -387,6 +457,24 @@ describe("processRemoteUpdate queue coalescing", () => {
     await Promise.all(calls);
 
     expect(useGameStore.getState().rewindTargets).toEqual(targets);
+  });
+
+  it("(d3) an older-seq update merged after a newer one does not replace the newer one's rewind targets", async () => {
+    const blocker = snapshot(1);
+    const older = snapshot(2);
+    const newer = snapshot(3);
+    const newerTargets = [{ turn_number: 3, active_player: 1 }];
+    const olderTargets = [{ turn_number: 2, active_player: 0 }];
+    const calls = [
+      processRemoteUpdate(blocker, lifeEvent(), [], undefined), // in flight
+      processRemoteUpdate(newer, lifeEvent(), [], newerTargets),
+      processRemoteUpdate(older, lifeEvent(), [], olderTargets),
+    ];
+    await vi.runAllTimersAsync();
+    await Promise.all(calls);
+
+    expect(useGameStore.getState().lastCommittedSeq).toBe(newer.seq);
+    expect(useGameStore.getState().rewindTargets).toEqual(newerTargets);
   });
 
   it("rejects every coalesced caller together when the merged entry fails", async () => {
