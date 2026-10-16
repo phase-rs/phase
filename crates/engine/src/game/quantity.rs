@@ -4678,10 +4678,13 @@ pub fn resolve_quantity_with_targets_slice(
 /// Suspension-resume paths (`roll_die::resume_after_ignore` and its callers)
 /// lose the `ResolvedAbility` across the suspension, but the parked frame
 /// carries its targets plus the chain-root/legality/pin context indexed
-/// reads need. That context feeds ONLY the distinguished `ability_targets`
-/// channel (consumed by `TargetedObjects`); the ordinary `targets` slice
-/// stays empty so every other arm reads exactly as the ability-blind entry
-/// would. The combat-tax slice entry keeps its own meaning and is untouched.
+/// reads need. That context feeds the distinguished `ability_targets`
+/// channel — consumed by `TargetedObjects` and by the selected-target arms
+/// (`ParentTarget`, `ParentTargetSlot`) of the shared member matcher, which
+/// judge the parked targets plus the carried keyed guard exactly like the
+/// live path; the ordinary `targets` slice stays empty so every other arm
+/// reads exactly as the ability-blind entry would. The combat-tax slice
+/// entry keeps its own meaning and is untouched.
 pub fn resolve_quantity_with_parked_targets(
     state: &GameState,
     expr: &QuantityExpr,
@@ -22345,6 +22348,271 @@ mod tests {
             vec![10],
             "the stale keyed guard excludes slot 1 (10 + 0); admitting it emits 15"
         );
+    }
+
+    /// R1 fixture: a live unstamped 5-power brute on the battlefield,
+    /// published to the chain tracked set and selected as the ability's
+    /// target with announced pins. The keyed delayed-referent pin is the
+    /// announced pin — current, or stale after an incarnation bump when
+    /// `stale_keyed`.
+    fn r1_member_fixture(stale_keyed: bool) -> (GameState, ResolvedAbility) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(540),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(541),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let pin = ability.target_pin_at(0).expect("pin announced");
+        if stale_keyed {
+            state.objects.get_mut(&brute).unwrap().bump_incarnation();
+        }
+        crate::game::effects::publish_tracked_set(&mut state, vec![brute]);
+        ability.set_target_incarnations_recursive(vec![pin]);
+        (state, ability)
+    }
+
+    /// R1: live member matching honors a `ParentTarget` member filter (and
+    /// its slotted twin) against current keyed pins — the tracked brute,
+    /// also the ability's target, contributes its power 5.
+    #[test]
+    fn live_member_filter_matches_selected_target_with_current_keyed_pin() {
+        let (state, ability) = r1_member_fixture(false);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let aggregate = QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter.clone()),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &aggregate, &ability),
+                5,
+                "live member filter {filter:?} must match the selected target"
+            );
+        }
+    }
+
+    /// R1: a parked member filter matches the same selected target after a
+    /// production capture and resume — the current keyed entry carries the
+    /// authority the live path reads (natural 10 + 5 = 15 per filter).
+    #[test]
+    fn parked_member_filter_matches_selected_target_with_current_keyed_pin() {
+        let (mut state, ability) = r1_member_fixture(false);
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert!(
+            !captured.keyed_target_incarnations.is_empty(),
+            "reach guard: the keyed entry must travel or both reads are vacuous"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let modifier = crate::types::ability::DieRollModifier::Add {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                                caused_by: None,
+                                filter: Some(filter.clone()),
+                            },
+                        )
+                        .expect("filtered ChainSet is admitted"),
+                    ),
+                },
+            };
+            let pending = crate::types::resolution::PendingDieRoll {
+                source_id: ability.source_id,
+                controller: PlayerId(0),
+                roller: PlayerId(0),
+                targets: ability.targets.clone(),
+                sides: 20,
+                results: vec![10],
+                ignore_rules: vec![],
+                results_table: vec![],
+                modifier: Some(modifier),
+                die_result: None,
+                next_index: 0,
+                running_total: 0,
+                rolled_any: false,
+                forced_ignored: vec![],
+                chain_root_targets: ability.context.chain_root_targets.clone(),
+                illegal_target_slots: illegal.clone(),
+                chain_root_target_pins: vec![],
+                declared_targets: captured.declared_targets.clone(),
+                declared_target_pins: captured.declared_pins.clone(),
+                declared_ahead: captured.declared_ahead,
+                local_target_pins: captured.local_pins.clone(),
+                keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
+            };
+            let mut events = Vec::new();
+            crate::game::effects::roll_die::resume_after_ignore(
+                &mut state,
+                pending,
+                Vec::new(),
+                &mut events,
+                None,
+            )
+            .expect("resuming the parked roll must not error");
+            let rolls: Vec<u8> = events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::types::events::GameEvent::DieRolled {
+                        result: Some(total),
+                        ..
+                    } => Some(*total),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rolls,
+                vec![15],
+                "parked member filter {filter:?} must match the selected target (10 + 5)"
+            );
+        }
+    }
+
+    /// R1: live member matching excludes the selected target once its keyed
+    /// pin goes stale — the same guard the parked path must apply.
+    #[test]
+    fn live_member_filter_excludes_selected_target_with_stale_keyed_pin() {
+        let (state, ability) = r1_member_fixture(true);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let aggregate = QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter.clone()),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &aggregate, &ability),
+                0,
+                "live member filter {filter:?} must exclude the stale-keyed target"
+            );
+        }
+    }
+
+    /// R1: a parked member filter excludes the selected target whose keyed
+    /// pin went stale — the carried guard must restrict, not merely admit
+    /// (natural 10 stays 10 per filter).
+    #[test]
+    fn parked_member_filter_excludes_selected_target_with_stale_keyed_pin() {
+        let (mut state, ability) = r1_member_fixture(true);
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let modifier = crate::types::ability::DieRollModifier::Add {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                                caused_by: None,
+                                filter: Some(filter.clone()),
+                            },
+                        )
+                        .expect("filtered ChainSet is admitted"),
+                    ),
+                },
+            };
+            let pending = crate::types::resolution::PendingDieRoll {
+                source_id: ability.source_id,
+                controller: PlayerId(0),
+                roller: PlayerId(0),
+                targets: ability.targets.clone(),
+                sides: 20,
+                results: vec![10],
+                ignore_rules: vec![],
+                results_table: vec![],
+                modifier: Some(modifier),
+                die_result: None,
+                next_index: 0,
+                running_total: 0,
+                rolled_any: false,
+                forced_ignored: vec![],
+                chain_root_targets: ability.context.chain_root_targets.clone(),
+                illegal_target_slots: illegal.clone(),
+                chain_root_target_pins: vec![],
+                declared_targets: captured.declared_targets.clone(),
+                declared_target_pins: captured.declared_pins.clone(),
+                declared_ahead: captured.declared_ahead,
+                local_target_pins: captured.local_pins.clone(),
+                keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
+            };
+            let mut events = Vec::new();
+            crate::game::effects::roll_die::resume_after_ignore(
+                &mut state,
+                pending,
+                Vec::new(),
+                &mut events,
+                None,
+            )
+            .expect("resuming the parked roll must not error");
+            let rolls: Vec<u8> = events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::types::events::GameEvent::DieRolled {
+                        result: Some(total),
+                        ..
+                    } => Some(*total),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rolls,
+                vec![10],
+                "parked member filter {filter:?} must exclude the stale-keyed target (10 + 0)"
+            );
+        }
     }
 
     /// CR 603.4 + CR 508.1a: Pack Tactics evaluates the particular declaration
