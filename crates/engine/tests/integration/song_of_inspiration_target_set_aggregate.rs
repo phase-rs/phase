@@ -1431,3 +1431,125 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         "slot 1 names Brute through the player slot 0 (10 + 2)"
     );
 }
+
+/// M6: production-created Song pause. Parsed Song is CAST with Barbarian
+/// Class's supported die replacement on board, driven manually (commit +
+/// priority) because the cast auto-driver answers keep prompts
+/// deterministically. Seed 49 ties the raised d20s at [5, 5] (seed search
+/// over 42..400 found 16 tied seeds; this one keeps natural 5 + MV 7 = 12
+/// inside the supported 1-14 row, clear of the honestly-red 15+ lifegain).
+/// Pins the actual prompt/actor/options, answers through `GameAction`, and
+/// verifies the modifier total, row delivery, priority, and a completed
+/// continuation — the capture seam at `roll_die.rs:213` exercised without
+/// any hand-installed suspension state.
+#[test]
+fn song_keep_choice_pause_is_production_created() {
+    const BARBARIAN_CLASS_L1: &str = "If you would roll one or more dice, instead roll that many \
+        dice plus one and ignore the lowest roll.";
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario
+        .add_creature_to_graveyard(P0, "Oak", 2, 3)
+        .with_mana_cost(mv_cost(3))
+        .id();
+    let elm = scenario
+        .add_creature_to_graveyard(P0, "Elm", 2, 4)
+        .with_mana_cost(mv_cost(4))
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let song = scenario
+        .add_spell_to_hand_from_oracle(P0, "Song of Inspiration", true, SONG)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(song).target_objects(&[oak, elm]).commit();
+    runner.resolve_top();
+
+    // The actual prompt, actor, and options off the production path.
+    let WaitingFor::DieKeepChoice {
+        player,
+        results,
+        ignorable_indices,
+        ignore_count,
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach-guard: the tied d20s must open a real CR 706.6 ignore choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "the roller answers the keep choice");
+    assert_eq!(*results, vec![5, 5], "seed 49 ties the raised d20s at 5");
+    assert_eq!(
+        *ignorable_indices,
+        vec![0, 1],
+        "both tied dice are offered"
+    );
+    assert_eq!(*ignore_count, 1, "Barbarian ignores one lowest roll");
+    assert_eq!(
+        runner.state().objects[&oak].zone,
+        Zone::Graveyard,
+        "reach-guard: the row must not deliver while the choice is open"
+    );
+
+    let result = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0],
+        })
+        .expect("submit the keep choice");
+    let rolls: Vec<u8> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                sides: 20,
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![12],
+        "CR 706.2: the survivor's final number is its natural 5 plus the \
+         parked targets' total MV (3 + 4); a dropped binding reads 0 and emits 5"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&oak].zone,
+        Zone::Hand,
+        "the 1-14 row returns Oak to hand"
+    );
+    assert_eq!(
+        runner.state().objects[&elm].zone,
+        Zone::Hand,
+        "the 1-14 row returns Elm to hand"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        20,
+        "total 12 stays in the 1-14 row: the 15+ lifegain must not fire"
+    );
+    assert_eq!(
+        runner.state().objects[&song].zone,
+        Zone::Graveyard,
+        "the resolved instant rests in the graveyard"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the continuation completes: the stack is empty"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected a clean return to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().die_result_this_resolution,
+        None,
+        "post-completion restore discipline: the inner aggregate must not leak \
+         into the outer context once the instruction finishes"
+    );
+}
