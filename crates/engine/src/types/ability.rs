@@ -7852,7 +7852,115 @@ impl FilterProp {
             FilterProp::InTrackedSet { .. } => true,
             FilterProp::Not { prop } => prop.references_tracked_set(),
             FilterProp::AnyOf { props } => props.iter().any(FilterProp::references_tracked_set),
-            _ => false,
+            // Reference/comparison sub-filters: the inner filter is compared
+            // against, not a membership restriction — see the fn docs.
+            FilterProp::DifferentNameFrom { .. }
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::Targets { .. }
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::CanEnchant { .. } => false,
+            // Player-axis sub-structure: a controller quality
+            // (`ControllerMatches`) or a historical action scoped by a player
+            // recipient (`DealtDamageThisTurn`) is never object-set
+            // membership, even when the inner player predicate counts objects.
+            FilterProp::ControllerMatches { .. } | FilterProp::DealtDamageThisTurn { .. } => false,
+            // Quantity-threshold predicates: a number read from a tracked set
+            // (`Cmc`, `Counters`, `PtComparison`) is a comparison value, not
+            // a membership restriction.
+            FilterProp::Counters { .. } | FilterProp::Cmc { .. } | FilterProp::PtComparison { .. } => {
+                false
+            }
+            // Every remaining variant is a leaf over scalars, enums, zones,
+            // costs, names, or counters: none of it can name a tracked set.
+            // Exhaustive by construction — a new variant fails to compile
+            // here rather than silently reading as "some other prop".
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::BlockStatus { .. }
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
+            | FilterProp::ConvokedSource
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedTo { .. }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::PrepareSpell
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
         }
     }
 }
@@ -23217,7 +23325,64 @@ impl TargetFilter {
             TargetFilter::ChosenDamageSource { filter, .. } => filter
                 .as_deref()
                 .is_some_and(TargetFilter::references_tracked_set),
-            _ => false,
+            // Player-axis population: players satisfying a player predicate —
+            // even one that counts objects — are not tracked members.
+            TargetFilter::PlayerMatching { .. } => false,
+            // Every remaining variant is a leaf: concrete referents, event /
+            // window projections, player roles, zones, names, or stack-object
+            // kinds. None of it can name a resolution-chain tracked set.
+            // Exhaustive by construction — a new variant fails to compile
+            // here rather than silently reading as "some other filter".
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
         }
     }
 
@@ -41771,6 +41936,110 @@ mod tests {
         );
         assert!(!TargetFilter::ChosenDamageSource { filter: None }.references_tracked_set());
         assert!(!TargetFilter::Any.references_tracked_set());
+    }
+
+    /// M7: every remaining reference/comparison sub-filter with a tracked-set
+    /// inner still reads false — the exhaustive classification must preserve
+    /// each of these verdicts, not just `DifferentNameFrom`'s. The player-axis
+    /// pair (`PlayerMatching`, `ControllerMatches`) names player populations
+    /// (or controller qualities), never tracked membership; the stack-target
+    /// pair (`Targets`, `TargetsOnly`) names stack entries; `DistinctFrom`
+    /// and `SharesQuality` compare against the inner; `CanEnchant` names
+    /// Auras. The confusable leaves name resolution-local populations that
+    /// are not tracked sets.
+    #[test]
+    fn references_tracked_set_classifies_every_reference_position_false() {
+        let tracked = || TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        let controls_tracked = || PlayerFilter::ControlsCount {
+            relation: PlayerRelation::Opponent,
+            filter: tracked(),
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+        let typed_with = |prop: FilterProp| {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![prop]))
+        };
+        // FilterProp reference positions: all false.
+        for (name, prop) in [
+            (
+                "DistinctFrom",
+                FilterProp::DistinctFrom {
+                    reference: Box::new(tracked()),
+                },
+            ),
+            (
+                "SharesQuality",
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Color,
+                    reference: Some(Box::new(tracked())),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ),
+            (
+                "Targets",
+                FilterProp::Targets {
+                    filter: Box::new(tracked()),
+                },
+            ),
+            (
+                "TargetsOnly",
+                FilterProp::TargetsOnly {
+                    filter: Box::new(tracked()),
+                },
+            ),
+            (
+                "CanEnchant",
+                FilterProp::CanEnchant {
+                    target: Box::new(tracked()),
+                },
+            ),
+            (
+                "ControllerMatches",
+                FilterProp::ControllerMatches {
+                    player: Box::new(controls_tracked()),
+                },
+            ),
+        ] {
+            assert!(
+                !typed_with(prop).references_tracked_set(),
+                "{name} compares against its inner filter rather than restricting \
+                 membership to it"
+            );
+        }
+        // TargetFilter player-axis position: false (a player population).
+        assert!(
+            !TargetFilter::PlayerMatching {
+                player: Box::new(controls_tracked()),
+            }
+            .references_tracked_set(),
+            "players controlling tracked members are not tracked members"
+        );
+        // Confusable resolution-local leaves: all false (not tracked sets).
+        for (name, filter) in [
+            ("ParentTarget", TargetFilter::ParentTarget),
+            ("ExiledBySource", TargetFilter::ExiledBySource),
+            ("LastZoneChanged", TargetFilter::LastZoneChanged),
+            ("CostPaidObject", TargetFilter::CostPaidObject),
+            ("ChosenCard", TargetFilter::ChosenCard),
+        ] {
+            assert!(
+                !filter.references_tracked_set(),
+                "{name} names a resolution-local population, not a tracked set"
+            );
+        }
+        // The filtered tracked-set selector itself: true.
+        assert!(
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature
+                ))),
+                caused_by: None,
+            }
+            .references_tracked_set()
+        );
     }
 
     #[test]
