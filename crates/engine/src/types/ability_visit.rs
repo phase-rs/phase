@@ -1494,15 +1494,18 @@ fn quantity_ref(r: &$($mut_)? QuantityRef, v: &mut impl FnMut(Symbol<'_>)) {
         QuantityRef::CountersOn { scope, .. } => object_scope(scope, v),
         QuantityRef::ObjectCount { filter: f } => filter(f, v),
         QuantityRef::PropertyAggregate(aggregate) => {
-            if let CardTypeSetSource::Objects { filter: f } = define_granter_walk!(@source aggregate $($mut_)?) {
-                filter(f, v);
-            }
-            // CR 201.5a: the tracked-set member filter binds the granting
-            // incarnation exactly like an object filter — omitting it leaves
-            // granter symbols in the aggregate unbound.
-            if let CardTypeSetSource::TrackedSet { filter: Some(f), .. } = define_granter_walk!(@source aggregate $($mut_)?) {
-                filter(f, v);
-            }
+            // CR 201.5a: member filters bind the granting incarnation exactly
+            // like object filters — including members nested in `AnyOf`
+            // unions. Omitting them leaves granter symbols in the aggregate
+            // unbound. The member walk is the bounded union authority, shared
+            // with every other population-axis consumer.
+            define_granter_walk!(@members aggregate $($mut_)?, &mut |leaf| {
+                match leaf {
+                    CardTypeSetSource::Objects { filter: f } => filter(f, v),
+                    CardTypeSetSource::TrackedSet { filter: Some(f), .. } => filter(f, v),
+                    _ => {}
+                }
+            });
         }
         _ => {}
     }
@@ -1516,6 +1519,18 @@ fn object_scope(scope: &$($mut_)? ObjectScope, v: &mut impl FnMut(Symbol<'_>)) {
     };
     (@source $aggregate:ident) => { $aggregate.source() };
     (@source $aggregate:ident mut) => { $aggregate.source_mut() };
+    (@members $aggregate:ident, $visit:expr) => {
+        $aggregate.source().try_for_each_member(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
+    (@members $aggregate:ident mut, $visit:expr) => {
+        $aggregate.source_mut().try_for_each_member_mut(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
 }
 
 /// Shared granter-symbol walk.
@@ -1647,6 +1662,72 @@ mod tests {
         assert!(
             !collect(&define(None)),
             "an unfiltered set yields no granter symbol"
+        );
+    }
+
+    /// M3: the granter walk descends into union members — a granter symbol in
+    /// an object filter or tracked-set member filter nested in `AnyOf` binds
+    /// exactly like a top-level one.
+    #[test]
+    fn granter_walk_visits_any_of_nested_member_filters() {
+        let filtered_objects = CardTypeSetSource::Objects {
+            filter: TargetFilter::GrantingObject { bound: None },
+        };
+        let filtered_tracked = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::GrantingObject { bound: None }),
+        };
+        let unfiltered_tracked = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let define = |source| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(
+                            PropertyAggregate::new(
+                                AggregateFunction::Sum,
+                                ObjectProperty::Toughness,
+                                source,
+                            )
+                            .expect("statically valid property aggregate"),
+                        ),
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let collect = |def: &AbilityDefinition| {
+            let mut found = false;
+            each_granter_symbol(DefinitionNode::Ability(def), &mut |symbol| {
+                found |= matches!(symbol, granter_symbols::Symbol::Filter(_));
+            });
+            found
+        };
+        assert!(
+            collect(&define(
+                CardTypeSetSource::any_of(vec![filtered_objects, unfiltered_tracked.clone()])
+                    .expect("union holds")
+            )),
+            "a granter symbol in an object filter nested in AnyOf must be visited"
+        );
+        assert!(
+            collect(&define(
+                CardTypeSetSource::any_of(vec![unfiltered_tracked.clone(), filtered_tracked])
+                    .expect("union holds")
+            )),
+            "a granter symbol in a tracked-set member filter nested in AnyOf must be visited"
+        );
+        assert!(
+            !collect(&define(
+                CardTypeSetSource::any_of(vec![unfiltered_tracked.clone(), unfiltered_tracked])
+                    .expect("union holds")
+            )),
+            "a union of unfiltered sets yields no granter symbol"
         );
     }
 }

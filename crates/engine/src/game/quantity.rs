@@ -12918,6 +12918,42 @@ mod tests {
         );
     }
 
+    /// M3 (CR 105.1 + CR 611.3a): `DistinctColorsAmong` over an
+    /// `Objects { filter }` population is recipient-dependent when its filter
+    /// reads the recipient, exactly like its `DistinctCardTypes`,
+    /// `SharedCardTypes`, and `DistinctSubtypes` siblings — the recipient
+    /// classifier must route it through the shared source authority instead
+    /// of dropping it to `Unread`.
+    #[test]
+    fn distinct_colors_among_over_recipient_filter_uses_recipient() {
+        let recipient_relative = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::AttachedTo {
+                            to: crate::types::ability::AttachmentReferent::Recipient,
+                        },
+                    ])),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_uses_recipient(&recipient_relative),
+            "DistinctColorsAmong over Objects{{AttachedToRecipient}} is recipient-dependent"
+        );
+
+        // Paired negative: ExiledBySource is fixed per source, never recipient-relative.
+        let source_fixed = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_recipient(&source_fixed),
+            "DistinctColorsAmong over ExiledBySource reads no recipient and must not force re-resolution"
+        );
+    }
+
     /// CR 608.2c: the graded recipient classifier separates identity reads
     /// ("other", "attached to it") from characteristic/controller reads, a
     /// composite or filter grades at its strongest part, and the legacy `bool`
