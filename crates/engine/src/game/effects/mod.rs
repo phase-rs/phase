@@ -3665,7 +3665,8 @@ fn try_materialize_reflexive_trigger(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<bool, EffectError> {
-    crate::game::quantity::with_reflexive_resolution_scope(|| {
+    let missing_reason = state.last_parent_target_missing_reason;
+    let result = crate::game::quantity::with_reflexive_resolution_scope(|| {
         try_materialize_reflexive_trigger_inner(
             state,
             reflexive,
@@ -3674,7 +3675,13 @@ fn try_materialize_reflexive_trigger(
             events,
             depth,
         )
-    })
+    });
+    // CR 603.12 + CR 608.2c: A probe that creates nothing is not the actual
+    // parent-to-child handoff; preserve its one-shot result for that handoff.
+    if matches!(result, Ok(false)) {
+        state.last_parent_target_missing_reason = missing_reason;
+    }
+    result
 }
 
 fn try_materialize_reflexive_trigger_inner(
@@ -4275,6 +4282,17 @@ fn resolve_sub_with_missing_forward_result(
     Ok(())
 }
 
+// CR 608.2c + CR 609.3: A referent never produced stays absent through
+// targetless hops; a branch with its own targets has its own referent.
+fn inherit_missing_parent_referent(child: &mut ResolvedAbility, parent: &ResolvedAbility) {
+    if let Some(reason) = parent
+        .parent_target_missing_reason
+        .filter(|_| child.targets.is_empty())
+    {
+        child.parent_target_missing_reason = Some(reason);
+    }
+}
+
 pub(crate) fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -4342,24 +4360,13 @@ pub(crate) fn apply_parent_chain_context(
     ) {
         child.context.direct_discard_result = None;
     }
-    // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
-    // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
-    // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice/
-    // ExileTop coming up with nothing and the very next parent->child hand-off — this
-    // IS that hand-off, so stamp the typed, per-ability signal onto `child`
-    // and consume (take) the transient global flag immediately. Consuming
-    // here (rather than where `child` is later resolved) means the signal can
-    // never reach a second, unrelated hand-off later in the same resolution,
-    // and a child that was never handed off this way (e.g. a freshly-built
-    // ability in a test) simply keeps the default `None` regardless of stray
-    // global state.
+    // CR 608.2c + CR 609.3: The transient relay names a Dig/ChooseFromZone/
+    // RevealHand reveal-choice/ExileTop/RevealUntil/library search coming up
+    // with nothing. Consume it at this real parent->child hand-off, then give
+    // that fresh result precedence over an inherited missing referent.
     let handed = state.last_parent_target_missing_reason.take();
-    // CR 608.2c + CR 609.3: a referent never produced is absent for every dependent anaphor,
-    // so the verdict travels down target-less hops as the targets do.
-    let passed_down = parent
-        .parent_target_missing_reason
-        .filter(|_| child.targets.is_empty());
-    if let Some(reason) = handed.or(passed_down) {
+    inherit_missing_parent_referent(child, parent);
+    if let Some(reason) = handed {
         child.parent_target_missing_reason = Some(reason);
     }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
@@ -4777,6 +4784,7 @@ pub(super) fn resolve_optional_effect_decision(
                     resolved.mirror_targets_from(&ability);
                 }
                 resolved.context = ability.context.clone();
+                inherit_missing_parent_referent(&mut resolved, &ability);
                 // CR 608.2c: This optional effect was DECLINED — the decline
                 // branch's `Not{IfYouDo}` / `IfYouDo` gate must evaluate
                 // relative to *this* decision, not a stale `true` inherited
@@ -16386,6 +16394,7 @@ fn resolve_chain_body(
                     else_resolved.mirror_targets_from(ability);
                 }
                 else_resolved.context = ability.context.clone();
+                inherit_missing_parent_referent(&mut else_resolved, ability);
                 if try_begin_deferred_else_branch_target_selection(
                     state,
                     &mut else_resolved,
@@ -21618,8 +21627,10 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
-    use crate::types::ability::ChooseOneOfKind;
-    use crate::types::ability::SpentColor;
+    use crate::types::ability::{
+        ChooseOneOfKind, LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
+        SearchSelectionConstraint, SpentColor,
+    };
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
     /// exact cards that reveal looked at, on the continuation itself — so an
@@ -24679,6 +24690,519 @@ mod tests {
         );
         ability.optional = true;
         ability
+    }
+
+    // Typed authority fixtures: these clauses deliberately do not claim printed-card reach.
+    fn missing_referent_reasons() -> [ParentTargetMissingReason; 6] {
+        [
+            ParentTargetMissingReason::Dig,
+            ParentTargetMissingReason::ChooseFromZone,
+            ParentTargetMissingReason::RevealHandChoice,
+            ParentTargetMissingReason::ExileTop,
+            ParentTargetMissingReason::RevealUntil,
+            ParentTargetMissingReason::SearchLibrary,
+        ]
+    }
+
+    fn missing_referent_placement(source: ObjectId, targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            targets,
+            source,
+            PlayerId(0),
+        )
+    }
+
+    #[test]
+    fn missing_referent_handoff_preserves_own_targets_and_fresh_precedence() {
+        let mut state = GameState::new_two_player(7);
+        let mut parent = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        parent.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        let mut child = missing_referent_placement(ObjectId(1), vec![]);
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(
+            child.parent_target_missing_reason,
+            Some(ParentTargetMissingReason::ExileTop)
+        );
+        assert_eq!(state.last_parent_target_missing_reason, None);
+        let mut unrelated = missing_referent_placement(ObjectId(2), vec![]);
+        let fresh_parent = optional_gain_life(ObjectId(2), PlayerId(0), 1);
+        apply_parent_chain_context(&mut unrelated, &fresh_parent, None, &mut state);
+        assert_eq!(unrelated.parent_target_missing_reason, None);
+        for reason in missing_referent_reasons() {
+            parent.parent_target_missing_reason = Some(reason);
+            let mut inherited = missing_referent_placement(ObjectId(1), vec![]);
+            inherit_missing_parent_referent(&mut inherited, &parent);
+            assert_eq!(inherited.parent_target_missing_reason, Some(reason));
+            let mut own =
+                missing_referent_placement(ObjectId(1), vec![TargetRef::Object(ObjectId(9))]);
+            own.parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
+            inherit_missing_parent_referent(&mut own, &parent);
+            assert_eq!(own.targets, vec![TargetRef::Object(ObjectId(9))]);
+            assert_eq!(
+                own.parent_target_missing_reason,
+                Some(ParentTargetMissingReason::ExileTop)
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 609.3: Otherwise and declined branches retain an absent
+    /// object, but their independently bound objects and following instructions survive.
+    #[test]
+    fn missing_referent_root_otherwise_and_public_optional_decline() {
+        for reason in missing_referent_reasons()
+            .into_iter()
+            .map(Some)
+            .chain([None])
+        {
+            for own_target in [false, true] {
+                for optional in [false, true] {
+                    let mut state = GameState::new_two_player(7);
+                    let source = create_object(
+                        &mut state,
+                        CardId(1),
+                        PlayerId(0),
+                        "Authority source".into(),
+                        Zone::Battlefield,
+                    );
+                    let own = create_object(
+                        &mut state,
+                        CardId(2),
+                        PlayerId(0),
+                        "Independent object".into(),
+                        Zone::Exile,
+                    );
+                    let mut progress = optional_gain_life(source, PlayerId(0), 3);
+                    progress.optional = false;
+                    let branch = missing_referent_placement(
+                        source,
+                        if own_target {
+                            vec![TargetRef::Object(own)]
+                        } else {
+                            vec![]
+                        },
+                    )
+                    .sub_ability(progress);
+                    let mut root = optional_gain_life(source, PlayerId(0), 2);
+                    root.parent_target_missing_reason = reason;
+                    root.else_ability = Some(Box::new(branch));
+                    let mut events = Vec::new();
+                    if optional {
+                        resolve_ability_chain(&mut state, &root, &mut events, 1).unwrap();
+                        assert!(matches!(
+                            state.waiting_for,
+                            WaitingFor::OptionalEffectChoice {
+                                player: PlayerId(0),
+                                ..
+                            }
+                        ));
+                        assert_eq!(
+                            state
+                                .active_optional_effect_frame()
+                                .unwrap()
+                                .ability
+                                .parent_target_missing_reason,
+                            reason
+                        );
+                        events.extend(
+                            crate::game::engine::apply_as_current(
+                                &mut state,
+                                GameAction::DecideOptionalEffect { accept: false },
+                            )
+                            .unwrap()
+                            .events,
+                        );
+                    } else {
+                        root.optional = false;
+                        root.condition = Some(AbilityCondition::QuantityCheck {
+                            lhs: QuantityExpr::Fixed { value: 0 },
+                            comparator: Comparator::GT,
+                            rhs: QuantityExpr::Fixed { value: 1 },
+                        });
+                        resolve_ability_chain(&mut state, &root, &mut events, 1).unwrap();
+                    }
+                    assert_eq!(
+                        state.objects[&source].zone,
+                        if reason.is_none() && !own_target {
+                            Zone::Library
+                        } else {
+                            Zone::Battlefield
+                        }
+                    );
+                    assert_eq!(
+                        state.objects[&own].zone,
+                        if own_target {
+                            Zone::Library
+                        } else {
+                            Zone::Exile
+                        }
+                    );
+                    assert_eq!(state.players[0].life, 23);
+                    assert!(events.iter().any(|e| matches!(
+                        e,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::PutAtLibraryPosition,
+                            ..
+                        }
+                    )));
+                    assert!(state.stack.is_empty());
+                    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                    assert!(state.active_optional_effect_frame().is_none());
+                    assert!(state.active_ability_continuation().is_none());
+                    assert!(state.resolution_stack.is_empty());
+                }
+            }
+        }
+        // CR 608.2d: Accepting the independent offer still performs it.
+        let mut state = GameState::new_two_player(7);
+        let mut offered = optional_gain_life(ObjectId(1), PlayerId(0), 2);
+        offered.parent_target_missing_reason = Some(ParentTargetMissingReason::SearchLibrary);
+        resolve_ability_chain(&mut state, &offered, &mut Vec::new(), 1).unwrap();
+        assert_eq!(state.waiting_for.acting_player(), Some(PlayerId(0)));
+        assert_eq!(
+            state
+                .active_optional_effect_frame()
+                .unwrap()
+                .ability
+                .parent_target_missing_reason,
+            offered.parent_target_missing_reason
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert_eq!(state.players[0].life, 22);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+        // CR 608.2d: The impossible ParentTarget offer auto-declines through the same authority.
+        let mut impossible = missing_referent_placement(ObjectId(1), vec![]);
+        impossible.optional = true;
+        impossible.parent_target_missing_reason = Some(ParentTargetMissingReason::SearchLibrary);
+        let mut progress = optional_gain_life(ObjectId(1), PlayerId(0), 3);
+        progress.optional = false;
+        impossible.else_ability = Some(Box::new(progress));
+        resolve_ability_chain(&mut state, &impossible, &mut Vec::new(), 1).unwrap();
+        assert_eq!(state.players[0].life, 25);
+        assert!(state.active_optional_effect_frame().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+    }
+
+    /// CR 603.12 + CR 608.2c: A nonmaterializing probe leaves the one-shot
+    /// producer relay available to the actual handoff; a real trigger consumes it.
+    #[test]
+    fn missing_referent_reflexive_probe_restores_only_false_result() {
+        let mut state = GameState::new_two_player(7);
+        let parent = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        let mut child = optional_gain_life(ObjectId(1), PlayerId(0), 2);
+        child.optional = false;
+        child.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 1 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealUntil);
+        let mut events = Vec::new();
+        assert!(!try_materialize_reflexive_trigger(
+            &mut state,
+            &child,
+            Some(&parent),
+            None,
+            &mut events,
+            1
+        )
+        .unwrap());
+        assert_eq!(
+            state.last_parent_target_missing_reason,
+            Some(ParentTargetMissingReason::RevealUntil)
+        );
+        assert!(state.stack.is_empty() && state.deferred_triggers.is_empty() && events.is_empty());
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(
+            child.parent_target_missing_reason,
+            Some(ParentTargetMissingReason::RevealUntil)
+        );
+        assert_eq!(state.last_parent_target_missing_reason, None);
+        child.set_unpinned_targets(vec![TargetRef::Object(ObjectId(9))]);
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
+        assert!(!try_materialize_reflexive_trigger(
+            &mut state,
+            &child,
+            Some(&parent),
+            None,
+            &mut events,
+            1
+        )
+        .unwrap());
+        assert_eq!(
+            state.last_parent_target_missing_reason,
+            Some(ParentTargetMissingReason::ExileTop)
+        );
+        child.set_unpinned_targets(vec![]);
+        child.condition = Some(AbilityCondition::WhenYouDo);
+        assert!(try_materialize_reflexive_trigger(
+            &mut state,
+            &child,
+            Some(&parent),
+            None,
+            &mut events,
+            1
+        )
+        .unwrap());
+        assert_eq!(state.last_parent_target_missing_reason, None);
+        assert_eq!(state.deferred_triggers.len(), 1);
+
+        // Typed failure-path invariant: mandatory targeting errors after the
+        // real parent handoff, and must retain that handoff's relay consumption.
+        let mut state = GameState::new_two_player(7);
+        let required_target = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(state.objects.is_empty());
+        assert!(required_target.targets.is_empty());
+        assert!(required_target.condition.is_none());
+        assert!(!required_target.optional_targeting);
+        assert!(parent.targets.is_empty());
+        let target_error = crate::game::ability_utils::build_target_slots(&state, &required_target)
+            .expect_err("a required creature slot has no legal target");
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
+        let mut events = Vec::new();
+        let error = try_materialize_reflexive_trigger(
+            &mut state,
+            &required_target,
+            Some(&parent),
+            None,
+            &mut events,
+            1,
+        )
+        .expect_err("the non-WhenYouDo target error is preserved");
+        assert!(
+            matches!(error, EffectError::InvalidParam(message) if message == target_error.to_string())
+        );
+        assert_eq!(state.last_parent_target_missing_reason, None);
+        assert!(state.stack.is_empty() && state.deferred_triggers.is_empty() && events.is_empty());
+        assert!(state.pending_trigger.is_none());
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    /// CR 608.2c: A second ordinary search has its own empty result even when
+    /// following text is parked. This is an authority invariant, not printed reach.
+    #[test]
+    fn missing_referent_second_search_isolates_bound_result_through_postlude_and_drain() {
+        for shape in 0..7 {
+            let mut state = GameState::new_two_player(7);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Two producer source".into(),
+                Zone::Battlefield,
+            );
+            let prior = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Earlier result".into(),
+                Zone::Library,
+            );
+            let mut reader = optional_gain_life(source, PlayerId(0), 1);
+            reader.optional = false;
+            reader.effect = Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                player: TargetFilter::Controller,
+            };
+            let first = ResolvedAbility::new(
+                Effect::ExileTop {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                    position: LibraryPosition::Top,
+                    face_down: false,
+                    actor: LibraryInstructionActor::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(reader.clone());
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &first, &mut events, 1).unwrap();
+            let a = state
+                .chain_tracked_set_id
+                .expect("the first producer really published A");
+            assert_eq!(state.tracked_object_sets[&a], vec![prior]);
+            assert_eq!(state.objects[&prior].zone, Zone::Exile);
+            assert_eq!(state.players[0].life, 21);
+            let mut progress = optional_gain_life(source, PlayerId(0), 3);
+            progress.optional = false;
+            let consumer = reader.clone().sub_ability(progress.clone());
+            let mut second = ResolvedAbility::new(
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![Zone::Library],
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            match shape {
+                0 => second.sub_ability = Some(Box::new(consumer)),
+                1 => append_to_pending_continuation(&mut state, Some(Box::new(consumer))),
+                2 => {
+                    let mut own_tail = optional_gain_life(source, PlayerId(0), 2);
+                    own_tail.optional = false;
+                    second.sub_ability = Some(Box::new(own_tail));
+                    append_to_pending_continuation(&mut state, Some(Box::new(consumer)));
+                }
+                3 => second.sub_ability = Some(Box::new(progress.clone())),
+                4 => {
+                    let mut other = consumer;
+                    other.source_id = ObjectId(99);
+                    append_to_pending_continuation(&mut state, Some(Box::new(other)));
+                }
+                5 => {
+                    let mut mode = progress.clone();
+                    mode.modal_instruction_ordinal = Some(1);
+                    second.sub_ability = Some(Box::new(mode));
+                    append_to_pending_continuation(&mut state, Some(Box::new(consumer)));
+                }
+                6 => {
+                    let mut mode = consumer;
+                    mode.modal_instruction_ordinal = Some(1);
+                    append_to_pending_continuation(&mut state, Some(Box::new(mode)));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(second.source_id, source);
+            assert_eq!(second.modal_instruction_ordinal, None);
+            match shape {
+                0 | 3 => {
+                    assert!(state.active_ability_continuation().is_none());
+                    let tail = second.sub_ability.as_deref().unwrap();
+                    assert_eq!(tail.source_id, source);
+                    assert_eq!(tail.modal_instruction_ordinal, None);
+                    assert_eq!(
+                        tail.effect,
+                        if shape == 0 {
+                            reader.effect.clone()
+                        } else {
+                            progress.effect.clone()
+                        }
+                    );
+                    assert_eq!(chain_references_tracked_set(tail), shape == 0);
+                }
+                1 | 2 | 4 | 5 | 6 => {
+                    let parked = state
+                        .active_ability_continuation()
+                        .expect("the accessor selects the intended parked frame");
+                    assert_eq!(
+                        parked.chain.source_id,
+                        if shape == 4 { ObjectId(99) } else { source }
+                    );
+                    assert_eq!(
+                        parked.chain.modal_instruction_ordinal,
+                        if shape == 6 { Some(1) } else { None }
+                    );
+                    assert_eq!(parked.chain.effect, reader.effect);
+                    assert_eq!(
+                        parked.chain.sub_ability.as_deref().unwrap().effect,
+                        progress.effect
+                    );
+                    assert_eq!(chain_references_tracked_set(&parked.chain), shape != 6);
+                    match shape {
+                        1 | 4 | 6 => assert!(second.sub_ability.is_none()),
+                        2 | 5 => {
+                            let tail = second.sub_ability.as_deref().unwrap();
+                            assert_eq!(tail.source_id, source);
+                            assert_eq!(
+                                tail.modal_instruction_ordinal,
+                                if shape == 5 { Some(1) } else { None }
+                            );
+                            assert!(!chain_references_tracked_set(tail));
+                            assert_eq!(
+                                tail.effect,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed {
+                                        value: if shape == 2 { 2 } else { 3 }
+                                    },
+                                    player: TargetFilter::Controller,
+                                }
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                state.chain_tracked_set_id,
+                Some(a),
+                "A must survive immediately before the depth-one second search"
+            );
+            assert_eq!(
+                resolution_next_needs_tracked_set(&state, &second),
+                shape < 3
+            );
+            // Inspect exclusions at the resolver boundary before any later mode reset.
+            let mut boundary = state.clone();
+            let mut boundary_events = Vec::new();
+            search_library::resolve(&mut boundary, &second, &mut boundary_events).unwrap();
+            assert_eq!(boundary.chain_tracked_set_id != Some(a), shape < 3);
+            assert!(boundary_events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::SearchLibrary,
+                    ..
+                }
+            )));
+            resolve_ability_chain(&mut state, &second, &mut events, 1).unwrap();
+            let b = state.chain_tracked_set_id.unwrap();
+            if shape < 3 {
+                assert_ne!(a, b);
+                assert!(state.tracked_object_sets[&b].is_empty());
+            }
+            drain_pending_continuation(&mut state, &mut events);
+            assert_eq!(state.tracked_object_sets[&a], vec![prior]);
+            assert_eq!(state.objects[&prior].zone, Zone::Exile);
+            if shape < 3 {
+                assert_eq!(
+                    state.players[0].life,
+                    if shape == 2 { 26 } else { 24 },
+                    "tracked-size gain is zero and independent progress completes"
+                );
+            }
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                }
+            )));
+            assert!(state.active_ability_continuation().is_none());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+            assert!(state.active_library_searches.is_empty());
+            assert!(state.active_search_decision_controls.is_empty());
+            assert!(state.pending_search_found_batch.is_none());
+        }
     }
 
     fn optional_stack_target_counter_move(

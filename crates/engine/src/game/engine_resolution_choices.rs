@@ -6,8 +6,8 @@ use rand::seq::SliceRandom;
 
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
-    ForwardedResultContext, GuessOutcome, LibraryPosition, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ResolvedAbility, TargetRef,
+    ForwardedResultContext, GuessOutcome, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
+    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -1471,6 +1471,11 @@ fn finalize_standard_search_selection(
         let targets = search_selection_targets(&frame.pending.chain, player, chosen);
         frame.pending.chain.set_unpinned_targets(targets.clone());
         propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
+        // CR 701.23a + CR 701.23b + CR 614.6 + CR 608.2c: Only delivered
+        // survivors bind the search referent; success clears an older reason.
+        frame.pending.chain.parent_target_missing_reason = chosen
+            .is_empty()
+            .then_some(ParentTargetMissingReason::SearchLibrary);
         state.push_ability_continuation(frame);
     } else if let Some(continuation) =
         state.outer_ability_continuation_of_active_post_replacement_draw()
@@ -1490,6 +1495,11 @@ fn finalize_standard_search_selection(
             .chain
             .set_unpinned_targets(targets.clone());
         propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
+        // CR 701.23a + CR 701.23b + CR 614.6 + CR 608.2c: Only delivered
+        // survivors bind the search referent; success clears an older reason.
+        continuation.pending.chain.parent_target_missing_reason = chosen
+            .is_empty()
+            .then_some(ParentTargetMissingReason::SearchLibrary);
     }
     if has_delivery {
         let hidden_search_audiences = hidden_search_audiences_for_search(state, player);
@@ -10355,6 +10365,307 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::zones::EtbTapState;
+
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::PostReplacementContinuation;
+    use crate::types::events::PlayerActionKind;
+    use crate::types::game_state::{
+        DrawSequenceStack, PostReplacementDrain, PostReplacementDrainStack, ResidentDrainPolicy,
+    };
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+    use crate::types::resolution::{MultiDrawFrame, ResolutionFrame};
+
+    /// CR 608.2c + CR 614.6: Both standard-finalize writers replace old
+    /// absence with the delivered survivor set. These are typed authority
+    /// invariants; the outer paired-draw shape has no claimed printed reach.
+    #[test]
+    fn missing_referent_finalize_overwrites_active_and_exact_outer_continuations() {
+        for outer in [false, true] {
+            for found_card in [false, true] {
+                let (mut state, found) = standard_delivery_state();
+                let frame = state.take_active_ability_continuation().unwrap().unwrap();
+                let source = frame.pending.chain.source_id;
+                let mut head = ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source,
+                    P0,
+                )
+                .sub_ability(*frame.pending.chain);
+                head.optional = true;
+                head.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+                let old = effects::publish_fresh_tracked_set(&mut state, vec![source]);
+                let mut progress = ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source,
+                    P0,
+                );
+                progress.sub_ability = Some(Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source,
+                    P0,
+                )));
+                head.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(progress));
+                let pending = PendingContinuation::new(Box::new(head), &state);
+                if outer {
+                    let filler = create_object(
+                        &mut state,
+                        CardId(90_200),
+                        P0,
+                        "Independent paired draw".into(),
+                        Zone::Library,
+                    );
+                    state.players[0].library = vec![filler, found].into();
+                    let mut drains = PostReplacementDrainStack::default();
+                    assert!(drains.install(
+                        PostReplacementDrain::ready(PostReplacementContinuation::Resolved(
+                            Box::new(ResolvedAbility::new(
+                                Effect::Draw {
+                                    count: QuantityExpr::Fixed { value: 0 },
+                                    target: TargetFilter::Controller
+                                },
+                                vec![],
+                                source,
+                                P0,
+                            ))
+                        )),
+                        ResidentDrainPolicy::KeepResident
+                    ));
+                    let (_, dispatch) = drains.begin_dispatch().unwrap();
+                    assert!(drains.pause_dispatch(dispatch));
+                    let mut draws = DrawSequenceStack::default();
+                    draws.push(P0, 1);
+                    state
+                        .resolution_stack
+                        .install_adjacent_post_replacement_draw(
+                            ResolutionFrame::PostReplacement(drains),
+                            ResolutionFrame::MultiDraw(MultiDrawFrame {
+                                draw_sequences: draws,
+                                connive_reentry: None,
+                            }),
+                        )
+                        .unwrap();
+                    state
+                        .insert_ability_continuation_outside_active_post_replacement_draw(pending)
+                        .unwrap();
+                    assert!(state.active_ability_continuation().is_none());
+                    assert_eq!(
+                        state
+                            .outer_ability_continuation_of_active_post_replacement_draw()
+                            .unwrap()
+                            .pending
+                            .chain
+                            .parent_target_missing_reason,
+                        Some(ParentTargetMissingReason::Dig)
+                    );
+                    assert!(state
+                        .resolution_stack
+                        .has_active_post_replacement_draw_pair());
+                } else {
+                    state.park_ability_continuation(pending);
+                    assert!(state.active_ability_continuation().is_some());
+                    assert!(state
+                        .outer_ability_continuation_of_active_post_replacement_draw()
+                        .is_none());
+                }
+                let mut events = Vec::new();
+                finalize_standard_search_selection(
+                    &mut state,
+                    P0,
+                    if found_card {
+                        std::slice::from_ref(&found)
+                    } else {
+                        &[]
+                    },
+                    &mut events,
+                );
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                ));
+                let optional = state
+                    .active_optional_effect_frame()
+                    .expect("independent head is offerable");
+                assert_eq!(
+                    optional.ability.parent_target_missing_reason,
+                    (!found_card).then_some(ParentTargetMissingReason::SearchLibrary)
+                );
+                assert_eq!(
+                    optional.ability.targets,
+                    if found_card {
+                        vec![TargetRef::Object(found)]
+                    } else {
+                        vec![]
+                    }
+                );
+                let fresh = state.chain_tracked_set_id.unwrap();
+                assert_ne!(fresh, old);
+                assert_eq!(
+                    state.tracked_object_sets[&fresh],
+                    if found_card { vec![found] } else { vec![] }
+                );
+                assert_eq!(state.tracked_object_sets[&old], vec![source]);
+                events.extend(
+                    super::super::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .unwrap()
+                    .events,
+                );
+                assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+                assert_eq!(
+                    state.objects[&found].zone,
+                    if found_card {
+                        Zone::Exile
+                    } else {
+                        Zone::Library
+                    }
+                );
+                assert_eq!(state.players[0].life, if found_card { 25 } else { 24 });
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        ..
+                    }
+                )));
+                assert!(state.active_optional_effect_frame().is_none());
+                assert!(state.active_ability_continuation().is_none());
+                assert!(state.resolution_stack.is_empty());
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            }
+        }
+    }
+
+    /// CR 614.6 + CR 701.23a + CR 608.2c: Actual SearchChoice and replacement
+    /// responses feed only surviving cards into the real Inventor continuation.
+    #[test]
+    fn missing_referent_public_inventor_search_uses_replacement_survivors() {
+        let oracle = "Vigilance\nWhen this creature enters, you may search your library for an artifact card, reveal it, then shuffle. Put that card into your hand if you control an Assassin. Otherwise, put that card on top of your library.";
+        for redirect in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let inventor = scenario
+                .add_creature_to_hand_from_oracle(P0, "Loyal Inventor", 2, 3, oracle)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            scenario
+                .add_creature(P0, "Assassin fixture", 1, 1)
+                .with_subtypes(vec!["Assassin"]);
+            let artifact = scenario
+                .add_spell_to_library_top(P0, "Found artifact", false)
+                .as_artifact()
+                .id();
+            let cover = scenario.add_land_to_library_top(P0, "Covering Forest").id();
+            let mut runner = scenario.build();
+            let replacement =
+                install_search_found_redirect(runner.state_mut(), P0, 90_300, Zone::Exile);
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&replacement)
+                .unwrap()
+                .replacement_definitions[0]
+                .mode = ReplacementMode::Optional { decline: None };
+            runner.cast(inventor).commit();
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            let WaitingFor::SearchChoice {
+                player: P0,
+                ref cards,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("real search must prompt");
+            };
+            assert_eq!(cards, &vec![artifact]);
+            let mut events = runner
+                .act(GameAction::SelectCards {
+                    cards: vec![artifact],
+                })
+                .unwrap()
+                .events;
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement {
+                        index: if redirect { 0 } else { 1 },
+                    })
+                    .unwrap()
+                    .events,
+            );
+            assert_eq!(runner.state().objects[&inventor].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+            assert_eq!(
+                runner.state().objects[&artifact].zone,
+                if redirect { Zone::Exile } else { Zone::Hand }
+            );
+            let revealed: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let GameEvent::CardsRevealed { card_ids, .. } = e {
+                        Some(card_ids.clone())
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .collect();
+            assert_eq!(revealed, if redirect { vec![] } else { vec![artifact] });
+            assert!(events.iter().any(|e| matches!(e, GameEvent::ZoneChanged { object_id, to, .. } if *object_id == artifact && *to == if redirect { Zone::Exile } else { Zone::Hand })));
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )));
+            assert!(events.iter().any(|e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::ChangeZone, source_id, .. } if *source_id == inventor)));
+            let set = runner.state().chain_tracked_set_id.unwrap();
+            assert_eq!(
+                runner.state().tracked_object_sets[&set],
+                if redirect { vec![] } else { vec![artifact] }
+            );
+            assert!(runner.state().pending_search_found_batch.is_none());
+            assert!(runner.state().active_library_searches.is_empty());
+            assert!(runner.state().active_search_decision_controls.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
 
     #[test]
     fn dig_binding_preserves_declared_roles_and_forwards_context_results() {

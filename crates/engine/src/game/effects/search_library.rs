@@ -4,9 +4,9 @@ use crate::game::filter::{
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility,
-    SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink, TargetFilter,
-    TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
+    ResolvedAbility, SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -798,6 +798,17 @@ pub fn resolve(
         events.push(event);
     }
     if prepared.candidates.is_empty() {
+        // CR 701.23a + CR 701.23b + CR 608.2c: The completed search supplied
+        // no card for a following "it" / "that card" instruction.
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::SearchLibrary);
+        // CR 608.2c: A second search owns its result, including an empty one.
+        // The ordinary postlude allocates the unbound case; an already-bound
+        // chain needs a fresh set before that postlude can union its result.
+        if state.chain_tracked_set_id.is_some()
+            && super::resolution_next_needs_tracked_set(state, ability)
+        {
+            super::publish_fresh_tracked_set(state, Vec::new());
+        }
         // CR 701.23b: A player searching a hidden zone isn't required to find
         // cards even if they're present ("fail to find"). Resolve immediately.
         events.push(GameEvent::EffectResolved {
@@ -843,13 +854,71 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, Comparator, FilterProp, QuantityExpr, QuantityRef,
-        TypeFilter, TypedFilter, UnlessPayModifier,
+        SearchDestinationSplit, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 701.23a + CR 701.23b + CR 608.2c: Completion without candidates
+    /// publishes a missing object even when the synchronous search has a split destination.
+    #[test]
+    fn missing_referent_no_candidate_search_stamps_the_transient_relay() {
+        for split_destination in [false, true] {
+            let mut state = GameState::new_two_player(7);
+            let mut ability = make_search_ability(TargetFilter::Any, 1);
+            let Effect::SearchLibrary { split, .. } = &mut ability.effect else {
+                unreachable!("the fixture is a search");
+            };
+            *split = split_destination.then_some(SearchDestinationSplit {
+                primary_destination: Zone::Battlefield,
+                primary_count: 1,
+                primary_enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                rest_destination: Zone::Hand,
+            });
+            assert_eq!(split.is_some(), split_destination);
+            if let Some(split) = split {
+                assert_eq!(split.primary_destination, Zone::Battlefield);
+                assert_eq!(split.primary_count, 1);
+                assert_eq!(
+                    split.primary_enter_tapped,
+                    crate::types::zones::EtbTapState::Tapped
+                );
+                assert_eq!(split.rest_destination, Zone::Hand);
+            }
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert_eq!(
+                state.last_parent_target_missing_reason,
+                Some(ParentTargetMissingReason::SearchLibrary)
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.active_library_searches.is_empty());
+            assert!(state.active_search_decision_controls.is_empty());
+            assert!(state.pending_search_found_batch.is_none());
+            assert!(state.resolution_stack.is_empty());
+            assert!(!matches!(
+                state.waiting_for,
+                WaitingFor::SearchChoice { .. } | WaitingFor::SearchPartitionChoice { .. }
+            ));
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                }
+            )));
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::SearchLibrary,
+                    ..
+                }
+            )));
+        }
+    }
 
     fn make_search_ability(filter: TargetFilter, count: i32) -> ResolvedAbility {
         ResolvedAbility::new(

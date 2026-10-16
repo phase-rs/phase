@@ -34974,17 +34974,73 @@ pub enum ParentTargetMissingReason {
     /// `EffectOutcomeSignal::RevealUntilMatched` guard of a "When you reveal a
     /// <filter> card this way" reflexive: that trigger event did not occur.
     RevealUntil,
+    /// CR 701.23a + CR 701.23b + CR 614.6 + CR 608.2c: a library search delivered
+    /// no card — no candidate matched, the searcher chose to find none, or every
+    /// found card was replaced (`apply_search_found_replacements`'s survivor set,
+    /// and the zone-owner-elimination `&[]` finalize) — so nothing is bound as
+    /// "it" / "that card" for the chained `ParentTarget` child. Read as `.is_some()`
+    /// by the `ParentTarget` `ChangeZone` and `PutAtLibraryPosition` no-op guards
+    /// and the optional-effect feasibility probe: without it the child's empty
+    /// `ParentTarget` falls back to the ability source, and an Archdruid's Charm
+    /// that found nothing would put itself into its owner's hand.
+    SearchLibrary,
 }
 
 #[cfg(test)]
 mod parent_target_missing_reason_tests {
-    use super::ParentTargetMissingReason;
+    use super::{Effect, ParentTargetMissingReason, QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{GameState, PendingContinuation};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
 
     #[test]
-    fn reveal_until_reason_round_trips_through_json() {
-        let json = serde_json::to_string(&Some(ParentTargetMissingReason::RevealUntil)).unwrap();
-        let back: Option<ParentTargetMissingReason> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, Some(ParentTargetMissingReason::RevealUntil));
+    fn missing_referent_reasons_round_trip_and_default_on_parked_continuations() {
+        for reason in [
+            ParentTargetMissingReason::Dig,
+            ParentTargetMissingReason::ChooseFromZone,
+            ParentTargetMissingReason::RevealHandChoice,
+            ParentTargetMissingReason::ExileTop,
+            ParentTargetMissingReason::RevealUntil,
+            ParentTargetMissingReason::SearchLibrary,
+        ] {
+            let json = serde_json::to_string(&Some(reason)).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Option<ParentTargetMissingReason>>(&json).unwrap(),
+                Some(reason)
+            );
+            let mut ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            assert!(serde_json::to_value(&ability)
+                .unwrap()
+                .get("parent_target_missing_reason")
+                .is_none());
+            let absent: ResolvedAbility =
+                serde_json::from_value(serde_json::to_value(&ability).unwrap()).unwrap();
+            assert_eq!(absent.parent_target_missing_reason, None);
+            ability.parent_target_missing_reason = Some(reason);
+            let mut state = GameState::new_two_player(7);
+            state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
+            state.last_parent_target_missing_reason = Some(reason);
+            let json = serde_json::to_value(&state).unwrap();
+            assert!(json.get("last_parent_target_missing_reason").is_none());
+            let restored: GameState = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                restored
+                    .active_ability_continuation()
+                    .unwrap()
+                    .chain
+                    .parent_target_missing_reason,
+                Some(reason)
+            );
+            assert_eq!(restored.last_parent_target_missing_reason, None);
+        }
     }
 }
 
@@ -35656,15 +35712,12 @@ pub struct ResolvedAbility {
     /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
-    /// CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
-    /// (Thoughtseize): Stamped ONLY by `effects::apply_parent_chain_context`
-    /// at the exact moment this ability is handed off as the immediate
-    /// sub_ability of a `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice/
-    /// `ExileTop`/`RevealUntil` that
-    /// came up with nothing (empty library, no eligible card to choose, or an
-    /// empty reveal-choice eligible set respectively) — never set any other
-    /// way, so it cannot be confused with a stale value from an unrelated
-    /// resolution. See [`ParentTargetMissingReason`] for what each variant
+    /// CR 608.2c + CR 609.3: Stamped by `effects::apply_parent_chain_context`
+    /// at a parent->child hand-off (and carried down target-less hops), by
+    /// `inherit_missing_parent_referent` onto an otherwise-branch or a declined
+    /// optional's surviving branch, and by `finalize_standard_search_selection`
+    /// onto the search's continuation (an empty delivered set; a non-empty one
+    /// clears it). See [`ParentTargetMissingReason`] for what each variant
     /// gates and who consults it.
     ///
     /// Serialized: a child parked on a paused continuation carries this across

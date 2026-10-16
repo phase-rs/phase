@@ -45782,6 +45782,58 @@ fn parse_effect_chain_ir_body(
             .rev()
             .filter(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
             .collect();
+        // CR 701.20a + CR 608.2c: a separate pure reveal modifies its actual
+        // search owner before intrinsic simulation replaces that head with a move.
+        // FoldSearchIntoElse explicitly links alternatives sharing this result.
+        let search_reveal_owners = (|| {
+            if absorbed_choice_prev.is_some()
+                || condition.is_some()
+                || clause.condition.is_some()
+                || clause.unlowered_guard.is_some()
+                || is_optional
+                || clause.optional
+                || delayed_condition.is_some()
+                || player_scope.is_some()
+                || opponent_may_scope.is_some()
+                || repeat_for.is_some()
+                || is_distributed_chunk
+            {
+                return None;
+            }
+            let previous = *non_absorbed.first()?;
+            if !matches!(previous.parsed.effect, Effect::SearchLibrary { .. })
+                || !matches!(
+                    parse_followup_continuation_ast(normalized_text, &previous.parsed.effect, ctx),
+                    Some(ContinuationAst::SearchRevealResult)
+                )
+            {
+                return None;
+            }
+            let mut owners = Vec::new();
+            for member in &non_absorbed {
+                if !matches!(member.parsed.effect, Effect::SearchLibrary { .. }) {
+                    return None;
+                }
+                match &member.disposition {
+                    ClauseDisposition::FoldSearchIntoElse {
+                        intrinsic:
+                            Some(ContinuationAst::SearchDestination {
+                                destination: Zone::Hand,
+                                ..
+                            }),
+                    } => owners.push(member.id),
+                    ClauseDisposition::Emit {
+                        intrinsic: Some(ContinuationAst::SearchDestination { destination, .. }),
+                        ..
+                    } if owners.is_empty() || *destination == Zone::Hand => {
+                        owners.push(member.id);
+                        return Some(owners);
+                    }
+                    _ => return None,
+                }
+            }
+            None
+        })();
         let effective_prev_is_search_destination_exile = absorbed_choice_prev.is_none()
             && non_absorbed.first().is_some_and(|previous| {
                 matches!(
@@ -45963,6 +46015,9 @@ fn parse_effect_chain_ir_body(
                     .any(|c| effect_installs_continuous_effect(&effective_effect_of(c)))
                     .then_some(ContinuationAst::EndEffectCost { cost })
             });
+        if search_reveal_owners.is_some() {
+            followup_continuation = Some(ContinuationAst::SearchResultClauseHandled);
+        }
         // CR 608.2c + CR 109.5: a reveal choice is the controller's only when the
         // consuming instruction addresses the controller ("you" / imperative).
         if let Some(ContinuationAst::RevealHandFilter { binding, .. }) = &followup_continuation {
@@ -46150,6 +46205,26 @@ fn parse_effect_chain_ir_body(
                 );
                 for d in cascade_diags {
                     ctx.push_diagnostic(d);
+                }
+            }
+        }
+
+        if let Some(owners) = search_reveal_owners {
+            for owner in owners {
+                let member = builder
+                    .clauses_mut()
+                    .iter_mut()
+                    .find(|member| member.id == owner)
+                    .expect("bound search owner remains in this builder");
+                if let ClauseDisposition::Emit {
+                    intrinsic: Some(ContinuationAst::SearchDestination { reveal, .. }),
+                    ..
+                }
+                | ClauseDisposition::FoldSearchIntoElse {
+                    intrinsic: Some(ContinuationAst::SearchDestination { reveal, .. }),
+                } = &mut member.disposition
+                {
+                    *reveal = true;
                 }
             }
         }

@@ -174,10 +174,19 @@ fn strip_search_result_subject(lower: &str) -> &str {
 }
 
 fn is_search_result_reveal_clause(lower: &str) -> bool {
-    matches!(
-        lower.trim().trim_end_matches('.'),
-        "reveal that card" | "reveal those cards" | "reveal the card" | "reveal them" | "reveal it"
-    )
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("reveal "),
+        alt((
+            tag("that card"),
+            tag("those cards"),
+            tag("the card"),
+            tag("them"),
+            tag("it"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
 }
 
 /// CR 701.23a + CR 406.3: compose the optional continuation connector, the
@@ -6892,7 +6901,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
     ctx: &ParseContext,
 ) -> Option<ContinuationAst> {
     match effect {
-        Effect::SearchLibrary { split, .. } => {
+        Effect::SearchLibrary { split, reveal, .. } => {
             // CR 701.23a + CR 608.2c: When the search carries a split destination
             // (cultivate-class "put one onto the battlefield tapped and the other
             // into your hand"), the partition is handled at resolution by the
@@ -6948,9 +6957,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // "enters tapped" modifier is detected even when the put-step is
             // in a sibling clause (Assassin's Trophy-style split).
             let enter_tapped = nom_primitives::scan_contains(&full_lower, "battlefield tapped");
-            let reveal = nom_primitives::scan_contains(&lower, "reveal")
-                || nom_primitives::scan_contains(&full_lower, "reveal that card")
-                || nom_primitives::scan_contains(&full_lower, "reveal it");
+
             // Safety net: verify the clause splitter correctly separated all boundaries.
             // If this fires, a verb is missing from starts_clause_text() or the splitter's
             // search_start guard is incorrectly suppressing a split.
@@ -6999,7 +7006,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                     fold_control_clauses(&full_lower),
                     name_entry_control_antecedent(None, ctx),
                 ),
-                reveal,
+                reveal: *reveal,
                 attach_host,
             })
         }
@@ -10139,6 +10146,122 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    /// SHAPE: the pure-result grammar consumes only the reveal instruction.
+    #[test]
+    fn search_result_reveal_grammar_is_composed_and_all_consuming() {
+        for referent in ["that card", "those cards", "the card", "them", "it"] {
+            for punctuation in ["", "."] {
+                assert!(is_search_result_reveal_clause(&format!(
+                    "reveal {referent}{punctuation}"
+                )));
+            }
+        }
+        for text in [
+            "reveal a creature card",
+            "reveal it and gain 2 life",
+            "reveal it..",
+            "reveal that card if you control a creature",
+        ] {
+            assert!(!is_search_result_reveal_clause(text), "{text}");
+        }
+        let search = super::super::parse_effect_chain(
+            "Search your library for a basic land card.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*search.effect, Effect::SearchLibrary { .. }));
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "Reveal it.",
+                &search.effect,
+                &mut ParseContext::default()
+            ),
+            Some(ContinuationAst::SearchRevealResult)
+        );
+    }
+
+    /// SHAPE: ClauseId ownership keeps independent searches separate; only
+    /// declared FoldSearchIntoElse edges carry a common reveal to alternatives.
+    #[test]
+    fn search_result_reveal_owns_the_actual_intrinsic_and_fold_chain() {
+        for (text, expected, folds) in [
+            ("Search your library for a basic land card and put it onto the battlefield tapped. Search your library and graveyard for a card named Nissa, Nature's Artisan, reveal it, put it into your hand, then shuffle.", vec![false, true], 0),
+            ("Search your library for a Plains card, an Island card, a Swamp card, and a Mountain card. Reveal those cards, put them into your hand, then shuffle.", vec![true], 0),
+            ("Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.", vec![true, true], 1),
+            ("Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle. You gain 2 life.", vec![true, true], 1),
+            ("Search your library for an artifact card. Search your library for a basic land card. Reveal it, put it into your hand, then shuffle.", vec![false, true], 0),
+            ("Search your library for an artifact card. Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.", vec![false, true, true], 1),
+            ("Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. If this spell was kicked, instead search your library for an artifact card. Reveal that card, put it into your hand, then shuffle.", vec![true, true, true], 2),
+        ] {
+            let ir = super::super::parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+            assert!(ir.clauses.iter().all(|c| !matches!(c.parsed.effect, Effect::Unimplemented { .. })), "{text}: {ir:?}");
+            let searches: Vec<_> = ir.clauses.iter().filter(|c| matches!(c.parsed.effect, Effect::SearchLibrary { .. })).collect();
+            assert_eq!(searches.len(), expected.len(), "{text}");
+            assert_eq!(searches.iter().filter(|c| matches!(c.disposition, crate::parser::oracle_ir::effect_chain::ClauseDisposition::FoldSearchIntoElse { .. })).count(), folds, "{text}");
+            for (clause, reveal_expected) in searches.iter().zip(expected) {
+                let Some(ContinuationAst::SearchDestination { reveal, .. }) = clause.disposition.intrinsic() else { panic!("missing intrinsic: {clause:?}"); };
+                assert_eq!(*reveal, reveal_expected, "owner {:?}: {text}", clause.id);
+            }
+        }
+    }
+
+    /// SHAPE: guarded and independently scoped riders must not become an
+    /// unconditional modifier on an earlier search's intrinsic continuation.
+    #[test]
+    fn search_result_reveal_does_not_borrow_a_guarded_or_intervening_result() {
+        for tail in [
+            "If you control a creature, reveal it.",
+            "You may reveal it.",
+            "At the beginning of your next upkeep, reveal it.",
+            "Each player reveals it.",
+            "Draw a card. Reveal it.",
+        ] {
+            let text = format!("Search your library for a basic land card. {tail}");
+            let ir = super::super::parse_effect_chain_ir(
+                &text,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let search = ir
+                .clauses
+                .iter()
+                .find(|c| matches!(c.parsed.effect, Effect::SearchLibrary { .. }))
+                .expect("positive search head");
+            let Some(ContinuationAst::SearchDestination { reveal, .. }) =
+                search.disposition.intrinsic()
+            else {
+                panic!("positive intrinsic: {text}");
+            };
+            assert!(!reveal, "{text}: {ir:?}");
+        }
+        // CR 608.2c: the existing splitter separates this conjunction, so the
+        // pure reveal may bind while its independent life-gain instruction stays.
+        let ir = super::super::parse_effect_chain_ir(
+            "Search your library for a basic land card. Reveal it and gain 2 life.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(ir.clauses.len(), 3);
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::SearchLibrary { .. }
+        ));
+        assert!(matches!(
+            ir.clauses[0].disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination { reveal: true, .. })
+        ));
+        assert!(matches!(
+            ir.clauses[1].disposition.followup(),
+            Some(ContinuationAst::SearchResultClauseHandled)
+        ));
+        assert!(matches!(
+            ir.clauses[2].parsed.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            }
+        ));
+    }
 
     /// The sacrifice-rest domains admit "they control", "you control" and "that
     /// player controls".
