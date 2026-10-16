@@ -2494,14 +2494,26 @@ describe("WebSocketAdapter", () => {
         type: "stateChanged", serverRevision: 2,
       }));
       if (typeof commandId !== "number") throw new Error("Expected a numeric command ID");
+      const data = {
+        message: "Another request failed",
+        rejection: { code: "invalid_action", disposition: "invalid", message: "Other rejection", related_object_ids: [] },
+      };
+      const surfaced = (type: string) => events.mock.calls.filter(([event]) => event.type === type).length;
       for (const type of ["ActionNoOp", "ActionRejected", "ActionFailed"]) {
-        const data = {
-          message: "Another request failed",
-          rejection: { code: "invalid_action", disposition: "invalid", message: "Other rejection", related_object_ids: [] },
-        };
+        // An id-less frame is not an answer to this command, so it never settles it.
         socket.dispatchSynthetic("message", JSON.stringify({ type, data }));
+      }
+      // ...but an id-less failure still surfaces, exactly once each, without releasing the slot.
+      expect(surfaced("requestRejected")).toBe(1);
+      expect(surfaced("operationFailed")).toBe(1);
+      expect(events).toHaveBeenCalledWith({ type: "requestRejected", reason: "Other rejection" });
+      expect(events).toHaveBeenCalledWith({ type: "operationFailed", message: "Another request failed" });
+      for (const type of ["ActionNoOp", "ActionRejected", "ActionFailed"]) {
+        // A frame carrying another command's id belongs to that command: swallowed entirely.
         socket.dispatchSynthetic("message", JSON.stringify({ type, data, command_id: commandId + 1 }));
       }
+      expect(surfaced("requestRejected")).toBe(1);
+      expect(surfaced("operationFailed")).toBe(1);
       expect(await outcome()).toBe("never settled");
       expect(events).not.toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
       socket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: commandId }));
@@ -2635,6 +2647,14 @@ describe("WebSocketAdapter", () => {
         events.mockClear();
         legacySocket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
         expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        // An ActionRejected with nothing pending releases the indicator and surfaces too.
+        events.mockClear();
+        legacySocket.dispatchSynthetic("message", JSON.stringify({
+          type: "ActionRejected",
+          data: { rejection: { code: "invalid_action", disposition: "invalid", message: "Nothing pending", related_object_ids: [] } },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        expect(events).toHaveBeenCalledWith({ type: "requestRejected", reason: "Nothing pending" });
       } finally {
         legacy.dispose();
       }

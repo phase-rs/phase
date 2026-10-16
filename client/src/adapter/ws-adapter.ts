@@ -27,6 +27,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
+import { SubmissionSlot } from "./submissionSlot";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, isCustomGameFormat, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
 import {
@@ -1436,10 +1437,7 @@ export class WebSocketAdapter implements EngineAdapter {
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
   private fullSessionKey: FullSessionKey | null = null;
-  private pendingResolve: ((result: SubmitResult) => void) | null = null;
-  private pendingReject: ((error: Error) => void) | null = null;
-  private nextCommandId = 1;
-  private pendingCommandId: number | null = null;
+  private readonly submission = new SubmissionSlot();
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -1867,14 +1865,12 @@ export class WebSocketAdapter implements EngineAdapter {
       // Settled above the identity-rejection guard: a close that arrives
       // while the latch is set must still settle the caller's promise, or
       // the submission hangs forever holding the dispatch mutex.
-      if (this.pendingReject) {
-        this.emit({ type: "actionPendingChanged", pending: false });
-        this.pendingReject(
+      const droppedSubmission = this.submission.drop();
+      if (droppedSubmission) {
+        droppedSubmission.reject(
           new AdapterError("WS_CLOSED", "Connection closed during action", true),
         );
-        this.pendingResolve = null;
-        this.pendingReject = null;
-        this.pendingCommandId = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
       }
       // Deliberately scoped to the submission slot. The seven reject helpers
       // below still skip on the identity-rejected path; none of them holds the
@@ -1972,7 +1968,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.aiDriverFault !== null && this.aiDriverFault.gameCode === this._gameCode) {
       throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
     }
-    if (this.pendingResolve !== null || this.pendingReject !== null) {
+    if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
         "Another game submission is pending; this submission was not sent.",
@@ -1985,56 +1981,27 @@ export class WebSocketAdapter implements EngineAdapter {
     return new Promise<SubmitResult>((resolve, reject) => {
       // Claim before emitting: event listeners run synchronously and may submit
       // again while handling actionPendingChanged.
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      this.pendingCommandId = this.commandCorrelationNegotiated()
-        ? this.nextCommandId++
-        : null;
+      const submission = this.submission.claim(resolve, reject, this.commandCorrelationNegotiated());
       try {
         this.emit({ type: "actionPendingChanged", pending: true });
       } catch (error) {
-        if (this.pendingResolve === resolve) {
-          this.pendingResolve = null;
-          this.pendingReject = null;
-          this.pendingCommandId = null;
-        }
+        this.submission.release(submission);
         reject(error instanceof Error ? error : new Error(String(error)));
         return;
       }
       // A synchronous listener may close/dispose the adapter or otherwise
       // settle this slot. Do not send after that owner has been released.
-      if (this.pendingResolve !== resolve) return;
-      const commandFrame = this.pendingCommandId === null
-        ? frame
-        : { ...frame, command_id: this.pendingCommandId };
-      if (!this.send(commandFrame) && this.pendingResolve === resolve) {
-        this.pendingResolve = null;
-        this.pendingReject = null;
-        this.pendingCommandId = null;
+      if (!this.submission.owns(submission)) return;
+      if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(sendFailure);
       }
     });
   }
 
+  /** Whether commands sent now should be stamped; the pending command, not this, decides settlement. */
   private commandCorrelationNegotiated(): boolean {
     return this._serverInfo?.commandCorrelation === "CommandIdV1";
-  }
-
-  private takeSubmission(commandId: unknown): {
-    resolve: (result: SubmitResult) => void;
-    reject: (error: Error) => void;
-  } | null {
-    const resolve = this.pendingResolve;
-    const reject = this.pendingReject;
-    if (!resolve || !reject) return null;
-    // A peer's newer snapshot is not an acknowledgement of our command.
-    // Missing IDs fall back only for servers that did not negotiate correlation.
-    if (this.commandCorrelationNegotiated() && commandId !== this.pendingCommandId) return null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
-    this.pendingCommandId = null;
-    return { resolve, reject };
   }
 
   async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
@@ -2231,14 +2198,9 @@ export class WebSocketAdapter implements EngineAdapter {
     this.playerToken = null;
     this._gameCode = null;
     this.fullSessionKey = null;
-    if (this.pendingReject) {
-      this.pendingReject(
-        new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
-      );
-      this.pendingResolve = null;
-      this.pendingReject = null;
-      this.pendingCommandId = null;
-    }
+    this.submission.drop()?.reject(
+      new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+    );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );
@@ -2857,7 +2819,7 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
-        const pending = this.takeSubmission(msg.command_id);
+        const pending = this.submission.take(msg.command_id);
         const resolvedAction = pending !== null;
         if (pending) {
           pending.resolve({ events: data.events, log_entries: data.log_entries });
@@ -2881,17 +2843,19 @@ export class WebSocketAdapter implements EngineAdapter {
         const error = isActionRejection(data.rejection)
           ? actionRejectionError(data.rejection)
           : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
-        const pending = this.takeSubmission(msg.command_id);
+        const pending = this.submission.take(msg.command_id);
         if (pending) {
           pending.reject(error);
           this.emit({ type: "actionPendingChanged", pending: false });
         } else {
+          const unmatched = this.submission.unmatched(msg.command_id);
           // Legacy servers always released the pending indicator here.
-          if (!this.commandCorrelationNegotiated()) {
+          if (unmatched.releasesIndicator) {
             this.emit({ type: "actionPendingChanged", pending: false });
           }
-          // Uncorrelated takeback refusals must not release an action's slot.
-          if (msg.command_id === undefined || !this.commandCorrelationNegotiated()) {
+          // An ActionRejected without a command_id is not an answer to this
+          // connection's command; surface it without releasing the slot.
+          if (unmatched.surfaces) {
             this.emit({ type: "requestRejected", reason: error.message });
           }
         }
@@ -2900,22 +2864,22 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "ActionFailed": {
         const data = msg.data as { message: string };
-        const pending = this.takeSubmission(msg.command_id);
+        const pending = this.submission.take(msg.command_id);
         if (pending) {
           pending.reject(new AdapterError("WS_ERROR", data.message, false));
           this.emit({ type: "actionPendingChanged", pending: false });
-        } else if (msg.command_id === undefined || !this.commandCorrelationNegotiated()) {
+        } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "operationFailed", message: data.message });
         }
         break;
       }
 
       case "ActionNoOp": {
-        const pending = this.takeSubmission(msg.command_id);
+        const pending = this.submission.take(msg.command_id);
         if (pending) {
           pending.resolve({ events: [], log_entries: [] });
           this.emit({ type: "actionPendingChanged", pending: false });
-        } else if (!this.commandCorrelationNegotiated()) {
+        } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
           // Legacy servers always released the pending indicator here.
           this.emit({ type: "actionPendingChanged", pending: false });
         }
@@ -3213,12 +3177,10 @@ export class WebSocketAdapter implements EngineAdapter {
         };
         const message = "Native AI driver stopped; this game can no longer advance.";
         this.aiDriverFault = { gameCode: this._gameCode, message };
-        if (this.pendingReject) {
+        const faulted = this.submission.drop();
+        if (faulted) {
+          faulted.reject(new AdapterError("WS_ERROR", message, false));
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingReject(new AdapterError("WS_ERROR", message, false));
-          this.pendingResolve = null;
-          this.pendingReject = null;
-          this.pendingCommandId = null;
         }
         this.emit({
           type: "aiDriverFault",

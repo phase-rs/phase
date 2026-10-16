@@ -61,6 +61,7 @@ function helloFrame(
     mode: "Full" | "LobbyOnly";
     lobby_protocol_version: number;
     wire_formats: string[];
+    command_correlation: unknown;
   }> = {},
 ): string {
   return JSON.stringify({
@@ -104,6 +105,20 @@ describe("openPhaseSocket", () => {
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );
+  });
+
+  it.each([
+    ["CommandIdV1", "CommandIdV1"],
+    ["Other", undefined],
+    [1, undefined],
+    [undefined, undefined],
+  ])("parses command_correlation %j as %j", async (advertised, expected) => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ command_correlation: advertised }));
+
+    const socket = await promise;
+    expect(socket.serverInfo.commandCorrelation).toBe(expected);
   });
 
   it("negotiates the gzip envelope and queues binary sends in order", async () => {
