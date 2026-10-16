@@ -52,6 +52,15 @@ import {
   pickRandomDeckCandidate,
   type RandomDeckCandidate,
 } from "../../services/randomDeckSelection";
+import {
+  applyPoolSelection,
+  isPoolSelectionEmpty,
+  loadFolderIndex,
+  summarizePoolSelection,
+  withCatalogSavedNames,
+} from "../../services/randomPoolSelection";
+import { resolveBracketDrawBase, resolveRandomDrawPool } from "../../services/aiRandomPool";
+import { RandomPoolTree } from "./RandomPoolTree";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
 import type { ImportSession } from "./importSession";
@@ -73,7 +82,8 @@ import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
-import { isCommanderFamilyFormat } from "../../types/bracket";
+import { isCommanderFamilyFormat, type CommanderBracket } from "../../types/bracket";
+import { CEDH_DIFFICULTY } from "../../services/cedhLock";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 /** Sentinel section ids for the virtual/system folders in the collapse set. */
@@ -85,7 +95,12 @@ const DECK_GRID_CLASS = "grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15
 const DECK_SCAN_BATCH_SIZE = 1;
 const COVERAGE_SCAN_BATCH_SIZE = 6;
 
-type SelectableRandomDeckCandidate = RandomDeckCandidate & { deckName: string };
+type SelectableRandomDeckCandidate = RandomDeckCandidate & {
+  deckName: string;
+  /** Resolved bracket tier (static tag or engine estimate) for the AI-matching
+   *  bracket restriction; null when unknown or outside single-player setup. */
+  bracket: CommanderBracket | null;
+};
 
 type FolderPromptRequest =
   | { kind: "create" }
@@ -630,6 +645,14 @@ interface MyDecksProps {
    * scanner batch results into a fan-out storm through the parent's render tree.
    */
   onActiveDeckCompatChange?: (compat: DeckCompatibilityResult | null) => void;
+  /**
+   * Resolved bracket tiers by catalog id, hoisted from the setup page's
+   * shared AI catalog analysis. Present only in single-player setup once the
+   * analysis lands; the human random pool matches the AI bracket restriction
+   * against it. Absent everywhere else (multiplayer select has no AI context,
+   * so the pool selection applies alone there).
+   */
+  aiBrackets?: ReadonlyMap<string, CommanderBracket | null>;
 }
 
 type MyDecksTab = "decks" | "subscriptions";
@@ -648,6 +671,7 @@ export function MyDecks({
   randomSelectionMode = "resolveImmediately",
   bare = false,
   onActiveDeckCompatChange,
+  aiBrackets,
 }: MyDecksProps) {
   const { t } = useTranslation("menu");
   const effectiveOffline = useEffectiveOffline();
@@ -735,6 +759,17 @@ export function MyDecks({
   const collapsedFolderIds = usePreferencesStore((s) => s.collapsedFolderIds);
   const toggleFolderCollapsed = usePreferencesStore((s) => s.toggleFolderCollapsed);
   const setCollapsedFolderIds = usePreferencesStore((s) => s.setCollapsedFolderIds);
+  const humanPoolSelection = usePreferencesStore((s) => s.humanPoolSelection);
+  const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
+  // Mirrors GameProvider's tableCedh (seats whose difficulty is the cEDH tier)
+  // so the human pool preview and the deferred game-start draw agree.
+  const tableCedh = usePreferencesStore((s) => s.aiSeats).some(
+    (seat) => seat.difficulty === CEDH_DIFFICULTY,
+  );
+  // The human Random draw matches the AI bracket restriction only in
+  // single-player setup (defer mode, bracket map present). Multiplayer
+  // select has no AI context, so the pool selection applies alone there.
+  const useBracketBase = randomSelectionMode === "defer" && aiBrackets !== undefined;
 
   const handleToggleStar = useCallback((name: string) => toggleStar(name), [toggleStar]);
   const handleAssignFolder = useCallback(
@@ -1149,20 +1184,23 @@ export function MyDecks({
     ? (randomDeckSelected ? t("myDecks.randomDeckTile") : activeDeckName)
     : null;
   const visibleDeckCount = sourceFilteredDeckNames.length + preconDeckNames.length;
-  const randomSelectableCandidates = useMemo<SelectableRandomDeckCandidate[]>(() => {
+  const randomBaseCandidates = useMemo<SelectableRandomDeckCandidate[]>(() => {
     if (mode !== "select") return [];
     return [...sourceFilteredDeckNames, ...preconDeckNames].map((deckName) => {
       const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
+      const id = candidate?.id ?? savedDeckCatalogId(deckName);
       return {
-        id: candidate?.id ?? savedDeckCatalogId(deckName),
+        id,
         name: deckName,
         deckName,
         source: candidate?.source ?? { type: "saved" },
         knownFormat: candidate?.knownFormat,
         compatibility: compatibilities[deckName] ?? null,
+        bracket: aiBrackets?.get(id) ?? null,
       };
     });
   }, [
+    aiBrackets,
     compatibilities,
     deckCandidatesByName,
     legalPreconByName,
@@ -1170,6 +1208,65 @@ export function MyDecks({
     preconDeckNames,
     sourceFilteredDeckNames,
   ]);
+  // The human pool curation narrows the Random pick, falling back when the
+  // selection matches nothing (the tree below warns). In single-player setup
+  // the shared bracket-then-curation layering applies so your deck lands in
+  // the same bracket(s) as the AI seats.
+  const randomSelectableCandidates = useMemo(() => {
+    if (!useBracketBase) {
+      if (isPoolSelectionEmpty(humanPoolSelection)) return randomBaseCandidates;
+      const keep = new Set(
+        applyPoolSelection(
+          withCatalogSavedNames(randomBaseCandidates),
+          humanPoolSelection,
+        ).pool.map((candidate) => candidate.id),
+      );
+      return randomBaseCandidates.filter((candidate) => keep.has(candidate.id));
+    }
+    const resolved = resolveRandomDrawPool(withCatalogSavedNames(randomBaseCandidates), {
+      bracketFilter: aiBracketFilter,
+      cedhMode: tableCedh,
+      selectedFormat: selectedFormatForCompatibility ?? null,
+      poolSelection: humanPoolSelection,
+    });
+    const keep = new Set(resolved.pool.map((candidate) => candidate.id));
+    return randomBaseCandidates.filter((candidate) => keep.has(candidate.id));
+  }, [
+    aiBracketFilter,
+    humanPoolSelection,
+    randomBaseCandidates,
+    selectedFormatForCompatibility,
+    tableCedh,
+    useBracketBase,
+  ]);
+  const poolTreeItems = useMemo(
+    () => withCatalogSavedNames(randomBaseCandidates),
+    [randomBaseCandidates],
+  );
+  const poolBaseIds = useMemo(
+    () =>
+      useBracketBase
+        ? new Set(
+            resolveBracketDrawBase(withCatalogSavedNames(randomBaseCandidates), {
+              bracketFilter: aiBracketFilter,
+              cedhMode: tableCedh,
+              selectedFormat: selectedFormatForCompatibility ?? null,
+            }).map((candidate) => candidate.id),
+          )
+        : undefined,
+    [
+      aiBracketFilter,
+      randomBaseCandidates,
+      selectedFormatForCompatibility,
+      tableCedh,
+      useBracketBase,
+    ],
+  );
+  const humanPoolConflict = useMemo(() => {
+    if (!useBracketBase || !poolBaseIds) return null;
+    const summary = summarizePoolSelection(poolTreeItems, humanPoolSelection, poolBaseIds, loadFolderIndex());
+    return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
+  }, [useBracketBase, poolTreeItems, humanPoolSelection, poolBaseIds]);
   const userDeckScanTotal = requiresCompatibilityFilter ? unknownFormatDeckNames.length : 0;
   const userDeckScanCompleted = Math.min(deckScanIndex, userDeckScanTotal);
   const isScanningUserDecks = userDeckScanCompleted < userDeckScanTotal;
@@ -1883,6 +1980,21 @@ export function MyDecks({
               )}
               {deckEntryTiles}
             </div>
+            {mode === "select" && poolTreeItems.length > 0 && (
+              <RandomPoolTree
+                pool="human"
+                items={poolTreeItems}
+                baseIds={poolBaseIds}
+                showBracketFilter={
+                  useBracketBase && isCommanderFamilyFormat(selectedFormatForCompatibility ?? undefined)
+                }
+              />
+            )}
+            {mode === "select" && humanPoolConflict !== null && (
+              <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                {t("myDecks.poolBracketConflict", { selected: humanPoolConflict.selected, total: humanPoolConflict.baseSize })}
+              </div>
+            )}
           </div>
 
           {/* User decks: a flat grid until the user creates a folder or stars a

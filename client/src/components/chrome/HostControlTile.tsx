@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useLocation } from "react-router";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -11,6 +11,8 @@ import {
   type SeatKind,
 } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { applyPoolSelection, withCatalogSavedNames } from "../../services/randomPoolSelection";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
@@ -309,18 +311,36 @@ export function HostControlTile() {
     selectedFormat: hostSession?.formatConfig.format,
     selectedMatchType: hostSession?.matchType,
   });
+  const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
 
   const isConnecting = hostingStatus === "connecting";
   const minPlayers = hostSession?.formatConfig.min_players ?? 2;
   // A supplied-deck format's AI seats submit nothing; the one empty entry feeds every deck consumer below.
   const suppliedFormat = hostSession ? formatSuppliesDeck(hostSession.formatConfig.format) : false;
-  const deckChoices = suppliedFormat
-    ? [suppliedAiDeckChoice()]
-    : aiDeckCatalog.candidates.map((candidate) => ({
-        id: candidate.id,
-        label: candidate.name,
-        choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
-      }));
+  const deckChoices = useMemo(
+    () =>
+      suppliedFormat
+        ? [suppliedAiDeckChoice()]
+        : aiDeckCatalog.candidates.map((candidate) => ({
+            id: candidate.id,
+            label: candidate.name,
+            choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
+          })),
+    [suppliedFormat, aiDeckCatalog.candidates],
+  );
+  // The dropdown lists every legal deck (any of them can be pinned), but fresh
+  // seats draw from the curated pool — falling back to the full catalog when
+  // the selection matches nothing.
+  const poolChoices = useMemo(() => {
+    if (suppliedFormat) return deckChoices;
+    const keep = new Set(
+      applyPoolSelection(
+        withCatalogSavedNames(aiDeckCatalog.candidates),
+        aiPoolSelection,
+      ).pool.map((candidate) => candidate.id),
+    );
+    return deckChoices.filter(({ id }) => keep.has(id));
+  }, [suppliedFormat, deckChoices, aiDeckCatalog.candidates, aiPoolSelection]);
   // Pick a random format-legal deck for each fresh AI-seat assignment.
   // Previously this defaulted to `deckChoices[0]`, which meant every AI seat
   // got the same deck — uninteresting and exposed catalog ordering. The
@@ -328,11 +348,11 @@ export function HostControlTile() {
   // `STARTER_DECKS` (Standard-format hardcoded list) and would produce an
   // illegal deck for any non-Standard format. `aiDeckCatalog.candidates` is
   // already filtered by `selectedFormat`, so picking from it gives a random
-  // format-legal deck.
+  // format-legal deck, further narrowed by the AI pool curation.
   const pickRandomAiDeck = (): DeckChoice | null => {
-    if (deckChoices.length === 0) return null;
-    const idx = Math.floor(Math.random() * deckChoices.length);
-    return deckChoices[idx].choice;
+    if (poolChoices.length === 0) return null;
+    const idx = Math.floor(Math.random() * poolChoices.length);
+    return poolChoices[idx].choice;
   };
   // Used only for the dropdown's fallback/disabled state — buttons that
   // assign a deck call `pickRandomAiDeck()` per-seat instead.

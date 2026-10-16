@@ -384,6 +384,15 @@ export function getDeckMeta(deckName: string): DeckMeta | null {
   return loadMetadataStore()[deckName] ?? null;
 }
 
+/**
+ * Bulk read of the deck metadata store: one parse for N lookups. Random-pool
+ * filtering reads through this (via `loadFolderIndex`) instead of calling
+ * `getDeckMeta` once per candidate.
+ */
+export function loadDeckMetaMap(): Record<string, DeckMeta> {
+  return loadMetadataStore();
+}
+
 /** Remove metadata for a deleted deck. */
 export function removeDeckMeta(txn: SavedDeckTxn, deckName: string): void {
   const store = loadMetadataStore();

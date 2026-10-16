@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AiOpponentConfig } from "../AiOpponentConfig";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import type { AiDeckCandidate } from "../../../services/aiDeckCatalog";
+import { emptyPoolSelection } from "../../../services/randomPoolSelection";
 import { useLlmStore } from "../../../stores/llmStore";
 import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
 
@@ -52,6 +53,7 @@ beforeEach(() => {
   ];
   act(() => {
     usePreferencesStore.getState().setAiBracketFilter([]);
+    usePreferencesStore.getState().setAiPoolSelection(emptyPoolSelection());
     usePreferencesStore.getState().setAiArchetypeFilter("Any");
     usePreferencesStore.getState().setAiCoverageFloor(50);
     // Reset to a single AI seat at Medium difficulty with cEDH mode off so each
@@ -320,5 +322,30 @@ describe("AiOpponentConfig — bracket filter", () => {
         screen.getByText("No bracket-5 decks available. Random AI seats cannot be filled."),
       ).toBeInTheDocument();
     });
+  });
+
+  it("warns when the pool selection misses the bracket pool entirely", async () => {
+    const user = userEvent.setup();
+    act(() => {
+      usePreferencesStore.getState().setAiPoolSelection({
+        excludedGroups: [],
+        excludedDecks: ["Bracket1", "Bracket2", "Bracket4"],
+        includedDecks: [],
+      });
+    });
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    await user.click(screen.getByRole("button", { name: "2 Core" }));
+
+    // Only Untagged is selected, but bracket 2 keeps only Bracket2: the seat
+    // falls back to the 1-deck bracket pool, and both the tree and the banner
+    // say why instead of letting "Random (1)" look mysterious.
+    await waitFor(() => {
+      expect(screen.getAllByText(/None of the 1 selected decks/)).toHaveLength(2);
+    });
+    expect(
+      screen.getByRole("button", { name: /AI random pool 1 of 4.*0 playable/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
   });
 });

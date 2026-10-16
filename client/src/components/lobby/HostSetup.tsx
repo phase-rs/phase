@@ -34,9 +34,16 @@ import {
   candidatePassesFilters,
   cedhSeatProblem,
   pickAiSeatDecks,
+  resolveBracketDrawBase,
   type CedhSeatProblem,
   restrictAiPoolByBracket,
 } from "../../services/aiRandomPool";
+import {
+  applyPoolSelection,
+  loadFolderIndex,
+  summarizePoolSelection,
+  withCatalogSavedNames,
+} from "../../services/randomPoolSelection";
 import { CEDH_DIFFICULTY } from "../../services/cedhLock";
 import { AI_DECK_RANDOM, usePreferencesStore, type AiDeckSelection } from "../../stores/preferencesStore";
 import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
@@ -51,6 +58,7 @@ import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
 import { bracketToEngineTier } from "../../types/bracketEstimate";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
+import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PileSourceChoice } from "../menu/PileSourceChoice";
 import { DEFAULT_PILE_CHOICE, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
@@ -534,6 +542,7 @@ export function HostSetup({
   const aiArchetypeFilter = usePreferencesStore((s) => s.aiArchetypeFilter);
   const aiCoverageFloor = usePreferencesStore((s) => s.aiCoverageFloor);
   const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
+  const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(formatConfig.format);
@@ -549,22 +558,60 @@ export function HostSetup({
   // A remembered config can carry a CEDH seat; the table is then cEDH and its
   // Random pool is restricted to bracket 5 (Commander formats only).
   const hostCedh = effectiveAiSeats.some((s) => s.difficulty === CEDH_DIFFICULTY);
-  const aiRandomPool = useMemo(
+  // Same layering as game start (`pickAiSeatDecks`): bracket, then the
+  // folder/deck curation (falling back when it matches nothing), then the
+  // archetype + coverage soft preferences.
+  const aiSelectedPool = useMemo(
     () =>
-      restrictAiPoolByBracket(aiDeckCatalog.candidates, {
-        bracketFilter: aiBracketFilter,
-        cedhMode: hostCedh,
-        selectedFormat: formatConfig.format,
-      }).filter((d) => candidatePassesFilters(d, aiArchetypeFilter, aiCoverageFloor)),
+      applyPoolSelection(
+        withCatalogSavedNames(
+          restrictAiPoolByBracket(aiDeckCatalog.candidates, {
+            bracketFilter: aiBracketFilter,
+            cedhMode: hostCedh,
+            selectedFormat: formatConfig.format,
+          }),
+        ),
+        aiPoolSelection,
+      ).pool,
     [
       aiDeckCatalog.candidates,
       aiBracketFilter,
       hostCedh,
       formatConfig.format,
-      aiArchetypeFilter,
-      aiCoverageFloor,
+      aiPoolSelection,
     ],
   );
+  const aiRandomPool = useMemo(
+    () =>
+      aiSelectedPool.filter((d) => candidatePassesFilters(d, aiArchetypeFilter, aiCoverageFloor)),
+    [aiSelectedPool, aiArchetypeFilter, aiCoverageFloor],
+  );
+  // The tree lists the full legal catalog (the curation is format-global),
+  // but reports playable counts against the draw base — the same base
+  // `pickAiSeatDecks` draws from — so a selection the bracket filter empties
+  // warns instead of silently falling back.
+  const poolTreeItems = useMemo(
+    () => withCatalogSavedNames(aiDeckCatalog.candidates),
+    [aiDeckCatalog.candidates],
+  );
+  const poolBaseIds = useMemo(
+    () =>
+      new Set(
+        resolveBracketDrawBase(aiDeckCatalog.candidates, {
+          bracketFilter: aiBracketFilter,
+          cedhMode: hostCedh,
+          selectedFormat: formatConfig.format,
+        }).map((candidate) => candidate.id),
+      ),
+    [aiDeckCatalog.candidates, aiBracketFilter, hostCedh, formatConfig.format],
+  );
+  // Decks are selected but none survive the bracket restriction, so Random
+  // seats silently fall back to the full bracket pool. Say so next to the
+  // seats (the tree warns too) — the "Random (N)" count alone hides the why.
+  const poolConflictForHost = useMemo(() => {
+    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, loadFolderIndex());
+    return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
+  }, [poolTreeItems, aiPoolSelection, poolBaseIds]);
   // A cEDH table with an AI seat no bracket-5 deck can serve (a Random seat over
   // an empty bracket-5 pool, or a seat pinned to a non-bracket-5 deck) would be
   // refused by the engine's bracket gate, so block hosting.
@@ -803,6 +850,7 @@ export function HostSetup({
       bracketFilter: aiBracketFilter,
       cedhMode: hostCedh,
       selectedFormat: formatConfig.format,
+      poolSelection: aiPoolSelection,
     });
     return ordered.map((seat, i) => ({
       ...seat,
@@ -1475,6 +1523,16 @@ export function HostSetup({
                   {t(CEDH_SEAT_PROBLEM_KEYS[cedhSeatProblemForHost])}
                 </p>
               )}
+              {poolConflictForHost !== null && (
+                <p role="status" className="mt-3 text-xs text-amber-300">
+                  {t("hostSetup.poolBracketConflict", { selected: poolConflictForHost.selected, total: poolConflictForHost.baseSize })}
+                </p>
+              )}
+            </div>
+          )}
+          {effectiveAiSeats.length > 0 && !suppliesDeck && !aiDeckCatalog.loading && (
+            <div className="surface-card rounded-panel border border-hairline p-4">
+              <RandomPoolTree pool="ai" items={poolTreeItems} baseIds={poolBaseIds} />
             </div>
           )}
 
