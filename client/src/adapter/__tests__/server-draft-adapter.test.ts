@@ -1700,8 +1700,81 @@ describe("ServerDraftAdapter game-command correlation", () => {
         receive(socket, "ActionNoOp", undefined);
         expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
         events.mockClear();
+        receive(socket, "ActionRejected", {
+          rejection: { code: "invalid_action", disposition: "invalid", message: "Nothing pending", related_object_ids: [] },
+        });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        events.mockClear();
         receive(socket, "ActionFailed", { message: "Nothing pending" });
         expect(events).toHaveBeenCalledWith({ type: "error", message: "Nothing pending" });
+      } finally {
+        seat.dispose();
+      }
+    });
+  });
+
+  describe("pending-indicator bookkeeping", () => {
+    it("frees the slot when a listener throws while the submission is announced", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        let armed = true;
+        seat.onEvent((event) => {
+          if (event.type === "actionPendingChanged" && event.pending && armed) {
+            armed = false;
+            throw new Error("listener failed");
+          }
+        });
+        await expect(seat.submitAction(keep, 0)).rejects.toThrow("listener failed");
+        expect(submissionTypes(socket)).toEqual([]);
+
+        const next = trackRejection(seat.submitAction(keep, 0));
+        expect(submissionTypes(socket)).toEqual(["Action"]);
+        deliverUpdate(socket, "after-throw", sentCommandId(socket));
+        expect(deliveredEventMarker(await next())).toBe("after-throw");
+      } finally {
+        seat.dispose();
+      }
+    });
+
+    it.each(["close", "dispose"] as const)(
+      "sends nothing when a listener ends the connection with %s while the submission is announced",
+      async (ending) => {
+        const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+        try {
+          const events = vi.fn();
+          seat.onEvent(events);
+          seat.onEvent((event) => {
+            if (event.type !== "actionPendingChanged" || !event.pending) return;
+            if (ending === "close") {
+              socket.readyState = 3; // CLOSED
+              socket.dispatchSynthetic("close");
+            } else {
+              seat.dispose();
+            }
+          });
+          const outcome = trackRejection(seat.submitAction(keep, 0));
+          expect(await outcome()).toMatchObject({ code: "WS_CLOSED" });
+          expect(submissionTypes(socket)).toEqual([]);
+          // A send attempted against the ended connection would also report a transport error.
+          expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+        } finally {
+          seat.dispose();
+        }
+      },
+    );
+
+    it("announces the released indicator when the socket closes under a pending submission", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const events = vi.fn();
+        seat.onEvent(events);
+        const pending = trackRejection(seat.submitAction(keep, 0));
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: true });
+        events.mockClear();
+        socket.readyState = 3; // CLOSED
+        socket.dispatchSynthetic("close");
+        expect(await pending()).toMatchObject({ code: "WS_CLOSED" });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
       } finally {
         seat.dispose();
       }

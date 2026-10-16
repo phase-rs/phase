@@ -2561,7 +2561,7 @@ describe("WebSocketAdapter", () => {
       expect(submissionTypes(socket)).toEqual([]);
     });
 
-    it("keeps a resumed command owned despite a late completion from the previous socket", async () => {
+    it("ignores a completion carrying a pre-resume command id after resume", async () => {
       vi.useFakeTimers();
       const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
       const events = vi.fn();
@@ -2622,6 +2622,88 @@ describe("WebSocketAdapter", () => {
         visibility.mockRestore();
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("pending-indicator bookkeeping", () => {
+    let subject: WebSocketAdapter;
+    let socket: MockWebSocket;
+    let events: Array<{ type: string; pending?: boolean }>;
+
+    beforeEach(async () => {
+      subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = subject.initialize();
+      socket = await completeHandshake(subject, CORRELATED_HELLO);
+      acceptFullReplyOwnershipSession(subject, socket);
+      await initialized;
+      events = [];
+      subject.onEvent((event) => { events.push(event as { type: string; pending?: boolean }); });
+    });
+
+    afterEach(() => subject.dispose());
+
+    it("frees the slot when a listener throws while the submission is announced", async () => {
+      let armed = true;
+      subject.onEvent((event) => {
+        if (event.type === "actionPendingChanged" && event.pending && armed) {
+          armed = false;
+          throw new Error("listener failed");
+        }
+      });
+      await expect(subject.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow("listener failed");
+      expect(submissionTypes(socket)).toEqual([]);
+
+      const next = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      expect(submissionTypes(socket)).toEqual(["Action"]);
+      deliverOwnershipStateUpdate(socket, "after-throw", 2, lastSubmissionCommandId(socket));
+      expect(deliveredEventMarker(await next())).toBe("after-throw");
+    });
+
+    it.each(["close", "dispose"] as const)(
+      "sends nothing when a listener ends the connection with %s while the submission is announced",
+      async (ending) => {
+        subject.onEvent((event) => {
+          if (event.type !== "actionPendingChanged" || !event.pending) return;
+          if (ending === "close") {
+            socket.readyState = 3; // CLOSED
+            socket.dispatchSynthetic("close");
+          } else {
+            subject.dispose();
+          }
+        });
+        const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+        expect(await outcome()).toMatchObject({ code: "WS_CLOSED" });
+        expect(submissionTypes(socket)).toEqual([]);
+        // A send attempted against the ended connection would also report a transport error.
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+      },
+    );
+
+    it("announces the released indicator when the socket closes under a pending submission", async () => {
+      const pending = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: true });
+      events.length = 0;
+      socket.readyState = 3; // CLOSED
+      socket.dispatchSynthetic("close");
+      expect(await pending()).toMatchObject({ code: "WS_CLOSED" });
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    });
+
+    it("clears the slot when the AI driver faults", async () => {
+      // The fault latch refuses every later submit for this game before the slot is
+      // consulted, so the slot itself is the only observable proof it was cleared.
+      const slot = (subject as unknown as { submission: { occupied: boolean } }).submission;
+      const pending = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      expect(slot.occupied).toBe(true);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      expect(await pending()).toMatchObject({ code: "WS_ERROR", recoverable: false });
+      expect(slot.occupied).toBe(false);
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
     });
   });
 

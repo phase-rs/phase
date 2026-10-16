@@ -103,7 +103,8 @@ export class SubmissionSlot {
 
   /**
    * Policy for a completion frame `take` declined. An id-less failure is not an
-   * answer to this connection's command (for example a takeback refusal), so it
+   * answer to this connection's command (for example the rejection of a
+   * malformed frame the server could not attribute to a command), so it
    * surfaces without touching the slot; a frame naming another command's id
    * belongs to that command and is swallowed. The legacy indicator release only
    * applies while no stamped command is in flight.
