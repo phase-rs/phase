@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-15T00:00:00Z",
+  "updated": "2026-10-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -678,9 +678,9 @@
       "name": "Jund Artifact Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
         "R",
-        "G"
+        "G",
+        "B"
       ],
       "tags": [
         "metagame"
@@ -691,12 +691,8 @@
           "name": "Biotech Specialist"
         },
         {
-          "count": 2,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Springleaf Drum"
         },
         {
           "count": 2,
@@ -704,11 +700,11 @@
         },
         {
           "count": 4,
-          "name": "Springleaf Drum"
+          "name": "Deadly Dispute"
         },
         {
           "count": 4,
-          "name": "Deadly Dispute"
+          "name": "Oni-Cult Anvil"
         },
         {
           "count": 4,
@@ -719,24 +715,12 @@
           "name": "Greedy Freebooter"
         },
         {
-          "count": 2,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 4,
-          "name": "Oni-Cult Anvil"
-        },
-        {
           "count": 1,
           "name": "Mountain"
         },
         {
           "count": 4,
-          "name": "Shrapnel Blast"
-        },
-        {
-          "count": 3,
-          "name": "Copperline Gorge"
+          "name": "Blackcleave Cliffs"
         },
         {
           "count": 3,
@@ -744,53 +728,65 @@
         },
         {
           "count": 4,
+          "name": "Shrapnel Blast"
+        },
+        {
+          "count": 4,
           "name": "Blood Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 4,
           "name": "The Sackville-Bagginses"
         },
         {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Torch the Tower"
         },
         {
           "count": 4,
           "name": "Voldaren Epicure"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Thoughtseize"
         },
         {
           "count": 3,
-          "name": "Soul-Guide Lantern"
+          "name": "Copperline Gorge"
         },
         {
-          "count": 2,
-          "name": "Hexing Squelcher"
-        },
+          "count": 3,
+          "name": "Rottenmouth Viper"
+        }
+      ],
+      "sideboard": [
         {
           "count": 3,
           "name": "Fatal Push"
         },
         {
-          "count": 1,
-          "name": "Fable of the Mirror-Breaker"
+          "count": 2,
+          "name": "Soul-Guide Lantern"
         },
         {
-          "count": 1,
-          "name": "Duress"
+          "count": 2,
+          "name": "Ob Nixilis, the Adversary"
         },
         {
           "count": 3,
           "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
         }
       ]
     },
