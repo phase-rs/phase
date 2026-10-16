@@ -1825,12 +1825,13 @@ async fn admit_seat_return_while_session_locked(
 /// which the declared order places below it.
 ///
 /// **The sender-map half is not covered by the session guard.** The reaper's
-/// and the lobby-expiry sweep's `prune_game_connections`, the seat-mutate arm's
-/// kicked-seat removal and the abandon arm's own route teardowns all write a
-/// game's `connections` entry outside it, and the lobby-expiry sweep in
-/// particular prunes a *started, still-live* game's entry after refusing to
-/// retire it. That is why the abandon path keeps both of its authority checks
-/// rather than collapsing them into one.
+/// `prune_game_connections`, the lobby-expiry sweep's
+/// `ExpiredLobbyRoutes::prune`, the seat-mutate arm's kicked-seat removal and
+/// the abandon arm's own route teardowns all write a game's `connections`
+/// entry outside it, and the lobby-expiry sweep in particular prunes a
+/// *started, still-live* game's entry after refusing to retire it. That is why
+/// the abandon path keeps both of its authority checks rather than collapsing
+/// them into one.
 async fn full_socket_is_current_while_state_locked(
     session: &GameSession,
     connections: &SharedConnections,
@@ -5272,18 +5273,15 @@ async fn dispatch_broker_msg(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
 ) {
-    // An unhosted heartbeat has no broker side effects. Keep its liveness
-    // independent of unrelated listing work; hosts still refresh their stamp
-    // through Broker::handle before receiving the same ordered Pong.
-    if let (lobby_broker::LobbyClientMessage::Ping { timestamp }, None) =
-        (&lobby_msg, &identity.lobby_host_game)
-    {
-        let _ = tx.send(ServerMessage::Pong {
-            timestamp: *timestamp,
-        });
+    let mut conn = identity.to_conn_state();
+    // The broker is the single authority for what such a frame is answered
+    // with; this only asks it before taking the lock. A frame it can answer
+    // statelessly (an unhosted heartbeat) stays live while unrelated listing
+    // work holds the lobby.
+    if let Some(reply) = Broker::stateless_reply(&conn, &lobby_msg) {
+        let _ = tx.send(to_server_message(reply));
         return;
     }
-    let mut conn = identity.to_conn_state();
     let mut broker = lobby.lock().await;
     let outbounds = broker.handle(&mut conn, lobby_msg, &SysEnv);
     identity.absorb_conn_state(conn);
@@ -6393,8 +6391,11 @@ fn consume_lobby_expiry_sweep(
     broker.reap_expired_handled(&lobby_sweep.sweep.acted, env)
 }
 
-/// Route identities observed before consuming a listing. Cleanup must not
-/// remove a replacement connection installed after the broker guard is released.
+/// Route identities observed before consuming a listing. Cleanup removes only
+/// those captured channels, so a replacement connection installed after the
+/// broker guard is released is not pruned. That narrows the window rather than
+/// closing it: a captured channel that rejoins the code between capture and
+/// prune is indistinguishable from the retired route.
 #[derive(Default)]
 struct ExpiredLobbyRoutes {
     players: HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>,
@@ -6520,8 +6521,14 @@ async fn finish_lobby_expiry_sweep(
         }
         removed
     };
-    // No broker guard while waiting for either global route map. Captured
-    // channel identities also protect a new owner of a reused game code.
+    // No broker guard while waiting for either global route map. Pruning by
+    // captured channel identity narrows the window in which a new owner of a
+    // reused game code could lose its routes; it cannot close it (see
+    // `ExpiredLobbyRoutes`). `removed` holds every code the broker announced,
+    // so a superseded code is excluded: it now names a live replacement
+    // listing, and pruning it would reach into a game this sweep did not
+    // retire. A deferred code is likewise absent and is pruned on the tick
+    // that retires it.
     if !removed.is_empty() {
         routes.prune(&removed, connections, spectators).await;
     }
@@ -7289,7 +7296,7 @@ async fn broadcast_ai_results(
 ) {
     let game_code = &full_key.game_code;
     // Broadcast AI follow-up results with delays
-    for transition in ai_results {
+    for (index, transition) in ai_results.iter().enumerate() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let ai_revision = transition.state_revision;
         let ai_raw_state = &transition.state;
@@ -7317,7 +7324,10 @@ async fn broadcast_ai_results(
         {
             continue;
         }
-        let is_last = transition.decision.is_some();
+        // Positional, not inferred from `decision`: the batch offers its
+        // decision on exactly its final transition (`run_ai_action_batch`), so
+        // an earlier transition carries `None` and advertises no actions.
+        let is_last = index + 1 == ai_results.len();
 
         let players = connections.lock().await.get(game_code).cloned();
         // Filter AI state per-player outside the lock
@@ -11479,7 +11489,10 @@ async fn handle_client_message(
 
         ClientMessage::Ping { .. } => {
             // Mode-agnostic keepalive: the broker is the single authority for
-            // the Pong reply on both Full and LobbyOnly servers.
+            // the Pong reply on both Full and LobbyOnly servers, whether it is
+            // computed under the lobby lock (`Broker::handle`, which also
+            // refreshes a host's liveness) or without it
+            // (`Broker::stateless_reply`, in `dispatch_broker_msg`).
             dispatch_broker(
                 &client_msg,
                 lobby,

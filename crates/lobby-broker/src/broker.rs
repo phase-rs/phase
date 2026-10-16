@@ -507,6 +507,30 @@ impl Broker {
             .map(crate::protocol::TournamentView::from)
     }
 
+    /// The reply to a frame that needs no broker state and has no side effects,
+    /// or `None` when the frame must go through [`Broker::handle`].
+    ///
+    /// Takes no `self`, so a shell can answer without taking the lock that
+    /// guards the broker. Today that is a `Ping` from a connection that does
+    /// not host a listing: a host's frame must also refresh its listing's
+    /// liveness clock (see the prelude of [`Broker::handle`]), which needs the
+    /// broker, so a hosting connection always yields `None`. The reply is a
+    /// point reply to the sender, hence a bare [`LobbyServerMessage`] rather
+    /// than an [`Outbound`] list. [`Broker::handle`] answers through this same
+    /// function, so the reply has exactly one definition.
+    #[must_use]
+    pub fn stateless_reply(
+        conn: &ConnState,
+        msg: &LobbyClientMessage,
+    ) -> Option<LobbyServerMessage> {
+        match msg {
+            LobbyClientMessage::Ping { timestamp } if conn.host_game.is_none() => {
+                Some(pong_reply(*timestamp))
+            }
+            _ => None,
+        }
+    }
+
     /// Single entry for client frames. Returns the ordered side effects the
     /// shell must perform. The error helper keeps the many reject paths terse.
     pub fn handle(
@@ -515,6 +539,12 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // Frames answerable without broker state (an unhosted Ping) never
+        // reach the liveness refresh, the guard or the dispatch below: none of
+        // them has anything to do for such a frame.
+        if let Some(reply) = Self::stateless_reply(conn, &msg) {
+            return vec![Outbound::ToSelf(reply)];
+        }
         // Any frame from the socket that owns the current listing is proof its
         // host is alive, so it refreshes the listing's liveness clock. Scoped
         // by identity, so a stale stamp cannot extend a reclaimer's listing;
@@ -644,8 +674,10 @@ impl Broker {
                 env,
             ),
 
+            // Reached only by a hosting connection (an unhosted Ping is
+            // answered by `stateless_reply` above), after its liveness refresh.
             LobbyClientMessage::Ping { timestamp } => {
-                vec![Outbound::ToSelf(LobbyServerMessage::Pong { timestamp })]
+                vec![Outbound::ToSelf(pong_reply(timestamp))]
             }
 
             LobbyClientMessage::UpdateLobbyMetadata {
@@ -1833,6 +1865,13 @@ pub fn server_hello(
 
 fn error(message: &str) -> Outbound {
     Outbound::ToSelf(LobbyServerMessage::error(message))
+}
+
+/// The keepalive reply: echoes the client's timestamp. The single constructor
+/// for `Pong`, shared by [`Broker::stateless_reply`] and the `Ping` arm of
+/// [`Broker::handle`].
+fn pong_reply(timestamp: u64) -> LobbyServerMessage {
+    LobbyServerMessage::Pong { timestamp }
 }
 
 /// The refusal for one gated tournament action: a `TournamentActionRejected`
@@ -3474,6 +3513,49 @@ mod tests {
         assert_eq!(
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 7 })]
+        );
+    }
+
+    #[test]
+    fn stateless_reply_answers_an_unhosted_ping_and_nothing_else() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        // A connection that hosts no listing is answered without the broker.
+        let guest = ConnState::default();
+        assert_eq!(
+            Broker::stateless_reply(&guest, &LobbyClientMessage::Ping { timestamp: 9 }),
+            Some(LobbyServerMessage::Pong { timestamp: 9 })
+        );
+        // The reply is the one `handle` produces for the same frame.
+        let mut guest_conn = ConnState::default();
+        assert_eq!(
+            broker.handle(
+                &mut guest_conn,
+                LobbyClientMessage::Ping { timestamp: 9 },
+                &env
+            ),
+            [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 9 })]
+        );
+
+        // A hosting connection's Ping must reach `handle` to refresh liveness.
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        create(&mut host, &mut broker, &env);
+        assert!(host.host_game.is_some());
+        assert_eq!(
+            Broker::stateless_reply(&host, &LobbyClientMessage::Ping { timestamp: 9 }),
+            None
+        );
+
+        // Any other frame needs the broker, hosting or not.
+        assert_eq!(
+            Broker::stateless_reply(&guest, &LobbyClientMessage::SubscribeLobby),
+            None
+        );
+        assert_eq!(
+            Broker::stateless_reply(&host, &LobbyClientMessage::SubscribeLobby),
+            None
         );
     }
 

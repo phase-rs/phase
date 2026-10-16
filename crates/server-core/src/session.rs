@@ -5947,6 +5947,10 @@ mod tests {
                     .expect("final state offers its decision");
                 let (legal, costs, by_object) = engine_legal_actions_full(&session.state);
                 assert_eq!(decision.legal_actions, legal);
+                assert_eq!(
+                    decision.auto_pass_recommended,
+                    auto_pass_recommended(&session.state, &legal)
+                );
                 assert_eq!(decision.spell_costs, costs);
                 assert_eq!(decision.legal_actions_by_object, by_object);
                 assert_eq!(last.state.waiting_for, session.state.waiting_for);
