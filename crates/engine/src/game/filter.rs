@@ -15871,6 +15871,36 @@ mod tests {
         );
     }
 
+    /// F2 — RESOLUTION. The granting-object match names the exact stamped
+    /// incarnation only: bound matches that occurrence, a later incarnation
+    /// of the same storage id does not, and unbound matches nothing.
+    #[test]
+    fn granting_object_match_names_the_stamped_incarnation_only() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let granter = add_creature(&mut state, PlayerId(0), "Granter");
+        let stamp = ObjectIncarnationRef::from_object(&state.objects[&granter]);
+        let bound = TargetFilter::GrantingObject { bound: Some(stamp) };
+        assert!(
+            matches_target_filter(&state, granter, &bound, source),
+            "the stamped incarnation must match"
+        );
+        state.objects.get_mut(&granter).unwrap().bump_incarnation();
+        assert!(
+            !matches_target_filter(&state, granter, &bound, source),
+            "a later incarnation of the same id must not match (CR 400.7)"
+        );
+        assert!(
+            !matches_target_filter(
+                &state,
+                granter,
+                &TargetFilter::GrantingObject { bound: None },
+                source
+            ),
+            "unbound matches nothing"
+        );
+    }
+
     /// CR 400.7: the pre-migration wire form stored a bare `ObjectId`. It must
     /// deserialize fail-closed to `LEGACY_INCARNATION`, a value no real
     /// incarnation can equal, so a loaded legacy choice matches nothing.

@@ -1507,6 +1507,21 @@ fn quantity_ref(r: &$($mut_)? QuantityRef, v: &mut impl FnMut(Symbol<'_>)) {
                 }
             });
         }
+        // F2: the four direct card-type heads admit the same filtered
+        // sources — walk their members through the same bounded union
+        // authority so a sole granter symbol binds in both modes.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            define_granter_walk!(@members_of source $($mut_)?, &mut |leaf| {
+                match leaf {
+                    CardTypeSetSource::Objects { filter: f } => filter(f, v),
+                    CardTypeSetSource::TrackedSet { filter: Some(f), .. } => filter(f, v),
+                    _ => {}
+                }
+            });
+        }
         _ => {}
     }
 }
@@ -1527,6 +1542,18 @@ fn object_scope(scope: &$($mut_)? ObjectScope, v: &mut impl FnMut(Symbol<'_>)) {
     };
     (@members $aggregate:ident mut, $visit:expr) => {
         $aggregate.source_mut().try_for_each_member_mut(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
+    (@members_of $source:ident, $visit:expr) => {
+        $source.try_for_each_member(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
+    (@members_of $source:ident mut, $visit:expr) => {
+        $source.try_for_each_member_mut(
             crate::types::ability::UNION_DEPTH_BUDGET,
             $visit,
         )
@@ -1616,8 +1643,8 @@ mod tests {
     use super::{each_granter_symbol, DefinitionNode};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, Effect,
-        ObjectProperty, PropertyAggregate, QuantityExpr, QuantityRef, TargetFilter,
-        TrackedAnaphorSource,
+        ObjectProperty, PropertyAggregate, QuantityExpr, QuantityRef, SubtypeExclusion,
+        TargetFilter, TrackedAnaphorSource,
     };
 
     /// PR-C F5 — VISITOR. The granter walk visits a `TrackedSet` member
@@ -1729,5 +1756,169 @@ mod tests {
             )),
             "a union of unfiltered sets yields no granter symbol"
         );
+    }
+
+    /// F2: the granter walk visits `TrackedSet` member filters on the four
+    /// direct card-type heads exactly like `PropertyAggregate` — a sole
+    /// granting-object symbol is found (and therefore bindable), including
+    /// nested in an `AnyOf` union, and an unfiltered set yields nothing.
+    #[test]
+    fn granter_walk_visits_direct_head_member_filters() {
+        let filtered_tracked = || CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::GrantingObject { bound: None }),
+        };
+        let unfiltered_tracked = || CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let filtered_objects = || CardTypeSetSource::Objects {
+            filter: TargetFilter::GrantingObject { bound: None },
+        };
+        let heads = |source: CardTypeSetSource| {
+            [
+                QuantityRef::DistinctCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::SharedCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                },
+                QuantityRef::DistinctColorsAmong { source },
+            ]
+        };
+        let define = |qty: QuantityRef| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let collect = |def: &AbilityDefinition| {
+            let mut found = false;
+            each_granter_symbol(DefinitionNode::Ability(def), &mut |symbol| {
+                found |= matches!(symbol, granter_symbols::Symbol::Filter(_));
+            });
+            found
+        };
+        for (source, expected, what) in [
+            (
+                filtered_tracked(),
+                true,
+                "a sole symbol in a TrackedSet member filter",
+            ),
+            (filtered_objects(), true, "a symbol in an Objects filter"),
+            (
+                CardTypeSetSource::any_of(vec![unfiltered_tracked(), filtered_tracked()])
+                    .expect("union holds"),
+                true,
+                "a symbol nested in an AnyOf union",
+            ),
+            (unfiltered_tracked(), false, "an unfiltered set"),
+        ] {
+            for qty in heads(source) {
+                assert_eq!(
+                    collect(&define(qty)),
+                    expected,
+                    "{what} must agree on granter-symbol discovery"
+                );
+            }
+        }
+    }
+
+    /// F2: the mutable granter walk binds a sole symbol in a direct head's
+    /// member filter to the stamped granter — and keeps a pre-existing
+    /// unrelated stamp (binding never clobbers).
+    #[test]
+    fn granter_walk_binds_direct_head_member_filters() {
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+
+        let granter = ObjectIncarnationRef::of(ObjectId(5), 1);
+        let earlier = ObjectIncarnationRef::of(ObjectId(9), 4);
+        let define = |qty: QuantityRef| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let tracked = |bound: Option<ObjectIncarnationRef>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::GrantingObject { bound }),
+        };
+        let heads = |source: CardTypeSetSource| {
+            [
+                QuantityRef::DistinctCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::SharedCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                },
+                QuantityRef::DistinctColorsAmong { source },
+            ]
+        };
+        let bound_of = |def: &AbilityDefinition| {
+            let Effect::GainLife {
+                amount: QuantityExpr::Ref { qty },
+                ..
+            } = &*def.effect
+            else {
+                panic!("GainLife shape required");
+            };
+            let source = match qty {
+                QuantityRef::DistinctCardTypes { source }
+                | QuantityRef::SharedCardTypes { source }
+                | QuantityRef::DistinctSubtypes { source, .. }
+                | QuantityRef::DistinctColorsAmong { source } => source,
+                other => panic!("direct head required, found {other:?}"),
+            };
+            let CardTypeSetSource::TrackedSet {
+                filter: Some(TargetFilter::GrantingObject { bound }),
+                ..
+            } = source
+            else {
+                panic!("filtered TrackedSet required");
+            };
+            *bound
+        };
+        let stamp = |def: &mut AbilityDefinition| {
+            super::granter_symbols_mut::each_node(
+                super::DefinitionNodeMut::Ability(def),
+                &mut |node| {
+                    super::granter_symbols_mut::node_fields(
+                        node,
+                        &mut super::granter_symbols_mut::bind(granter),
+                    )
+                },
+            )
+        };
+        for qty in heads(tracked(None)) {
+            let mut def = define(qty);
+            stamp(&mut def);
+            assert_eq!(bound_of(&def), Some(granter));
+        }
+        for qty in heads(tracked(Some(earlier))) {
+            let mut def = define(qty);
+            stamp(&mut def);
+            assert_eq!(
+                bound_of(&def),
+                Some(earlier),
+                "binding must not clobber an unrelated stamp"
+            );
+        }
     }
 }
