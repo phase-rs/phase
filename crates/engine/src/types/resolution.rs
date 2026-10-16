@@ -372,6 +372,15 @@ pub struct PendingDieRoll {
     /// `targets`, for the local fallback and occurrence-aware parked reads.
     #[serde(default)]
     pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins
+    /// (`ResolvedAbility::target_incarnations`), captured at park time so a
+    /// resumed indexed read applies the same eligibility guard the live
+    /// slot authority would. Keyed by object id, not positional — an id
+    /// with no entry passes (fail-open). Currency is evaluated at resume,
+    /// not at park. `#[serde(default)]` for in-flight states serialized
+    /// before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -462,6 +471,12 @@ pub struct PendingDieRollInstruction {
     /// for in-flight states serialized before this field existed.
     #[serde(default)]
     pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1

@@ -22129,6 +22129,7 @@ mod tests {
             declared_target_pins: captured.declared_pins,
             declared_ahead: captured.declared_ahead,
             local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
         };
         let mut events = Vec::new();
         crate::game::effects::roll_die::resume_after_ignore(
@@ -22153,6 +22154,196 @@ mod tests {
             rolls,
             vec![15],
             "slot 1 reads its own pumped-departure pin (10 + 5); dropping the stale pin emits 10"
+        );
+    }
+
+    /// F1r2: live slot selection still honors the SEPARATE keyed
+    /// delayed-referent guard — slot 1's occurrence departed with pumped
+    /// power 5, but its keyed pin went stale with it, so the keyed
+    /// restriction excludes it and the aggregate reads 0. The
+    /// no-keyed-pin twin reads 5 through fail-open admission.
+    #[test]
+    fn live_slot_selection_excludes_stale_keyed_delayed_referent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        // Delayed-trigger creation stamps the keyed referent list through
+        // this recursive setter; the stale keyed pin mirrors the departure.
+        ability.set_target_incarnations_recursive(vec![stale]);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            0,
+            "the stale keyed guard excludes slot 1 despite its departure value"
+        );
+    }
+
+    /// F1r2: parked slot selection honors the SAME keyed delayed-referent
+    /// guard — the repeated-id twin captured through the production
+    /// authority and resumed: slot 1's stale keyed pin excludes it, so
+    /// the modifier reads 0 (natural 10 stays 10). Without the carried
+    /// guard the positional departure reads 5 and emits 15.
+    #[test]
+    fn parked_slot_selection_excludes_stale_keyed_delayed_referent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        ability.set_target_incarnations_recursive(vec![stale]);
+        // Production capture: the same calls `resolve` makes before a
+        // CR 616.1 suspension drops the ability.
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.keyed_target_incarnations,
+            vec![stale],
+            "reach guard: capture must carry the keyed guard"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let chain_root_targets = ability.context.chain_root_targets.clone();
+        let chain_root_target_pins = chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                    )
+                    .unwrap(),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: source,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets,
+            illegal_target_slots: illegal,
+            chain_root_target_pins,
+            declared_targets: captured.declared_targets,
+            declared_target_pins: captured.declared_pins,
+            declared_ahead: captured.declared_ahead,
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![10],
+            "the stale keyed guard excludes slot 1 (10 + 0); admitting it emits 15"
         );
     }
 
@@ -26826,6 +27017,7 @@ mod tests {
             declared_target_pins: Vec::new(),
             declared_ahead: 0,
             local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
         };
 
         let mut events = Vec::new();

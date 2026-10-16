@@ -619,6 +619,7 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         declared_target_pins: vec![],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,
@@ -723,6 +724,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         declared_target_pins: vec![None, None],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -793,6 +795,7 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         declared_target_pins: vec![None, None],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -891,6 +894,7 @@ fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
         declared_target_pins: vec![Some(pin)],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -988,6 +992,7 @@ fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
         declared_target_pins: vec![],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1057,6 +1062,7 @@ fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
         declared_target_pins: vec![],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1131,6 +1137,7 @@ fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
         declared_target_pins: vec![None],
         declared_ahead: 1,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1230,6 +1237,7 @@ fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
         declared_target_pins: vec![Some(stale_pin), Some(current_pin)],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1338,6 +1346,7 @@ fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
         declared_target_pins: vec![],
         declared_ahead: 0,
         local_target_pins: vec![Some(pin)],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1412,6 +1421,7 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         declared_target_pins: vec![None, None],
         declared_ahead: 0,
         local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)

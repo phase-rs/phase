@@ -1578,11 +1578,15 @@ pub(crate) fn carrier_illegal_slots(state: &GameState, ability: &ResolvedAbility
 ///   [`resolve_live_parent_slot_from_root`].
 /// - `local_pins`: the node's own positional pins, aligned with its announced
 ///   targets, for the local fallback and for occurrence-aware parked reads.
+/// - `keyed_target_incarnations`: the node's keyed delayed-referent pins
+///   (`ResolvedAbility::target_incarnations`), so resume applies the same
+///   eligibility guard the live slot authority would.
 pub(crate) struct ParkedSlotCapture {
     pub declared_targets: Vec<TargetRef>,
     pub declared_pins: Vec<Option<ObjectIncarnationRef>>,
     pub declared_ahead: usize,
     pub local_pins: Vec<Option<ObjectIncarnationRef>>,
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
 }
 
 /// Capture the slot context for `ability` suspending mid-resolution. With no
@@ -1604,6 +1608,7 @@ pub(crate) fn capture_parked_slot_context(
         declared_pins,
         declared_ahead: super::ability_utils::declared_slots_ahead_of(root, base),
         local_pins: ability.aligned_target_pins(),
+        keyed_target_incarnations: ability.target_incarnations.clone(),
     }
 }
 
@@ -9164,6 +9169,10 @@ mod tests {
             captured.local_pins,
             vec![Some(stale), Some(current)],
             "the node's own pins align the same way"
+        );
+        assert!(
+            captured.keyed_target_incarnations.is_empty(),
+            "no delayed referents here: the keyed guard travels empty"
         );
     }
 

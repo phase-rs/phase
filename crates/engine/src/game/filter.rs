@@ -1458,10 +1458,11 @@ fn parent_target_mass_leg(state: &GameState, ability: &ResolvedAbility) -> Targe
 /// the resolving ability itself does not survive the suspension. `local`
 /// keeps positional slice semantics for whole-population reads
 /// (`ParentTarget`); indexed reads (`ParentTargetSlot`) resolve against
-/// `root` (declared chain-root numbering) and exclude `illegal_slots` (the
-/// carrier stamp). Announced pins are carried into occurrence-aware reads —
-/// a stale pin reads its exact departure LKI, matching the live path — and
-/// never exclude; only the stamp excludes.
+/// `root` (declared chain-root numbering), exclude `illegal_slots` (the
+/// carrier stamp), and judge the selected object id against the keyed
+/// delayed-referent pins with the shared live predicate. Positional pins
+/// are carried into occurrence-aware reads — a stale positional pin reads
+/// its exact departure LKI, matching the live path — and never exclude.
 #[derive(Clone, Copy)]
 pub struct ParkedTargets<'a> {
     /// The suspending node's own targets (positional, local numbering).
@@ -1487,6 +1488,11 @@ pub struct ParkedTargets<'a> {
     /// The slot base's offset in root numbering: resume judges the
     /// root-numbered stamp at `ahead + index`. Zero on pre-M2 frames.
     pub ahead: usize,
+    /// The keyed delayed-referent pins captured at park time. An indexed
+    /// selection judges the selected object id against these with the
+    /// shared keyed predicate — the same guard the live slot authority
+    /// applies — evaluated live at resume.
+    pub keyed_target_incarnations: &'a [ObjectIncarnationRef],
 }
 
 /// Context bundle passed into filter evaluation.
@@ -10913,10 +10919,11 @@ fn matches_crew_relation(
 /// does not survive the suspension): whole-population reads take the local
 /// slice; indexed reads resolve against the chain-root list (declared
 /// numbering — indexing happens before checks, so an illegal earlier slot
-/// never renumbers the selection) and exclude carrier-stamped slots. The
-/// aligned announced pin is carried into the shared occurrence reader — a
-/// stale pin reads exact departure LKI like the live path — and never
-/// excludes. An empty root list (legacy
+/// never renumbers the selection), exclude carrier-stamped slots, and apply
+/// the shared keyed delayed-referent guard to the selected object id
+/// (fail-open when unrecorded). The aligned announced pin is carried into
+/// the shared occurrence reader — a stale pin reads exact departure LKI
+/// like the live path — and never excludes. An empty root list (legacy
 /// in-flight frames, attraction rolls) falls back to local positional
 /// indexing — the only numbering those frames ever carried.
 /// One parked referent with the occurrence pin that selected it. The pin
@@ -10929,7 +10936,7 @@ pub(crate) struct ParkedReferent<'a> {
 }
 
 pub(crate) fn referenced_parked_targets_for_filter<'a>(
-    _state: &GameState,
+    state: &GameState,
     target: &TargetFilter,
     parked: ParkedTargets<'a>,
 ) -> Vec<ParkedReferent<'a>> {
@@ -10968,11 +10975,26 @@ pub(crate) fn referenced_parked_targets_for_filter<'a>(
             if parked.illegal_slots.contains(&(ahead + *index)) {
                 return vec![];
             }
+            // The keyed delayed-referent guard travels with the frame: an
+            // object id with a stale keyed pin is excluded here, through
+            // the same shared predicate the live slot authority applies —
+            // evaluated live at resume, fail-open when unrecorded. This is
+            // the ONLY currency exclusion; a stale POSITIONAL pin is still
+            // carried to the exact-pin reader below.
+            if let TargetRef::Object(id) = referent {
+                if !crate::types::ability::keyed_target_pin_is_current(
+                    parked.keyed_target_incarnations,
+                    *id,
+                    state,
+                ) {
+                    return vec![];
+                }
+            }
             // A short or missing pin entry passes unpinned (legacy frames
-            // carry no pins). Players carry no incarnation. A STALE pin is
-            // carried, never dropped: the shared pinned reader resolves the
-            // selected occurrence's exact departure LKI (CR 608.2h), exactly
-            // like the live path — only the carrier stamp above excludes.
+            // carry no pins). Players carry no incarnation. A STALE
+            // positional pin is carried, never dropped: the shared pinned
+            // reader resolves the selected occurrence's exact departure LKI
+            // (CR 608.2h), exactly like the live path.
             let pin = pins.get(*index).copied().flatten();
             vec![ParkedReferent {
                 target: referent,
