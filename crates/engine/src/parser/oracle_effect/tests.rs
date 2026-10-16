@@ -95571,7 +95571,9 @@ fn shared_this_way_policy_trips_identity_but_excuses_bound_and_reveal() {
     assert!(
         !target_span_dropped_this_way_anaphor(
             "a creature card put into a graveyard this way",
-            &TargetFilter::TrackedSet { id: TrackedSetId(0) },
+            &TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
         ),
         "a target that bound the anaphor passes through untouched"
     );

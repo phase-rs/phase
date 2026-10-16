@@ -1480,11 +1480,7 @@ fn song_keep_choice_pause_is_production_created() {
     };
     assert_eq!(*player, P0, "the roller answers the keep choice");
     assert_eq!(*results, vec![5, 5], "seed 49 ties the raised d20s at 5");
-    assert_eq!(
-        *ignorable_indices,
-        vec![0, 1],
-        "both tied dice are offered"
-    );
+    assert_eq!(*ignorable_indices, vec![0, 1], "both tied dice are offered");
     assert_eq!(*ignore_count, 1, "Barbarian ignores one lowest roll");
     assert_eq!(
         runner.state().objects[&oak].zone,

@@ -21728,9 +21728,7 @@ mod tests {
             .insert(chain_id, vec![batch_member]);
 
         // Hostile but SATISFIED: the batch member is a red Goblin creature.
-        let satisfied_creature = || {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
-        };
+        let satisfied_creature = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
         let poisoned = CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::TriggeringBatch,
             caused_by: None,

@@ -7868,9 +7868,9 @@ impl FilterProp {
             // Quantity-threshold predicates: a number read from a tracked set
             // (`Cmc`, `Counters`, `PtComparison`) is a comparison value, not
             // a membership restriction.
-            FilterProp::Counters { .. } | FilterProp::Cmc { .. } | FilterProp::PtComparison { .. } => {
-                false
-            }
+            FilterProp::Counters { .. }
+            | FilterProp::Cmc { .. }
+            | FilterProp::PtComparison { .. } => false,
             // Every remaining variant is a leaf over scalars, enums, zones,
             // costs, names, or counters: none of it can name a tracked set.
             // Exhaustive by construction — a new variant fails to compile
@@ -42030,16 +42030,12 @@ mod tests {
             );
         }
         // The filtered tracked-set selector itself: true.
-        assert!(
-            TargetFilter::TrackedSetFiltered {
-                id: crate::types::identifiers::TrackedSetId(0),
-                filter: Box::new(TargetFilter::Typed(TypedFilter::new(
-                    TypeFilter::Creature
-                ))),
-                caused_by: None,
-            }
-            .references_tracked_set()
-        );
+        assert!(TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            caused_by: None,
+        }
+        .references_tracked_set());
     }
 
     #[test]
