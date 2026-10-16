@@ -16490,6 +16490,15 @@ fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {
     )
 }
 
+/// CR 606.3 + CR 101.1: "You may activate [recipient]'s loyalty ability N more
+/// times this turn" grants the permission to make the activations later. Its
+/// "may" is that later activation (CR 608.2d), not a choice made while the grant
+/// resolves, so the grant lowers as mandatory. The parsed effect is the detector,
+/// so no clause text is inspected.
+fn clause_is_extra_loyalty_activation_grant(clause: &ParsedEffectClause) -> bool {
+    matches!(&clause.effect, Effect::GrantExtraLoyaltyActivations { .. })
+}
+
 /// CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that clause is
 /// now absorbed into `Effect::GenericEffect.end_cost` by the `EndEffectCost`
 /// continuation. Kept as defense-in-depth for the non-mana shape (a hypothetical
@@ -44905,6 +44914,11 @@ fn parse_effect_chain_ir_body(
         // CR 601.3: a granted graveyard cast permission ("you may cast <type>
         // spells from your graveyard this turn") lets the player cast later; its
         // "may" is that later cast, not a choice made at resolution (CR 608.2d).
+        //
+        // CR 606.3 + CR 101.1: the same holds for an extra loyalty-activation
+        // grant ("you may activate ~'s loyalty ability two more times this turn"):
+        // the "may" is the later activation, and the grant itself is mandatory
+        // (`clause_is_extra_loyalty_activation_grant`).
         let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. })
             || crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&clause.effect)
             || matches!(
@@ -44923,6 +44937,7 @@ fn parse_effect_chain_ir_body(
                 }
             )
             || clause_is_additional_land_permission(&clause)
+            || clause_is_extra_loyalty_activation_grant(&clause)
             || clause_is_pay_to_end_effect_termination(normalized_text)
         {
             false

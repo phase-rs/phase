@@ -3181,7 +3181,8 @@ fn cover_projection(state: &GameState) -> GameState {
 /// then that same strict comparator — plus the hand conjunct at the end of
 /// [`loop_states_equal_modulo_resources_side`], where this gate compensates for an axis the
 /// strict comparator leaves out: [`loyalty_activation_counts_match`] over the per-object
-/// CR 606.3 count (distinct from the per-player `extra_loyalty_activations_this_turn`, which
+/// CR 606.3 count and per-permanent extra-activation grant (distinct from the per-player
+/// `GameState::extra_loyalty_activations_this_turn` map, which
 /// `impl PartialEq for GameState` does compare). It states its own fail-closed argument there.
 ///
 /// What the projection removes is named by its own authorities rather than listed, because a
@@ -3215,25 +3216,33 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     bump_loop_detect_cost(|cost| cost.compares_equal_modulo_resources += 1);
     let pa = project_out_resources(a);
     let pb = b.projected();
-    // CR 606.3: the per-object loyalty-activation count is the authoritative
-    // once-per-turn-per-permanent gate, but `objects_content_eq` does NOT compare it
-    // (and `normalize_for_loop` does not zero it), so a loyalty loop is invisible to
-    // `loop_states_equal`. Compare it analysis-locally (do NOT widen the strict
-    // comparator, do NOT zero the field) so a loop that re-activates a loyalty
-    // ability (count k -> k+1) compares UNEQUAL and is not falsely certified.
+    // CR 606.3: the per-object loyalty-activation count (and the per-permanent
+    // extra-activation grant that extends it) is the authoritative
+    // once-per-turn-per-permanent gate, but `objects_content_eq` does NOT compare
+    // either (and `normalize_for_loop` does not zero them), so a loyalty loop is
+    // invisible to `loop_states_equal`. Compare them analysis-locally (do NOT
+    // widen the strict comparator, do NOT zero the fields) so a loop that
+    // re-activates a loyalty ability (count k -> k+1) compares UNEQUAL and is not
+    // falsely certified.
     loop_states_equal(&pa, &pb) && loyalty_activation_counts_match(&pa, &pb)
 }
 
-/// CR 606.3: per-object `loyalty_activations_this_turn` equality across two
-/// projected states. Transparent for non-loyalty loops (all-zero counts compare
-/// equal); discriminating for loyalty loops (the count grows each activation).
+/// CR 606.3: per-object loyalty-activation equality across two projected
+/// states, over both the count (`loyalty_activations_this_turn`) and the
+/// per-permanent extra-activation grant (`extra_loyalty_activations_this_turn`).
+/// Two states that differ in how many more activations a permanent may make are
+/// not the same position, so a differing grant breaks equality exactly as a
+/// differing count does (fail-closed). Transparent for non-loyalty loops
+/// (all-zero values compare equal); discriminating for loyalty loops (the count
+/// grows each activation).
 /// `loop_states_equal` already requires identical object sets before this runs, so
 /// iterating one side's objects and comparing shared ids is symmetric.
 fn loyalty_activation_counts_match(a: &GameState, b: &GameState) -> bool {
     a.objects.iter().all(|(id, oa)| {
-        b.objects
-            .get(id)
-            .is_none_or(|ob| oa.loyalty_activations_this_turn == ob.loyalty_activations_this_turn)
+        b.objects.get(id).is_none_or(|ob| {
+            oa.loyalty_activations_this_turn == ob.loyalty_activations_this_turn
+                && oa.extra_loyalty_activations_this_turn == ob.extra_loyalty_activations_this_turn
+        })
     })
 }
 
@@ -9759,6 +9768,49 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
             "equal loyalty-activation counts must stay modulo-EQUAL (transparent for non-loyalty loops)"
+        );
+    }
+
+    /// CR 606.3 + CR 101.1: the per-permanent extra-activation grant is part of
+    /// the same analysis-local equality: two states equal except for the grant
+    /// (one permanent may activate more often) are NOT a repeat. The control
+    /// with equal grants is EQUAL, which is the reach-guard that the comparison
+    /// ran and was not unequal for another reason.
+    #[test]
+    fn permanent_loyalty_grant_breaks_modulo_equality() {
+        let mut a = GameState::new_two_player(7);
+        let oid = battlefield_creature(&mut a, 742, 0);
+        a.objects.get_mut(&oid).unwrap().card_types.core_types = vec![CoreType::Planeswalker];
+        let mut equal_grant = a.clone();
+        equal_grant
+            .objects
+            .get_mut(&oid)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 0;
+        assert!(
+            loop_states_equal_modulo_resources(&a, &equal_grant),
+            "equal grants (both 0) must stay modulo-EQUAL"
+        );
+
+        let mut b = a.clone();
+        b.objects
+            .get_mut(&oid)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "CR 606.3: states differing only in a permanent's extra loyalty-activation grant \
+             must compare UNEQUAL"
+        );
+
+        let mut c = a.clone();
+        c.objects
+            .get_mut(&oid)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert!(
+            loop_states_equal_modulo_resources(&b, &c),
+            "equal non-zero grants compare EQUAL"
         );
     }
 

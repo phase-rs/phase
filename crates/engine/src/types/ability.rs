@@ -20466,16 +20466,27 @@ pub enum Effect {
         )]
         count: QuantityExpr,
     },
-    /// CR 606.3: Grant the resolved target player the right to activate each of
-    /// their planeswalkers' loyalty abilities `amount` additional times this
-    /// turn. Class lift of The Chain Veil's "{4}, {T}: You may activate each
-    /// planeswalker's loyalty ability an additional time this turn." Stored as
-    /// a per-player counter on `GameState::extra_loyalty_activations_this_turn`,
-    /// read by `planeswalker::can_activate_loyalty_ability` as a +N bump to the
-    /// per-permanent CR 606.3 cap. The counter is cleared at turn start.
-    /// `target` defaults to `Controller` (printed wording is "you may
-    /// activate..."); parameterized for future cards that grant the bonus to a
-    /// different player.
+    /// CR 606.3 + CR 101.1: Grant extra loyalty-ability activations for the rest
+    /// of this turn. The card's text overrides CR 606.3's once-per-permanent
+    /// limit (CR 101.1) by raising the cap by `amount`; both recipient axes feed
+    /// the one gate, `planeswalker::loyalty_activation_cap`.
+    ///
+    /// `target` is the recipient axis (absent in serialized data means `Controller`):
+    /// - `Controller` — every planeswalker the controller controls (The Chain
+    ///   Veil: "...activate each planeswalker's loyalty ability an additional
+    ///   time this turn"). Stored in the per-player map
+    ///   `GameState::extra_loyalty_activations_this_turn`.
+    /// - `SelfRef` — only the resolving permanent ("You may activate ~'s loyalty
+    ///   ability two more times this turn"). Stored in
+    ///   `GameObject::extra_loyalty_activations_this_turn` and usable only for that
+    ///   permanent's own characteristic loyalty abilities; a loyalty ability it
+    ///   gained in layer 6 (CR 613.1f) is not covered. That ability-level scope is
+    ///   the card's ruling, not CR text.
+    ///
+    /// The "may" is the later activation permission, not a choice made while
+    /// applying the effect (CR 608.2d), so the grant itself is mandatory. Both
+    /// stores are cleared at turn start (CR 514.2); the per-permanent store is
+    /// also cleared when the permanent enters the battlefield (CR 400.7).
     GrantExtraLoyaltyActivations {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,

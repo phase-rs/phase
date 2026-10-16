@@ -1111,29 +1111,37 @@ fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
     Some(expr)
 }
 
-/// CR 606.3: Recognize the printed Chain Veil class — a single ability that
-/// raises the per-permanent CR 606.3 loyalty-activation cap by N for every
-/// planeswalker the controller controls. Two surface forms are accepted:
+/// CR 606.3 + CR 101.1: Recognize the extra loyalty-activation grant on both
+/// recipient axes — the card's text overrides the once-per-permanent limit.
+/// Returns the amount and the `Effect::GrantExtraLoyaltyActivations` recipient.
+/// Two surface families are accepted:
 ///
-///   - "for each planeswalker you control, you may activate one of its loyalty
-///     abilities once this turn as though none of its loyalty abilities have
-///     been activated this turn." — the printed Chain Veil wording. The
-///     "for each planeswalker you control" preamble identifies the beneficiaries
-///     (each planeswalker gets +1 cap), not a repeat count;
-///     `strip_for_each_prefix` bails out on this pattern so the imperative
-///     dispatch sees the full text here.
-///   - "activate each planeswalker's loyalty ability an additional time this
-///     turn" / "an additional N times this turn" — future-proof generalization
-///     after the outer "you may " has been stripped by
-///     `strip_optional_effect_prefix`. Numeric variant supports cards that grant
-///     more than one extra activation in a single resolution.
-fn parse_grant_extra_loyalty_activations(lower: &str) -> Option<QuantityExpr> {
+///   - The printed Chain Veil wording, recipient `Controller` (every planeswalker
+///     the controller controls): "for each planeswalker you control, you may
+///     activate one of its loyalty abilities once this turn as though none of its
+///     loyalty abilities have been activated this turn." The "for each
+///     planeswalker you control" preamble identifies the beneficiaries (each
+///     planeswalker gets +1 cap), not a repeat count; `strip_for_each_prefix`
+///     bails out on this pattern so the imperative dispatch sees the full text
+///     here. This form keeps its own non-strict behavior and is tried first.
+///   - The generalized imperative, after the outer "you may " has been stripped by
+///     `strip_optional_effect_prefix` (see [`parse_extra_loyalty_activation_grant`]):
+///     "activate each planeswalker's loyalty ability an additional time [this
+///     turn]" (recipient `Controller`) and "activate ~'s loyalty ability two more
+///     times [this turn]" (recipient `SelfRef`, Comet, Stellar Pup). The whole
+///     clause must match, so a grant followed by a further instruction is declined
+///     rather than silently truncated.
+fn parse_grant_extra_loyalty_activations(lower: &str) -> Option<(QuantityExpr, TargetFilter)> {
     if let Ok((_, amount)) = parse_chain_veil_for_each_form(lower) {
-        return Some(amount);
+        return Some((amount, TargetFilter::Controller));
     }
-    parse_each_planeswalker_additional_form(lower)
-        .map(|(_, amount)| amount)
-        .ok()
+    all_consuming(terminated(
+        parse_extra_loyalty_activation_grant,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(lower.trim())
+    .ok()
+    .map(|(_, grant)| grant)
 }
 
 /// CR 606.3: "For each planeswalker you control, you may activate one of its
@@ -1170,36 +1178,55 @@ fn parse_single_loyalty_permission(lower: &str) -> nom::IResult<&str, (), Oracle
     Ok((rest, ()))
 }
 
-/// CR 606.3: "activate each planeswalker's loyalty ability an additional time
-/// this turn" / "an additional N times this turn" — generalization after
-/// `strip_optional_effect_prefix` has consumed the outer "you may ".
-fn parse_each_planeswalker_additional_form(
-    lower: &str,
-) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
-    let (rest, _) = (
-        tag("activate "),
-        tag("each planeswalker"),
-        tag("'s "),
-        tag("loyalty ability "),
-    )
-        .parse(lower)?;
-    alt((
-        // "an additional N times this turn" → +N
-        map(
-            (
-                tag::<_, _, OracleError<'_>>("an additional "),
-                nom_primitives::parse_number,
-                tag(" times this turn"),
-            ),
-            |(_, n, _)| QuantityExpr::Fixed { value: n as i32 },
-        ),
-        // "an additional time this turn" → +1
+/// CR 606.3 + CR 101.1: "activate <recipient>'s loyalty ability <count> [this
+/// turn]" — the generalized grant after `strip_optional_effect_prefix` has
+/// consumed the outer "you may ". Recipient × count:
+///
+///   - recipient: "each planeswalker's" → `Controller` (every planeswalker the
+///     controller controls); a self-reference followed by "'s" → `SelfRef` (the
+///     resolving permanent). `parse_self_reference` can also yield
+///     `GrantingObject`, which the resolver would silently take down its player
+///     path, so only `SelfRef` is accepted.
+///   - count: "an additional time" / "one more time" → 1, "<number> more times" →
+///     N. (An "an additional <number> times" form is not accepted: the chunk
+///     loop's repeat-count peel strips a trailing " times" before this grammar
+///     runs, so it could never be reached through the chain.)
+///   - "this turn" is optional because the clause shell peels a trailing "this
+///     turn" into the ability's duration before this grammar sees the clause.
+fn parse_extra_loyalty_activation_grant(
+    input: &str,
+) -> nom::IResult<&str, (QuantityExpr, TargetFilter), OracleError<'_>> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("activate ").parse(input)?;
+    let (rest, recipient) = alt((
         value(
-            QuantityExpr::Fixed { value: 1 },
-            tag::<_, _, OracleError<'_>>("an additional time this turn"),
+            TargetFilter::Controller,
+            tag::<_, _, OracleError<'_>>("each planeswalker's "),
+        ),
+        terminated(
+            verify(nom_target::parse_self_reference, |filter: &TargetFilter| {
+                matches!(filter, TargetFilter::SelfRef)
+            }),
+            tag("'s "),
         ),
     ))
-    .parse(rest)
+    .parse(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("loyalty ability ").parse(rest)?;
+    let (rest, count) = alt((
+        value(1u32, tag::<_, _, OracleError<'_>>("an additional time")),
+        value(1u32, tag("one more time")),
+        terminated(nom_primitives::parse_number, tag(" more times")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn")).parse(rest)?;
+    Ok((
+        rest,
+        (
+            QuantityExpr::Fixed {
+                value: count as i32,
+            },
+            recipient,
+        ),
+    ))
 }
 
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
@@ -12508,23 +12535,22 @@ pub(super) fn parse_imperative_family_ast(
         )));
     }
 
-    // CR 606.3: "activate each planeswalker's loyalty ability an additional
-    // time this turn" — The Chain Veil class. The outer "you may" is
-    // stripped by `strip_optional_effect_prefix`, leaving the imperative
-    // "activate ..." form here. The grant raises the per-permanent CR 606.3
-    // activation cap by `amount` for the rest of the turn (the resolver lives
-    // in `effects::grant_extra_loyalty_activations`).
+    // CR 606.3 + CR 101.1: "activate each planeswalker's loyalty ability an
+    // additional time this turn" (The Chain Veil class, recipient `Controller`)
+    // and "activate ~'s loyalty ability two more times this turn" (Comet, Stellar
+    // Pup, recipient `SelfRef`). The outer "you may" is stripped by
+    // `strip_optional_effect_prefix`, leaving the imperative "activate ..." form
+    // here; the grant is mandatory because the "may" is the later activation
+    // permission (`clause_is_extra_loyalty_activation_grant` reconciles that in
+    // the chain loop). The grant raises the CR 606.3 activation cap by `amount`
+    // for the rest of the turn (the resolver lives in
+    // `effects::grant_extra_loyalty_activations`).
     //
-    // Quantity axes accepted:
-    //   - "an additional time"        → +1
-    //   - "an additional <number> times" → +N (future-proofs cards that grant
-    //     more than one additional activation in a single ability).
-    if let Some(amount) = parse_grant_extra_loyalty_activations(lower) {
+    // Count axes accepted: "an additional time" / "one more time" → +1, and
+    // "<number> more times" → +N.
+    if let Some((amount, target)) = parse_grant_extra_loyalty_activations(lower) {
         return Some(ImperativeFamilyAst::GainKeyword(
-            Effect::GrantExtraLoyaltyActivations {
-                amount,
-                target: TargetFilter::Controller,
-            },
+            Effect::GrantExtraLoyaltyActivations { amount, target },
         ));
     }
 
@@ -28857,5 +28883,198 @@ mod exile_graveyard_producer_shape {
             })
             .is_err());
         }
+    }
+}
+
+/// CR 606.3 + CR 101.1: the extra loyalty-activation grant, on both recipient
+/// axes (every planeswalker the controller controls, or the source permanent).
+#[cfg(test)]
+mod extra_loyalty_activation_grant_tests {
+    use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
+
+    const SOURCE_GRANT: &str = "You may activate ~'s loyalty ability two more times this turn.";
+    const SOURCE_GRANT_AFTER_DRAW: &str =
+        "Draw a card, and you may activate ~'s loyalty ability two more times this turn.";
+
+    /// The grant's `(count, recipient)` when `def`'s own effect is the grant.
+    fn grant_of(def: &AbilityDefinition) -> Option<(i32, &TargetFilter)> {
+        match &*def.effect {
+            Effect::GrantExtraLoyaltyActivations {
+                amount: QuantityExpr::Fixed { value },
+                target,
+            } => Some((*value, target)),
+            _ => None,
+        }
+    }
+
+    /// Every effect reachable through the `sub_ability` chain, root first.
+    fn chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut effects = vec![&*def.effect];
+        let mut next = def.sub_ability.as_deref();
+        while let Some(sub) = next {
+            effects.push(&*sub.effect);
+            next = sub.sub_ability.as_deref();
+        }
+        effects
+    }
+
+    fn has_unimplemented(def: &AbilityDefinition) -> bool {
+        chain_effects(def)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
+    }
+
+    /// (V1) Both recipient axes, each with and without the " this turn" the
+    /// clause shell may already have peeled, and with an optional final period.
+    #[test]
+    fn grant_grammar_accepts_both_recipient_axes() {
+        let grant = |text: &str| parse_grant_extra_loyalty_activations(text);
+        let source = |n: i32| Some((QuantityExpr::Fixed { value: n }, TargetFilter::SelfRef));
+        let controller =
+            |n: i32| Some((QuantityExpr::Fixed { value: n }, TargetFilter::Controller));
+
+        for tail in ["", " this turn", " this turn.", "."] {
+            assert_eq!(
+                grant(&format!(
+                    "activate ~'s loyalty ability two more times{tail}"
+                )),
+                source(2),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                grant(&format!("activate ~'s loyalty ability one more time{tail}")),
+                source(1),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                grant(&format!("activate ~'s loyalty ability 3 more times{tail}")),
+                source(3),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                grant(&format!(
+                    "activate each planeswalker's loyalty ability an additional time{tail}"
+                )),
+                controller(1),
+                "tail {tail:?}"
+            );
+        }
+        assert_eq!(
+            grant(
+                "for each planeswalker you control, you may activate one of its loyalty \
+                 abilities once this turn as though none of its loyalty abilities have been \
+                 activated this turn."
+            ),
+            controller(1),
+            "the printed Chain Veil wording is unchanged"
+        );
+    }
+
+    /// (V1) Declines. Each is paired with the accepted base form in the same
+    /// test, so a decline is a decision about the varied part, not an upstream
+    /// short-circuit.
+    #[test]
+    fn grant_grammar_declines_each_paired_with_a_positive_in_the_same_test() {
+        let accepted = "activate ~'s loyalty ability two more times this turn";
+        assert!(
+            parse_grant_extra_loyalty_activations(accepted).is_some(),
+            "positive reach-guard"
+        );
+        for declined in [
+            // plural noun
+            "activate ~'s loyalty abilities two more times this turn",
+            // no count
+            "activate ~'s loyalty ability this turn",
+            // a further instruction must not be silently truncated
+            "activate ~'s loyalty ability two more times this turn, then draw a card",
+            // a recipient that is neither each planeswalker nor the source
+            "activate target planeswalker's loyalty ability two more times this turn",
+            "activate its loyalty ability two more times this turn",
+            // the dropped "an additional <number> times" arm fails closed
+            "activate each planeswalker's loyalty ability an additional two times this turn",
+        ] {
+            assert_eq!(
+                parse_grant_extra_loyalty_activations(declined),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    /// (a) The bare "you may activate ~'s loyalty ability N more times" clause
+    /// is one mandatory source-scoped grant: the "may" is the later activation
+    /// permission (CR 608.2d), not a resolution-time choice.
+    #[test]
+    fn bare_clause_is_one_mandatory_source_grant() {
+        let def = parse_effect_chain(SOURCE_GRANT, AbilityKind::Activated);
+        assert!(!has_unimplemented(&def), "{def:#?}");
+        assert_eq!(
+            grant_of(&def),
+            Some((2, &TargetFilter::SelfRef)),
+            "{def:#?}"
+        );
+        assert!(!def.optional, "the grant is mandatory: {def:#?}");
+        assert!(def.sub_ability.is_none(), "{def:#?}");
+    }
+
+    /// (b) A grant conjoined with a prior clause splits at ", and you may" and
+    /// stays mandatory in its own sub-ability.
+    #[test]
+    fn grant_after_a_prior_clause_is_a_mandatory_sub_ability() {
+        let def = parse_effect_chain(SOURCE_GRANT_AFTER_DRAW, AbilityKind::Activated);
+        assert!(!has_unimplemented(&def), "{def:#?}");
+        assert!(matches!(&*def.effect, Effect::Draw { .. }), "{def:#?}");
+        assert!(!def.optional, "{def:#?}");
+        let sub = def.sub_ability.as_deref().expect("grant sub-ability");
+        assert_eq!(grant_of(sub), Some((2, &TargetFilter::SelfRef)), "{def:#?}");
+        assert!(!sub.optional, "the grant is mandatory: {def:#?}");
+    }
+
+    /// (c) Sibling controls: the reconciliation clears optionality for the
+    /// grant only. Each pairs with (a) / (b), which prove the chain reached the
+    /// same seam.
+    #[test]
+    fn reconciliation_leaves_other_may_clauses_alone() {
+        let draw = parse_effect_chain("You may draw a card.", AbilityKind::Activated);
+        assert!(matches!(&*draw.effect, Effect::Draw { .. }), "{draw:#?}");
+        assert!(draw.optional, "an ordinary \"you may\" stays optional");
+
+        let land = parse_effect_chain(
+            "You may play an additional land this turn.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            !land.optional,
+            "the land permission stays mandatory: {land:#?}"
+        );
+    }
+
+    /// (d) The printed Chain Veil text still lowers to the player-wide grant.
+    #[test]
+    fn printed_chain_veil_is_still_the_player_wide_grant() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of your end step, if you didn't activate a loyalty ability of a \
+             planeswalker this turn, you lose 2 life.\n{4}, {T}: For each planeswalker you \
+             control, you may activate one of its loyalty abilities once this turn as though \
+             none of its loyalty abilities have been activated this turn.",
+            "The Chain Veil",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let index = parsed
+            .abilities
+            .iter()
+            .position(|ability| grant_of(ability).is_some())
+            .expect("The Chain Veil keeps its grant ability");
+        let def = &parsed.abilities[index];
+        assert_eq!(
+            grant_of(def),
+            Some((1, &TargetFilter::Controller)),
+            "{def:#?}"
+        );
+        assert!(!def.optional, "{def:#?}");
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn), "{def:#?}");
     }
 }

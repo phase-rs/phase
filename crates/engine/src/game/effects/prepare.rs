@@ -520,6 +520,9 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.summoning_sick = false;
     copy.echo_due = false;
     copy.loyalty_activations_this_turn = 0;
+    // CR 707.2: a per-permanent extra loyalty-activation grant is a "this turn"
+    // effect on the permanent, not a copiable value, so the copy does not inherit it.
+    copy.extra_loyalty_activations_this_turn = 0;
     copy.assigns_damage_from_toughness = false;
     copy.assigns_damage_as_though_unblocked = false;
     copy.assigns_no_combat_damage = false;
@@ -1436,6 +1439,8 @@ mod tests {
         obj.signature_spell = Some(SignatureSpellState {});
         obj.prepared = Some(PreparedState);
         obj.prepared_copy_source = Some(ObjectId(80));
+        obj.loyalty_activations_this_turn = 1;
+        obj.extra_loyalty_activations_this_turn = 2;
 
         strip_non_copiable_state(&mut obj);
 
@@ -1474,6 +1479,8 @@ mod tests {
         assert!(!obj.uses_command_zone_rules());
         assert_eq!(obj.prepared, None);
         assert_eq!(obj.prepared_copy_source, None);
+        assert_eq!(obj.loyalty_activations_this_turn, 0);
+        assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
     }
 
     #[test]
