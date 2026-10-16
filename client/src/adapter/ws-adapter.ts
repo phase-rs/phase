@@ -1258,6 +1258,8 @@ export interface ServerInfo {
   wireFormats?: WireFormat[];
   /** Advertised liveness budget; exceeding it is recorded in diagnostics, never acted on. */
   heartbeat?: { pingIntervalMs: number; silenceBudgetMs: number };
+  /** A completion echoes only the command issued by this connection. */
+  commandCorrelation?: "CommandIdV1";
 }
 
 /**
@@ -1436,6 +1438,8 @@ export class WebSocketAdapter implements EngineAdapter {
   private fullSessionKey: FullSessionKey | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextCommandId = 1;
+  private pendingCommandId: number | null = null;
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -1870,6 +1874,7 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.pendingResolve = null;
         this.pendingReject = null;
+        this.pendingCommandId = null;
       }
       // Deliberately scoped to the submission slot. The seven reject helpers
       // below still skip on the identity-rejected path; none of them holds the
@@ -1976,18 +1981,22 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
-  private submitGameFrame(frame: unknown, sendFailure: AdapterError): Promise<SubmitResult> {
+  private submitGameFrame(frame: Record<string, unknown>, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
       // Claim before emitting: event listeners run synchronously and may submit
       // again while handling actionPendingChanged.
       this.pendingResolve = resolve;
       this.pendingReject = reject;
+      this.pendingCommandId = this.commandCorrelationNegotiated()
+        ? this.nextCommandId++
+        : null;
       try {
         this.emit({ type: "actionPendingChanged", pending: true });
       } catch (error) {
         if (this.pendingResolve === resolve) {
           this.pendingResolve = null;
           this.pendingReject = null;
+          this.pendingCommandId = null;
         }
         reject(error instanceof Error ? error : new Error(String(error)));
         return;
@@ -1995,13 +2004,37 @@ export class WebSocketAdapter implements EngineAdapter {
       // A synchronous listener may close/dispose the adapter or otherwise
       // settle this slot. Do not send after that owner has been released.
       if (this.pendingResolve !== resolve) return;
-      if (!this.send(frame) && this.pendingResolve === resolve) {
+      const commandFrame = this.pendingCommandId === null
+        ? frame
+        : { ...frame, command_id: this.pendingCommandId };
+      if (!this.send(commandFrame) && this.pendingResolve === resolve) {
         this.pendingResolve = null;
         this.pendingReject = null;
+        this.pendingCommandId = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(sendFailure);
       }
     });
+  }
+
+  private commandCorrelationNegotiated(): boolean {
+    return this._serverInfo?.commandCorrelation === "CommandIdV1";
+  }
+
+  private takeSubmission(commandId: unknown): {
+    resolve: (result: SubmitResult) => void;
+    reject: (error: Error) => void;
+  } | null {
+    const resolve = this.pendingResolve;
+    const reject = this.pendingReject;
+    if (!resolve || !reject) return null;
+    // A peer's newer snapshot is not an acknowledgement of our command.
+    // Missing IDs fall back only for servers that did not negotiate correlation.
+    if (this.commandCorrelationNegotiated() && commandId !== this.pendingCommandId) return null;
+    this.pendingResolve = null;
+    this.pendingReject = null;
+    this.pendingCommandId = null;
+    return { resolve, reject };
   }
 
   async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
@@ -2204,6 +2237,7 @@ export class WebSocketAdapter implements EngineAdapter {
       );
       this.pendingResolve = null;
       this.pendingReject = null;
+      this.pendingCommandId = null;
     }
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
@@ -2557,7 +2591,7 @@ export class WebSocketAdapter implements EngineAdapter {
     return this._serverInfo;
   }
 
-  private handleMessage(msg: { type: string; data?: unknown }): void {
+  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
     if (this.sessionIdentityRejected) return;
 
     switch (msg.type) {
@@ -2823,12 +2857,11 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
-        const resolvedAction = this.pendingResolve !== null;
-        if (this.pendingResolve) {
+        const pending = this.takeSubmission(msg.command_id);
+        const resolvedAction = pending !== null;
+        if (pending) {
+          pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingResolve({ events: data.events, log_entries: data.log_entries });
-          this.pendingResolve = null;
-          this.pendingReject = null;
         }
         if (!resolvedAction || this.options.nativePregame) {
           this.emit({
@@ -2848,49 +2881,43 @@ export class WebSocketAdapter implements EngineAdapter {
         const error = isActionRejection(data.rejection)
           ? actionRejectionError(data.rejection)
           : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
-        this.emit({ type: "actionPendingChanged", pending: false });
-        if (this.pendingReject) {
-          this.pendingReject(
-            error,
-          );
-          this.pendingResolve = null;
-          this.pendingReject = null;
+        const pending = this.takeSubmission(msg.command_id);
+        if (pending) {
+          pending.reject(error);
+          this.emit({ type: "actionPendingChanged", pending: false });
         } else {
-          // No in-flight action owns this rejection, so it answers a
-          // fire-and-forget request — `sendRequestTakeback` is the only one
-          // today. Surface it instead of dropping it on the floor.
-          //
-          // These two branches cannot race: `handle_client_message` is
-          // awaited to completion before the socket reads the next frame, so
-          // a takeback refusal is not even parsed until any preceding action
-          // has been fully answered. That is what rules out the sharper
-          // hazard here — rejecting an in-flight ACTION's promise with a
-          // TAKEBACK's reason string, which would be a misattribution rather
-          // than merely a stale spinner.
-          this.emit({ type: "requestRejected", reason: error.message });
+          // Legacy servers always released the pending indicator here.
+          if (!this.commandCorrelationNegotiated()) {
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+          // Uncorrelated takeback refusals must not release an action's slot.
+          if (msg.command_id === undefined || !this.commandCorrelationNegotiated()) {
+            this.emit({ type: "requestRejected", reason: error.message });
+          }
         }
         break;
       }
 
       case "ActionFailed": {
         const data = msg.data as { message: string };
-        if (this.pendingReject) {
+        const pending = this.takeSubmission(msg.command_id);
+        if (pending) {
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingReject(new AdapterError("WS_ERROR", data.message, false));
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        } else {
+        } else if (msg.command_id === undefined || !this.commandCorrelationNegotiated()) {
           this.emit({ type: "operationFailed", message: data.message });
         }
         break;
       }
 
       case "ActionNoOp": {
-        this.emit({ type: "actionPendingChanged", pending: false });
-        if (this.pendingResolve) {
-          this.pendingResolve({ events: [], log_entries: [] });
-          this.pendingResolve = null;
-          this.pendingReject = null;
+        const pending = this.takeSubmission(msg.command_id);
+        if (pending) {
+          pending.resolve({ events: [], log_entries: [] });
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (!this.commandCorrelationNegotiated()) {
+          // Legacy servers always released the pending indicator here.
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
         break;
       }
@@ -3191,6 +3218,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingReject(new AdapterError("WS_ERROR", message, false));
           this.pendingResolve = null;
           this.pendingReject = null;
+          this.pendingCommandId = null;
         }
         this.emit({
           type: "aiDriverFault",

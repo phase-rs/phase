@@ -276,6 +276,7 @@ export function openPhaseSocket(
         public_url?: string;
         wire_formats?: WireFormat[];
         heartbeat?: { ping_interval_ms?: unknown; silence_budget_ms?: unknown };
+        command_correlation?: unknown;
       };
       const info: ServerInfo = {
         version: data.server_version,
@@ -286,6 +287,7 @@ export function openPhaseSocket(
         publicUrl: data.public_url,
         wireFormats: data.wire_formats ?? [],
         heartbeat: parseHeartbeat(data.heartbeat),
+        commandCorrelation: data.command_correlation === "CommandIdV1" ? "CommandIdV1" : undefined,
       };
 
       const rejection = serverProtocolRejection(info, surface);
