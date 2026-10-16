@@ -49,6 +49,7 @@ use crate::planner::{
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::effect_classify::{aura_polarity, EffectPolarity};
+use crate::policies::self_cost::cheapest_payable_branch_index;
 use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
 
 use crate::policies::tutor::score_search_choice_selection;
@@ -1670,15 +1671,20 @@ pub fn fallback_action(
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
 
-        // Disjunctive activation costs: default to the first payable branch.
+        // CR 118.3 + CR 601.2h: Disjunctive activation costs: pay the branch the
+        // activation verdict priced (cheapest payable), not the first listed.
         WaitingFor::ActivationCostOneOfChoice {
             player,
             costs,
             pending_cast,
-        } => costs
-            .iter()
-            .position(|cost| cost.is_payable(state, *player, pending_cast.object_id))
-            .map(|index| GameAction::ChooseActivationCostBranch { index }),
+        } => cheapest_payable_branch_index(
+            state,
+            *player,
+            pending_cast,
+            costs,
+            &config.policy_penalties,
+        )
+        .map(|index| GameAction::ChooseActivationCostBranch { index }),
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
@@ -3496,6 +3502,7 @@ fn score_candidates_core_for_root(
             state,
             ai_player,
             &effective_profile,
+            &config.policy_penalties,
             Some(session.as_ref()),
             services.context.opponent_threat.as_ref(),
             Some(services.deadline),
@@ -4584,6 +4591,7 @@ pub(crate) fn deterministic_choice(
                 ai_player,
                 &attacker_ids,
                 &config.profile,
+                &config.policy_penalties,
                 Some(valid_block_targets),
             );
             // CR 509.1c: a block tax is an offer the defender may
@@ -4617,6 +4625,7 @@ fn deterministic_combat_choice(
     state: &GameState,
     ai_player: PlayerId,
     profile: &crate::config::AiProfile,
+    penalties: &crate::config::PolicyPenalties,
     session: Option<&AiSession>,
     opponent_threat: Option<&ThreatProfile>,
     comparison_deadline: Option<engine::util::Deadline>,
@@ -4677,6 +4686,7 @@ fn deterministic_combat_choice(
                 ai_player,
                 &attacker_ids,
                 profile,
+                penalties,
                 Some(valid_block_targets),
             );
             // CR 509.1c: a block tax is an offer the defender may
