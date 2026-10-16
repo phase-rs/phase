@@ -6549,6 +6549,44 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
     }
   });
 
+  it("does not claim a state acknowledgement from a channel that has not identified itself", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const hostile = new FakeOpenableConnection();
+    emitConnection(hostile as unknown as DataConnection);
+    hostile.fireOpen();
+    await hostile.simulateData({ type: "state_ack", revision: 1 });
+    // An unclaimed acknowledgement keeps ordinary dispatch, so the first-frame
+    // contract still rejects it instead of the fast path swallowing it.
+    const rejected = (await hostile.getSentMessages()).find((m) => (m as { type?: string }).type === "reconnect_rejected");
+    expect(rejected).toEqual(expect.objectContaining({ reasonCode: "first_message_invalid" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostile.open).toBe(false);
+    adapter.dispose();
+  });
+
+  it("rejects a fast-path acknowledgement stamped by a different host incarnation", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } } });
+    await adapter.initializeGame();
+    await guest.getSentMessages();
+    guest.stopAcking();
+    await guest.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    const frame = (await guest.getSentMessages()).find((m) => (m as P2PMessage).type === "state_update") as Extract<P2PMessage, { type: "state_update" }>;
+    expect(frame.authority).toBeDefined();
+    await guest.simulateData({
+      type: "state_ack",
+      revision: frame.revision,
+      authority: { ...frame.authority!, hostIncarnation: `${frame.authority!.hostIncarnation}-other` },
+    });
+    const rejected = (await guest.getSentMessages()).find((m) => (m as { type?: string }).type === "reconnect_rejected");
+    expect(rejected).toEqual(expect.objectContaining({ reason: "Host session superseded" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(guest.open).toBe(false);
+    adapter.dispose();
+  });
+
   it.each(["queued", "in flight"] as const)("keeps redelivery single-flight while %s and permits the next retry", async (phase) => {
     const { adapter, emitConnection } = makeHost(2);
     await adapter.initialize();
