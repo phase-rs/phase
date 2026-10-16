@@ -16895,14 +16895,25 @@ pub enum WaitingFor {
         eligible: Vec<TargetRef>,
         phase: TimeTravelPhase,
     },
-    /// CR 608.2d: While applying `ChooseObjectsIntoTrackedSet`, the affected player
-    /// selects `min..=max` battlefield permanents from `eligible`. The
-    /// chosen objects are written into a fresh tracked set so a downstream
-    /// `PayCost { ScaledMana }` and `IfYouDo`/`Untap` reference the exact
-    /// selection. An empty selection is legal when `min == 0`.
+    /// CR 608.2d: A resolving effect asks `player` to choose `min..=max` entries of
+    /// `eligible`. Two producers share this prompt.
+    ///
+    /// `ChooseObjectsIntoTrackedSet`: the affected player selects `min..=max`
+    /// battlefield permanents. The chosen objects are written into a fresh
+    /// tracked set so a downstream `PayCost { ScaledMana }` and `IfYouDo`/`Untap`
+    /// reference the exact selection. An empty selection is legal when
+    /// `min == 0`.
+    ///
+    /// CR 115.10a + CR 608.2d, an untargeted described damage recipient ("a
+    /// creature or player" — no "target"): `eligible` is every creature and
+    /// player the instruction may hit, `min = 1` and `max = Some(1)`. The pick
+    /// binds to the parked damage instruction and no tracked set is published.
+    /// Hexproof, shroud and protection do not restrict `eligible`: it is a
+    /// choice, not a target.
     ChooseObjectsSelection {
         player: PlayerId,
-        /// Eligible battlefield permanents matching the effect's filter.
+        /// Eligible battlefield permanents matching the effect's filter, and, for
+        /// a described damage recipient, players.
         eligible: Vec<TargetRef>,
         /// Minimum number of distinct eligible objects that must be selected.
         #[serde(default)]

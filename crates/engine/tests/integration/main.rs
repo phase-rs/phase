@@ -1534,6 +1534,7 @@ mod unmaterialized_lki_serialization;
 mod unravel_counter_mana_value;
 mod unresolved_look_result;
 mod unstoppable_slasher_half_life;
+mod untargeted_damage_recipient_chooser;
 mod until_next_step_deadline_durations;
 mod until_source_leaves_cr610_3a;
 mod until_source_leaves_cr610_3b;
