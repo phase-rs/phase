@@ -95538,3 +95538,95 @@ fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
         })
     ));
 }
+
+/// M5: the shared refusal policy's three verdicts — the return arm routes
+/// through this authority rather than duplicating the raw predicate. An
+/// identity participle the target grammar dropped trips it; a bound quantity
+/// anaphor (excised before the scan) and a reveal-choice span (owned by the
+/// reveal binder downstream) do not.
+#[test]
+fn shared_this_way_policy_trips_identity_but_excuses_bound_and_reveal() {
+    let typed_creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+    assert!(
+        target_span_dropped_this_way_anaphor(
+            "a creature card put into a graveyard this way",
+            &typed_creature,
+        ),
+        "a dropped identity participle (Danse Macabre) must trip the refusal"
+    );
+    assert!(
+        !target_span_dropped_this_way_anaphor(
+            "up to the number of counters removed this way target creatures",
+            &typed_creature,
+        ),
+        "a bound quantity anaphor (Sarulf's threshold) is consumed, not dropped"
+    );
+    assert!(
+        !target_span_dropped_this_way_anaphor(
+            "a creature card they revealed this way",
+            &typed_creature,
+        ),
+        "a reveal-choice span is owned by the reveal binder, never dropped"
+    );
+    assert!(
+        !target_span_dropped_this_way_anaphor(
+            "a creature card put into a graveyard this way",
+            &TargetFilter::TrackedSet { id: TrackedSetId(0) },
+        ),
+        "a target that bound the anaphor passes through untouched"
+    );
+}
+
+/// M5: the bound-anaphor excision the refusal policy scans through — now a
+/// loop over the shared `scan_preceded` primitive rather than a caller-local
+/// `.find(' ')` stepper. Every excised chunk is a complete combinator match
+/// consuming its "this way" tail; anything else stays and still trips.
+#[test]
+fn bound_quantity_excision_uses_complete_combinator_matches() {
+    assert_eq!(
+        strip_bound_quantity_anaphors("up to the number of counters removed this way"),
+        "up to ",
+        "the counters-removed anaphor (Sarulf) excises whole"
+    );
+    assert_eq!(
+        strip_bound_quantity_anaphors("the amount of {e} paid this way"),
+        "",
+        "the energy-paid anaphor (Wrath of the Skies) excises whole"
+    );
+    assert_eq!(
+        strip_bound_quantity_anaphors(
+            "the amount of {e} paid this way and the number of counters removed this way"
+        ),
+        " and ",
+        "repeated scans excise every bound anaphor in the span"
+    );
+    assert_eq!(
+        strip_bound_quantity_anaphors("a creature card put into a graveyard this way"),
+        "a creature card put into a graveyard this way",
+        "an identity participle no combinator binds stays and still trips"
+    );
+}
+
+/// M5: return lines through the shared policy — a reveal-choice target span
+/// (owned downstream) and a bound-anaphor span (consumed) parse exactly as
+/// before the return arm was routed through the authority: no new printed
+/// reveal-return regression, and the fallback outcome is unchanged.
+#[test]
+fn return_arm_routes_through_the_shared_this_way_policy() {
+    for line in [
+        "return a creature card they revealed this way to its owner's hand",
+        "return a creature card they revealed this way to its owner's hand and draw a card",
+    ] {
+        let parsed = parse_effect(line);
+        assert!(
+            matches!(
+                parsed,
+                Effect::Bounce {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
+        );
+    }
+}

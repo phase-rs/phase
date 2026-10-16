@@ -2119,28 +2119,26 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
 /// strand the "this way" it was meant to cover; anything the combinators do
 /// not match stays in place and still trips the check (fail-closed).
 fn strip_bound_quantity_anaphors(span_lower: &str) -> String {
+    // M5: the word-boundary scan lives in the shared `scan_preceded`
+    // primitive — this loop only repeats it per match and splices the
+    // `before` gaps. Behaviour-identical to the retired caller-local
+    // `.find(' ')` stepper: `scan_preceded` tries the combinator at the
+    // current position first and steps one word on failure, and every
+    // excised chunk is still a complete combinator match consuming its
+    // "this way" tail, so anything unmatched still trips the check below.
+    let mut bound = alt((
+        nom_quantity::parse_paid_energy_this_way_ref,
+        nom_quantity::parse_counters_removed_this_way_ref,
+    ));
     let mut stripped = String::with_capacity(span_lower.len());
-    let mut cursor = 0usize;
     let mut remaining = span_lower;
-    while !remaining.is_empty() {
-        let bound = alt((
-            nom_quantity::parse_paid_energy_this_way_ref,
-            nom_quantity::parse_counters_removed_this_way_ref,
-        ))
-        .parse(remaining);
-        if let Ok((after, _)) = bound {
-            let match_start = span_lower.len() - remaining.len();
-            let match_end = span_lower.len() - after.len();
-            stripped.push_str(&span_lower[cursor..match_start]);
-            cursor = match_end;
-            remaining = after;
-        } else {
-            remaining = remaining
-                .find(' ')
-                .map_or("", |i| remaining[i + 1..].trim_start());
-        }
+    while let Some((before, _, after)) =
+        nom_primitives::scan_preceded(remaining, |input| bound.parse(input))
+    {
+        stripped.push_str(before);
+        remaining = after;
     }
-    stripped.push_str(&span_lower[cursor..]);
+    stripped.push_str(remaining);
     stripped
 }
 
@@ -22274,12 +22272,11 @@ fn try_parse_verb_and_target<'a>(
         // the built target carries no such restriction, the participle was
         // silently dropped (unit 8e, unimplemented) and the bare filter
         // would resolve over-broad (any graveyard creature, not Danse's
-        // victims). Refuse the line so it lowers honestly Unimplemented
-        // instead of wrong. Targets that DID bind the anaphor
-        // (`TrackedSetFiltered`, `InTrackedSet`) pass through untouched.
-        if scan_contains_phrase(&target_text.to_ascii_lowercase(), "this way")
-            && !target.references_tracked_set()
-        {
+        // victims). The shared refusal policy owns this check — including
+        // the bound-quantity-anaphor excision and the reveal-choice
+        // exemption — so this arm routes through it rather than duplicating
+        // the raw predicate.
+        if target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
