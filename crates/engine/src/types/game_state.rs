@@ -16896,9 +16896,10 @@ pub enum WaitingFor {
         phase: TimeTravelPhase,
     },
     /// CR 608.2d: A resolving effect asks `player` to choose `min..=max` entries of
-    /// `eligible`. Two producers share this prompt.
+    /// `eligible`. Two kinds of selection share this prompt.
     ///
-    /// `ChooseObjectsIntoTrackedSet`: the affected player selects `min..=max`
+    /// `ChooseObjectsIntoTrackedSet` (and the Contraption crank prompt in
+    /// `game::contraptions`): the affected player selects `min..=max`
     /// battlefield permanents. The chosen objects are written into a fresh
     /// tracked set so a downstream `PayCost { ScaledMana }` and `IfYouDo`/`Untap`
     /// reference the exact selection. An empty selection is legal when
@@ -16922,8 +16923,9 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max: Option<u32>,
         /// CR 608.2: triggering event of the ability whose `ChooseObjectsIntoTrackedSet`
-        /// raised this prompt. Restored around the continuation drain so the stashed
-        /// `PayCost { payer: TriggeringPlayer }` resolves to the correct player.
+        /// or described damage recipient raised this prompt. Restored around the
+        /// continuation drain so a stashed `PayCost { payer: TriggeringPlayer }` (or
+        /// any other trigger-context read) resolves to the correct player.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger_event: Option<crate::types::events::GameEvent>,
     },

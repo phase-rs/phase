@@ -2473,7 +2473,7 @@ pub(super) fn target_choice_timing_for_parsed(
     // what the resolver prompts for. Excluded and left on their existing readings:
     // anything the text says "target" about (the same printed-fragment scan as
     // every arm above), a divided or multi-target announcement, a damage source
-    // that is itself a targets-positional referent, and a selection the game makes
+    // other than the ability's own (a targets-positional referent, or the triggering event's source), and a selection the game makes
     // rather than the controller ("chosen at random": CR 101.1, the card's own
     // words override the controller's default choice).
     if let Effect::DealDamage {

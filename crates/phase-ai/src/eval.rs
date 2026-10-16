@@ -855,10 +855,10 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 ///   cannot move it. Only the residue that the arm's guard excludes —
 ///   `up_to` (optional) sacrifices and `count == 0` — falls through to scoring.
 /// - **`WaitingFor::ChooseObjectsSelection` — NOT REACHED for the tracked-set
-///   selection, REACHED for the damage-recipient choice.** Two producers share the
+///   selection, REACHED for the damage-recipient choice.** Two kinds of selection share the
 ///   prompt (its variant doc in `types::game_state`). Recorded explicitly because
 ///   an earlier revision of this very block cited it as the primary reached
-///   class, and the first producer is not one: the `ChooseObjectsIntoTrackedSet`
+///   class, and the first kind is not one: the `ChooseObjectsIntoTrackedSet`
 ///   selection *references* battlefield permanents into a tracked set for a
 ///   downstream `PayCost { ScaledMana }` / `IfYouDo` / `Untap`.
 ///   **Those permanents are not given up.** Its candidates do reach
@@ -867,7 +867,7 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 ///   discriminate. (`Untap` downstream does not change that: the count is a
 ///   development measure that ignores tapped state — see
 ///   `zone_eval::is_intrinsic_mana_source`.)
-///   The other producer is an untargeted damage recipient ("deals N damage to a
+///   The other kind is an untargeted damage recipient ("deals N damage to a
 ///   creature or player", CR 115.10a + CR 608.2d): its candidates are the
 ///   creatures and players the damage may hit, they likewise reach scoring, and
 ///   the damage is applied inside each scored candidate. So a pair of them
