@@ -1,6 +1,7 @@
 mod admin;
 mod data_bootstrap;
 mod draft_pools;
+mod full_persistence;
 mod game_executor;
 mod jev_relay;
 mod logging;
@@ -16,6 +17,7 @@ mod socket_handoff_tests;
 mod socket_heartbeat;
 mod socket_ingress;
 mod socket_io;
+mod socket_mailbox;
 #[cfg(test)]
 mod socket_spectator_order_tests;
 #[cfg(test)]
@@ -124,7 +126,7 @@ use url::Url;
 /// index operations, never across a session-guard acquisition.
 type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
-    Arc<Mutex<HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>>>;
+    Arc<Mutex<HashMap<String, HashMap<PlayerId, crate::socket_mailbox::Sender>>>>;
 type SharedDb = Arc<CardDatabase>;
 /// The lobby registry, wrapped in the WASM-safe [`Broker`]. LobbyOnly broker
 /// dispatch goes through `Broker::handle`/`on_disconnect`/`reap_expired`;
@@ -135,7 +137,7 @@ type SharedLobby = Arc<Mutex<Broker>>;
 type LobbyGuard<'a> = tokio::sync::MutexGuard<'a, Broker>;
 /// A lobby subscriber and the build its accepted hello declared.
 struct LobbySubscriber {
-    tx: mpsc::UnboundedSender<ServerMessage>,
+    tx: crate::socket_mailbox::Sender,
     build_commit: String,
 }
 type SharedLobbySubscribers = Arc<Mutex<Vec<LobbySubscriber>>>;
@@ -209,13 +211,13 @@ type SharedDraftSpectators = Arc<
             String,
             Vec<(
                 draft_core::types::SpectatorVisibility,
-                mpsc::UnboundedSender<ServerMessage>,
+                crate::socket_mailbox::Sender,
             )>,
         >,
     >,
 >;
 /// Spectator senders keyed by game code (live games only).
-type GameSpectatorRegistry = HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>;
+type GameSpectatorRegistry = HashMap<String, Vec<crate::socket_mailbox::Sender>>;
 type SharedGameSpectators = Arc<Mutex<GameSpectatorRegistry>>;
 
 /// Deserializing a persisted session is deeply nested and stack-hungry — and
@@ -396,7 +398,7 @@ fn finish_restored_full_startup(
 
 async fn reserve_lobby_subscriber_slot(
     lobby_subscribers: &SharedLobbySubscribers,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     build_commit: &str,
 ) -> Result<(), String> {
     let mut subs = lobby_subscribers.lock().await;
@@ -417,7 +419,7 @@ async fn reserve_lobby_subscriber_slot(
 async fn remove_game_spectator_sender(
     game_spectators: &SharedGameSpectators,
     game_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) {
     let mut specs = game_spectators.lock().await;
     remove_game_spectator_sender_in_registry(&mut specs, game_code, tx);
@@ -426,7 +428,7 @@ async fn remove_game_spectator_sender(
 fn remove_game_spectator_sender_in_registry(
     specs: &mut GameSpectatorRegistry,
     game_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) {
     if let Some(spectators) = specs.get_mut(game_code) {
         spectators.retain(|sender| !sender.same_channel(tx) && !sender.is_closed());
@@ -440,7 +442,7 @@ fn remove_game_spectator_sender_in_registry(
 async fn reserve_game_spectator_slot(
     game_spectators: &SharedGameSpectators,
     game_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     let mut specs = game_spectators.lock().await;
@@ -450,7 +452,7 @@ async fn reserve_game_spectator_slot(
 fn reserve_game_spectator_slot_in_registry(
     specs: &mut GameSpectatorRegistry,
     game_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     let spectators = specs.entry(game_code.to_string()).or_default();
@@ -474,7 +476,7 @@ async fn switch_game_spectator_slot(
     game_spectators: &SharedGameSpectators,
     previous_game_code: Option<&str>,
     game_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     // The target bootstrap and both route changes are one publication fence.
@@ -502,7 +504,7 @@ async fn prune_game_connections<'a>(
 async fn remove_draft_spectator_sender(
     draft_spectators: &SharedDraftSpectators,
     draft_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) {
     let mut specs = draft_spectators.lock().await;
     if let Some(spectators) = specs.get_mut(draft_code) {
@@ -517,7 +519,7 @@ async fn reserve_draft_spectator_slot(
     draft_spectators: &SharedDraftSpectators,
     draft_code: &str,
     visibility: draft_core::types::SpectatorVisibility,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     let mut specs = draft_spectators.lock().await;
@@ -546,7 +548,7 @@ async fn switch_draft_spectator_slot(
     previous_draft_code: Option<&str>,
     draft_code: &str,
     visibility: draft_core::types::SpectatorVisibility,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     bootstrap: Option<ServerMessage>,
 ) -> Result<(), String> {
     reserve_draft_spectator_slot(draft_spectators, draft_code, visibility, tx, bootstrap).await?;
@@ -1912,7 +1914,7 @@ async fn full_socket_is_current_while_state_locked(
     session: &GameSession,
     connections: &SharedConnections,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) -> bool {
     let Some((game_code, player_id, player_token)) = identity.full_seat() else {
         return false;
@@ -1935,7 +1937,7 @@ async fn full_socket_is_current_preflight(
     state: &SharedState,
     connections: &SharedConnections,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) -> bool {
     let Some((game_code, _, _)) = identity.full_seat() else {
         return false;
@@ -1958,7 +1960,7 @@ async fn install_full_sender_while_state_locked(
     connections: &SharedConnections,
     game_code: &str,
     player_id: PlayerId,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) {
     let mut conns = connections.lock().await;
     conns
@@ -1976,7 +1978,7 @@ async fn attach_full_seat(
     identity: &mut SocketIdentity,
     game_code: String,
     player_token: String,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) -> Result<PlayerId, String> {
     // This site's base answer to an absent game is its own message, not the
     // relocated `Game not found`, so `lock_session`'s `Err` is discarded and
@@ -1998,7 +2000,7 @@ async fn full_socket_authority_rejection(
     state: &SharedState,
     connections: &SharedConnections,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) -> Option<&'static str> {
     match full_socket_authority(message) {
         FullSocketAuthority::Independent => None,
@@ -2078,7 +2080,7 @@ async fn depart_full_seat_while_session_locked(
     lobby_subscribers: &SharedLobbySubscribers,
     session: &mut GameSession,
     player_id: PlayerId,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     disconnected_at: Instant,
 ) {
     let game_code = session.game_code.clone();
@@ -2114,7 +2116,7 @@ fn notify_full_seat_disconnect(
     player_id: PlayerId,
     grace: std::time::Duration,
     disconnected_at: Instant,
-    peers: &[mpsc::UnboundedSender<ServerMessage>],
+    peers: &[crate::socket_mailbox::Sender],
 ) {
     let Some((last, others)) = peers.split_last() else {
         return;
@@ -2150,7 +2152,7 @@ async fn return_full_seat_while_session_locked(
     lobby_subscribers: &SharedLobbySubscribers,
     session: &mut GameSession,
     player: PlayerId,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     full_key: &server_core::FullSessionKey,
     hello: Option<&ClientHelloInfo>,
     received_at: Instant,
@@ -2216,7 +2218,7 @@ async fn disconnect_full_seat_if_current(
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     disconnected_at: Instant,
 ) {
     let Some((game_code, player_id, player_token)) = identity.full_seat() else {
@@ -2265,7 +2267,7 @@ async fn draft_socket_is_current_while_state_locked(
     manager: &DraftSessionManager,
     connections: &SharedConnections,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) -> bool {
     let Some((draft_code, seat, player_token)) = identity.draft_seat() else {
         return false;
@@ -2292,7 +2294,7 @@ async fn draft_socket_is_current_preflight(
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) -> bool {
     let manager = draft_state.lock().await;
     draft_socket_is_current_while_state_locked(&manager, connections, identity, tx).await
@@ -2307,7 +2309,7 @@ async fn install_draft_sender_while_state_locked(
     connections: &SharedConnections,
     draft_code: &str,
     seat: usize,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) {
     let mut conns = connections.lock().await;
     conns
@@ -2330,7 +2332,7 @@ async fn reconnect_draft_seat(
     identity: &mut SocketIdentity,
     draft_code: String,
     player_token: String,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     received_at: Instant,
 ) -> Result<
     (
@@ -2392,7 +2394,7 @@ async fn attach_current_draft_match(
     lobby_subscribers: &SharedLobbySubscribers,
     identity: &mut SocketIdentity,
     draft_code: &str,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     received_at: Instant,
     executor: &game_executor::GameExecutor,
     #[cfg(test)] hooks: &socket_test_hooks::Hooks,
@@ -2630,7 +2632,7 @@ async fn disconnect_draft_seat_if_current(
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     disconnected_at: Instant,
 ) {
     let Some((draft_code, seat, player_token)) = identity.draft_seat() else {
@@ -3833,7 +3835,7 @@ mod lifecycle_tests {
                 );
             }
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(vec![LobbySubscriber {
             tx,
             build_commit: String::new(),
@@ -3984,7 +3986,7 @@ mod lifecycle_tests {
         assert!(!reap_outbounds.is_empty());
 
         // Step 2, verbatim: one subscribed client, and the fan-out loop.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         for ob in reap_outbounds {
             if let Outbound::ToSubscribers(msg) = ob {
                 let server_msg = super::to_server_message(msg);
@@ -4710,7 +4712,7 @@ async fn handle_socket(
     online_count: u32,
     slot: ConnectionSlot,
 ) {
-    let (tx, rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (tx, rx) = socket_mailbox::channel();
     let (mut socket, frames, mut transport) = socket_io::start(
         socket,
         rx,
@@ -4768,6 +4770,7 @@ async fn handle_socket(
             ping_interval_ms: 5_000,
             silence_budget_ms: 45_000,
         }),
+        command_correlation: Some(server_core::protocol::CommandCorrelation::CommandIdV1),
     };
     if socket.enqueue_reply(hello).is_err() {
         transport.shutdown().await;
@@ -4812,6 +4815,8 @@ async fn handle_socket(
                     None => break,
                 },
             };
+            socket.set_command_id(client_msg.command_id());
+            let client_msg = client_msg.message;
             let span = identity
                 .session_span
                 .clone()
@@ -4841,6 +4846,7 @@ async fn handle_socket(
             )
             .instrument(span)
             .await;
+            socket.set_command_id(None);
             drop(admission);
         }
     }
@@ -4969,7 +4975,7 @@ async fn broadcast_player_count(lobby_subscribers: &SharedLobbySubscribers, coun
 /// The single place a `PlayerSlotsUpdate` is built: the message is rebuilt per
 /// recipient, so no send site can skip `slots_for_recipient`.
 fn send_player_slots<'a>(
-    recipients: impl IntoIterator<Item = (&'a PlayerId, &'a mpsc::UnboundedSender<ServerMessage>)>,
+    recipients: impl IntoIterator<Item = (&'a PlayerId, &'a crate::socket_mailbox::Sender)>,
     slots: &[server_core::PlayerSlotInfo],
 ) {
     for (pid, sender) in recipients {
@@ -5129,6 +5135,7 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             // by handle_socket; broker-originated hellos are only projections.
             wire_formats: Vec::new(),
             heartbeat: None,
+            command_correlation: None,
         },
         L::GameCreated {
             game_code,
@@ -5460,7 +5467,7 @@ async fn dispatch_broker(
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
 ) {
     if let Err(reason) = guard_broker_projection_inbound(msg) {
@@ -5490,7 +5497,7 @@ async fn dispatch_broker_msg(
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
 ) {
     let mut conn = identity.to_conn_state();
@@ -5524,7 +5531,7 @@ async fn dispatch_broker_msg(
 async fn apply_outbounds(
     lobby: &LobbyGuard<'_>,
     outbounds: Vec<Outbound>,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
     build_commit: &str,
@@ -5601,22 +5608,14 @@ fn initialize_full_runtime(
     Ok(())
 }
 
-/// Fire-and-forget generation- and revision-fenced persistence of an active
-/// Full session. Terminal code never calls this writer after preparation.
+/// Queue only metadata and a weak session handle. The persistence owner captures
+/// the latest state after admission and a durable currency check.
 fn persist_full_session_async(
     executor: &game_executor::GameExecutor,
     game_db: &SharedGameDb,
-    session: &mut GameSession,
+    session: &mut game_executor::SessionJob<'_>,
 ) {
-    let db = game_db.clone();
-    let Some(snapshot) = session.full_persist_snapshot() else {
-        warn!(game = %session.game_code, "skipping persistence for unbound Full session");
-        return;
-    };
-    let executor = executor.clone();
-    tokio::spawn(async move {
-        executor.persist_full_snapshot(db, snapshot).await;
-    });
+    game_db.full_saves.request(executor, game_db, session);
 }
 
 /// Session-configuration inputs for [`create_and_connect_multiplayer_session`].
@@ -5638,7 +5637,7 @@ struct MultiplayerSessionRequest {
     ai_requests: Vec<server_core::session::AiSeatSetup>,
     public: bool,
     password: Option<String>,
-    host_tx: mpsc::UnboundedSender<ServerMessage>,
+    host_tx: crate::socket_mailbox::Sender,
     context: ServerContext,
 }
 
@@ -6239,7 +6238,7 @@ async fn commit_full_abandon(
     lobby_subscribers: &SharedLobbySubscribers,
     game_db: &SharedGameDb,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     game_code: &str,
 ) -> ControlFlow<Option<ServerMessage>, Vec<(PlayerId, server_core::CurrentTerminalDelivery)>> {
     // An abandon naming an absent game is answered as an already-completed
@@ -6632,8 +6631,8 @@ fn consume_lobby_expiry_sweep(
 /// prune is indistinguishable from the retired route.
 #[derive(Default)]
 struct ExpiredLobbyRoutes {
-    players: HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>,
-    spectators: HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>,
+    players: HashMap<String, HashMap<PlayerId, crate::socket_mailbox::Sender>>,
+    spectators: HashMap<String, Vec<crate::socket_mailbox::Sender>>,
 }
 
 impl ExpiredLobbyRoutes {
@@ -7377,7 +7376,7 @@ async fn broadcast_game_started(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
     game_db: &SharedGameDb,
-    joiner: Option<(PlayerId, &str, &mpsc::UnboundedSender<ServerMessage>)>,
+    joiner: Option<(PlayerId, &str, &crate::socket_mailbox::Sender)>,
 ) {
     let code = session.game_code.clone();
     let mut players = connections
@@ -7845,7 +7844,7 @@ async fn handle_preview_interaction(
     request: InteractionPreviewRequest,
     state: &SharedState,
     connections: &SharedConnections,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     identity: &SocketIdentity,
     executor: &game_executor::GameExecutor,
 ) {
@@ -7924,7 +7923,7 @@ async fn handle_full_concession(
     draft_state: &SharedDraftState,
     game_db: &SharedGameDb,
     identity: &SocketIdentity,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
 ) {
     let (Some(game_code), Some(player_token), Some(player)) = (
         identity.game_code.clone(),
@@ -8100,33 +8099,35 @@ async fn handle_full_concession(
 /// second ~400-line copy that would drift.
 #[allow(clippy::too_many_arguments)]
 async fn handle_full_game_submission(
+    command_id: Option<server_core::protocol::CommandId>,
     submission: GameSubmission,
     executor: &game_executor::GameExecutor,
     state: &SharedState,
     db: &SharedDb,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
     identity: &SocketIdentity,
 ) {
+    let reply = tx.for_completion(command_id);
     let kind = submission.kind();
     let is_zero_count_debug_create = submission.is_zero_count_debug_create();
     let Some(game_code) = identity.game_code.clone() else {
-        let _ = tx.send(ServerMessage::ActionFailed {
+        let _ = reply.send(ServerMessage::ActionFailed {
             message: "Not in a game".to_string(),
         });
         return;
     };
     let Some(player_token) = identity.player_token.clone() else {
-        let _ = tx.send(ServerMessage::ActionFailed {
+        let _ = reply.send(ServerMessage::ActionFailed {
             message: "No player token".to_string(),
         });
         return;
     };
     if let Err(message) = submission.payload_rejection() {
-        let _ = tx.send(*message);
+        let _ = reply.send(*message);
         return;
     }
     let lock_start = Instant::now();
@@ -8138,7 +8139,7 @@ async fn handle_full_game_submission(
         None => false,
     };
     if !current {
-        let _ = tx.send(ServerMessage::ActionFailed {
+        let _ = reply.send(ServerMessage::ActionFailed {
             message: FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
         });
         return;
@@ -8162,7 +8163,13 @@ async fn handle_full_game_submission(
                 Vec::new(),
                 Vec::new(),
             )
-            .await,
+            .await
+            .with_completion(
+                identity
+                    .player_id
+                    .expect("the authority gate proved this seat"),
+                command_id,
+            ),
         )
     };
     let card_db = db.clone();
@@ -8218,7 +8225,7 @@ async fn handle_full_game_submission(
     let applied = match applied {
         Ok(Some(applied)) => applied,
         Ok(None) => {
-            let _ = tx.send(ServerMessage::ActionNoOp);
+            let _ = reply.send(ServerMessage::ActionNoOp);
             return;
         }
         Err(error) => {
@@ -8226,7 +8233,7 @@ async fn handle_full_game_submission(
                 SessionActionError::Operational(message) => ServerMessage::ActionFailed { message },
                 error => session_action_error_message(error),
             };
-            let _ = tx.send(message);
+            let _ = reply.send(message);
             return;
         }
     };
@@ -8281,20 +8288,20 @@ async fn handle_full_game_submission(
     let (mut publisher, human_result, winner, terminal, guarded) = match metadata {
         Ok(metadata) => metadata,
         Err(message) => {
-            let _ = tx.send(ServerMessage::ActionFailed { message });
+            let _ = reply.send(ServerMessage::ActionFailed { message });
             return;
         }
     };
     if let Err(message) = guarded {
         warn!(game = %game_code, %message, "action snapshot too large to broadcast");
-        let _ = tx.send(ServerMessage::ActionFailed { message });
+        let _ = reply.send(ServerMessage::ActionFailed { message });
         return;
     }
     let deliveries = match terminal {
         Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
             Ok(deliveries) => deliveries,
             Err(message) => {
-                let _ = tx.send(ServerMessage::ActionFailed { message });
+                let _ = reply.send(ServerMessage::ActionFailed { message });
                 return;
             }
         },
@@ -8339,7 +8346,7 @@ async fn handle_resolve_all(
     state: &SharedState,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
     identity: &SocketIdentity,
@@ -8629,7 +8636,7 @@ async fn join_game_with_password_full(
     player_count: &SharedPlayerCount,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
     game_code: String,
     deck: server_core::protocol::DeckData,
@@ -8735,7 +8742,7 @@ async fn seat_guest_and_start(
     player_count: &SharedPlayerCount,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
     session: OwnedMutexGuard<GameSession>,
     game_code: String,
@@ -8970,7 +8977,7 @@ async fn handle_client_message(
     game_db: &SharedGameDb,
     draft_spectators: &SharedDraftSpectators,
     game_spectators: &SharedGameSpectators,
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &crate::socket_mailbox::Sender,
     identity: &mut SocketIdentity,
     mode: Mode,
     context: &ServerContext,
@@ -9382,6 +9389,7 @@ async fn handle_client_message(
 
         ClientMessage::Action { action } => {
             handle_full_game_submission(
+                socket.command_id(),
                 GameSubmission::Action(action),
                 &context.game_executor,
                 state,
@@ -9398,6 +9406,7 @@ async fn handle_client_message(
 
         ClientMessage::Interaction { submission } => {
             handle_full_game_submission(
+                socket.command_id(),
                 GameSubmission::Interaction(submission),
                 &context.game_executor,
                 state,
@@ -12354,8 +12363,8 @@ mod state_transport_derived_tests {
                 )
                 .expect("open temporary game database"),
             );
-            let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
-            let (ai_tx, mut ai_rx) = mpsc::unbounded_channel();
+            let (requester_tx, mut requester_rx) = crate::socket_mailbox::channel();
+            let (ai_tx, mut ai_rx) = crate::socket_mailbox::channel();
             connections
                 .lock()
                 .await
@@ -12461,7 +12470,7 @@ mod state_transport_derived_tests {
                 )
                 .expect("open temporary game database"),
             );
-            let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
+            let (requester_tx, mut requester_rx) = crate::socket_mailbox::channel();
             let identity = SocketIdentity {
                 heartbeat_host: None,
                 game_code: Some(game_code),
@@ -12693,13 +12702,13 @@ mod interaction_preview_route_tests {
         InteractionPreviewRequest,
         (
             SocketIdentity,
-            mpsc::UnboundedSender<ServerMessage>,
-            mpsc::UnboundedReceiver<ServerMessage>,
+            crate::socket_mailbox::Sender,
+            crate::socket_mailbox::Receiver,
         ),
         (
             SocketIdentity,
-            mpsc::UnboundedSender<ServerMessage>,
-            mpsc::UnboundedReceiver<ServerMessage>,
+            crate::socket_mailbox::Sender,
+            crate::socket_mailbox::Receiver,
         ),
     ) {
         let mut manager = SessionManager::new();
@@ -12722,7 +12731,7 @@ mod interaction_preview_route_tests {
         let state: SharedState = Arc::new(Mutex::new(manager));
         let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
 
-        let (requester_tx, requester_rx) = mpsc::unbounded_channel();
+        let (requester_tx, requester_rx) = crate::socket_mailbox::channel();
         let mut requester_identity = empty_identity();
         attach_full_seat(
             &state,
@@ -12735,7 +12744,7 @@ mod interaction_preview_route_tests {
         .await
         .expect("the requesting seat attaches");
 
-        let (other_tx, other_rx) = mpsc::unbounded_channel();
+        let (other_tx, other_rx) = crate::socket_mailbox::channel();
         let mut other_identity = empty_identity();
         attach_full_seat(
             &state,
@@ -12836,7 +12845,7 @@ mod interaction_preview_route_tests {
             (_other_identity, _other_tx, _other_rx),
         ) = two_seat_table().await;
 
-        let (stale_tx, mut stale_rx) = mpsc::unbounded_channel();
+        let (stale_tx, mut stale_rx) = crate::socket_mailbox::channel();
         handle_preview_interaction(
             request.clone(),
             &state,
@@ -12868,7 +12877,7 @@ mod interaction_preview_route_tests {
     #[tokio::test]
     async fn preview_before_joining_is_refused_on_the_correlated_channel() {
         let (state, connections, _game_code, request, _requester, _other) = two_seat_table().await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
 
         handle_preview_interaction(
             request.clone(),
@@ -13126,7 +13135,7 @@ mod full_socket_authority_tests {
     #[tokio::test]
     async fn fresh_socket_reaches_full_create_join_and_reconnect_validation() {
         let (state, connections, game_code, player_token) = test_session();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         let fresh = empty_identity();
         let messages = [
             ClientMessage::CreateGame {
@@ -13150,8 +13159,8 @@ mod full_socket_authority_tests {
     #[tokio::test]
     async fn stale_socket_cannot_act_reconnect_or_start_another_full_session() {
         let (state, connections, game_code, player_token) = test_session();
-        let (a_tx, _a_rx) = mpsc::unbounded_channel();
-        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let (a_tx, _a_rx) = crate::socket_mailbox::channel();
+        let (b_tx, _b_rx) = crate::socket_mailbox::channel();
         let mut stale_a = empty_identity();
         attach_full_seat(
             &state,
@@ -13213,8 +13222,8 @@ mod full_socket_authority_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn mutation_gate_rechecks_after_a_preflight_race() {
         let (state, connections, game_code, player_token) = test_session();
-        let (a_tx, _a_rx) = mpsc::unbounded_channel();
-        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let (a_tx, _a_rx) = crate::socket_mailbox::channel();
+        let (b_tx, _b_rx) = crate::socket_mailbox::channel();
 
         let (preflight_tx, preflight_rx) = tokio::sync::oneshot::channel();
         let claimant_a = tokio::spawn({
@@ -13291,8 +13300,8 @@ mod full_socket_authority_tests {
     #[tokio::test]
     async fn stale_close_leaves_replacement_seat_connected() {
         let (state, connections, game_code, player_token) = test_session();
-        let (a_tx, _a_rx) = mpsc::unbounded_channel();
-        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let (a_tx, _a_rx) = crate::socket_mailbox::channel();
+        let (b_tx, _b_rx) = crate::socket_mailbox::channel();
         let mut stale_a = empty_identity();
         attach_full_seat(
             &state,
@@ -13345,7 +13354,7 @@ mod full_socket_authority_tests {
             let mut manager = state.lock().await;
             manager.create_game(PlayerDeckPayload::default(), None)
         };
-        let (x_tx, _x_rx) = mpsc::unbounded_channel();
+        let (x_tx, _x_rx) = crate::socket_mailbox::channel();
         let mut identity_x = empty_identity();
         attach_full_seat(
             &state,
@@ -13380,7 +13389,7 @@ mod full_socket_authority_tests {
     #[tokio::test]
     async fn current_socket_may_reconnect_its_own_resolved_seat() {
         let (state, connections, game_code, player_token) = test_session();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         let mut identity = empty_identity();
         attach_full_seat(
             &state,
@@ -13443,7 +13452,7 @@ mod full_socket_authority_tests {
         restored_manager.restore_session(restored);
         let state: SharedState = Arc::new(Mutex::new(restored_manager));
         let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
 
         assert_eq!(
             full_socket_authority_rejection(
@@ -13491,8 +13500,8 @@ mod full_socket_authority_tests {
     #[tokio::test]
     async fn authority_checks_and_replacement_close_complete_without_lock_cycle() {
         let (state, connections, game_code, player_token) = test_session();
-        let (a_tx, _a_rx) = mpsc::unbounded_channel();
-        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let (a_tx, _a_rx) = crate::socket_mailbox::channel();
+        let (b_tx, _b_rx) = crate::socket_mailbox::channel();
         let mut identity_a = empty_identity();
         attach_full_seat(
             &state,
@@ -14011,7 +14020,7 @@ mod draft_socket_authority_tests {
     async fn attached_draft_socket_cannot_create_or_join_without_replacing_its_seat() {
         let (draft_state, connections, draft_code, player_token) = test_draft();
         let (lobby, subs) = lobby_handles();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         let mut identity = empty_identity();
         reconnect_draft_seat(
             &draft_state,
@@ -14065,8 +14074,8 @@ mod draft_socket_authority_tests {
     async fn stale_draft_socket_cannot_create_or_join_another_pod() {
         let (draft_state, connections, draft_code, player_token) = test_draft();
         let (lobby, subs) = lobby_handles();
-        let (stale_tx, _stale_rx) = mpsc::unbounded_channel();
-        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let (stale_tx, _stale_rx) = crate::socket_mailbox::channel();
+        let (current_tx, _current_rx) = crate::socket_mailbox::channel();
         let mut stale_identity = empty_identity();
         reconnect_draft_seat(
             &draft_state,
@@ -14119,8 +14128,8 @@ mod draft_socket_authority_tests {
     async fn reconnect_replaces_the_draft_seat_sender_before_identity_is_exposed() {
         let (draft_state, connections, draft_code, player_token) = test_draft();
         let (lobby, subs) = lobby_handles();
-        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
-        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let (a_tx, mut a_rx) = crate::socket_mailbox::channel();
+        let (b_tx, mut b_rx) = crate::socket_mailbox::channel();
         let mut identity_a = empty_identity();
         reconnect_draft_seat(
             &draft_state,
@@ -14198,8 +14207,8 @@ mod draft_socket_authority_tests {
     async fn stale_draft_close_cannot_disconnect_the_replacement_seat() {
         let (draft_state, connections, draft_code, player_token) = test_draft();
         let (lobby, subs) = lobby_handles();
-        let (a_tx, _a_rx) = mpsc::unbounded_channel();
-        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let (a_tx, _a_rx) = crate::socket_mailbox::channel();
+        let (b_tx, _b_rx) = crate::socket_mailbox::channel();
         let mut identity_a = empty_identity();
         reconnect_draft_seat(
             &draft_state,
@@ -14267,7 +14276,7 @@ mod lobby_subscriber_tests {
         {
             let mut subs = subscribers.lock().await;
             for _ in 0..MAX_LOBBY_SUBSCRIBERS {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 subs.push(LobbySubscriber {
                     tx,
                     build_commit: String::new(),
@@ -14275,7 +14284,7 @@ mod lobby_subscriber_tests {
                 receivers.push(rx);
             }
         }
-        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+        let (overflow_tx, _overflow_rx) = crate::socket_mailbox::channel();
 
         let err = reserve_lobby_subscriber_slot(&subscribers, &overflow_tx, "")
             .await
@@ -14292,7 +14301,7 @@ mod lobby_subscriber_tests {
         {
             let mut subs = subscribers.lock().await;
             for _ in 0..MAX_LOBBY_SUBSCRIBERS {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 drop(rx);
                 subs.push(LobbySubscriber {
                     tx,
@@ -14300,7 +14309,7 @@ mod lobby_subscriber_tests {
                 });
             }
         }
-        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+        let (new_tx, _new_rx) = crate::socket_mailbox::channel();
 
         reserve_lobby_subscriber_slot(&subscribers, &new_tx, "")
             .await
@@ -14312,7 +14321,7 @@ mod lobby_subscriber_tests {
     #[tokio::test]
     async fn lobby_subscriber_reservation_is_idempotent_for_same_channel() {
         let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
 
         reserve_lobby_subscriber_slot(&subscribers, &tx, "")
             .await
@@ -14328,9 +14337,9 @@ mod lobby_subscriber_tests {
     async fn remove_subscriber_outbound_removes_current_channel_and_closed_senders() {
         let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
         let player_count = Arc::new(AtomicU32::new(0));
-        let (current_tx, _current_rx) = mpsc::unbounded_channel();
-        let (live_tx, _live_rx) = mpsc::unbounded_channel();
-        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        let (current_tx, _current_rx) = crate::socket_mailbox::channel();
+        let (live_tx, _live_rx) = crate::socket_mailbox::channel();
+        let (closed_tx, closed_rx) = crate::socket_mailbox::channel();
         drop(closed_rx);
         {
             let mut subs = subscribers.lock().await;
@@ -14411,12 +14420,12 @@ mod live_spectator_tests {
             let mut specs = spectators.lock().await;
             let game_spectators = specs.entry("FULL".to_string()).or_default();
             for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 game_spectators.push(tx);
                 receivers.push(rx);
             }
         }
-        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+        let (overflow_tx, _overflow_rx) = crate::socket_mailbox::channel();
 
         let err = reserve_game_spectator_slot(&spectators, "FULL", &overflow_tx, None)
             .await
@@ -14437,12 +14446,12 @@ mod live_spectator_tests {
             let mut specs = spectators.lock().await;
             let game_spectators = specs.entry("PRUNE".to_string()).or_default();
             for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 drop(rx);
                 game_spectators.push(tx);
             }
         }
-        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+        let (new_tx, _new_rx) = crate::socket_mailbox::channel();
 
         reserve_game_spectator_slot(&spectators, "PRUNE", &new_tx, None)
             .await
@@ -14454,7 +14463,7 @@ mod live_spectator_tests {
     #[tokio::test]
     async fn game_spectator_reservation_is_idempotent_for_same_channel() {
         let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
 
         reserve_game_spectator_slot(&spectators, "SAME", &tx, None)
             .await
@@ -14469,7 +14478,7 @@ mod live_spectator_tests {
     #[tokio::test]
     async fn game_spectator_switch_keeps_previous_game_when_new_game_is_full() {
         let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
-        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let (current_tx, _current_rx) = crate::socket_mailbox::channel();
         let mut full_receivers = Vec::new();
         {
             let mut specs = spectators.lock().await;
@@ -14479,7 +14488,7 @@ mod live_spectator_tests {
                 .push(current_tx.clone());
             let full_game = specs.entry("FULL".to_string()).or_default();
             for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 full_game.push(tx);
                 full_receivers.push(rx);
             }
@@ -14508,12 +14517,12 @@ mod live_spectator_tests {
             let mut specs = spectators.lock().await;
             let draft_spectators = specs.entry("FULL".to_string()).or_default();
             for _ in 0..MAX_DRAFT_SPECTATORS_PER_DRAFT {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 draft_spectators.push((visibility, tx));
                 receivers.push(rx);
             }
         }
-        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+        let (overflow_tx, _overflow_rx) = crate::socket_mailbox::channel();
 
         let err = reserve_draft_spectator_slot(&spectators, "FULL", visibility, &overflow_tx, None)
             .await
@@ -14535,12 +14544,12 @@ mod live_spectator_tests {
             let mut specs = spectators.lock().await;
             let draft_spectators = specs.entry("PRUNE".to_string()).or_default();
             for _ in 0..MAX_DRAFT_SPECTATORS_PER_DRAFT {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = crate::socket_mailbox::channel();
                 drop(rx);
                 draft_spectators.push((visibility, tx));
             }
         }
-        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+        let (new_tx, _new_rx) = crate::socket_mailbox::channel();
 
         reserve_draft_spectator_slot(&spectators, "PRUNE", visibility, &new_tx, None)
             .await
@@ -14553,7 +14562,7 @@ mod live_spectator_tests {
     async fn draft_spectator_reservation_is_idempotent_for_same_channel() {
         let spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
         let visibility = draft_core::types::SpectatorVisibility::default();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
 
         reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx, None)
             .await
@@ -16624,7 +16633,7 @@ mod issue_4548_full_create_tests {
                 .expect("session");
 
             let held = app.lobby.lock().await;
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (tx, mut rx) = crate::socket_mailbox::channel();
             let subscribe = tokio::spawn({
                 let (lobby, subscribers, count) = (
                     app.lobby.clone(),
@@ -16884,7 +16893,7 @@ mod issue_4548_full_create_tests {
     async fn full_create_drops_residual_routes_under_its_code() {
         let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
-            let (stale_tx, mut stale_rx) = mpsc::unbounded_channel();
+            let (stale_tx, mut stale_rx) = crate::socket_mailbox::channel();
             // Held so a dropped route reads as "nothing received", not as a
             // closed channel.
             let _stale_tx_alive = stale_tx.clone();
@@ -16918,7 +16927,7 @@ mod issue_4548_full_create_tests {
     async fn full_ai_create_drops_residual_routes_under_its_code() {
         let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
-            let (stale_tx, _stale_rx) = mpsc::unbounded_channel();
+            let (stale_tx, _stale_rx) = crate::socket_mailbox::channel();
             app_state
                 .connections
                 .lock()
@@ -20264,7 +20273,7 @@ mod issue_4548_deadlock_tests {
             mgr.create_game(PlayerDeckPayload::default(), None)
         };
 
-        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = crate::socket_mailbox::channel();
         let mut identity_b = empty_identity();
         attach_full_seat(
             &state,
@@ -20477,7 +20486,7 @@ mod issue_4548_deadlock_tests {
             lob.mark_host_away(&code);
             assert!(lob.has_game(&code), "reach guard: the room is registered");
         }
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(vec![LobbySubscriber {
             tx,
             build_commit: String::new(),
@@ -20729,7 +20738,7 @@ mod issue_4548_deadlock_tests {
             .any(|registration| registration.game_code() == code));
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let count = Arc::new(AtomicU32::new(1));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         dispatch_broker_msg(
             lobby_broker::LobbyClientMessage::Ping { timestamp: 7 },
             &lobby,
@@ -20764,13 +20773,13 @@ mod issue_4548_deadlock_tests {
             sweep: ExpirySweep { acted, deferred: 0 },
             live: Vec::new(),
         };
-        let (player_tx, _player_rx) = mpsc::unbounded_channel();
+        let (player_tx, _player_rx) = crate::socket_mailbox::channel();
         connections
             .lock()
             .await
             .insert(code.to_string(), HashMap::from([(PlayerId(0), player_tx)]));
         let routes = ExpiredLobbyRoutes::capture(&sweep, &connections, &spectators).await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         let subscribers = Arc::new(Mutex::new(vec![LobbySubscriber {
             tx,
             build_commit: build_commit().to_string(),
@@ -20820,9 +20829,9 @@ mod issue_4548_deadlock_tests {
             },
             live: Vec::new(),
         };
-        let (old_player, _old_player_rx) = mpsc::unbounded_channel();
-        let (retired_other, _retired_other_rx) = mpsc::unbounded_channel();
-        let (old_spectator, _old_spectator_rx) = mpsc::unbounded_channel();
+        let (old_player, _old_player_rx) = crate::socket_mailbox::channel();
+        let (retired_other, _retired_other_rx) = crate::socket_mailbox::channel();
+        let (old_spectator, _old_spectator_rx) = crate::socket_mailbox::channel();
         connections.lock().await.insert(
             code.to_string(),
             HashMap::from([(PlayerId(0), old_player), (PlayerId(1), retired_other)]),
@@ -20832,8 +20841,8 @@ mod issue_4548_deadlock_tests {
             .await
             .insert(code.to_string(), vec![old_spectator]);
         let routes = ExpiredLobbyRoutes::capture(&sweep, &connections, &spectators).await;
-        let (new_player, _new_player_rx) = mpsc::unbounded_channel();
-        let (new_spectator, _new_spectator_rx) = mpsc::unbounded_channel();
+        let (new_player, _new_player_rx) = crate::socket_mailbox::channel();
+        let (new_spectator, _new_spectator_rx) = crate::socket_mailbox::channel();
         connections
             .lock()
             .await
@@ -21267,7 +21276,7 @@ mod issue_4548_deadlock_tests {
 
         // The composed leg: the production teardown on the same game is
         // blocked too, and completes once the guard is released.
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         let mut identity = empty_identity();
         identity.game_code = Some(code.clone());
         identity.player_id = Some(PlayerId(0));
@@ -21391,7 +21400,7 @@ mod issue_4548_deadlock_tests {
             (code, token)
         };
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         let mut identity = empty_identity();
         attach_full_seat(
             &state,
@@ -21493,7 +21502,7 @@ mod issue_4548_deadlock_tests {
     async fn the_draft_registry_to_connections_edge_completes() {
         let (draft_state, draft_code) = draft_fixture().await;
         let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         connections
             .lock()
             .await
@@ -21525,7 +21534,7 @@ mod issue_4548_deadlock_tests {
     async fn the_draft_spectator_to_draft_registry_edge_completes() {
         let (draft_state, draft_code) = draft_fixture().await;
         let draft_spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::socket_mailbox::channel();
         draft_spectators.lock().await.insert(
             draft_code.clone(),
             vec![(SpectatorVisibility::default(), tx)],
@@ -21612,7 +21621,7 @@ mod issue_4548_deadlock_tests {
                     .unwrap(),
             )
         };
-        let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
+        let (tx, _rx) = crate::socket_mailbox::channel();
 
         let (game_code, _token, _host_player, _count, _full_key) =
             create_and_connect_multiplayer_session(
@@ -21862,8 +21871,8 @@ mod player_slots_projection_tests {
             code
         };
 
-        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-        let (guest_tx, mut guest_rx) = mpsc::unbounded_channel();
+        let (host_tx, mut host_rx) = crate::socket_mailbox::channel();
+        let (guest_tx, mut guest_rx) = crate::socket_mailbox::channel();
         {
             let mut conns = connections.lock().await;
             let room = conns.entry(game_code.clone()).or_default();
@@ -23250,7 +23259,7 @@ mod metrics_tests {
     use server_core::draft_session::DraftSessionManager;
     use server_core::protocol::{AiSeatRequest, ClientMessage, DeckData, ServerMessage};
     use server_core::session::{GameSession, SessionManager};
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::Mutex;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     use super::metrics::{self, RejectReason};
@@ -23289,8 +23298,8 @@ mod metrics_tests {
     /// A sender whose receiver has been dropped — exactly what a departed
     /// socket leaves behind in `connections`, since the disconnect path does
     /// not remove the entry.
-    fn dead_sender() -> mpsc::UnboundedSender<ServerMessage> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn dead_sender() -> crate::socket_mailbox::Sender {
+        let (tx, rx) = crate::socket_mailbox::channel();
         drop(rx);
         tx
     }
@@ -23327,8 +23336,8 @@ mod metrics_tests {
             (a, b, c)
         };
 
-        let (live_tx, _live_rx) = mpsc::unbounded_channel();
-        let (retired_tx, _retired_rx) = mpsc::unbounded_channel();
+        let (live_tx, _live_rx) = crate::socket_mailbox::channel();
+        let (retired_tx, _retired_rx) = crate::socket_mailbox::channel();
         {
             let mut conns = state.connections.lock().await;
             conns.insert(
@@ -23375,7 +23384,7 @@ mod metrics_tests {
             0
         );
 
-        let (spectator_tx, _spectator_rx) = mpsc::unbounded_channel();
+        let (spectator_tx, _spectator_rx) = crate::socket_mailbox::channel();
         state
             .game_spectators
             .lock()

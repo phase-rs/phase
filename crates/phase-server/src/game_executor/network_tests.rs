@@ -409,3 +409,345 @@ fn assert_elimination_publication(path: EliminationPublication) {
         outcome.expect("the real elimination publication stalled");
     });
 }
+
+async fn receive_command_frame(socket: &mut ClientSocket) -> serde_json::Value {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+        match socket
+            .next()
+            .await
+            .expect("live command socket")
+            .expect("valid frame")
+        {
+            Message::Text(text) => return serde_json::from_str(&text).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => {}
+            frame => panic!("command test expected plain JSON, got {frame:?}"),
+        }
+    }
+}
+
+async fn send_command_frame(socket: &mut ClientSocket, action: &GameAction, command_id: u64) {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "Action",
+                "command_id": command_id,
+                "data": { "action": action },
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+fn owns_command_completion(frame: &serde_json::Value, command_id: u64) -> bool {
+    frame.get("command_id").and_then(serde_json::Value::as_u64) == Some(command_id)
+}
+
+#[test]
+fn four_human_mulligans_settle_only_the_originating_commands() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut sockets = Vec::with_capacity(4);
+            let mut keeps = Vec::with_capacity(4);
+            for player in 0..4 {
+                let mut socket = connect_and_hello(table.url.clone()).await;
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::Reconnect {
+                        game_code: table.key.game_code.clone(),
+                        player_token: table.tokens[player].clone(),
+                        full_key: table.key.clone(),
+                    },
+                    false,
+                )
+                .await;
+                loop {
+                    let frame = receive_command_frame(&mut socket).await;
+                    if frame["type"] == "GameStarted" {
+                        assert_eq!(frame["data"]["your_player"], player);
+                        let legal: Vec<GameAction> =
+                            serde_json::from_value(frame["data"]["legal_actions"].clone()).unwrap();
+                        keeps.push(
+                            legal
+                                .into_iter()
+                                .find(|action| {
+                                    matches!(
+                                        action,
+                                        GameAction::MulliganDecision {
+                                            choice: MulliganChoice::Keep
+                                        }
+                                    )
+                                })
+                                .expect("each human receives its own opening decision"),
+                        );
+                        break;
+                    }
+                }
+                sockets.push(socket);
+            }
+
+            // All four clients have submitted, but none can have applied yet.
+            // The first publication is therefore ambient for three clients.
+            let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            for (player, socket) in sockets.iter_mut().enumerate() {
+                send_command_frame(socket, &keeps[player], 100 + player as u64).await;
+            }
+            drop(lease);
+            let mut pending = [true; 4];
+            let mut own_completions = [0; 4];
+            let mut first_revision = None;
+            let mut ambient = 0;
+            for (player, socket) in sockets.iter_mut().enumerate() {
+                loop {
+                    let frame = receive_command_frame(socket).await;
+                    if frame["type"] != "StateUpdate" {
+                        continue;
+                    }
+                    let revision = frame["data"]["state_revision"].as_u64().unwrap();
+                    assert_eq!(*first_revision.get_or_insert(revision), revision);
+                    let is_own = frame.get("command_id").is_some();
+                    if is_own {
+                        assert!(owns_command_completion(&frame, 100 + player as u64));
+                        own_completions[player] += 1;
+                    } else {
+                        ambient += 1;
+                    }
+                    if owns_command_completion(&frame, 100 + player as u64) {
+                        pending[player] = false;
+                    }
+                    // Model the actual client bug: releasing the slot on an
+                    // ambient frame permits its still-legal Keep to be sent a
+                    // second time, behind this socket's original command.
+                    let legal: Vec<GameAction> =
+                        serde_json::from_value(frame["data"]["legal_actions"].clone()).unwrap();
+                    if !pending[player] && legal.iter().any(|action| action == &keeps[player]) {
+                        send_command_frame(socket, &keeps[player], 200 + player as u64).await;
+                    }
+                    break;
+                }
+            }
+            assert_eq!(
+                ambient, 3,
+                "simultaneous decisions must expose the peer-update window"
+            );
+            let mut rejections = Vec::new();
+            for socket in &mut sockets {
+                // Application FIFO, not Pong, is the authoritative drain fence.
+                send_test_message(socket, &ClientMessage::SubscribeLobby, false).await;
+            }
+            for (player, socket) in sockets.iter_mut().enumerate() {
+                loop {
+                    let frame = receive_command_frame(socket).await;
+                    match frame["type"].as_str().unwrap() {
+                        "LobbyUpdate" => break,
+                        "StateUpdate" => {
+                            if let Some(id) =
+                                frame.get("command_id").and_then(serde_json::Value::as_u64)
+                            {
+                                assert_eq!(
+                                    id,
+                                    100 + player as u64,
+                                    "a peer must never receive this echo"
+                                );
+                                pending[player] = false;
+                                own_completions[player] += 1;
+                            }
+                        }
+                        "ActionRejected" | "ActionFailed" | "Error" => rejections.push(frame),
+                        _ => {}
+                    }
+                }
+            }
+            assert!(
+                rejections.is_empty(),
+                "ambient ACKs replayed opening commands: {rejections:?}"
+            );
+            assert_eq!(pending, [false; 4]);
+            assert_eq!(own_completions, [1; 4]);
+            for socket in &mut sockets {
+                socket.close(None).await.unwrap();
+            }
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("four-human command correlation must finish");
+    });
+}
+
+async fn queue_named_revision(table: &NativeTable, name: String) -> u64 {
+    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+        .await
+        .unwrap();
+    let db = table.app.game_db.clone();
+    let executor = table.app.context.game_executor.clone();
+    let persistence_executor = executor.clone();
+    let (lease, revision) = executor
+        .with_session(session, move |session| {
+            session.display_names[0] = name;
+            let revision = session.advance_state_revision();
+            crate::persist_full_session_async(&persistence_executor, &db, session);
+            revision
+        })
+        .await;
+    drop(lease);
+    revision
+}
+
+async fn persistence_pool_probe(table: &NativeTable) -> Arc<str> {
+    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+        .await
+        .unwrap();
+    let (lease, pools) = table
+        .app
+        .context
+        .game_executor
+        .with_session(session, |session| {
+            session.full_persist_snapshot().unwrap().deck_pools_json
+        })
+        .await;
+    drop(lease);
+    pools
+}
+
+#[test]
+fn pending_persistence_retains_one_snapshot_and_saves_the_latest_revision() {
+    run_async_test(|| async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let pools = persistence_pool_probe(&table).await;
+            let baseline = Arc::strong_count(&pools);
+            let writes = Arc::new(AtomicUsize::new(0));
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let completed = Arc::new(tokio::sync::Notify::new());
+            let (release, blocked) = std::sync::mpsc::channel();
+            let blocked = parking_lot::Mutex::new(Some(blocked));
+            table.app.game_db.set_full_save_io_hook(Arc::new({
+                let writes = writes.clone();
+                let entered = entered.clone();
+                let completed = completed.clone();
+                move |_, _| {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    if let Some(blocked) = blocked.lock().take() {
+                        entered.notify_one();
+                        blocked.recv().unwrap();
+                    } else {
+                        completed.notify_one();
+                    }
+                }
+            }));
+            queue_named_revision(&table, "first".to_string()).await;
+            entered.notified().await;
+            let mut latest = 0;
+            for revision in 1..=100 {
+                latest = queue_named_revision(&table, format!("latest-{revision}")).await;
+            }
+            // Each eager pending FullPersistSnapshot retains this real shared
+            // pool buffer. One prepared write may retain it; 100 queued saves
+            // must not retain 100 complete game states behind that write.
+            let retained = Arc::strong_count(&pools);
+            release.send(()).unwrap();
+            completed.notified().await;
+            let db = table.app.game_db.clone();
+            let loaded =
+                tokio::task::spawn_blocking(move || db.load_active_full_sessions().unwrap())
+                    .await
+                    .unwrap();
+            let saved = loaded
+                .into_iter()
+                .find(|saved| saved.key == table.key)
+                .unwrap();
+            assert!(
+                retained <= baseline + 1,
+                "pending saves retained {} extra game snapshots behind one writer",
+                retained.saturating_sub(baseline),
+            );
+            assert_eq!(saved.mutation_revision, latest);
+            assert_eq!(saved.persisted.display_names[0], "latest-100");
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                2,
+                "only the in-flight and latest saves should reach SQLite"
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("coalesced persistence must drain");
+    });
+}
+
+#[test]
+fn terminal_retirement_cancels_pending_saves_before_serialization() {
+    run_async_test(|| async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let pools = persistence_pool_probe(&table).await;
+            let baseline = Arc::strong_count(&pools);
+            let serialized = Arc::new(AtomicUsize::new(0));
+            table.app.game_db.set_full_save_hook(Arc::new({
+                let serialized = serialized.clone();
+                move |_| {
+                    serialized.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+            let held_io = table.app.context.game_executor.admit_persistence_io().await;
+            for revision in 1..=20 {
+                queue_named_revision(&table, format!("pending-{revision}")).await;
+            }
+            let mut sockets = Vec::with_capacity(4);
+            for player in 0..4 {
+                sockets.push(table.connect(PlayerId(player)).await);
+            }
+            for socket in sockets.iter_mut().take(3) {
+                send_test_message(socket, &ClientMessage::Concede, false).await;
+                loop {
+                    let frame = receive_command_frame(socket).await;
+                    match frame["type"].as_str().unwrap() {
+                        "Conceded" => break,
+                        "Error" | "ActionFailed" | "ActionRejected" => {
+                            panic!("concede refused: {frame}")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            loop {
+                let frame = receive_command_frame(&mut sockets[3]).await;
+                if frame["type"] == "TerminalResult" {
+                    break;
+                }
+            }
+            drop(held_io);
+            while Arc::strong_count(&pools) > baseline {
+                tokio::task::yield_now().await;
+            }
+            let db = table.app.game_db.clone();
+            let active =
+                tokio::task::spawn_blocking(move || db.load_active_full_sessions().unwrap())
+                    .await
+                    .unwrap();
+            assert!(active.iter().all(|snapshot| snapshot.key != table.key));
+            assert_eq!(
+                serialized.load(Ordering::SeqCst),
+                0,
+                "retired pending snapshots must not be serialized and rejected later"
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("retirement must cancel the persistence backlog");
+    });
+}

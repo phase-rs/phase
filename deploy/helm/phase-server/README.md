@@ -59,7 +59,7 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
-| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure` and `ingress_overflow` |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow` and `raw_decode_quota` |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -142,6 +142,11 @@ action can proceed during a long AI sequence. Background Full-session saves
 serialize one snapshot at a time and do not occupy a game CPU slot while
 waiting for SQLite.
 
+Pending saves coalesce to the latest revision per Full lifetime, retaining at
+most one captured snapshot per game rather than a full snapshot per queued
+action. Currency checks precede capture and serialization; the final SQLite
+generation, revision and activation fences still protect the write.
+
 ## Behind Cloudflare
 
 Traefik typically sees a SNAT'd node IP (Service `externalTrafficPolicy: Cluster`),
@@ -170,8 +175,21 @@ Queued application ingress is limited to 64 commands and 1 MiB of retained
 payload across the raw and decoded queues. Overflow closes the connection with
 WebSocket code 1013 rather than silently discarding a command. Established
 connections' plain-text and raw-envelope JSON Pings bypass this command budget;
-their replies are coalesced. Compressed envelopes still consume the raw decode
-quota before decompression.
+their replies are coalesced. Other binary frames, including malformed and
+compressed envelopes, consume the raw decode quota before decompression.
+Exceeding that quota also closes with 1013 and records the distinct
+`raw_decode_quota` disconnect cause. Normal client JSON Pings are smaller than
+the 256-byte compression threshold and use the exempt plain/raw form.
+Decoded Action/Interaction quota failures instead receive an owned
+`ActionFailed`, without closing the transport.
+
+`ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
+game-command completion. Action/Interaction messages may carry a top-level
+numeric `command_id`; only the originating socket's own StateUpdate,
+ActionRejected, ActionFailed or ActionNoOp echoes it. Ambient updates do not
+acknowledge another command. Older servers without this capability retain the
+legacy completion behavior. These IDs are correlation metadata, not
+idempotency keys: commands are not automatically retried or deduplicated.
 
 Reattachment bootstraps precede updates from the new room, and a successful
 spectator switch stops routing the previous room. If a draft match ends while

@@ -245,6 +245,7 @@ fn server_hello_mode_byte_identical() {
         public_url: None,
         wire_formats: Vec::new(),
         heartbeat: None,
+        command_correlation: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),

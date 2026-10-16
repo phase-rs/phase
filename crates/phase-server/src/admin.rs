@@ -237,7 +237,7 @@ mod tests {
     use lobby_broker::{Broker, BrokerEnv};
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::Mutex;
 
     use crate::{draft_pools, persistence, AppState, PlayerId, ServerContext, ServerMode};
 
@@ -319,7 +319,7 @@ mod tests {
             draft_code
         };
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         state.connections.lock().await.insert(
             draft_code.clone(),
             HashMap::from([(PlayerId(0), tx.clone())]),

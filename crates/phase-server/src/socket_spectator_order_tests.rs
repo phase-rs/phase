@@ -42,7 +42,7 @@ fn full_spectator_switch_cannot_publish_a_prior_game_update_after_the_new_bootst
                 game_code: "OLD001".to_string(),
                 generation: 1,
             };
-            let (sender, mut messages) = mpsc::unbounded_channel();
+            let (sender, mut messages) = crate::socket_mailbox::channel();
             let mut registry = app.game_spectators.lock().await;
             registry.insert(prior_key.game_code.clone(), vec![sender.clone()]);
 

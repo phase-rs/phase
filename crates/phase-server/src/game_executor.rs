@@ -24,7 +24,10 @@ use server_core::session::{
 };
 use server_core::takeback::RewindOption;
 use server_core::FullSessionKey;
-use tokio::sync::{mpsc, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 use crate::{
     build_spectator_state_update_message, build_state_update_message, remove_game_spectator_sender,
@@ -46,6 +49,32 @@ pub(crate) struct GameExecutor {
     ai_step_hook: Option<AiStepHook>,
     #[cfg(test)]
     historical_publication: PublicationGate,
+}
+
+/// A CPU job retains its game's ordering lease. Only persistence scheduling
+/// needs the weak handle; individual AI steps incur no handle-cloning cost.
+pub(crate) struct SessionJob<'a> {
+    session: &'a mut OwnedMutexGuard<GameSession>,
+}
+
+impl SessionJob<'_> {
+    pub(crate) fn weak_session(&self) -> std::sync::Weak<tokio::sync::Mutex<GameSession>> {
+        Arc::downgrade(OwnedMutexGuard::mutex(self.session))
+    }
+}
+
+impl std::ops::Deref for SessionJob<'_> {
+    type Target = GameSession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session
+    }
+}
+
+impl std::ops::DerefMut for SessionJob<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.session
+    }
 }
 
 impl Default for GameExecutor {
@@ -126,10 +155,12 @@ impl GameExecutor {
     ) -> (OwnedMutexGuard<GameSession>, T)
     where
         T: Send + 'static,
-        F: FnOnce(&mut GameSession) -> T + Send + 'static,
+        F: FnOnce(&mut SessionJob<'_>) -> T + Send + 'static,
     {
         self.run(move || {
-            let result = work(&mut session);
+            let result = work(&mut SessionJob {
+                session: &mut session,
+            });
             (session, result)
         })
         .await
@@ -196,52 +227,13 @@ impl GameExecutor {
         }
     }
 
-    /// Serialize under CPU admission, but never spend that permit waiting for
-    /// SQLite. FIFO I/O admission is acquired first, bounding prepared buffers
-    /// and blocking-pool writers independently of game computation.
-    pub(crate) async fn persist_full_snapshot(
-        &self,
-        db: crate::SharedGameDb,
-        snapshot: server_core::FullPersistSnapshot,
-    ) {
-        let io = self
-            .persistence_io
+    /// One prepared buffer/writer at a time, independently of game CPU work.
+    pub(crate) async fn admit_persistence_io(&self) -> OwnedSemaphorePermit {
+        self.persistence_io
             .clone()
             .acquire_owned()
             .await
-            .expect("Full persistence admission is never closed");
-        let preparation_db = db.clone();
-        // The serializer also owns I/O admission if its async waiter is cancelled.
-        let (io, prepared) = self
-            .run(move || (io, preparation_db.prepare_full_session_save(snapshot)))
-            .await;
-        let prepared = match prepared {
-            Ok(prepared) => prepared,
-            Err((key, error)) => {
-                tracing::error!(game = %key.game_code, %error, "failed to serialize Full session");
-                return;
-            }
-        };
-        let result = tokio::task::spawn_blocking(move || {
-            // Cancellation of the async waiter must not admit another writer
-            // while this database mutex wait or commit is still running.
-            let _io = io;
-            match db.save_prepared_full_session(&prepared) {
-                Ok(server_core::FullPersistDisposition::Applied) => {}
-                Ok(disposition) => tracing::warn!(
-                    game = %prepared.key.game_code, ?disposition,
-                    "Full snapshot was no longer current"
-                ),
-                Err(error) => tracing::error!(
-                    game = %prepared.key.game_code, %error,
-                    "failed to persist Full session"
-                ),
-            }
-        })
-        .await;
-        if let Err(error) = result {
-            tracing::error!(%error, "Full persistence worker failed");
-        }
+            .expect("Full persistence admission is never closed")
     }
 
     /// Creation owns unpublished sessions through the registry. CPU admission
@@ -353,8 +345,8 @@ impl<'a> StateUpdateSource<'a> {
 /// Append owned frame copies only on a blocking CPU worker, without replacing
 /// an earlier event batch. Registry locks only fence the final ownership transfer.
 pub(crate) fn prepare_spectator_frames(
-    frames: &mut Vec<(mpsc::UnboundedSender<ServerMessage>, ServerMessage)>,
-    captured: &[mpsc::UnboundedSender<ServerMessage>],
+    frames: &mut Vec<(crate::socket_mailbox::Sender, ServerMessage)>,
+    captured: &[crate::socket_mailbox::Sender],
     message: ServerMessage,
 ) {
     frames.reserve(captured.len());
@@ -376,8 +368,8 @@ pub(crate) async fn publish_spectator_frames(
     executor: &GameExecutor,
     routes: &SharedGameSpectators,
     game_code: &str,
-    frames: Vec<(mpsc::UnboundedSender<ServerMessage>, ServerMessage)>,
-) -> Vec<mpsc::UnboundedSender<ServerMessage>> {
+    frames: Vec<(crate::socket_mailbox::Sender, ServerMessage)>,
+) -> Vec<crate::socket_mailbox::Sender> {
     let mut failed = Vec::new();
     let mut discarded = Vec::new();
     {
@@ -388,9 +380,11 @@ pub(crate) async fn publish_spectator_frames(
             });
             if !current {
                 discarded.push(message);
-            } else if let Err(error) = sender.send(message) {
+            } else if sender
+                .send_recovering(message, |message| discarded.push(message))
+                .is_err()
+            {
                 failed.push(sender);
-                discarded.push(error.0);
             }
         }
     }
@@ -407,13 +401,14 @@ pub(crate) async fn publish_spectator_frames(
 pub(crate) struct StateUpdatePublisher {
     full_key: FullSessionKey,
     player_count: u8,
-    players: HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>,
-    spectators: Vec<mpsc::UnboundedSender<ServerMessage>>,
+    players: HashMap<PlayerId, crate::socket_mailbox::Sender>,
+    spectators: Vec<crate::socket_mailbox::Sender>,
     spectator_routes: Option<SharedGameSpectators>,
-    spectator_frames: Vec<(mpsc::UnboundedSender<ServerMessage>, ServerMessage)>,
-    failed_spectators: Vec<mpsc::UnboundedSender<ServerMessage>>,
+    spectator_frames: Vec<(crate::socket_mailbox::Sender, ServerMessage)>,
+    failed_spectators: Vec<crate::socket_mailbox::Sender>,
     eliminated: Vec<PlayerId>,
     rewind_targets: Vec<RewindOption>,
+    completion: Option<(PlayerId, server_core::protocol::CommandId)>,
 }
 
 impl StateUpdatePublisher {
@@ -451,7 +446,17 @@ impl StateUpdatePublisher {
             failed_spectators: Vec::new(),
             eliminated,
             rewind_targets,
+            completion: None,
         }
+    }
+
+    pub(crate) fn with_completion(
+        mut self,
+        player: PlayerId,
+        command_id: Option<server_core::protocol::CommandId>,
+    ) -> Self {
+        self.completion = command_id.map(|id| (player, id));
+        self
     }
 
     pub(crate) fn set_batch_metadata(
@@ -518,7 +523,12 @@ impl StateUpdatePublisher {
                 self.rewind_targets.clone(),
                 &self.eliminated,
             );
-            let _ = sender.send(message);
+            let command_id = if self.completion.is_some_and(|(owner, _)| owner == player) {
+                self.completion.take().map(|(_, id)| id)
+            } else {
+                None
+            };
+            let _ = sender.send_completion(message, command_id);
         }
         self.collect_closed_spectators();
         if self.spectators.is_empty() {
@@ -896,7 +906,7 @@ mod tests {
                 let session = crate::lock_session(&state, &next).await.unwrap();
                 crate::build_spectator_game_started_message(&session).unwrap()
             };
-            let (tx, mut messages) = mpsc::unbounded_channel();
+            let (tx, mut messages) = crate::socket_mailbox::channel();
             let routes: SharedGameSpectators =
                 Arc::new(tokio::sync::Mutex::new(HashMap::from([(
                     prior.clone(),
@@ -988,7 +998,7 @@ mod tests {
                 let spectators = spectators.clone();
                 let drafts = drafts.clone();
                 async move {
-                    let (tx, mut messages) = mpsc::unbounded_channel();
+                    let (tx, mut messages) = crate::socket_mailbox::channel();
                     connections
                         .lock()
                         .await
@@ -997,6 +1007,7 @@ mod tests {
                     identity.set_session(code, PlayerId(0), token);
                     started.send(()).unwrap();
                     crate::handle_full_game_submission(
+                        None,
                         crate::GameSubmission::Action(GameAction::MulliganDecision {
                             choice: MulliganChoice::Keep,
                         }),
@@ -1131,7 +1142,7 @@ mod tests {
             });
             assert_eq!(steps.recv().await.unwrap(), 1);
 
-            let (tx, mut messages) = mpsc::unbounded_channel();
+            let (tx, mut messages) = crate::socket_mailbox::channel();
             let connections: SharedConnections = Arc::new(tokio::sync::Mutex::new(HashMap::from(
                 [(code_b.clone(), HashMap::from([(PlayerId(0), tx.clone())]))],
             )));
@@ -1146,6 +1157,7 @@ mod tests {
                 async move {
                     let _ = queued.send(());
                     crate::handle_full_game_submission(
+                        None,
                         crate::GameSubmission::Action(GameAction::MulliganDecision {
                             choice: MulliganChoice::Keep,
                         }),

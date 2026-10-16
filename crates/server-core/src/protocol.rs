@@ -79,6 +79,19 @@ pub struct HeartbeatContract {
     pub silence_budget_ms: u64,
 }
 
+/// Connection-scoped command ownership, never player authority or idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandId(pub u64);
+
+/// Optional command-completion correlation supported by a native server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandCorrelation {
+    CommandIdV1,
+    #[serde(other)]
+    Unknown,
+}
+
 pub use engine::starter_decks::DeckData;
 
 /// AI seat configuration sent by the client when creating a game with AI opponents.
@@ -691,6 +704,9 @@ pub enum ServerMessage {
         /// Present when application Ping replies are independent of game CPU work.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heartbeat: Option<HeartbeatContract>,
+        /// Completion ownership is optional transport-envelope metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_correlation: Option<CommandCorrelation>,
     },
     GameCreated {
         game_code: String,
@@ -2365,6 +2381,7 @@ mod tests {
                 ping_interval_ms: 5_000,
                 silence_budget_ms: 45_000,
             }),
+            command_correlation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2383,6 +2400,7 @@ mod tests {
                 public_url,
                 wire_formats,
                 heartbeat,
+                command_correlation: _,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -2417,6 +2435,7 @@ mod tests {
             public_url: None,
             wire_formats: Vec::new(),
             heartbeat: None,
+            command_correlation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -3902,6 +3921,40 @@ mod tests {
         assert!(
             !json.contains("resolved_by"),
             "None must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn optional_command_correlation_hello_preserves_old_server_fallback() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "test",
+                "build_commit": "test",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full",
+            },
+        });
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(legacy.clone()).unwrap(),
+            ServerMessage::ServerHello {
+                command_correlation: None,
+                ..
+            }
+        ));
+        let mut negotiated = legacy;
+        negotiated["data"]["command_correlation"] = serde_json::json!("CommandIdV1");
+        let hello: ServerMessage = serde_json::from_value(negotiated.clone()).unwrap();
+        assert!(matches!(
+            &hello,
+            ServerMessage::ServerHello {
+                command_correlation: Some(CommandCorrelation::CommandIdV1),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(hello).unwrap()["data"]["command_correlation"],
+            "CommandIdV1"
         );
     }
 }

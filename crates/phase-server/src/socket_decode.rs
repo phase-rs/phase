@@ -37,7 +37,7 @@ pub(crate) async fn run(
     host: watch::Receiver<Option<LobbyRegistration>>,
     mode: ServerMode,
     hello: oneshot::Sender<ClientHelloInfo>,
-    application: mpsc::Sender<Received<ClientMessage>>,
+    application: mpsc::Sender<Received<crate::socket_mailbox::ClientEnvelope>>,
 ) {
     let mut hello = Some(hello);
     let mut limiter = IngressRateLimiter::new();
@@ -68,7 +68,8 @@ pub(crate) async fn run(
         // content, must spend raw quota before decompression or warning work.
         let charge = if matches!(&frame, Message::Binary(_)) {
             if !limiter.allow() {
-                continue;
+                socket.raw_decode_quota();
+                break;
             }
             RateCharge::Applied
         } else {
@@ -97,31 +98,56 @@ pub(crate) async fn run(
             socket.ingress_overflow();
             break;
         }
-        let message: ClientMessage = match serde_json::from_str(&text) {
+        let envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text) {
             Ok(message) => message,
             Err(error) => {
-                if matches!(charge, RateCharge::Required) && !limiter.allow() {
+                let command_id = crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text);
+                let allowed = !matches!(charge, RateCharge::Required) || limiter.allow();
+                if !allowed && command_id.is_none() {
                     continue;
                 }
-                warn!(%error, "failed to parse client message");
-                if socket
-                    .enqueue_reply(ServerMessage::error(format!("Invalid message: {error}")))
-                    .is_err()
-                {
+                if allowed {
+                    warn!(%error, "failed to parse client message");
+                }
+                let message = if allowed {
+                    format!("Invalid message: {error}")
+                } else {
+                    "Command rate quota exceeded".to_string()
+                };
+                let rejection = if command_id.is_some() {
+                    ServerMessage::ActionFailed { message }
+                } else {
+                    ServerMessage::error(message)
+                };
+                if socket.enqueue_completion(rejection, command_id).is_err() {
                     break;
                 }
                 continue;
             }
         };
+        let command_id = envelope.command_id();
+        let message = &envelope.message;
         // JSON heartbeats are a control-plane message, not an application-rate
         // quota consumer. Their replies are coalesced by the bounded control lane.
         if matches!(charge, RateCharge::Required)
-            && !(hello.is_none() && matches!(&message, ClientMessage::Ping { .. }))
+            && !(hello.is_none() && matches!(message, ClientMessage::Ping { .. }))
             && !limiter.allow()
         {
+            if command_id.is_some()
+                && socket
+                    .enqueue_completion(
+                        ServerMessage::ActionFailed {
+                            message: "Command rate quota exceeded".to_string(),
+                        },
+                        command_id,
+                    )
+                    .is_err()
+            {
+                break;
+            }
             continue;
         }
-        let rejection = match classify_hello_gate(hello.is_none(), &message, hello_acceptance(mode))
+        let rejection = match classify_hello_gate(hello.is_none(), message, hello_acceptance(mode))
         {
             HelloGateOutcome::Accept(info) => {
                 info!(version = %info.client_version, commit = %info.build_commit, "ClientHello accepted");
@@ -168,30 +194,36 @@ pub(crate) async fn run(
             HelloGateOutcome::PassThrough => None,
         };
         if let Some(rejection) = rejection {
-            if socket.enqueue_reply(rejection).is_err() {
+            let rejection = if command_id.is_some() {
+                crate::operation_failed_message(message, "Client handshake rejected this command")
+                    .unwrap_or(rejection)
+            } else {
+                rejection
+            };
+            if socket.enqueue_completion(rejection, command_id).is_err() {
                 break;
             }
             continue;
         }
         // Apply the existing cheap shape guards before a decoded command can
         // wait behind a long handler. Authorization remains in the handler.
-        let rejection = if let Some(reason) = reject_if_disabled(&message, mode) {
+        let rejection = if let Some(reason) = reject_if_disabled(message, mode) {
             Some(
-                crate::operation_failed_message(&message, reason)
+                crate::operation_failed_message(message, reason)
                     .unwrap_or_else(|| ServerMessage::error(reason)),
             )
-        } else if let Err(reason) = guard_client_message_before_dispatch(&message, mode) {
-            Some(wire_rejection_message(&message, reason))
+        } else if let Err(reason) = guard_client_message_before_dispatch(message, mode) {
+            Some(wire_rejection_message(message, reason))
         } else {
             None
         };
         if let Some(rejection) = rejection {
-            if socket.enqueue_reply(rejection).is_err() {
+            if socket.enqueue_completion(rejection, command_id).is_err() {
                 break;
             }
             continue;
         }
-        if let ClientMessage::Ping { timestamp } = &message {
+        if let ClientMessage::Ping { timestamp } = message {
             socket.enqueue_pong(*timestamp);
             if host.borrow().is_some() {
                 refresh
@@ -200,7 +232,7 @@ pub(crate) async fn run(
             }
         } else {
             match application.try_send(Received {
-                message,
+                message: envelope,
                 received_at,
                 admission,
             }) {

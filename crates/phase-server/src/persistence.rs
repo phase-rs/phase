@@ -38,6 +38,7 @@ pub enum SessionRetention {
 pub struct GameDb {
     conn: Mutex<Connection>,
     retention: SessionRetention,
+    pub(crate) full_saves: crate::full_persistence::Scheduler,
     #[cfg(test)]
     full_save_hook: Mutex<Option<FullSaveHook>>,
     #[cfg(test)]
@@ -146,6 +147,7 @@ impl GameDb {
         Ok(Self {
             conn: Mutex::new(conn),
             retention,
+            full_saves: crate::full_persistence::Scheduler::default(),
             #[cfg(test)]
             full_save_hook: Mutex::new(None),
             #[cfg(test)]
@@ -319,6 +321,65 @@ impl GameDb {
         .optional()
     }
 
+    /// Cheap preflight before capture/serialization. The transactional upsert
+    /// remains authoritative if a retirement or newer save races this read.
+    pub(crate) fn full_save_currency(
+        &self,
+        key: &FullSessionKey,
+        revision: u64,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        let conn = self.conn.lock().unwrap();
+        if !Self::current_activation(&conn, key, activation_epoch)? {
+            return Ok(FullPersistDisposition::NotCurrentActivation);
+        }
+        let retained = conn
+            .query_row(
+                "SELECT generation, mutation_revision, retired, session_state_json IS NULL
+             FROM game_sessions WHERE game_code = ?1",
+                params![key.game_code],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if retained.is_some_and(|(generation, saved, retired, empty)| {
+            generation > key.generation
+                || (generation == key.generation && (retired || (saved >= revision && !empty)))
+        }) {
+            Ok(FullPersistDisposition::SupersededOrRetired)
+        } else {
+            Ok(FullPersistDisposition::Applied)
+        }
+    }
+
+    fn current_activation(
+        conn: &Connection,
+        key: &FullSessionKey,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<bool> {
+        let Some(epoch) = activation_epoch else {
+            return Ok(true);
+        };
+        let active = conn.query_row(
+            "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
+            [],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+            )),
+        ).optional()?;
+        Ok(active.is_some_and(|(code, generation, active_epoch)| {
+            code == key.game_code && generation == key.generation && active_epoch == epoch
+        }))
+    }
+
     /// Saves a Full authoritative snapshot only when it is newer than the
     /// retained lifetime. Equal revisions are intentionally no-ops.
     pub fn save_full_session(
@@ -404,23 +465,8 @@ impl GameDb {
         }
         let tx = conn.transaction()?;
 
-        if let Some(epoch) = activation_epoch {
-            let active = tx
-                .query_row(
-                    "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, u64>(1)?,
-                            row.get::<_, u64>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if active != Some((key.game_code.clone(), key.generation, epoch)) {
-                return Ok(FullPersistDisposition::NotCurrentActivation);
-            }
+        if !Self::current_activation(&tx, key, activation_epoch)? {
+            return Ok(FullPersistDisposition::NotCurrentActivation);
         }
 
         // The dynamic payload and the pools are two columns of one upsert in
@@ -566,6 +612,7 @@ impl GameDb {
             params![snapshot.key.game_code, snapshot.key.generation],
         )?;
         tx.commit()?;
+        self.full_saves.cancel_all();
         Ok((next_epoch, FullPersistDisposition::Applied))
     }
 
@@ -638,6 +685,7 @@ impl GameDb {
             tx.execute("DELETE FROM full_active_session WHERE slot = 1", [])?;
         }
         tx.commit()?;
+        self.full_saves.cancel(key);
         Ok(FullPersistDisposition::Applied)
     }
 
@@ -739,6 +787,7 @@ impl GameDb {
         {
             if existing_digest == digest {
                 tx.commit()?;
+                self.full_saves.cancel(&artifact.key);
                 return Ok(PrepareFullTerminalDisposition::AlreadyPrepared);
             }
             return Err(rusqlite::Error::InvalidQuery);
@@ -818,6 +867,7 @@ impl GameDb {
             params![artifact.key.game_code, artifact.key.generation],
         )?;
         tx.commit()?;
+        self.full_saves.cancel(&artifact.key);
         Ok(PrepareFullTerminalDisposition::Prepared)
     }
 

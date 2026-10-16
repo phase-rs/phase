@@ -103,14 +103,31 @@ impl Drop for PendingWrite {
 /// bounded, coalesced transport/Pong controls bypass application encoding.
 #[derive(Clone)]
 pub(crate) struct NegotiatedSocket {
-    messages: mpsc::UnboundedSender<ServerMessage>,
+    messages: crate::socket_mailbox::Sender,
     control: ControlLane,
     death: Death,
+    command_id: Option<server_core::protocol::CommandId>,
     #[cfg(test)]
     hooks: crate::socket_test_hooks::Hooks,
 }
 
 impl NegotiatedSocket {
+    pub(crate) fn set_command_id(&mut self, command_id: Option<server_core::protocol::CommandId>) {
+        self.command_id = command_id;
+    }
+
+    pub(crate) fn command_id(&self) -> Option<server_core::protocol::CommandId> {
+        self.command_id
+    }
+
+    pub(crate) fn enqueue_completion(
+        &self,
+        message: ServerMessage,
+        command_id: Option<server_core::protocol::CommandId>,
+    ) -> Result<(), mpsc::error::SendError<()>> {
+        self.messages.send_completion(message, command_id)
+    }
+
     pub(crate) fn set_wire_format(&mut self, format: Option<WireFormat>) {
         self.control.accept_wire_format(format);
     }
@@ -123,9 +140,7 @@ impl NegotiatedSocket {
         &self,
         message: ServerMessage,
     ) -> Result<(), mpsc::error::SendError<()>> {
-        self.messages
-            .send(message)
-            .map_err(|_| mpsc::error::SendError(()))
+        self.enqueue_completion(message, self.command_id)
     }
 
     pub(crate) fn enqueue_pong(&self, timestamp: u64) {
@@ -151,13 +166,21 @@ impl NegotiatedSocket {
     }
 
     pub(crate) fn ingress_overflow(&self) {
+        self.close_for_ingress(Cause::IngressOverflow);
+    }
+
+    pub(crate) fn raw_decode_quota(&self) {
+        self.close_for_ingress(Cause::RawDecodeQuota);
+    }
+
+    fn close_for_ingress(&self, cause: Cause) {
         self.control.close(
             Some(CloseFrame {
                 code: 1013,
                 reason: Default::default(),
             }),
             CloseOrigin::Server,
-            || self.death.record(Cause::IngressOverflow),
+            || self.death.record(cause),
         );
     }
 }
@@ -216,7 +239,7 @@ impl Drop for SocketTasks {
 }
 
 pub(crate) struct SocketConfig {
-    pub(crate) replies: mpsc::UnboundedSender<ServerMessage>,
+    pub(crate) replies: crate::socket_mailbox::Sender,
     pub(crate) metrics: Arc<crate::metrics::ServerMetrics>,
     pub(crate) executor: crate::game_executor::GameExecutor,
     #[cfg(test)]
@@ -225,7 +248,7 @@ pub(crate) struct SocketConfig {
 
 pub(crate) fn start(
     socket: WebSocket,
-    mut messages: mpsc::UnboundedReceiver<ServerMessage>,
+    mut messages: crate::socket_mailbox::Receiver,
     config: SocketConfig,
 ) -> (
     NegotiatedSocket,
@@ -247,6 +270,7 @@ pub(crate) fn start(
         messages: config.replies,
         control: control.clone(),
         death: death.clone(),
+        command_id: None,
         #[cfg(test)]
         hooks: hooks.clone(),
     };
@@ -277,14 +301,19 @@ pub(crate) fn start(
                     biased;
                     _ = closed.wait_for(Option::is_some) => break,
                     _ = sample.tick() => {
-                        sample_backlog(connection, messages.len(), &metrics, &mut warned);
+                        sample_backlog(connection, messages.queued_frames(), &metrics, &mut warned);
                         continue;
                     }
-                    message = messages.recv() => match message { Some(message) => message, None => break },
+                    message = messages.recv_envelope() => match message { Some(message) => message, None => break },
                 };
-                sample_backlog(connection, messages.len() + 1, &metrics, &mut warned);
+                sample_backlog(
+                    connection,
+                    messages.queued_frames() + 1,
+                    &metrics,
+                    &mut warned,
+                );
                 #[cfg(test)]
-                hooks.before_encode(&message).await;
+                hooks.before_encode(&message.message).await;
                 let encoding = encode_application(
                     &executor,
                     message,
@@ -295,7 +324,7 @@ pub(crate) fn start(
                     tokio::select! {
                         biased;
                         _ = closed.wait_for(Option::is_some) => return,
-                        _ = sample.tick() => sample_backlog(connection, messages.len() + 1, &metrics, &mut warned),
+                        _ = sample.tick() => sample_backlog(connection, messages.queued_frames() + 1, &metrics, &mut warned),
                         encoded = &mut encoding => break encoded,
                     }
                 };
@@ -328,7 +357,7 @@ pub(crate) fn start(
                     tokio::select! {
                         biased;
                         _ = closed.wait_for(Option::is_some) => return,
-                        _ = sample.tick() => sample_backlog(connection, messages.len(), &metrics, &mut warned),
+                        _ = sample.tick() => sample_backlog(connection, messages.queued_frames(), &metrics, &mut warned),
                         result = &mut completion => break result,
                     }
                 };
@@ -620,12 +649,12 @@ enum EncodingFailure {
 
 async fn encode_application(
     executor: &crate::game_executor::GameExecutor,
-    message: ServerMessage,
+    message: crate::socket_mailbox::Envelope,
     envelope: bool,
 ) -> Result<Message, EncodingFailure> {
-    let envelope = envelope && !matches!(&message, ServerMessage::ServerHello { .. });
+    let envelope = envelope && !matches!(&message.message, ServerMessage::ServerHello { .. });
     let state_bearing = matches!(
-        &message,
+        &message.message,
         ServerMessage::StateUpdate { .. }
             | ServerMessage::GameStarted { .. }
             | ServerMessage::AuthoritativeStateExport { .. }
@@ -1410,11 +1439,9 @@ mod transport_fixup_tests {
 
     #[tokio::test]
     async fn malformed_binary_envelopes_consume_the_raw_decode_quota() {
-        use crate::issue_4548_full_create_tests::{
-            recv_enveloped_server_message, send_test_message, test_client_hello,
-        };
+        use crate::issue_4548_full_create_tests::{send_test_message, test_client_hello};
         use server_core::protocol::WireFormat;
-        let (url, server, _directory, _app) = spawn_full_mode_server().await;
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
             recv_server_message(&mut socket).await;
@@ -1430,30 +1457,93 @@ mod transport_fixup_tests {
                     .await
                     .unwrap();
             }
-            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, true).await;
-            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 91 }, true).await;
-            assert!(matches!(
-                recv_enveloped_server_message(&mut socket).await,
-                ServerMessage::Pong { timestamp: 91 }
-            ));
-            assert!(
-                tokio::time::timeout(Duration::from_millis(250), async {
-                    loop {
-                        if matches!(
-                            recv_enveloped_server_message(&mut socket).await,
-                            ServerMessage::LobbyUpdate { .. }
-                        ) {
-                            break;
-                        }
+            loop {
+                match socket.next().await {
+                    Some(Ok(WsMessage::Close(Some(close)))) => {
+                        assert_eq!(u16::from(close.code), 1013);
+                        break;
                     }
-                })
-                .await
-                .is_err(),
-                "invalid binary traffic bypassed the quota for the next command"
+                    Some(Ok(_)) => {}
+                    other => panic!("raw decode quota must close explicitly: {other:?}"),
+                }
+            }
+            assert_eq!(
+                app.context
+                    .metrics
+                    .ws_disconnect_count(Cause::RawDecodeQuota),
+                1,
             );
         })
         .await;
         server.abort();
-        result.expect("malformed traffic prevented its control reply");
+        result.expect("malformed binary traffic must produce its classified close");
+    }
+
+    #[tokio::test]
+    async fn decoded_command_quota_refusals_echo_the_command_without_losing_heartbeats() {
+        use crate::issue_4548_full_create_tests::send_test_message;
+        use engine::types::interaction::{
+            InteractionChoiceId, InteractionId, InteractionResponse, InteractionSubmission,
+        };
+
+        let (url, server, _directory, _app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = connect_and_hello(url).await;
+            for _ in 0..crate::RATE_LIMIT_MESSAGES {
+                send_test_message(&mut socket, &ClientMessage::SubscribeLobby, false).await;
+            }
+            for (command_id, message) in [
+                (
+                    37,
+                    ClientMessage::Action {
+                        action: engine::types::actions::GameAction::PassPriority,
+                    },
+                ),
+                (
+                    38,
+                    ClientMessage::Interaction {
+                        submission: InteractionSubmission {
+                            interaction_id: InteractionId("quota-interaction".to_string()),
+                            response: InteractionResponse::Choose {
+                                choice_id: InteractionChoiceId("quota-choice".to_string()),
+                            },
+                        },
+                    },
+                ),
+            ] {
+                let mut frame = serde_json::to_value(message).unwrap();
+                frame["command_id"] = serde_json::json!(command_id);
+                socket
+                    .send(WsMessage::Text(frame.to_string().into()))
+                    .await
+                    .unwrap();
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        WsMessage::Text(text) => {
+                            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                            if frame["type"] == "ActionFailed" {
+                                assert_eq!(frame["command_id"], command_id);
+                                break;
+                            }
+                        }
+                        WsMessage::Ping(_) | WsMessage::Pong(_) => {}
+                        frame => {
+                            panic!("ordinary command quota must not close the transport: {frame:?}")
+                        }
+                    }
+                }
+            }
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 91 }, false).await;
+            loop {
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::Pong { timestamp: 91 } => break,
+                    ServerMessage::Error { message, .. } => panic!("heartbeat failed: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("decoded commands must receive an owned refusal");
     }
 }

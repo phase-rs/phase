@@ -18,10 +18,11 @@ pub(crate) enum Cause {
     EncodingFailure,
     IngressOverflow,
     ApplicationEnd,
+    RawDecodeQuota,
 }
 
 impl Cause {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::PeerClose,
         Self::ReadEof,
         Self::ReadError,
@@ -30,6 +31,7 @@ impl Cause {
         Self::EncodingFailure,
         Self::IngressOverflow,
         Self::ApplicationEnd,
+        Self::RawDecodeQuota,
     ];
 
     pub(crate) const fn index(self) -> usize {
@@ -42,6 +44,7 @@ impl Cause {
             Self::EncodingFailure => 5,
             Self::IngressOverflow => 6,
             Self::ApplicationEnd => 7,
+            Self::RawDecodeQuota => 8,
         }
     }
 
@@ -55,6 +58,7 @@ impl Cause {
             Self::EncodingFailure => "encoding_failure",
             Self::IngressOverflow => "ingress_overflow",
             Self::ApplicationEnd => "application_end",
+            Self::RawDecodeQuota => "raw_decode_quota",
         }
     }
 }
