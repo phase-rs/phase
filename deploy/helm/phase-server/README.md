@@ -144,7 +144,7 @@ waiting for SQLite.
 
 Pending saves coalesce to the latest revision per Full lifetime, retaining at
 most one captured snapshot per game rather than a full snapshot per queued
-action. Currency checks precede capture and serialization; the final SQLite
+action. Capture under the game lease comes first, followed by the I/O-admitted currency check and serialization; the final SQLite
 generation, revision and activation fences still protect the write.
 
 ## Behind Cloudflare

@@ -293,6 +293,8 @@ impl IngressRateLimiter {
 /// Hosted listing refreshes coalesce independently of heartbeat replies.
 /// One task per hosting connection prevents a blocked broker from accumulating
 /// a detached task for every Ping or delaying the decoder's next Pong.
+/// This stamp belongs to broker-hosted (LobbyOnly) listings. Native Full rooms
+/// and draft pods are kept alive by the session-aware lobby expiry sweep.
 struct HostRefresh {
     changed: std::sync::Arc<tokio::sync::Notify>,
     worker: tokio::task::JoinHandle<()>,

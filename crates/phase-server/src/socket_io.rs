@@ -550,11 +550,7 @@ async fn pending_control(
             let envelope = matches!(format, Some(WireFormat::GzipEnvelopeV1));
             // Host activity refresh is independent; the broker remains the
             // single authority for the coalesced application heartbeat reply.
-            let reply = lobby_broker::Broker::stateless_reply(
-                &lobby_broker::ConnState::default(),
-                &lobby_broker::LobbyClientMessage::Ping { timestamp },
-            )
-            .expect("an unhosted Ping has a stateless broker reply");
+            let reply = lobby_broker::Broker::heartbeat_reply(timestamp);
             let json = serde_json::to_string(&crate::to_server_message(reply))
                 .map_err(|error| error.to_string())?;
             WriteOperation::Frame(wire::encode_json_message(json, envelope).await?)

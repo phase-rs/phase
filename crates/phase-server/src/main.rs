@@ -5501,10 +5501,9 @@ async fn dispatch_broker_msg(
     identity: &mut SocketIdentity,
 ) {
     let mut conn = identity.to_conn_state();
-    // The broker is the single authority for what such a frame is answered
-    // with; this only asks it before taking the lock. A frame it can answer
-    // statelessly (an unhosted heartbeat) stays live while unrelated listing
-    // work holds the lobby.
+    // Production socket Pings are intercepted by the reader/decoder, with
+    // hosted presence refreshed independently. Broker-facing callers of this
+    // dispatcher still share its stateless policy without taking the lobby lock.
     if let Some(reply) = Broker::stateless_reply(&conn, &lobby_msg) {
         let _ = tx.send(to_server_message(reply));
         return;
@@ -5608,8 +5607,8 @@ fn initialize_full_runtime(
     Ok(())
 }
 
-/// Queue only metadata and a weak session handle. The persistence owner captures
-/// the latest state after admission and a durable currency check.
+/// Coalesce request metadata; one worker captures a current checkpoint under the
+/// game lease, then retains it through FIFO I/O admission and a fenced write.
 fn persist_full_session_async(
     executor: &game_executor::GameExecutor,
     game_db: &SharedGameDb,
@@ -7542,12 +7541,9 @@ async fn draft_pack_generator_for_start(
 
 /// Per-AI-result fan-out for a batch of `run_ai` results.
 ///
-/// Lifted verbatim out of `handle_full_game_submission` so the approved-takeback
-/// path can reuse it rather than duplicate 110 lines: a rollback can restore an
-/// AI seat to priority, and that AI's follow-up must reach clients with the same
-/// 100 ms pacing, size guard, `is_last` legal-action gating, per-player filter
-/// and spectator fan-out as a normal action's. Pure extraction — no behavioural
-/// delta on the shipped path.
+/// Shared by normal submissions and rollback follow-up. Publication retains
+/// per-transition order, snapshot size guards, final-decision disclosure and
+/// viewer filtering. No artificial pacing delay is inserted between transitions.
 ///
 /// `rewind_targets` and `eliminated` are both captured under the same lock as
 /// the results themselves, and both **after** `run_ai` — neither can be
@@ -20702,63 +20698,6 @@ mod issue_4548_deadlock_tests {
             },
             &SysEnv,
         );
-    }
-
-    #[tokio::test]
-    async fn hosted_ping_still_refreshes_the_listing_liveness_stamp() {
-        struct AncientEnv;
-        impl BrokerEnv for AncientEnv {
-            fn now_ms(&self) -> u64 {
-                0
-            }
-            fn new_token(&self) -> String {
-                SysEnv.new_token()
-            }
-            fn new_game_code(&self) -> String {
-                SysEnv.new_game_code()
-            }
-        }
-        let code = "ABC123";
-        let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
-        let mut identity = empty_identity();
-        identity.lobby_host_game = Some(lobby.lock().await.lobby_mut().register_game(
-            code,
-            RegisterGameRequest {
-                public: true,
-                ..Default::default()
-            },
-            &AncientEnv,
-        ));
-        assert!(lobby
-            .lock()
-            .await
-            .lobby()
-            .check_expired(300, &SysEnv)
-            .iter()
-            .any(|registration| registration.game_code() == code));
-        let subscribers = Arc::new(Mutex::new(Vec::new()));
-        let count = Arc::new(AtomicU32::new(1));
-        let (tx, mut rx) = crate::socket_mailbox::channel();
-        dispatch_broker_msg(
-            lobby_broker::LobbyClientMessage::Ping { timestamp: 7 },
-            &lobby,
-            &subscribers,
-            &count,
-            &tx,
-            &mut identity,
-        )
-        .await;
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ServerMessage::Pong { timestamp: 7 })
-        ));
-        let broker = lobby.lock().await;
-        assert!(broker.lobby().public_game(code).is_some());
-        assert!(!broker
-            .lobby()
-            .check_expired(300, &SysEnv)
-            .iter()
-            .any(|registration| registration.game_code() == code));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! One latest-wins metadata slot per Full lifetime; no queued GameState copies.
+//! One coalesced request and at most one captured checkpoint per Full lifetime.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -93,7 +93,7 @@ impl Scheduler {
             .get(&runtime.key)
             .filter(|worker| !worker.requests.is_closed())
         {
-            // Pending work retains only scalar metadata, never a game payload.
+            // New requests replace scalar metadata, not the worker's checkpoint.
             sender.requests.send_replace(request);
             return;
         }
@@ -163,20 +163,10 @@ async fn run(
     registration: Registration,
 ) {
     loop {
-        let request = *receiver.borrow_and_update();
         let Some(db) = db.upgrade() else { return };
         // Do not retain the database while idle: its sender registry must be
         // able to disappear and close this worker during shutdown.
-        match save_latest(
-            &executor,
-            db,
-            key.clone(),
-            &mut receiver,
-            request,
-            session.clone(),
-        )
-        .await
-        {
+        match save_latest(&executor, db, key.clone(), &mut receiver, session.clone()).await {
             Next::Closed => return,
             Next::Refresh => continue,
             Next::Wait => {
@@ -216,6 +206,12 @@ async fn current(
     }
 }
 
+/// New requests coalesce without cancelling an in-flight admission or lease wait.
+/// Only removal of this lifetime's sender cancels pending work.
+async fn cancelled(mut receiver: watch::Receiver<Request>) {
+    while receiver.changed().await.is_ok() {}
+}
+
 async fn discard(executor: &GameExecutor, snapshot: FullPersistSnapshot) {
     if let Err(error) = executor.try_run(move || drop(snapshot)).await {
         tracing::error!(%error, "Full snapshot disposal worker failed");
@@ -227,52 +223,32 @@ async fn save_latest(
     db: SharedGameDb,
     key: Arc<FullSessionKey>,
     receiver: &mut watch::Receiver<Request>,
-    request: Request,
     session: Weak<AsyncMutex<GameSession>>,
 ) -> Next {
-    if let Some(next) = newer(receiver) {
-        return next;
-    }
     if session.strong_count() == 0 {
         return Next::Closed;
-    }
-    let preflight = tokio::select! {
-        biased;
-        changed = receiver.changed() => return if changed.is_ok() { Next::Refresh } else { Next::Closed },
-        io = executor.admit_persistence_io() => io,
-    };
-    // This check precedes both the game-state clone and JSON serialization.
-    // It is an optimization, not a database lease: the final SQL fence remains.
-    let Some(preflight) = current(
-        db.clone(),
-        key.clone(),
-        request.revision,
-        request.activation_epoch,
-        preflight,
-    )
-    .await
-    else {
-        return Next::Wait;
-    };
-    // Do not park global persistence admission behind a game's ordering lease.
-    drop(preflight);
-    if let Some(next) = newer(receiver) {
-        return next;
     }
     let Some(session) = session.upgrade() else {
         return Next::Closed;
     };
+    #[cfg(test)]
+    executor.notify_persistence_lease_wait();
     let session = tokio::select! {
         biased;
-        changed = receiver.changed() => return if changed.is_ok() { Next::Refresh } else { Next::Closed },
+        _ = cancelled(receiver.clone()) => return Next::Closed,
         session = session.lock_owned() => session,
     };
-    let capture_receiver = receiver.clone();
+    if matches!(newer(receiver), Some(Next::Closed)) {
+        return Next::Closed;
+    }
+    let request = *receiver.borrow_and_update();
+    // The lease pins the current capture revision, including a newer revision
+    // that did not schedule another save. Never hold global I/O admission while
+    // waiting for a game's potentially long AI batch to release this lease.
     let capture_key = key.clone();
     let (session, snapshot) = executor
         .with_session(session, move |session| {
-            if newer(&capture_receiver).is_some()
-                || session.state_revision != request.revision
+            if session.state_revision < request.revision
                 || session.full_runtime.as_ref().is_none_or(|runtime| {
                     runtime.key != *capture_key
                         || runtime.activation_epoch != request.activation_epoch
@@ -286,15 +262,15 @@ async fn save_latest(
         .await;
     drop(session);
     let Some(snapshot) = snapshot else {
-        return newer(receiver).unwrap_or(Next::Wait);
+        return Next::Wait;
     };
-    // At most one captured snapshot per game can reach this point. Newer work
-    // cancels this wait and retains only its metadata, not another snapshot.
+    // Retain one captured snapshot and this FIFO queue position per game.
+    // New mutations mark the worker dirty; they never discard its checkpoint.
     let io = tokio::select! {
         biased;
-        changed = receiver.changed() => {
+        _ = cancelled(receiver.clone()) => {
             discard(executor, snapshot).await;
-            return if changed.is_ok() { Next::Refresh } else { Next::Closed };
+            return Next::Closed;
         }
         io = executor.admit_persistence_io() => io,
     };
@@ -314,9 +290,10 @@ async fn save_latest(
     let preparation_db = db.clone();
     let prepared = executor
         .try_run(move || {
-            // The I/O lease travels into the worker, including cancellation of its
-            // async waiter. No second serializer can create a prepared SQL buffer.
-            if newer(&serialization_receiver).is_some() {
+            // The I/O lease travels into the worker, including cancellation of
+            // its async waiter. Newer requests never discard this checkpoint;
+            // a retired lifetime still avoids unnecessary serialization.
+            if serialization_receiver.has_changed().is_err() {
                 return (io, None);
             }
             (io, Some(preparation_db.prepare_full_session_save(snapshot)))
@@ -328,13 +305,13 @@ async fn save_latest(
             tracing::error!(game = %key.game_code, %error, "failed to serialize Full session");
             return Next::Wait;
         }
-        Ok((_, None)) => return newer(receiver).unwrap_or(Next::Wait),
+        Ok((_, None)) => return Next::Closed,
         Err(error) => {
             tracing::error!(%error, "Full serialization worker failed");
             return Next::Wait;
         }
     };
-    // Once serialized, commit this checkpoint even if mutations keep arriving.
+    // Once admitted, commit this checkpoint even if mutations keep arriving.
     // The SQL lifetime/activation/revision fences remain authoritative; later
     // requests coalesce for the next checkpoint instead of starving durability.
     if let Err(error) = tokio::task::spawn_blocking(move || {

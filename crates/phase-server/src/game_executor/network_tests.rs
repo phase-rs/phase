@@ -38,8 +38,12 @@ impl NativeTable {
     }
 
     async fn with_parallelism(parallelism: NonZeroUsize) -> Self {
+        Self::with_executor(GameExecutor::new(parallelism)).await
+    }
+
+    async fn with_executor(game_executor: GameExecutor) -> Self {
         let context = crate::ServerContext {
-            game_executor: GameExecutor::new(parallelism),
+            game_executor,
             ..Default::default()
         };
         let (url, server, directory, app) = spawn_server(
@@ -848,6 +852,114 @@ fn malformed_correlated_quota_refusals_bound_the_slow_consumer_backlog() {
 }
 
 #[test]
+fn captured_checkpoints_keep_fifo_admission_during_sustained_mutation() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let executor = table.app.context.game_executor.clone();
+            let held_io = executor.admit_persistence_io().await;
+            let queued = executor.arm_persistence_admission();
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let db = table.app.game_db.clone();
+            let persistence_executor = executor.clone();
+            let (lease, captured_revision) = executor
+                .with_session(session, move |session| {
+                    session.advance_state_revision();
+                    crate::persist_full_session_async(&persistence_executor, &db, session);
+                    // A revision advance without another save request must not
+                    // invalidate the already-requested checkpoint.
+                    session.display_names[0] = "current-without-another-request".to_string();
+                    session.advance_state_revision()
+                })
+                .await;
+            drop(lease);
+            queued.notified().await;
+
+            let observation = executor.admit_persistence_io();
+            tokio::pin!(observation);
+            tokio::select! {
+                biased;
+                _ = &mut observation => panic!("the test still holds I/O admission"),
+                _ = tokio::task::yield_now() => {}
+            }
+            for revision in 0..32 {
+                queue_named_revision(&table, format!("still-mutating-{revision}")).await;
+            }
+            drop(held_io);
+            // This waiter was queued after the checkpoint. It can acquire only
+            // after that checkpoint commits, not after an abandon-and-requeue.
+            let io = observation.await;
+            let db = table.app.game_db.clone();
+            let loaded =
+                tokio::task::spawn_blocking(move || db.load_active_full_sessions().unwrap())
+                    .await
+                    .unwrap();
+            let saved = loaded
+                .into_iter()
+                .find(|save| save.key == table.key)
+                .unwrap();
+            let actual = saved.mutation_revision;
+            let names = saved.persisted.display_names;
+            drop(io);
+            assert_eq!(
+                actual, captured_revision,
+                "mutations moved the captured checkpoint behind a later I/O waiter",
+            );
+            assert_eq!(names[0], "current-without-another-request");
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("pre-serialization mutation must not starve FIFO checkpoint progress");
+    });
+}
+
+#[test]
+fn a_busy_game_lease_does_not_block_another_games_durable_checkpoint() {
+    run_async_test(|| async {
+        let executor = GameExecutor::new(NonZeroUsize::MIN);
+        let a = NativeTable::with_executor(executor.clone()).await;
+        let b = NativeTable::with_executor(executor.clone()).await;
+        let session = crate::lock_session(&a.app.sessions, &a.key.game_code)
+            .await
+            .unwrap();
+        let db = a.app.game_db.clone();
+        let persistence_executor = executor.clone();
+        let lease_wait = executor.arm_persistence_lease();
+        let (lease, ()) = executor
+            .with_session(session, move |session| {
+                session.advance_state_revision();
+                crate::persist_full_session_async(&persistence_executor, &db, session);
+            })
+            .await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            lease_wait.notified().await;
+            let revision = queue_named_revision(&b, "other-game-durable".to_string()).await;
+            while b.app.game_db.full_saves.pending_games() != 0 {
+                tokio::task::yield_now().await;
+            }
+            let db = b.app.game_db.clone();
+            let saved =
+                tokio::task::spawn_blocking(move || db.load_active_full_sessions().unwrap())
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|save| save.key == b.key)
+                    .unwrap();
+            assert_eq!(saved.mutation_revision, revision);
+            assert_eq!(saved.persisted.display_names[0], "other-game-durable");
+        })
+        .await;
+        // Also release the lease before reporting a negative-control timeout.
+        drop(lease);
+        a.server.abort();
+        b.server.abort();
+        outcome.expect("one game's long ordering lease held global persistence I/O admission");
+    });
+}
+
+#[test]
 fn serialized_checkpoints_commit_during_sustained_mutation() {
     run_async_test(|| async {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1114,5 +1226,191 @@ fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
             .await;
         table.server.abort();
         outcome.expect("actual socket flush must own refusal admission");
+    });
+}
+
+async fn age_hosted_listing(
+    app: &crate::AppState,
+    code: &str,
+) -> Vec<lobby_broker::LobbyRegistration> {
+    let mut broker = app.lobby.lock().await;
+    // Preserve the registration generation while advancing its fixture age.
+    // No production clock override or five-minute wall-clock sleep is needed.
+    let mut snapshot = serde_json::to_value(broker.lobby()).unwrap();
+    let game = &mut snapshot["games"][code];
+    game["created_at"] = serde_json::json!(0);
+    game["last_seen"] = serde_json::json!(0);
+    *broker.lobby_mut() = serde_json::from_value(snapshot).unwrap();
+    let reported = broker.lobby().check_expired(300, &crate::SysEnv);
+    assert!(reported
+        .iter()
+        .any(|registration| registration.game_code() == code));
+    reported
+}
+
+#[test]
+fn socket_hosted_json_pings_keep_the_listing_alive() {
+    run_async_test(|| async {
+        for mode in [crate::ServerMode::Full, crate::ServerMode::LobbyOnly] {
+            let (url, server, _directory, app) = spawn_server(
+                mode,
+                crate::draft_pools::DraftPools::default(),
+                Arc::new(basic_land_test_database()),
+                crate::ServerContext::default(),
+            )
+            .await;
+            let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+                let mut socket = connect_and_hello(url).await;
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::CreateGameWithSettings {
+                        deck: DeckData {
+                            main_deck: vec!["Network Test Land".to_string(); 60],
+                            ..Default::default()
+                        },
+                        display_name: "Heartbeat Host".to_string(),
+                        public: true,
+                        password: None,
+                        timer_seconds: None,
+                        player_count: 2,
+                        match_config: Default::default(),
+                        ai_seats: Vec::new(),
+                        format_config: Some(FormatConfig::free_for_all()),
+                        room_name: None,
+                        host_peer_id: matches!(mode, crate::ServerMode::LobbyOnly)
+                            .then(|| "heartbeat-peer".to_string()),
+                        draft_metadata: None,
+                        start_when_full: true,
+                        ranked: false,
+                        requested_code: None,
+                        booster_pack_pool: None,
+                    },
+                    false,
+                )
+                .await;
+                let code = loop {
+                    match recv_server_message(&mut socket).await {
+                        ServerMessage::GameCreated { game_code, .. } => break game_code,
+                        ServerMessage::Error { message, .. } => {
+                            panic!("{mode:?} host creation failed: {message}")
+                        }
+                        _ => {}
+                    }
+                };
+                // Delimit creation through the application FIFO before aging.
+                // Only broker-hosted rooms publish a heartbeat registration.
+                send_test_message(&mut socket, &ClientMessage::SubscribeLobby, false).await;
+                loop {
+                    if matches!(
+                        recv_server_message(&mut socket).await,
+                        ServerMessage::LobbyUpdate { .. }
+                    ) {
+                        break;
+                    }
+                }
+                for timestamp in 1..=3 {
+                    if matches!(mode, crate::ServerMode::LobbyOnly) {
+                        let _ = age_hosted_listing(&app, &code).await;
+                    }
+                    send_test_message(&mut socket, &ClientMessage::Ping { timestamp }, false).await;
+                    loop {
+                        if matches!(
+                            recv_server_message(&mut socket).await,
+                            ServerMessage::Pong { timestamp: echoed } if echoed == timestamp
+                        ) {
+                            break;
+                        }
+                    }
+                    match mode {
+                        crate::ServerMode::Full => {
+                            // Full rooms are session-owned, not broker-owned.
+                            // Force a stale report AFTER the Pong, then drive
+                            // the same session/draft and lobby phases as main's
+                            // production expiry task. A live host must keep its
+                            // room even without a broker heartbeat stamp.
+                            let mut reported = age_hosted_listing(&app, &code).await;
+                            tokio::time::timeout(Duration::from_secs(5), async {
+                                loop {
+                                    let drafts =
+                                        crate::live_draft_codes(&app.draft_sessions, &reported)
+                                            .await;
+                                    let sweep = {
+                                        let mut sessions = app.sessions.lock().await;
+                                        crate::handle_expired_lobby_games(
+                                            &mut sessions,
+                                            &app.game_db,
+                                            &reported,
+                                            &drafts,
+                                        )
+                                    };
+                                    let routes = crate::ExpiredLobbyRoutes::capture(
+                                        &sweep,
+                                        &app.connections,
+                                        &app.game_spectators,
+                                    )
+                                    .await;
+                                    crate::finish_lobby_expiry_sweep(
+                                        &app.lobby,
+                                        &app.lobby_subscribers,
+                                        &app.connections,
+                                        &app.game_spectators,
+                                        &sweep,
+                                        routes,
+                                    )
+                                    .await;
+                                    assert!(
+                                        app.sessions.lock().await.contains_game(&code),
+                                        "lobby age retired a connected Full host's room",
+                                    );
+                                    let broker = app.lobby.lock().await;
+                                    assert!(broker.lobby().public_game(&code).is_some());
+                                    reported = broker.lobby().check_expired(300, &crate::SysEnv);
+                                    if !reported
+                                        .iter()
+                                        .any(|registration| registration.game_code() == code)
+                                    {
+                                        break;
+                                    }
+                                    drop(broker);
+                                    // A busy session is legitimately deferred
+                                    // by the sweep; model its next tick.
+                                    tokio::task::yield_now().await;
+                                }
+                            })
+                            .await
+                            .expect("the production sweep failed to keep a live Full room");
+                        }
+                        crate::ServerMode::LobbyOnly => {
+                            // Pong and HostRefresh are independent. Do not send
+                            // another broker command that could mask a missing
+                            // refresh from this actual socket heartbeat.
+                            tokio::time::timeout(Duration::from_secs(5), async {
+                                loop {
+                                    let broker = app.lobby.lock().await;
+                                    assert!(broker.lobby().public_game(&code).is_some());
+                                    if !broker
+                                        .lobby()
+                                        .check_expired(300, &crate::SysEnv)
+                                        .iter()
+                                        .any(|registration| registration.game_code() == code)
+                                    {
+                                        break;
+                                    }
+                                    drop(broker);
+                                    tokio::task::yield_now().await;
+                                }
+                            })
+                            .await
+                            .expect("a real JSON Ping failed to refresh its broker-hosted listing");
+                        }
+                    }
+                }
+            })
+            .await;
+            server.abort();
+            outcome.unwrap_or_else(|error| {
+                panic!("{mode:?} hosted socket lifecycle failed: {error}");
+            });
+        }
     });
 }

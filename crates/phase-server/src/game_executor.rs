@@ -41,6 +41,9 @@ type AiStepHook = Arc<dyn Fn(&GameSession) + Send + Sync>;
 type PublicationGate =
     Arc<parking_lot::Mutex<Option<Arc<crate::socket_test_hooks::BootstrapGate>>>>;
 
+#[cfg(test)]
+type PersistenceNotice = Arc<parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>>;
+
 #[derive(Clone)]
 pub(crate) struct GameExecutor {
     permits: Arc<Semaphore>,
@@ -49,6 +52,10 @@ pub(crate) struct GameExecutor {
     ai_step_hook: Option<AiStepHook>,
     #[cfg(test)]
     historical_publication: PublicationGate,
+    #[cfg(test)]
+    persistence_admission: PersistenceNotice,
+    #[cfg(test)]
+    persistence_lease: PersistenceNotice,
 }
 
 /// A CPU job retains its game's ordering lease. Only persistence scheduling
@@ -100,6 +107,10 @@ impl GameExecutor {
             ai_step_hook: None,
             #[cfg(test)]
             historical_publication: Arc::default(),
+            #[cfg(test)]
+            persistence_admission: Arc::default(),
+            #[cfg(test)]
+            persistence_lease: Arc::default(),
         }
     }
 
@@ -229,11 +240,43 @@ impl GameExecutor {
 
     /// One prepared buffer/writer at a time, independently of game CPU work.
     pub(crate) async fn admit_persistence_io(&self) -> OwnedSemaphorePermit {
-        self.persistence_io
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("Full persistence admission is never closed")
+        let admission = self.persistence_io.clone().acquire_owned();
+        tokio::pin!(admission);
+        #[cfg(test)]
+        let mut entered = self.persistence_admission.lock().take();
+        std::future::poll_fn(|cx| {
+            let result = std::future::Future::poll(admission.as_mut(), cx);
+            #[cfg(test)]
+            if let Some(entered) = entered.take() {
+                // Notify only after the real semaphore future has been polled,
+                // so tests observe its actual FIFO queue position.
+                entered.notify_one();
+            }
+            result
+        })
+        .await
+        .expect("Full persistence admission is never closed")
+    }
+
+    #[cfg(test)]
+    fn arm_persistence_admission(&self) -> Arc<tokio::sync::Notify> {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        *self.persistence_admission.lock() = Some(entered.clone());
+        entered
+    }
+
+    #[cfg(test)]
+    fn arm_persistence_lease(&self) -> Arc<tokio::sync::Notify> {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        *self.persistence_lease.lock() = Some(entered.clone());
+        entered
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notify_persistence_lease_wait(&self) {
+        if let Some(entered) = self.persistence_lease.lock().take() {
+            entered.notify_one();
+        }
     }
 
     /// Creation owns unpublished sessions through the registry. CPU admission
@@ -474,7 +517,12 @@ impl StateUpdatePublisher {
         transitions: Vec<AiTransition>,
     ) -> Self {
         self.flush_spectators(executor).await;
-        for transition in transitions {
+        let transition_count = transitions.len();
+        for (index, transition) in transitions.into_iter().enumerate() {
+            debug_assert!(
+                transition.decision.is_none() || index + 1 == transition_count,
+                "only the final AI transition may carry a decision",
+            );
             self = executor
                 .run(move || {
                     let source = StateUpdateSource::from_transition(&transition);
