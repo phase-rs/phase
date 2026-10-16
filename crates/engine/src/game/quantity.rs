@@ -371,56 +371,81 @@ fn characteristic_view_for_object(
     }
 }
 
-/// CR 608.2h + CR 400.7: the latest departure snapshot for an object that
-/// left a snapshot zone (battlefield/exile/stack) — the greatest recorded
-/// incarnation strictly below the live one. Every battlefield departure
-/// records under its pre-move incarnation and incarnations bump
-/// monotonically, so this is always the most recent departure's
-/// characteristics; later non-recording moves (graveyard→exile) change no
-/// characteristics. `None` when no departure was recorded (genuine
-/// graveyard-origin members) or the object is gone without history.
-fn departure_lki_for_object(
+/// CR 608.2h + CR 400.7: which authority reads one tracked-set member's
+/// characteristics (and its member-filter match). The producing occurrence
+/// binds the read: a stamped origin selects its departure record, never any
+/// latest older departure by storage id.
+enum TrackedMemberRead<'s> {
+    /// Stamped producing transition with a recorded departure snapshot.
+    Snapshot(&'s crate::types::game_state::LKISnapshot),
+    /// Stamped producing transition from a zone that records no LKI
+    /// (hand/library/graveyard): the live object is authoritative — the
+    /// legacy cache slot necessarily describes an EARLIER, unrelated
+    /// departure and must not be consulted.
+    Live,
+    /// Unstamped member (selection sets, legacy saves) or a recording-origin
+    /// data gap: legacy live-or-cache behavior.
+    Legacy,
+}
+
+/// True when departures from `zone` record LKI under their pre-move
+/// incarnation. Mirrors the zones.rs recording gate exactly; a new
+/// recording zone must extend both.
+fn zone_departure_records_lki(zone: Zone) -> bool {
+    matches!(zone, Zone::Battlefield | Zone::Exile | Zone::Stack)
+}
+
+fn tracked_member_read_authority(
     state: &GameState,
+    set_id: Option<crate::types::identifiers::TrackedSetId>,
     object_id: ObjectId,
-) -> Option<&crate::types::game_state::LKISnapshot> {
-    let live = state.objects.get(&object_id)?.incarnation;
-    state
-        .lki_by_incarnation
-        .get(&object_id)
-        .and_then(|history| {
-            history
-                .iter()
-                .filter(|(incarnation, _)| **incarnation < live)
-                .max_by_key(|(incarnation, _)| **incarnation)
-        })
-        .map(|(_, lki)| lki)
+) -> TrackedMemberRead<'_> {
+    let origin = set_id.and_then(|set_id| {
+        state
+            .tracked_set_member_origins
+            .get(&set_id)
+            .and_then(|origins| origins.get(&object_id))
+    });
+    match origin {
+        None => TrackedMemberRead::Legacy,
+        Some(origin) => match state
+            .lki_by_incarnation
+            .get(&object_id)
+            .and_then(|history| history.get(&origin.departure_incarnation))
+        {
+            Some(lki) => TrackedMemberRead::Snapshot(lki),
+            // A recording origin with no record is a data gap (legacy save,
+            // pruned history): best-effort legacy behavior. A non-recording
+            // origin has no snapshot BY CONSTRUCTION, so live is
+            // authoritative and the legacy slot is provably some other
+            // departure.
+            None if zone_departure_records_lki(origin.departed_from) => TrackedMemberRead::Legacy,
+            None => TrackedMemberRead::Live,
+        },
+    }
 }
 
 /// CR 608.2h + CR 400.7: the characteristic view for one tracked-set member.
 ///
-/// A member that left a snapshot zone reads its latest departure LKI: the
-/// retained live entry was reverted to base characteristics on exit
-/// (`revert_layered_characteristics_to_base`), so a live-first read loses
-/// battlefield modifications (Danse Macabre reading a pumped sacrifice's
-/// base toughness). Selection is from exact incarnation history — never the
-/// legacy cache slot, which may describe a later incarnation (same rule as
-/// the `filter.rs` entrant dispatch and
-/// `targeted_object_characteristic_view`).
-///
-/// A member with no departure history — genuine graveyard-origin reads — or
-/// still on the battlefield keeps the shared live-or-LKI helper, matching
-/// the filter sibling in the tracked arm, which likewise consults LKI only
-/// off the battlefield.
+/// A member stamped with its producing transition reads that departure's
+/// snapshot (Danse Macabre reading a pumped sacrifice's battlefield
+/// toughness); a member stamped from a non-recording origin (a discarded
+/// card's hand departure) reads live, which is authoritative there and can
+/// never resurrect an earlier departure's modifications. Unstamped members
+/// keep the shared live-or-LKI helper.
 fn tracked_member_characteristic_view<'s>(
     state: &'s GameState,
+    set_id: Option<crate::types::identifiers::TrackedSetId>,
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'s>> {
-    if !state.battlefield.contains(&object_id) {
-        if let Some(lki) = departure_lki_for_object(state, object_id) {
-            return Some(CharacteristicView::Lki(lki));
-        }
+    match tracked_member_read_authority(state, set_id, object_id) {
+        TrackedMemberRead::Snapshot(lki) => Some(CharacteristicView::Lki(lki)),
+        TrackedMemberRead::Live => state
+            .objects
+            .get(&object_id)
+            .map(CharacteristicView::Object),
+        TrackedMemberRead::Legacy => characteristic_view_for_object(state, object_id),
     }
-    characteristic_view_for_object(state, object_id)
 }
 
 /// CR 608.2h + CR 400.7: the characteristic view for one targeted object.
@@ -665,34 +690,45 @@ fn visit_characteristic_leaf<'s>(
                             .is_some_and(|member_cause| member_cause == cause)
                     }),
                 };
-                // CR 608.2h + CR 608.2i: a member the producer moved off the
-                // battlefield is read from last known information, exactly as
-                // the `FilteredTrackedSetSize` count sibling reads it.
+                // CR 608.2h + CR 608.2i: member narrowing judges the same
+                // producing-occurrence authority as the characteristic read
+                // below — a stamped snapshot, authoritative live, or the
+                // legacy off-battlefield cache path for unstamped members.
                 let filter_ok = match filter {
                     None => true,
-                    Some(filter) => {
-                        if !state.battlefield.contains(&oid) {
-                            state.lki_cache.get(&oid).map_or_else(
-                                || {
-                                    crate::game::filter::matches_target_filter(
-                                        state, oid, filter, filter_ctx,
-                                    )
-                                },
-                                |lki| {
-                                    crate::game::filter::matches_target_filter_on_lki_snapshot(
-                                        state, oid, lki, filter, filter_ctx,
-                                    )
-                                },
-                            )
-                        } else {
-                            crate::game::filter::matches_target_filter(
-                                state, oid, filter, filter_ctx,
+                    Some(filter) => match tracked_member_read_authority(state, set_id, oid) {
+                        TrackedMemberRead::Snapshot(lki) => {
+                            crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                state, oid, lki, filter, filter_ctx,
                             )
                         }
-                    }
+                        TrackedMemberRead::Live => crate::game::filter::matches_target_filter(
+                            state, oid, filter, filter_ctx,
+                        ),
+                        TrackedMemberRead::Legacy => {
+                            if !state.battlefield.contains(&oid) {
+                                state.lki_cache.get(&oid).map_or_else(
+                                    || {
+                                        crate::game::filter::matches_target_filter(
+                                            state, oid, filter, filter_ctx,
+                                        )
+                                    },
+                                    |lki| {
+                                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                            state, oid, lki, filter, filter_ctx,
+                                        )
+                                    },
+                                )
+                            } else {
+                                crate::game::filter::matches_target_filter(
+                                    state, oid, filter, filter_ctx,
+                                )
+                            }
+                        }
+                    },
                 };
                 if cause_ok && filter_ok {
-                    let view = tracked_member_characteristic_view(state, oid);
+                    let view = tracked_member_characteristic_view(state, set_id, oid);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(oid), view, false);
                     }
@@ -21790,6 +21826,154 @@ mod tests {
             resolve(QuantityRef::DistinctCardTypes { source: chained }),
             1,
             "the refusal is scoped to the batch: a satisfied filtered ChainSet still consumes"
+        );
+    }
+
+    /// M1r2 staging: Oak was a pumped 5-power creature on the battlefield
+    /// (incarnation 1, departure recorded), was bounced to hand
+    /// (incarnation 2, hand exits record nothing), then discarded to the
+    /// graveyard (incarnation 3, live power back to printed 2). The chain
+    /// tracked set holds Oak as a Discarded member bound to the
+    /// hand-departure origin — the shape production stamping produces.
+    fn stage_pumped_bounced_discarded_member(state: &mut GameState) -> (ObjectId, ObjectId) {
+        use crate::types::game_state::{LKISnapshot, TrackedMemberOrigin};
+
+        let source = create_object(
+            state,
+            CardId(528),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let oak = create_object(
+            state,
+            CardId(529),
+            PlayerId(0),
+            "Oak".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&oak).unwrap();
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+            obj.incarnation = 3;
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let pumped = LKISnapshot {
+            name: "Oak".to_string(),
+            token_image_ref: None,
+            power: Some(5),
+            toughness: Some(6),
+            base_power: Some(2),
+            base_toughness: Some(3),
+            mana_value: 3,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            counters: Default::default(),
+            chosen_attributes: vec![],
+            tapped: false,
+            is_suspected: false,
+            attachments: Vec::new(),
+        };
+        state
+            .lki_by_incarnation
+            .entry(oak)
+            .or_default()
+            .insert(1, pumped.clone());
+        state.lki_cache.insert(oak, pumped);
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![oak]);
+        state.tracked_set_member_causes.insert(
+            set_id,
+            [(oak, ThisWayCause::Discarded)].into_iter().collect(),
+        );
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                oak,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Hand,
+                    departure_incarnation: 2,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        (source, oak)
+    }
+
+    /// M1r2: a discarded member reads its producing hand-departure origin —
+    /// live printed power — not the greatest older battlefield departure.
+    /// CR 400.7: the bounce plus discard made Oak a new object twice over;
+    /// the old pump belongs to neither. Fails while the reader selects any
+    /// latest older departure by storage id.
+    #[test]
+    fn discarded_member_reads_producing_origin_not_older_battlefield_pump() {
+        let mut state = GameState::new_two_player(42);
+        let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity(&state, &aggregate, PlayerId(0), source),
+            2,
+            "the discarded member must read printed power 2, not the pumped battlefield departure 5"
+        );
+    }
+
+    /// M1r2, filter half: member narrowing over the same discarded member
+    /// judges the producing origin too — live power 2 fails a power-3 floor
+    /// the stale pumped snapshot would satisfy.
+    #[test]
+    fn discarded_member_filter_judges_producing_origin_not_older_pump() {
+        use crate::types::ability::{PtStat, PtValueScope};
+
+        let mut state = GameState::new_two_player(42);
+        let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+        let power_floor =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                },
+            ]));
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(power_floor),
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity(&state, &aggregate, PlayerId(0), source),
+            0,
+            "live power 2 fails the power-3 floor; the stale pumped 5 must not admit the member"
         );
     }
 

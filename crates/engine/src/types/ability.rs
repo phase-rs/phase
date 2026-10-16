@@ -8390,6 +8390,31 @@ pub enum ThisWayCause {
     PutIntoGraveyard,
 }
 
+impl ThisWayCause {
+    /// The origin zone the producing transition must have departed, when the
+    /// action determines one. `None` for destination-named actions (Exiled,
+    /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
+    /// which arrive from anywhere. The origin-stamp site requires the
+    /// member's latest zone-change record to agree; a mismatch means the
+    /// record is not the producing transition and no origin is stamped.
+    pub fn expected_origin_zone(self) -> Option<crate::types::zones::Zone> {
+        use crate::types::zones::Zone;
+        match self {
+            // CR 701.21a / CR 701.8a: sacrifice and destroy act on permanents.
+            ThisWayCause::Sacrificed | ThisWayCause::Destroyed => Some(Zone::Battlefield),
+            // CR 701.17a: mill moves library cards to the graveyard.
+            ThisWayCause::Milled => Some(Zone::Library),
+            // CR 701.9a: discard moves hand cards to the graveyard.
+            ThisWayCause::Discarded => Some(Zone::Hand),
+            ThisWayCause::Exiled
+            | ThisWayCause::Returned
+            | ThisWayCause::Bounced
+            | ThisWayCause::PutIntoGraveyard
+            | ThisWayCause::OwnerLibraryShuffleSubject => None,
+        }
+    }
+}
+
 /// CR 113.3b / CR 113.3c: Which stack ability kinds a `StackAbility` filter accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]

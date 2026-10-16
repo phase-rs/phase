@@ -36,7 +36,7 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
     PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
-    ReturnResultOccurrenceId, SeatCreatedTokens, WaitingFor, ZoneChangeRecord,
+    ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin, WaitingFor, ZoneChangeRecord,
     ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
@@ -14979,15 +14979,71 @@ pub(crate) fn publish_tracked_set_with_causes(
 /// contributed to the same merged set. The only writer of
 /// [`GameState::tracked_set_member_causes`] that adds an entry, shared by both
 /// recording publications so neither can record a cause the other cannot.
+/// Origins stamp alongside causes (same key, same overwrite policy): every
+/// `Some(cause)` names a zone-transition producer action, so the member's
+/// latest zone-change record — verified, not assumed — is its producing
+/// transition. Unverifiable members stamp no origin and keep the live read.
 fn stamp_member_causes(state: &mut GameState, affected: Vec<(ObjectId, Option<ThisWayCause>)>) {
     if let Some(chain_id) = state.chain_tracked_set_id {
+        let derived: Vec<(ObjectId, ThisWayCause, Option<TrackedMemberOrigin>)> = affected
+            .into_iter()
+            .filter_map(|(id, cause)| {
+                cause.map(|cause| (id, cause, producing_origin_for(state, id, cause)))
+            })
+            .collect();
         let causes = state.tracked_set_member_causes.entry(chain_id).or_default();
-        for (id, cause) in affected {
-            if let Some(cause) = cause {
-                causes.insert(id, cause);
+        let origins = state
+            .tracked_set_member_origins
+            .entry(chain_id)
+            .or_default();
+        for (id, cause, origin) in derived {
+            causes.insert(id, cause);
+            if let Some(origin) = origin {
+                origins.insert(id, origin);
             }
         }
     }
+}
+
+/// CR 608.2h + CR 400.7: derive one member's producing-transition origin at
+/// publication. The latest zone-change record for the member must BE the
+/// producing transition: it ends where the member is (nothing moved since),
+/// it departs a real zone (created-directly members stamp nothing), and it
+/// agrees with the action's origin when the action determines one. Returns
+/// `None` — no stamp, live read — on any mismatch rather than binding a
+/// stale or unrelated departure.
+fn producing_origin_for(
+    state: &GameState,
+    id: ObjectId,
+    cause: ThisWayCause,
+) -> Option<TrackedMemberOrigin> {
+    let live = state.objects.get(&id)?;
+    let record = state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.object_id == id)?;
+    let from = record.from_zone?;
+    if record.to_zone != live.zone {
+        return None;
+    }
+    if cause
+        .expected_origin_zone()
+        .is_some_and(|expected| expected != from)
+    {
+        return None;
+    }
+    // zones.rs bumps the incarnation exactly +1 per genuine zone change and
+    // nothing for a same-zone record, so the departure recorded under:
+    let departure_incarnation = if record.to_zone == Zone::Battlefield || from != record.to_zone {
+        live.incarnation.saturating_sub(1)
+    } else {
+        live.incarnation
+    };
+    Some(TrackedMemberOrigin {
+        departed_from: from,
+        departure_incarnation,
+    })
 }
 
 /// CR 608.2c + CR 614.6: the fresh-scope sibling of
@@ -31872,6 +31928,67 @@ mod tests {
                     TargetFilter::SpecificObject { id: ObjectId(8) },
                 ]
             }
+        );
+    }
+
+    /// M1r2: publication stamps each member's producing-transition origin —
+    /// verified against the zone journal, never assumed. A real
+    /// battlefield→hand→graveyard journey publishes Discarded bound to the
+    /// hand departure; a cause/origin mismatch (Sacrificed for a hand
+    /// departure) and a selection (`None` cause) stamp nothing, keeping the
+    /// live read rather than binding a stale departure.
+    #[test]
+    fn publish_stamps_verified_producing_origins() {
+        let mut state = GameState::new_two_player(42);
+        let oak = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Oak".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, oak, Zone::Hand, &mut events);
+        crate::game::zones::move_to_zone(&mut state, oak, Zone::Graveyard, &mut events);
+        let live_incarnation = state.objects.get(&oak).unwrap().incarnation;
+
+        let discarded = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![oak],
+            Some(ThisWayCause::Discarded),
+        );
+        assert_eq!(
+            state
+                .tracked_set_member_origins
+                .get(&discarded)
+                .and_then(|origins| origins.get(&oak)),
+            Some(&TrackedMemberOrigin {
+                departed_from: Zone::Hand,
+                departure_incarnation: live_incarnation - 1,
+            }),
+            "the discard binds the verified hand departure"
+        );
+
+        let mismatched = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![oak],
+            Some(ThisWayCause::Sacrificed),
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&mismatched)
+                .is_none_or(|origins| !origins.contains_key(&oak)),
+            "Sacrificed demands a battlefield origin: a hand departure stamps nothing"
+        );
+
+        let selection = publish_fresh_tracked_set_with_causes(&mut state, vec![oak], None);
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&selection)
+                .is_none_or(|origins| !origins.contains_key(&oak)),
+            "a selection names no transition and stamps nothing"
         );
     }
 

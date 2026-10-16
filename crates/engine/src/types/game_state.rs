@@ -22399,6 +22399,17 @@ pub fn record_captured_onsets_json(json: &str) -> String {
     serde_json::to_string(&document).expect("a committed capture re-serializes")
 }
 
+/// CR 608.2h + CR 400.7: the producing transition a tracked-set member is
+/// bound to — the zone it departed and the pre-move incarnation that
+/// departure recorded under in `lki_by_incarnation`. Reads key on the
+/// incarnation; the zone documents the expected origin and selects the
+/// no-record fallback (live is authoritative for zones that record no LKI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackedMemberOrigin {
+    pub departed_from: Zone,
+    pub departure_incarnation: u64,
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -23231,6 +23242,23 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub tracked_set_member_causes: im::HashMap<TrackedSetId, im::HashMap<ObjectId, ThisWayCause>>,
+
+    /// CR 608.2h + CR 400.7: the producing transition each tracked-set member
+    /// was stamped with at publication — the zone it departed and the
+    /// pre-move incarnation that departure recorded under. Characteristic
+    /// and member-filter reads bind to THIS record (via
+    /// `lki_by_incarnation`), never to "the latest older departure by ID":
+    /// a storage id reused by a genuinely new hand/graveyard-origin object
+    /// must not inherit an earlier departure's characteristics (an old pump
+    /// on a discarded card). Origins whose zone records no LKI departure
+    /// (hand/library/graveyard) read live, which is authoritative there.
+    /// Stamped only for zone-transition producer actions, alongside the
+    /// cause stamp; selection sets and legacy saves carry no entry and keep
+    /// the live-or-cache read. Pruned with membership at the same sites.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub tracked_set_member_origins:
+        im::HashMap<TrackedSetId, im::HashMap<ObjectId, TrackedMemberOrigin>>,
 
     /// CR 701.24c-e + CR 608.2c: players explicitly designated by a tracked-set
     /// producer even when their subject population is empty. The object ledger
@@ -32040,6 +32068,7 @@ impl GameState {
             next_return_result_occurrence_id: default_next_return_result_occurrence_id(),
             resolving_modal_instruction: None,
             tracked_set_member_causes: im::HashMap::new(),
+            tracked_set_member_origins: im::HashMap::new(),
             tracked_set_participants: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
@@ -35124,6 +35153,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // resolution — the same reason that field is projected out here.
         resolving_modal_instruction: _,
         tracked_set_member_causes: _,
+        tracked_set_member_origins: _,
         tracked_set_participants: _,
         commander_cast_count: _,
         commander_cast_owners: _,
