@@ -814,13 +814,14 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
     );
 }
 
-/// PR-C F4 — RESUME. A paused indexed roll drops a selected slot whose
-/// announced incarnation departed: the brute's pin goes stale through a real
-/// pipeline exit, so the carried pin excludes it and the modifier reads 0
-/// (natural 10 stays 10). Raw local indexing ignores incarnation and emits
-/// 12 (10 + the retained 2/2 entry).
+/// F1 — RESUME. A paused indexed roll admits a selected slot whose
+/// announced incarnation legally departed: the brute's pin goes stale
+/// through a real pipeline exit, and the carried pin reads its exact
+/// departure LKI power 2 (natural 10 + 2 = 12) — the same
+/// occurrence-aware read the live path applies. Only a carrier-stamped
+/// illegal slot contributes nothing.
 #[test]
-fn parked_indexed_roll_drops_selected_slot_with_stale_pin() {
+fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let brute = scenario.add_creature(P0, "Brute", 2, 2).id();
@@ -906,8 +907,8 @@ fn parked_indexed_roll_drops_selected_slot_with_stale_pin() {
         .collect();
     assert_eq!(
         rolls,
-        vec![10],
-        "the stale-pinned slot contributes nothing; raw local indexing reads the retained 2/2 and emits 12"
+        vec![12],
+        "the stale-pinned slot reads its departure power 2 (10 + 2); only a stamped-illegal slot contributes nothing"
     );
 }
 

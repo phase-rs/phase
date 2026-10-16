@@ -22028,6 +22028,134 @@ mod tests {
         );
     }
 
+    /// F1: parked slot selection admits the SAME legal-then-departed
+    /// occurrence the live path reads — the repeated-id twin of
+    /// `live_slot_selection_reads_the_selected_occurrence_pin`, driven
+    /// through the production capture authority and the production die
+    /// resume. Slot 1's stale pin reads its pumped-departure power 5
+    /// (natural 10 + 5 = 15); a suspension that dropped the stale pin
+    /// would emit 10, so an optional die choice must not change the
+    /// aggregate's value.
+    #[test]
+    fn parked_slot_selection_reads_the_selected_occurrence_pin() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        // Same incarnation break as the live twin: the departure records
+        // pumped 5, the live return resets to base 2.
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        // Production capture: the same calls `resolve` makes before a
+        // CR 616.1 suspension drops the ability.
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.declared_pins,
+            vec![Some(current), Some(stale)],
+            "reach guard: capture must carry each occurrence's own pin"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let chain_root_targets = ability.context.chain_root_targets.clone();
+        let chain_root_target_pins = chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                    )
+                    .unwrap(),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: source,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets,
+            illegal_target_slots: illegal,
+            chain_root_target_pins,
+            declared_targets: captured.declared_targets,
+            declared_target_pins: captured.declared_pins,
+            declared_ahead: captured.declared_ahead,
+            local_target_pins: captured.local_pins,
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![15],
+            "slot 1 reads its own pumped-departure pin (10 + 5); dropping the stale pin emits 10"
+        );
+    }
+
     /// CR 603.4 + CR 508.1a: Pack Tactics evaluates the particular declaration
     /// event that caused the check, and each declaration record keeps its own
     /// power even when a hostile fixture reuses the same object id.
