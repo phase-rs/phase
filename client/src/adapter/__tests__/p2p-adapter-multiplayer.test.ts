@@ -4771,6 +4771,21 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     });
   });
 
+  it.each(["action_failed", "action_rejected"] as const)("preserves the guest session after unsolicited %s", async (type) => {
+    const { adapter, conn } = await joinedGuest();
+    const events = vi.fn();
+    adapter.onEvent(events);
+    await conn.simulateData(type === "action_failed"
+      ? { type, message: "Operation declined" }
+      : { type, rejection: { code: "invalid_action", disposition: "invalid", message: "Operation declined", related_object_ids: [] } });
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "operationFailed" }));
+    expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    const next = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({ type: "action_noop" });
+    await expect(next).resolves.toEqual({ events: [], log_entries: [] });
+    adapter.dispose();
+  });
+
   it("guest rejects a malformed rejection DTO without exposing its arbitrary message", async () => {
     const { peer } = createFakePeer();
     const conn = new FakeDataConnection();
@@ -4809,8 +4824,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     await conn.simulateData({ type: "action_failed", message: "Match concession unavailable" });
     await conn.simulateData({ type: "action_rejected", rejection: { message: "untrusted" } } as never);
-    expect(emitted).toHaveBeenCalledWith({ type: "error", message: "Match concession unavailable" });
-    expect(emitted).toHaveBeenCalledWith({ type: "error", message: "Host sent an invalid action rejection" });
+    expect(emitted).toHaveBeenCalledWith({ type: "operationFailed", message: "Match concession unavailable" });
+    expect(emitted).toHaveBeenCalledWith({ type: "operationFailed", message: "Host sent an invalid action rejection" });
   });
 
   it("guest snapshots stay coherent and strictly ordered across successive state updates", async () => {

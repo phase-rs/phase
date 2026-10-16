@@ -642,3 +642,31 @@ it("coalesces route changes during an in-flight probe and shares the refreshed e
   expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", candidates: { localType: "relay", relayProtocol: "tcp" } });
   session.close();
 });
+
+it("retains RTC transitions and native channel loss evidence before PeerJS reports closure", () => {
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed" });
+  const channel = Object.assign(new EventTarget(), { readyState: "open", bufferedAmount: 65536 });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc, dataChannel: channel });
+  const session = createPeerSession(conn as never);
+  const diagnosticId = getDiagnosticSources().peers.slice(-1)[0].diagnosticId;
+  try {
+    pc.connectionState = "disconnected";
+    pc.dispatchEvent(new Event("connectionstatechange"));
+    pc.iceConnectionState = "failed";
+    pc.dispatchEvent(new Event("iceconnectionstatechange"));
+    channel.dispatchEvent(new Event("error"));
+    channel.readyState = "closed";
+    channel.dispatchEvent(new Event("close"));
+    const transitions = getDiagnosticHistory().filter((entry) => entry.kind === "transport-transition" && entry.diagnosticId === diagnosticId);
+    expect(transitions).toMatchObject([
+      { event: "connectionstatechange", transport: { connectionState: "disconnected", bufferedBytes: 65536 } },
+      { event: "iceconnectionstatechange", transport: { iceState: "failed" } },
+      { event: "error", transport: { channelError: "data-channel-error", bufferedBytes: 65536 } },
+      { event: "close", transport: { channelState: "closed", bufferedBytes: 65536 } },
+    ]);
+    conn.simulateClose();
+    expect(getDiagnosticHistory().filter((entry) => entry.kind === "disconnect" && entry.diagnosticId === diagnosticId)).toHaveLength(1);
+  } finally {
+    session.close();
+  }
+});

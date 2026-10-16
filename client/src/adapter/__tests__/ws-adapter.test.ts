@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { diagnosticIdFor, getDiagnosticHistory } from "../../services/troubleshooting";
+import { loadDiagnosticHistory } from "../../services/diagnosticHistory";
 
 const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
@@ -36,38 +38,25 @@ class MockWebSocket extends EventTarget {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: CloseEvent) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor(public url: string) {
     super();
     MockWebSocket.last = this;
   }
-  // Deliver a frame the way production does — which is asymmetric between
-  // the two event types, so this routes them differently.
-  //
-  // `"message"`: `onmessage` ONLY. Both `openPhaseSocket`
-  // (`openPhaseSocket.ts:190`) and the adapter (`ws-adapter.ts:528`) assign
-  // the `onmessage` IDL attribute, and neither registers an
-  // `addEventListener("message", ...)` — `PhaseSocketTransport` types
-  // `addEventListener` for `"close"` alone (`openPhaseSocket.ts:20-25`), so
-  // a message listener is not even expressible through the interface. This
-  // previously also called `dispatchEvent(new MessageEvent(...))` under a
-  // comment claiming `openPhaseSocket` registered a message listener; it
-  // does not, and happy-dom routes `dispatchEvent` back through the
-  // `onmessage` attribute, so every frame in this file was handled TWICE.
-  // Harmless for idempotent handlers, but it silently defeats any negative
-  // that depends on state the first delivery consumes.
-  //
-  // `"close"`: both channels, because production genuinely uses both —
-  // `openPhaseSocket.ts:366` registers `addEventListener("close", ...)`
-  // alongside the `onclose` assignment.
-  dispatchSynthetic(type: "message" | "close", data?: string) {
+  // Deliver raw observers and the IDL handler once each; happy-dom would
+  // otherwise invoke the same IDL handler again through dispatchEvent.
+  dispatchSynthetic(type: "message" | "close", data?: string, closeEvent = new CloseEvent("close")) {
     if (type === "message" && data !== undefined) {
-      this.onmessage?.({ data });
+      const handler = this.onmessage;
+      this.onmessage = null;
+      this.dispatchEvent(new MessageEvent("message", { data }));
+      this.onmessage = handler;
+      handler?.({ data });
     } else if (type === "close") {
-      this.onclose?.();
-      this.dispatchEvent(new Event("close"));
+      this.onclose?.(closeEvent);
+      this.dispatchEvent(closeEvent);
     }
   }
 }
@@ -84,6 +73,13 @@ const SERVER_HELLO = JSON.stringify({
     mode: "Full",
   },
 });
+const HEARTBEAT_HELLO = JSON.stringify({
+  ...JSON.parse(SERVER_HELLO),
+  data: {
+    ...JSON.parse(SERVER_HELLO).data,
+    heartbeat: { ping_interval_ms: 5000, silence_budget_ms: 15000 },
+  },
+});
 
 const REPLY_OWNERSHIP_FULL_KEY = { game_code: "GAME01", generation: 7 };
 
@@ -92,12 +88,12 @@ const REPLY_OWNERSHIP_FULL_KEY = { game_code: "GAME01", generation: 7 };
  * post-ServerHello state. Returns the adapter's underlying mock ws once
  * the handshake has landed, so tests can then fire game-level frames.
  */
-async function completeHandshake(adapter: WebSocketAdapter): Promise<MockWebSocket> {
+async function completeHandshake(adapter: WebSocketAdapter, hello = SERVER_HELLO): Promise<MockWebSocket> {
   // Allow the microtask inside `openPhaseSocket` to install its
   // `onmessage` handler before we deliver the hello frame.
   await Promise.resolve();
   const ws = MockWebSocket.last!;
-  ws.dispatchSynthetic("message", SERVER_HELLO);
+  ws.dispatchSynthetic("message", hello);
   // One more tick so the adapter's `attachSocket` re-binds `onmessage`
   // to its post-handshake handler and the `this.ws` assignment settles.
   await Promise.resolve();
@@ -993,11 +989,10 @@ describe("WebSocketAdapter", () => {
       // Presently unsatisfiable on the old code: `attemptReconnect` returned
       // before the `reconnecting` emit, so this event was NEVER produced for
       // a native-ai adapter.
-      expect(listener).toHaveBeenCalledWith({
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({
         type: "reconnecting",
         attempt: 1,
-        maxAttempts: 8,
-      });
+      }));
       expect(listener).not.toHaveBeenCalledWith(
         expect.objectContaining({ type: "reconnectFailed" }),
       );
@@ -1681,6 +1676,39 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("Bug C: stateChanged emission", () => {
+    it("keeps reconnect revision 10 when a delayed revision 7 arrives", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state_revision: 10, state: { ...createMockState(), turn_number: 10 }, your_player: 0,
+          full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      const started = await adapter.getSnapshot();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      deliverOwnershipStateUpdate(ws, "stale", 7);
+      expect(await adapter.getSnapshot()).toBe(started);
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+      deliverOwnershipStateUpdate(ws, "fresh", 11);
+      expect((await adapter.getState()).turn_number).toBe(11);
+    });
+
+    it("allows GameStarted to reseed the revision baseline", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      deliverOwnershipStateUpdate(ws, "previous", 10);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state_revision: 3, state: { ...createMockState(), turn_number: 3 }, your_player: 0,
+          full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      deliverOwnershipStateUpdate(ws, "reseeded", 4);
+      expect((await adapter.getState()).turn_number).toBe(4);
+    });
+
     it("emits stateChanged event when StateUpdate arrives without pendingResolve", () => {
       const listener = vi.fn();
       adapter.onEvent(listener);
@@ -1749,6 +1777,537 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("reconnect flow", () => {
+    async function liveReconnectFixture(hello = HEARTBEAT_HELLO) {
+      const subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = subject.initialize();
+      const socket = await completeHandshake(subject, hello);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state: createMockState(), your_player: 0,
+          player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      await initialized;
+      return { subject, socket };
+    }
+
+    it("retains one privacy-safe close record and updates it when reconnect resumes", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(1000);
+        socket.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+        await vi.advanceTimersByTimeAsync(1000);
+        socket.dispatchSynthetic("close", undefined, new CloseEvent("close", {
+          code: 1006, reason: "PRIVATE-token@private-host", wasClean: false,
+        }));
+        const loss = getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0];
+        expect(loss).toMatchObject({
+          code: 1006, reason: "redacted", wasClean: false,
+          receiveAgeMs: 1000, sendAgeMs: 2000, visibility: "visible", online: false,
+          silenceExceeded: false, reconnectAttempt: 0, outcome: "pending",
+        });
+        expect(loadDiagnosticHistory()).toContainEqual(loss);
+        expect(JSON.stringify(loss)).not.toMatch(/PRIVATE|private-host|accepted-full-session-token/);
+        await vi.advanceTimersByTimeAsync(1000);
+        const recovered = await completeHandshake(subject, HEARTBEAT_HELLO);
+        recovered.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state: createMockState(), your_player: 0,
+            player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        const retained = getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss" && entry.diagnosticId === loss.diagnosticId);
+        expect(retained).toHaveLength(1);
+        expect(retained[0]).toMatchObject({ outcome: "resumed" });
+        expect(loadDiagnosticHistory()).toContainEqual(retained[0]);
+      } finally {
+        subject.dispose();
+        online.mockRestore();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("records an exceeded silence budget on a later loss without closing the socket itself", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(socket.close).not.toHaveBeenCalled();
+        socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+        expect(getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0]).toMatchObject({
+          code: 1006, silenceExceeded: true, receiveAgeMs: 15_000,
+        });
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("captures loss during a reconnect handshake and marks the retry chain gave-up", async () => {
+      vi.useFakeTimers();
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        socket.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const retrySocket = MockWebSocket.last!;
+        retrySocket.dispatchSynthetic("close", undefined, new CloseEvent("close", {
+          code: 1013, reason: "Server shutdown", wasClean: true,
+        }));
+        const loss = getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0];
+        expect(loss).toMatchObject({ code: 1013, reason: "server shutdown", reconnectAttempt: 1, outcome: "pending" });
+        await vi.advanceTimersByTimeAsync(135_000);
+        expect(getDiagnosticHistory().find((entry) => entry.diagnosticId === loss.diagnosticId)).toMatchObject({ outcome: "gave-up" });
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("still captures native closure when a transport error consumer disposes first", async () => {
+      const { subject, socket } = await liveReconnectFixture();
+      subject.onEvent((event) => { if (event.type === "error") subject.dispose(); });
+      socket.onerror?.();
+      socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+      expect(getDiagnosticHistory().find((entry) => entry.diagnosticId === diagnosticIdFor(socket))).toMatchObject({
+        kind: "websocket-loss", code: 1006, wasClean: false, silenceExceeded: false, outcome: "not-attempted",
+      });
+      subject.dispose();
+    });
+
+    it("does not close legacy servers during sixty seconds of visible AI silence", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture(SERVER_HELLO);
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(socket.close).not.toHaveBeenCalled();
+        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Ping"'));
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("uses the advertised silence budget for the diagnostic and never closes on silence", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const hello = JSON.parse(HEARTBEAT_HELLO);
+      hello.data.heartbeat.silence_budget_ms = 30_000;
+      // Each probe silences a fresh live socket for `ms`, then drops it and
+      // reads the loss record that drop produced.
+      const lossAfterSilence = async (ms: number) => {
+        const { subject, socket } = await liveReconnectFixture(JSON.stringify(hello));
+        try {
+          await vi.advanceTimersByTimeAsync(ms);
+          expect(socket.close).not.toHaveBeenCalled();
+          socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006 }));
+          return getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0];
+        } finally {
+          subject.dispose();
+        }
+      };
+      try {
+        expect(await lossAfterSilence(20_000)).toMatchObject({ silenceExceeded: false });
+        expect(await lossAfterSilence(120_000)).toMatchObject({ silenceExceeded: true });
+      } finally {
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([0, -1, "45000", null])(
+      "treats a malformed advertised silence budget (%s) as no budget",
+      async (budget) => {
+        vi.useFakeTimers();
+        const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+        const hello = JSON.parse(HEARTBEAT_HELLO);
+        hello.data.heartbeat.silence_budget_ms = budget;
+        const { subject, socket } = await liveReconnectFixture(JSON.stringify(hello));
+        try {
+          await vi.advanceTimersByTimeAsync(60_000);
+          expect(socket.close).not.toHaveBeenCalled();
+        } finally {
+          subject.dispose();
+          visibility.mockRestore();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each(["timeout", "ws_error", "closed"] as const)(
+      "continues reconnecting after a %s handshake failure",
+      async (failure) => {
+        acceptFullReplyOwnershipSession(adapter, ws);
+        vi.useFakeTimers();
+        try {
+          ws.dispatchSynthetic("close");
+          await vi.advanceTimersByTimeAsync(1000);
+          const failedSocket = MockWebSocket.last!;
+          expect(failedSocket).not.toBe(ws);
+          if (failure === "timeout") {
+            await vi.advanceTimersByTimeAsync(5000);
+          } else if (failure === "ws_error") {
+            failedSocket.onerror?.();
+          } else {
+            failedSocket.dispatchSynthetic("close");
+          }
+          await vi.advanceTimersByTimeAsync(6000);
+          expect(MockWebSocket.last).not.toBe(failedSocket);
+          const recoveredSocket = await completeHandshake(adapter);
+          expect(recoveredSocket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+    it("keeps retrying throughout the server grace and eventually stops", async () => {
+      vi.useFakeTimers();
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("close");
+        let previous = socket;
+        for (let second = 0; second < 120; second++) {
+          await vi.advanceTimersByTimeAsync(1000);
+          if (MockWebSocket.last !== previous) {
+            previous = await completeHandshake(subject);
+            previous.dispatchSynthetic("close");
+          }
+        }
+        expect(events).not.toHaveBeenCalledWith({ type: "reconnectFailed" });
+        await vi.advanceTimersByTimeAsync(15000);
+        expect(events).toHaveBeenCalledWith({ type: "reconnectFailed" });
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    // Fails each redial the moment it is dialed. Returns the elapsed fake time at
+    // which `done` first holds. Fixed jitter makes the schedule deterministic.
+    async function failEveryRedial(done: () => boolean, limitMs = 200_000): Promise<number> {
+      const stepMs = 100;
+      let previous = MockWebSocket.last;
+      let elapsed = 0;
+      while (!done() && elapsed < limitMs) {
+        await vi.advanceTimersByTimeAsync(stepMs);
+        elapsed += stepMs;
+        if (MockWebSocket.last !== previous) {
+          previous = MockWebSocket.last;
+          previous!.dispatchSynthetic("close");
+        }
+      }
+      return elapsed;
+    }
+
+    it("ends a remote reconnect episode without scheduling an attempt that cannot dial", async () => {
+      vi.useFakeTimers();
+      const random = vi.spyOn(Math, "random").mockReturnValue(1);
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("close");
+        const failedAt = await failEveryRedial(
+          () => events.mock.calls.some(([event]) => (event as { type: string }).type === "reconnectFailed"),
+        );
+        // Redials fire at 1, 3, 7, 12, ... 122 s; the next would fire at 127 s,
+        // past the 125 s budget. The episode ends at 122 s, not at the 125 s edge.
+        expect(failedAt).toBeGreaterThan(120_000);
+        expect(failedAt).toBeLessThan(124_000);
+        const attempts = events.mock.calls
+          .map(([event]) => event as { type: string; attempt?: number })
+          .filter((event) => event.type === "reconnecting");
+        expect(attempts).toHaveLength(26);
+      } finally {
+        random.mockRestore();
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports no attempt denominator for a remote episode bounded by time", async () => {
+      vi.useFakeTimers();
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("close");
+        expect(events).toHaveBeenCalledWith({ type: "reconnecting", attempt: 1, maxAttempts: 0 });
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the loopback sidecar's original 8-attempt, ~32 s reconnect budget", async () => {
+      vi.useFakeTimers();
+      const random = vi.spyOn(Math, "random").mockReturnValue(1);
+      MockWebSocket.last = null;
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine", "host", { main_deck: [], sideboard: [] },
+        undefined, undefined, undefined, "Player",
+        {
+          nativeAi: {
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            aiSeats: [],
+            playerCount: 2,
+          },
+        },
+      );
+      try {
+        const initialized = nativeAdapter.initialize();
+        const nativeSocket = await completeHandshake(nativeAdapter);
+        nativeSocket.dispatchSynthetic("message", JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "ABCD", player_token: "tok", full_key: { game_code: "ABCD", generation: 1 } },
+        }));
+        nativeSocket.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }));
+        await initialized;
+        const events = vi.fn();
+        nativeAdapter.onEvent(events);
+        nativeSocket.dispatchSynthetic("close");
+        const failedAt = await failEveryRedial(
+          () => events.mock.calls.some(([event]) => (event as { type: string }).type === "reconnectFailed"),
+        );
+        // 1 + 2 + 4 + 5 * 5 = 32 s of backoff across 8 attempts, then give up
+        // rather than carry on for the remote server's 120 s grace.
+        expect(failedAt).toBeGreaterThanOrEqual(31_000);
+        expect(failedAt).toBeLessThanOrEqual(34_000);
+        const attempts = events.mock.calls
+          .map(([event]) => event as { type: string; attempt?: number; maxAttempts?: number })
+          .filter((event) => event.type === "reconnecting");
+        expect(attempts).toHaveLength(8);
+        expect(attempts.every((event) => event.maxAttempts === 8)).toBe(true);
+      } finally {
+        random.mockRestore();
+        nativeAdapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("fully ends the reconnect episode when a reconnect is answered with PasswordRequired", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const retry = await completeHandshake(adapter);
+        retry.dispatchSynthetic("message", JSON.stringify({
+          type: "PasswordRequired", data: { game_code: "GAME01" },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnectFailed" });
+        // The lifecycle listeners are gone and the budget is reset: neither a
+        // network resume nor a later manual reconnect inherits a dead episode.
+        const dialed = MockWebSocket.last;
+        window.dispatchEvent(new Event("online"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(MockWebSocket.last).toBe(dialed);
+        expect((adapter as unknown as { reconnectStartedAt: number | null }).reconnectStartedAt).toBeNull();
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["online", "visible"] as const)("retries a backed-off session immediately on %s", async (resume) => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      try {
+        ws.dispatchSynthetic("close");
+        if (resume === "online") window.dispatchEvent(new Event("online"));
+        else document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(MockWebSocket.last).not.toBe(ws);
+        const recovered = await completeHandshake(adapter);
+        expect(recovered.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        adapter.dispose();
+        const disposedSocket = MockWebSocket.last;
+        window.dispatchEvent(new Event("online"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(6000);
+        expect(MockWebSocket.last).toBe(disposedSocket);
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not spend reconnect attempts on resume notifications that never dial", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        for (let i = 0; i < 70; i++) window.dispatchEvent(new Event("online"));
+        expect(events).not.toHaveBeenCalledWith({ type: "reconnectFailed" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(MockWebSocket.last).not.toBe(ws);
+        expect(events).toHaveBeenLastCalledWith(expect.objectContaining({ type: "reconnecting", attempt: 1 }));
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("ends the reconnect episode when a hosting reconnect is answered with GameCreated", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const hosting = await completeHandshake(adapter);
+        hosting.dispatchSynthetic("message", JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "GAME01", player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: false });
+        // Waiting in the lobby past the old budget must not doom the next drop.
+        await vi.advanceTimersByTimeAsync(130_000);
+        hosting.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(events).not.toHaveBeenCalledWith({ type: "reconnectFailed" });
+        expect(MockWebSocket.last).not.toBe(hosting);
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports a reconnect answered with GameStarted as back in the game", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const resumed = await completeHandshake(adapter);
+        resumed.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 2, state: createMockState(), your_player: 0,
+            player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true });
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores a late error from a retired socket once its replacement is live", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const replacement = await completeHandshake(adapter);
+        events.mockClear();
+        ws.onerror?.();
+        expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+        replacement.onerror?.();
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a visible silent socket open; a real transport close still reconnects", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(socket.close).not.toHaveBeenCalled();
+        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Ping"'));
+        socket.dispatchSynthetic("close");
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "reconnecting" }));
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["Pong", "StateUpdate"] as const)("uses inbound %s as liveness evidence", async (type) => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(10000);
+        socket.dispatchSynthetic("message", JSON.stringify({
+          type,
+          data: type === "Pong" ? { timestamp: Date.now() } : {
+            state_revision: 2, state: createMockState(), events: [], full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        await vi.advanceTimersByTimeAsync(10000);
+        // 20 s of wall time but only 10 s since the inbound frame: within the 15 s budget.
+        socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006 }));
+        expect(getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0])
+          .toMatchObject({ silenceExceeded: false });
+        expect(socket.close).not.toHaveBeenCalled();
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not mistake background throttling or a local clock gap for a dead peer", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(30000);
+        expect(socket.close).not.toHaveBeenCalled();
+        visibility.mockReturnValue("visible");
+        document.dispatchEvent(new Event("visibilitychange"));
+        vi.setSystemTime(Date.now() + 60000);
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(socket.close).not.toHaveBeenCalled();
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it("reconnects with the persisted session after socket close", async () => {
       MockWebSocket.last = null;
       const reconnectingAdapter = new WebSocketAdapter(
@@ -1893,6 +2452,36 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("send() error handling", () => {
+    it.each(["ActionFailed", "Error"] as const)("keeps unsolicited %s off the transport error channel", async (type) => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      const events = vi.fn();
+      adapter.onEvent(events);
+      ws.dispatchSynthetic("message", JSON.stringify({ type, data: { message: "Operation declined" } }));
+      expect(events).toHaveBeenCalledWith({ type: "operationFailed", message: "Operation declined" });
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      const next = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", data: { full_key: REPLY_OWNERSHIP_FULL_KEY } }));
+      await expect(next).resolves.toEqual({ events: [], log_entries: [] });
+    });
+
+    it("reports an AI driver fault, then a terminal error so the game cannot continue", () => {
+      const events = vi.fn();
+      adapter.onEvent(events);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 4, after_state_revision: 10, cause: {} } },
+      }));
+      const types = events.mock.calls.map(([event]) => (event as { type: string }).type);
+      expect(types.filter((type) => type === "aiDriverFault")).toHaveLength(1);
+      expect(types.filter((type) => type === "error")).toHaveLength(1);
+      expect(types.indexOf("aiDriverFault")).toBeLessThan(types.indexOf("error"));
+      expect(events).toHaveBeenCalledWith({
+        type: "error",
+        message: "Native AI driver stopped; this game can no longer advance.",
+      });
+      expect(ws.close).not.toHaveBeenCalled();
+    });
+
     it("rejects initialize when the post-handshake setup frame cannot be sent", async () => {
       MockWebSocket.last = null;
       const setupFailingAdapter = new WebSocketAdapter(
@@ -2185,6 +2774,61 @@ describe("WebSocketAdapter", () => {
       });
       expect(listener).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "aiDriverFault" }));
+    });
+
+    it("fails later submissions fast once the native AI driver has faulted", async () => {
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "AiDriverFault",
+          data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+        }),
+      );
+      ws.send.mockClear();
+
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
+        recoverable: false,
+      });
+      await expect(adapter.submitInteraction(interactionSubmission("after-fault"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
+      });
+      expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Action"'));
+    });
+
+    it("keeps a fault fence across a same-game GameStarted, before the replayed fault arrives", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      // A reconnect snapshot precedes the server's fault replay; nothing may slip through between them.
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state_revision: 4, state: createMockState(), your_player: 0,
+          player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      ws.send.mockClear();
+
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({ code: "WS_ERROR" });
+      expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Action"'));
+    });
+
+    it("does not fence a different game with an earlier game's fault", async () => {
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameCreated",
+        data: { game_code: "GAME02", player_token: "next-game-token" },
+      }));
+      ws.send.mockClear();
+
+      void adapter.submitAction({ type: "PassPriority" }, 0).catch(() => undefined);
+      expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Action"'));
     });
 
     // `dispose()` used to null the submission handles instead of rejecting

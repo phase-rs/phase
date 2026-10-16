@@ -1,4 +1,7 @@
 import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
+import { observeSocketDiagnostics, type SocketDiagnosticObserver } from "../services/socketDiagnostics";
+import { completeSocketDiagnostics, DIAGNOSTIC_HISTORY_LIMIT, type SocketReconnectOutcome } from "../services/troubleshooting";
+import { GzipEnvelopeSocket } from "../services/gzipEnvelopeSocket";
 import type {
   AbilityBlockEntry,
   EngineAdapter,
@@ -1253,6 +1256,8 @@ export interface ServerInfo {
   publicUrl?: string;
   /** Optional binary JSON envelopes understood by this server. */
   wireFormats?: WireFormat[];
+  /** Advertised liveness budget; exceeding it is recorded in diagnostics, never acted on. */
+  heartbeat?: { pingIntervalMs: number; silenceBudgetMs: number };
 }
 
 /**
@@ -1317,7 +1322,8 @@ export function serverProtocolRejection(
   return null;
 }
 
-/** Events emitted by the WebSocketAdapter for UI state updates. */
+/** UI events: `error` is transport/session-terminal; `operationFailed` is
+ * toast-only and preserves connection status and adapter ownership. */
 export type WsAdapterEvent =
   | { type: "serverHello"; info: ServerInfo; compatible: boolean }
   | { type: "playerIdentity"; playerId: PlayerId; opponentName: string | null; playerNames?: Record<number, string> }
@@ -1339,9 +1345,12 @@ export type WsAdapterEvent =
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
   | { type: "aiDriverFault"; id: number; revision: number; message: string }
   | { type: "error"; message: string }
+  | { type: "operationFailed"; message: string }
   | { type: "deckRejected"; reason: string }
+  /** `maxAttempts` is 0 when the episode is bounded by time rather than attempt count. */
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
-  | { type: "reconnected" }
+  /** `inGame` is false when the session resumed into a hosting lobby (GameCreated). */
+  | { type: "reconnected"; inGame: boolean }
   | { type: "reconnectFailed" }
   | { type: "terminalDelivery"; delivery: FullTerminalDelivery }
   | { type: "terminalUnavailable"; message: string }
@@ -1374,6 +1383,36 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
   return playerNames;
 }
 
+const PING_INTERVAL_MS = 5000;
+
+interface ReconnectPolicy {
+  /** Wall-clock budget for one reconnect episode. */
+  readonly budgetMs: number;
+  /** Hard cap on dialed attempts per episode. */
+  readonly maxAttempts: number;
+  readonly initialDelayMs: number;
+  readonly maxDelayMs: number;
+}
+
+/** Remote servers keep a dropped seat for a 120 s grace window (plus one ping
+ *  interval of detection slack), so the client retries across all of it. The
+ *  attempt cap is a safety net; the time budget ends the episode first. */
+const REMOTE_RECONNECT_POLICY: ReconnectPolicy = {
+  budgetMs: 120_000 + PING_INTERVAL_MS,
+  maxAttempts: 64,
+  initialDelayMs: 1000,
+  maxDelayMs: 5000,
+};
+
+/** The loopback sidecar either answers immediately or is gone, so it keeps the
+ *  original schedule: 8 attempts over about 32 s, bounded by attempts alone. */
+const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
+  budgetMs: Number.POSITIVE_INFINITY,
+  maxAttempts: 8,
+  initialDelayMs: 1000,
+  maxDelayMs: 5000,
+};
+
 /**
  * WebSocket-backed implementation of EngineAdapter.
  * Communicates with the phase-server via WebSocket protocol
@@ -1390,6 +1429,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * server messages in order, so stamping on arrival reproduces engine order.
    */
   private snapshot: EngineSnapshot | null = null;
+  private cachedStateRevision: number | null = null;
   private _playerId: PlayerId | null = null;
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
@@ -1433,16 +1473,34 @@ export class WebSocketAdapter implements EngineAdapter {
   private abandonReject: ((error: Error) => void) | null = null;
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
-  // A native bridge has no resumable server session: a dead loopback engine
-  // cannot recover through the multiplayer reconnect protocol.
+  private readonly reconnectPolicy: ReconnectPolicy;
   private readonly maxReconnectAttempts: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectStartedAt: number | null = null;
+  private socketOpening = false;
+  private socketDiagnostics: SocketDiagnosticObserver | null = null;
+  private readonly pendingDiagnosticLosses = new Set<string>();
+  private sessionLifecycleListening = false;
+  private lastInboundAt = 0;
+  private lastPingTickAt = 0;
+  private readonly retryAfterResume = () => {
+    this.lastInboundAt = Date.now();
+    this.lastPingTickAt = this.lastInboundAt;
+    if (document.visibilityState === "hidden" || this.reconnectTimer === null) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    // The cancelled schedule never dialed: reuse its attempt number, don't spend another.
+    this.reconnectAttempt = Math.max(0, this.reconnectAttempt - 1);
+    this.attemptReconnect(true);
+  };
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   // Aborts a handshake still in flight when the adapter is disposed.
   private readonly disposeAbort = new AbortController();
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
+  /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
+  private aiDriverFault: { gameCode: string | null; message: string } | null = null;
   private gameEnded = false;
   /**
    * Populated once the server's `ServerHello` arrives. `null` between the
@@ -1474,42 +1532,9 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
   ) {
-    // 0 is terminal, not "retry once": `attemptReconnect` compares
-    // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 is true on the
-    // very first attempt — it emits `reconnectFailed` and returns without
-    // ever emitting `reconnecting`, incrementing, or scheduling a timer. Any
-    // socket drop is instantly fatal.
-    //
-    // `nativeAi` no longer takes that. The sidecar runs `--single-user`, so
-    // its reconnect grace period is effectively unbounded and sessions are
-    // never stale-purged; a transient drop against a live sidecar is exactly
-    // the recoverable case, and 8 attempts is the same budget `online` gets.
-    //
-    // Not purely additive: a genuinely DEAD sidecar now spends **32s** of
-    // `reconnecting` UI before `reconnectFailed`, where today it fails
-    // instantly. `attemptReconnect`'s
-    // `Math.min(Math.pow(2, attempt - 1) * 1000, 5000)` over attempts 1-8 is
-    // 1+2+4+5+5+5+5+5 = 32, not the 27 first claimed here — the series was
-    // right and the sum was wrong.
-    //
-    // That is a floor, not a ceiling. It assumes each connect is *refused*
-    // immediately. If they hang instead, `attachSocket` calls
-    // `openPhaseSocket` without a `timeoutMs`, taking its 5000ms default, so
-    // the worst case is 32 + 8x5 = 72s.
-    //
-    // Still the right trade — the common case goes from fatal to recovered —
-    // but it is a user-visible latency regression on the most likely desktop
-    // failure, and for a LOOPBACK socket that failure is a crash or a
-    // sleep/resume rather than a spurious drop. 8 attempts buys little over
-    // 3-4 there, and nothing respawns the sidecar: `ensureNativeEngine` is
-    // never called from a close or error handler. Worth revisiting; the
-    // budget is deliberately left matching `online` rather than tuned here.
-    //
-    // `nativePregame` keeps 0, and that is out of scope rather than endorsed:
-    // a pregame drop is recoverable by re-entering the lobby (no game has
-    // been invested yet), and that path has adapter-level special-casing of
-    // `options.nativePregame` that has NOT been analysed here.
-    this.maxReconnectAttempts = options.nativePregame ? 0 : 8;
+    // Keep retrying through the server's reconnect grace; pregame remains terminal.
+    this.reconnectPolicy = options.nativeAi ? NATIVE_AI_RECONNECT_POLICY : REMOTE_RECONNECT_POLICY;
+    this.maxReconnectAttempts = options.nativePregame ? 0 : this.reconnectPolicy.maxAttempts;
   }
 
   get gameCode(): string | null {
@@ -1545,6 +1570,9 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   private emit(event: WsAdapterEvent): void {
+    if (event.type === "sessionChanged") {
+      this.setSessionLifecycleListeners(event.session !== null && !this.disposed);
+    }
     for (const listener of this.listeners) {
       listener(event);
     }
@@ -1704,15 +1732,42 @@ export class WebSocketAdapter implements EngineAdapter {
    * so the handshake policy lives in exactly one place.
    */
   private async attachSocket(setupFrame: unknown): Promise<void> {
+    if (this.disposed) return;
+    this.socketOpening = true;
     let socket: PhaseSocket<PhaseSocketTransport>;
+    let diagnostics: SocketDiagnosticObserver | null = null;
     try {
       socket = await openPhaseSocket(this.serverUrl, {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
         signal: this.disposeAbort.signal,
+        onSocketCreated: (raw) => {
+          // Diagnostics are best-effort: a failure here must never abort the handshake.
+          try {
+            diagnostics = observeSocketDiagnostics(
+              raw, this.reconnectAttempt,
+              (id) => this.socketDiagnostics === diagnostics
+                ? this.recordSocketLoss(id)
+                : this.disposed ? "not-attempted" : "resumed",
+              () => { if (this.socketDiagnostics === diagnostics) this.lastInboundAt = Date.now(); },
+            );
+          } catch {
+            diagnostics = null;
+          }
+          this.socketDiagnostics = diagnostics;
+        },
+        onFrameSent: () => diagnostics?.didSend(),
       });
     } catch (err) {
+      this.socketOpening = false;
+      if (this.disposed) return;
+      const retryable = !(err instanceof HandshakeError)
+        || !["protocol_mismatch", "invalid_url", "aborted"].includes(err.kind);
+      if (this.reconnectInFlight && retryable) {
+        this.attemptReconnect();
+        return;
+      }
+      if (this.reconnectInFlight) this.finishSocketDiagnostics("failed");
       if (err instanceof HandshakeError) {
-        const retryable = err.kind !== "protocol_mismatch" && err.kind !== "invalid_url";
         const adapterErr = new AdapterError("WS_ERROR", err.message, retryable);
         this.rejectInitialization(adapterErr);
         if (err.kind === "protocol_mismatch" && err.serverInfo) {
@@ -1728,11 +1783,13 @@ export class WebSocketAdapter implements EngineAdapter {
             compatible: false,
           });
         }
+        if (this.reconnectInFlight) this.failReconnect();
         return;
       }
       this.rejectInitialization(new AdapterError("WS_ERROR", String(err), true));
       return;
     }
+    this.socketOpening = false;
     // A handshake that settled before `dispose()` resumes here after it.
     if (this.disposed) {
       socket.close();
@@ -1749,6 +1806,7 @@ export class WebSocketAdapter implements EngineAdapter {
         socket.serverInfo.version,
       );
       this.rejectInitialization(error);
+      if (this.reconnectInFlight) this.failReconnect();
       return;
     }
 
@@ -1758,6 +1816,8 @@ export class WebSocketAdapter implements EngineAdapter {
     this.startPing();
 
     socket.ws.onmessage = (event) => {
+      if (this.disposed || this.ws !== socket.ws) return;
+      this.lastInboundAt = Date.now();
       let message: unknown;
       try {
         message = JSON.parse(event.data as string);
@@ -1782,6 +1842,8 @@ export class WebSocketAdapter implements EngineAdapter {
     };
 
     socket.ws.onerror = () => {
+      // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
+      if (this.disposed || this.ws !== socket.ws) return;
       if (this.sessionIdentityRejected) return;
       const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
       if (this.initReject || this.pregameReject || this.gameStartedReject) {
@@ -1792,6 +1854,8 @@ export class WebSocketAdapter implements EngineAdapter {
     };
 
     socket.ws.onclose = () => {
+      if (this.ws !== socket.ws) return;
+      this.ws = null;
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
@@ -1898,6 +1962,11 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   private assertNoPendingSubmission(): void {
+    // A faulted game never advances again (the fault survives reconnects and restarts);
+    // fail fast instead of parking a submission forever.
+    if (this.aiDriverFault !== null && this.aiDriverFault.gameCode === this._gameCode) {
+      throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
+    }
     if (this.pendingResolve !== null || this.pendingReject !== null) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
@@ -2104,7 +2173,11 @@ export class WebSocketAdapter implements EngineAdapter {
       this.sendConcede();
     }
     this.disposed = true;
+    this.setSessionLifecycleListeners(false);
     this.disposeAbort.abort();
+    this.finishSocketDiagnostics("not-attempted");
+    // Native close can follow an error/dispose; its observer removes itself on close.
+    this.socketDiagnostics = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -2158,6 +2231,8 @@ export class WebSocketAdapter implements EngineAdapter {
 
   /** Attempt reconnection using stored session data. */
   tryReconnect(session: WsSessionData): boolean {
+    if (this.disposed || this.gameEnded || this.sessionIdentityRejected || this.socketOpening) return false;
+    if (this.reconnectInFlight && this.ws?.readyState === WebSocket.OPEN) return false;
     this._gameCode = session.gameCode;
     this.playerToken = session.playerToken;
     this.fullSessionKey = session.fullKey;
@@ -2168,6 +2243,8 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     this.reconnectInFlight = true;
+    this.reconnectStartedAt ??= Date.now();
+    this.setSessionLifecycleListeners(true);
     this.attachSocket({
       type: "Reconnect",
       data: {
@@ -2182,36 +2259,120 @@ export class WebSocketAdapter implements EngineAdapter {
     return true;
   }
 
-  private attemptReconnect(): void {
-    if (this.disposed) return;
+  private attemptReconnect(immediate = false): void {
+    if (this.disposed || this.gameEnded || this.sessionIdentityRejected) return;
+    if (this.reconnectTimer !== null || this.socketOpening) return;
     const session = this.currentSession();
-    if (!session) {
-      this.emit({ type: "reconnectFailed" });
+    const policy = this.reconnectPolicy;
+    this.reconnectStartedAt ??= Date.now();
+    const remainingMs = policy.budgetMs - (Date.now() - this.reconnectStartedAt);
+    const backoff = Math.min(
+      policy.initialDelayMs * 2 ** this.reconnectAttempt,
+      policy.maxDelayMs,
+    );
+    const delay = immediate ? 0 : backoff * (0.8 + Math.random() * 0.2);
+    // An attempt that would only fire at the budget edge can never dial, so
+    // end the episode now rather than waiting out a timer that fails anyway.
+    if (
+      !session
+      || delay >= remainingMs
+      || this.reconnectAttempt >= this.maxReconnectAttempts
+    ) {
+      this.failReconnect();
       return;
     }
-    if (this.reconnectAttempt >= this.maxReconnectAttempts) {
-      this.emit({ type: "reconnectFailed" });
-      return;
-    }
+    this.reconnectInFlight = true;
     this.reconnectAttempt++;
-    const delay = Math.min(Math.pow(2, this.reconnectAttempt - 1) * 1000, 5000);
     this.emit({
       type: "reconnecting",
       attempt: this.reconnectAttempt,
-      maxAttempts: this.maxReconnectAttempts,
+      // Only the loopback schedule is bounded by attempts; a remote episode
+      // ends on its time budget, so no denominator is reported (0 = unbounded).
+      maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
     });
     this.reconnectTimer = setTimeout(() => {
-      this.tryReconnect(session);
+      this.reconnectTimer = null;
+      if (Date.now() - this.reconnectStartedAt! >= policy.budgetMs) {
+        this.failReconnect();
+      } else {
+        this.tryReconnect(session);
+      }
     }, delay);
   }
 
-  private startPing(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
+  private failReconnect(outcome: "gave-up" | "failed" = "gave-up"): void {
+    this.finishSocketDiagnostics(outcome);
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectInFlight = false;
+    // The episode is over: a later tryReconnect starts a fresh budget.
+    this.reconnectAttempt = 0;
+    this.reconnectStartedAt = null;
+    this.setSessionLifecycleListeners(false);
+    this.emit({ type: "reconnectFailed" });
+  }
+
+  /** Ends a reconnect episode: the next loss starts a fresh retry budget. */
+  private completeReconnect(inGame: boolean): void {
+    this.finishSocketDiagnostics("resumed");
+    this.reconnectInFlight = false;
+    this.reconnectAttempt = 0;
+    this.reconnectStartedAt = null;
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.emit({ type: "reconnected", inGame });
+  }
+
+  private recordSocketLoss(id: string): SocketReconnectOutcome {
+    if (this.sessionIdentityRejected) return "failed";
+    if (this.disposed || this.gameEnded || this.maxReconnectAttempts === 0) return "not-attempted";
+    if (!this.snapshot && !this.playerToken && !this.reconnectInFlight) return "not-attempted";
+    if (this.pendingDiagnosticLosses.size >= DIAGNOSTIC_HISTORY_LIMIT) {
+      const oldest = this.pendingDiagnosticLosses.values().next().value;
+      if (oldest !== undefined) this.pendingDiagnosticLosses.delete(oldest);
     }
+    this.pendingDiagnosticLosses.add(id);
+    return "pending";
+  }
+
+  private finishSocketDiagnostics(outcome: Exclude<SocketReconnectOutcome, "pending">): void {
+    completeSocketDiagnostics(this.pendingDiagnosticLosses, outcome);
+    this.pendingDiagnosticLosses.clear();
+  }
+
+  private setSessionLifecycleListeners(active: boolean): void {
+    if (active === this.sessionLifecycleListening) return;
+    this.sessionLifecycleListening = active;
+    if (active) {
+      window.addEventListener("online", this.retryAfterResume);
+      document.addEventListener("visibilitychange", this.retryAfterResume);
+    } else {
+      window.removeEventListener("online", this.retryAfterResume);
+      document.removeEventListener("visibilitychange", this.retryAfterResume);
+    }
+  }
+
+  private startPing(): void {
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    this.lastInboundAt = Date.now();
+    this.lastPingTickAt = this.lastInboundAt;
     this.pingInterval = setInterval(() => {
-      this.send({ type: "Ping", data: { timestamp: Date.now() } });
-    }, 5000);
+      const now = Date.now();
+      // Background throttling or local suspension is not evidence of a dead peer.
+      if (document.visibilityState === "hidden" || now - this.lastPingTickAt > 2 * PING_INTERVAL_MS) {
+        this.lastInboundAt = now;
+      }
+      this.lastPingTickAt = now;
+      const silenceBudgetMs = this._serverInfo?.heartbeat?.silenceBudgetMs;
+      // Silence is recorded, never acted on: a healthy socket can be mid-way
+      // through a long state frame (no complete message for a while), and on
+      // legacy servers AI runs inline for minutes. Closing would add drops; the
+      // transport's own close remains the only disconnect signal.
+      if (silenceBudgetMs !== undefined && now - this.lastInboundAt >= silenceBudgetMs) {
+        this.socketDiagnostics?.markSilenceExceeded();
+      }
+      this.send({ type: "Ping", data: { timestamp: now } });
+    }, PING_INTERVAL_MS);
   }
 
   private nativeAiSetupFrame(options: NativeAiAdapterOptions) {
@@ -2359,6 +2520,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     try {
       ws.send(JSON.stringify(msg));
+      if (!(ws instanceof GzipEnvelopeSocket)) this.socketDiagnostics?.didSend();
       return true;
     } catch (err) {
       this.emit({
@@ -2419,6 +2581,8 @@ export class WebSocketAdapter implements EngineAdapter {
         this.playerToken = data.player_token;
         if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         this.hostWaitingForOpponent = true;
+        // A hosting reconnect is answered with GameCreated, not GameStarted.
+        if (this.reconnectInFlight) this.completeReconnect(false);
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "gameCreated", gameCode: data.game_code });
         this.emit({ type: "waitingForOpponent" });
@@ -2509,11 +2673,7 @@ export class WebSocketAdapter implements EngineAdapter {
         // `GameStarted` that will never come.
         const data = msg.data as { game_code: string };
         this.emit({ type: "passwordRequired", gameCode: data.game_code });
-        if (this.reconnectInFlight) {
-          this.reconnectInFlight = false;
-          this.reconnectAttempt = 0;
-          this.emit({ type: "reconnectFailed" });
-        }
+        if (this.reconnectInFlight) this.failReconnect("failed");
         if (this.initReject) {
           this.initReject(
             new AdapterError(
@@ -2542,9 +2702,7 @@ export class WebSocketAdapter implements EngineAdapter {
           if (!this.acceptFullSessionKey(data.full_key)) break;
         }
         if (this.reconnectInFlight) {
-          this.reconnectInFlight = false;
-          this.reconnectAttempt = 0;
-          this.emit({ type: "reconnected" });
+          this.completeReconnect(true);
         } else if (this.hostWaitingForOpponent) {
           this.hostWaitingForOpponent = false;
           this.emit({
@@ -2565,6 +2723,7 @@ export class WebSocketAdapter implements EngineAdapter {
             viewerInteraction: data.viewer_interaction,
           },
         );
+        this.cachedStateRevision = data.state_revision ?? null;
         this._playerId = data.your_player;
         if (nativeReconnect) {
           const attachment: NativeSessionAttachment = {
@@ -2645,6 +2804,7 @@ export class WebSocketAdapter implements EngineAdapter {
       case "StateUpdate": {
         const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[]; full_key?: FullSessionKey };
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -2662,6 +2822,7 @@ export class WebSocketAdapter implements EngineAdapter {
             viewerInteraction: data.viewer_interaction,
           },
         );
+        this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
         const resolvedAction = this.pendingResolve !== null;
         if (this.pendingResolve) {
           this.emit({ type: "actionPendingChanged", pending: false });
@@ -2719,7 +2880,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {
-          this.emit({ type: "error", message: data.message });
+          this.emit({ type: "operationFailed", message: data.message });
         }
         break;
       }
@@ -3006,13 +3167,16 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string; code?: string };
+        const terminal = this.reconnectInFlight || this.initReject !== null
+          || this.pregameReject !== null || this.gameStartedReject !== null;
         const initializationError = data.code === "deck_rejected"
           ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
           : actionRejectionError(data.message);
         this.rejectInitialization(initializationError);
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
-        this.emit({ type: "error", message: data.message });
+        if (this.reconnectInFlight) this.failReconnect();
+        this.emit({ type: terminal ? "error" : "operationFailed", message: data.message });
         break;
       }
 
@@ -3021,6 +3185,7 @@ export class WebSocketAdapter implements EngineAdapter {
           fault: { id: number; after_state_revision: number; cause: unknown };
         };
         const message = "Native AI driver stopped; this game can no longer advance.";
+        this.aiDriverFault = { gameCode: this._gameCode, message };
         if (this.pendingReject) {
           this.emit({ type: "actionPendingChanged", pending: false });
           this.pendingReject(new AdapterError("WS_ERROR", message, false));
@@ -3033,6 +3198,9 @@ export class WebSocketAdapter implements EngineAdapter {
           revision: data.fault.after_state_revision,
           message,
         });
+        // Terminal for this game, as before: the native driver is gone, so
+        // consumers dispose the session and show the "game cannot continue"
+        // surface. `aiDriverFault` above stays for P2P relay and diagnostics.
         this.emit({ type: "error", message });
         break;
       }
@@ -3111,6 +3279,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.sessionIdentityRejected) return false;
 
     this.sessionIdentityRejected = true;
+    this.finishSocketDiagnostics("failed");
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
