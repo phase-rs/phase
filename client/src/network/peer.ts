@@ -41,6 +41,9 @@ export interface PeerSessionOptions {
   onSessionEnd?: () => void;
   /** Round-trip latency, or null when the last measurement is stale. */
   onLatency?: (latencyMs: number | null) => void;
+  /** Consume an authenticated acknowledgement without waiting for game work.
+   * Return false to retain ordinary pre-handshake/FIFO dispatch. */
+  onStateAck?: (msg: Extract<P2PMessage, { type: "state_ack" }>) => boolean;
   /**
    * An inbound frame reached this session but could not be handed to any
    * `onMessage` handler. Reported, never acted on here: whether anything will
@@ -185,10 +188,8 @@ export function createPeerSession(
         return false;
       }
       if (msg.type !== "ping" && msg.type !== "pong") {
-        const rawSize = JSON.stringify(msg).length;
-        const reduction = rawSize > 0 ? ((1 - bytes.length / rawSize) * 100).toFixed(0) : "0";
         console.log(
-          `[PeerSession] sending "${msg.type}" (${(bytes.length / 1024).toFixed(1)} KB wire, ${(rawSize / 1024).toFixed(1)} KB raw, ${reduction}% reduction)`,
+          `[PeerSession] sending "${msg.type}" (${(bytes.length / 1024).toFixed(1)} KB wire)`,
         );
         tracePeerSession("send", { type: msg.type, connOpen: conn.open, size: bytes.length });
       }
@@ -300,8 +301,8 @@ export function createPeerSession(
   };
 
   // Decode in wire order, but dispatch game messages on a separate FIFO.
-  // An async engine action must not strand an already-arrived ping/pong behind
-  // its handler: the keep-alive would otherwise close a healthy channel.
+  // Heartbeats and claimed state acknowledgements bypass async game work;
+  // delayed pongs affect latency display, not channel lifetime.
   let recvQueue: Promise<void> = Promise.resolve();
   let dispatchQueue: Promise<void> = Promise.resolve();
 
@@ -352,6 +353,15 @@ export function createPeerSession(
       if (msg.type === "ping") {
         void trySend({ type: "pong", timestamp: msg.timestamp });
         return;
+      }
+
+      if (msg.type === "state_ack" && options.onStateAck) {
+        try {
+          if (options.onStateAck(msg)) return;
+        } catch (error) {
+          console.warn("[PeerSession] state acknowledgement handler threw:", error);
+          return;
+        }
       }
 
       delivery = dispatchQueue.then(async () => {

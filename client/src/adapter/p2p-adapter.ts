@@ -986,10 +986,10 @@ let sharedEngineHost: symbol | null = null;
 
 /**
  * Cadence of the host's per-guest state redelivery sweep — deliberately the
- * same 5s as the transport keepalive (`network/peer.ts`). The keepalive bounds
- * detection of a DEAD channel (pong timeout, disconnect, `reconnect_ack`
- * resync on rejoin); this sweep bounds recovery from failures the host can
- * SEE on a live channel: a rejected viewer snapshot or a refused send.
+ * same 5s as transport latency sampling (`network/peer.ts`). WebRTC close/error
+ * detects channel loss; stale pongs only clear the latency display. This sweep
+ * heals unacknowledged state on a live channel, one queued/in-flight resend
+ * per seat, without replaying the missed frame's events or logs.
  */
 const STATE_REDELIVERY_TICK_MS = 5_000;
 
@@ -1161,6 +1161,7 @@ export class P2PHostAdapter implements EngineAdapter {
    */
   private terminalDelivered = new Set<PlayerId>();
   private redeliveryTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingRedeliveries = new Set<PlayerId>();
   /** First committed terminal statement fences every subsequent action and
    * reconnect. Its id is immutable for this adapter incarnation. */
   private terminalResult: P2PTerminalResult | null = null;
@@ -2114,6 +2115,11 @@ export class P2PHostAdapter implements EngineAdapter {
     // first message before wrapping in a PeerSession with full handlers.
     let identified = false;
     const session = createPeerSession(conn, {
+      onStateAck: (msg) => {
+        if (!identified) return false;
+        this.handleGuestStateAck(session, msg);
+        return true;
+      },
       onLatency: (latencyMs) => {
         if (![...this.guestSessions.values()].includes(session)) return;
         this.sessionLatencies.set(session, latencyMs);
@@ -3154,13 +3160,20 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Sweep entry — runs outside the delivery queue, so it only nominates
    * seats; the actual send happens inside `enqueueDelivery`, which re-checks
    * the lag (a broadcast queued ahead may already have healed the seat, and
-   * a second nomination then settles as a no-op). */
+   * a nominated seat stays single-flight through queueing and transmission). */
   private queueLaggingRedeliveries(): void {
     if (this.disposed || !this.ownsAuthority()) return;
     for (const pid of this.guestSessions.keys()) {
       if (this.disconnectedSeats.has(pid)) continue;
-      if (!this.shouldRedeliver(pid)) continue;
-      void this.enqueueDelivery(() => this.redeliverGuestState(pid));
+      if (!this.shouldRedeliver(pid) || this.pendingRedeliveries.has(pid)) continue;
+      this.pendingRedeliveries.add(pid);
+      void this.enqueueDelivery(async () => {
+        try {
+          await this.redeliverGuestState(pid);
+        } finally {
+          this.pendingRedeliveries.delete(pid);
+        }
+      });
     }
   }
 
@@ -3515,6 +3528,7 @@ export class P2PHostAdapter implements EngineAdapter {
     this.aiDecks.clear();
     this.nativeDeliveredViews.clear();
     this.guestAckedRevisions.clear();
+    this.pendingRedeliveries.clear();
     this.terminalDelivered.clear();
     if (this.redeliveryTimer !== null) {
       clearInterval(this.redeliveryTimer);
@@ -3610,28 +3624,36 @@ export class P2PHostAdapter implements EngineAdapter {
     return null;
   }
 
+  private authenticatedGuestPlayerId(sourceSession: PeerSession, msg: P2PMessage): PlayerId | null {
+    // Resolve the current seat: mutations can compact the map while a channel stays open.
+    const pid = this.guestPlayerIdForSession(sourceSession);
+    if (pid === null) return null;
+    const session = this.guestSessions.get(pid);
+    // Pre-ACK reconnect channels are not installed and cannot advance a seat.
+    if (session !== sourceSession) return null;
+    if (!this.ownsAuthority()) {
+      this.rejectSuperseded(session);
+      return null;
+    }
+    if (msg.authority && !hasExactP2PAuthority(msg.authority, this.authority)) {
+      this.rejectSuperseded(session);
+      return null;
+    }
+    return pid;
+  }
+
+  private handleGuestStateAck(sourceSession: PeerSession, msg: Extract<P2PMessage, { type: "state_ack" }>): void {
+    const pid = this.authenticatedGuestPlayerId(sourceSession, msg);
+    if (pid !== null) this.recordGuestAck(pid, msg.revision);
+  }
+
   private async handleGuestMessage(
     sourceSession: PeerSession,
     msg: P2PMessage,
   ): Promise<void> {
-    // Seat mutations can compact the guest map while the PeerJS channel stays
-    // open. Resolve the actor from the current session map at receive time;
-    // the seat captured when the callback was installed may now be stale.
-    const pid = this.guestPlayerIdForSession(sourceSession);
+    const pid = this.authenticatedGuestPlayerId(sourceSession, msg);
     if (pid === null) return;
-    const session = this.guestSessions.get(pid);
-    // A reconnecting channel is intentionally not installed in
-    // `guestSessions` until its ACK has been delivered. Keep every control
-    // frame bound to the exact installed channel, not merely its player id.
-    if (session !== sourceSession) return;
-    if (!this.ownsAuthority()) {
-      if (session) this.rejectSuperseded(session);
-      return;
-    }
-    if (msg.authority && !hasExactP2PAuthority(msg.authority, this.authority)) {
-      if (session) this.rejectSuperseded(session);
-      return;
-    }
+    const session = sourceSession;
     if (this.concedingSeats.has(pid) && (msg.type === "action" || msg.type === "interaction")) {
       void this.send(sourceSession, { type: "action_failed", message: "Player departure is in progress" });
       return;
@@ -3873,9 +3895,6 @@ export class P2PHostAdapter implements EngineAdapter {
         this.requestBoundMatchConcede(pid);
         break;
       }
-      case "state_ack":
-        this.recordGuestAck(pid, msg.revision);
-        break;
       default:
         break;
     }
