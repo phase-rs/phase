@@ -2520,6 +2520,22 @@ describe("WebSocketAdapter", () => {
       await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
     });
 
+    it("settles its own correlated completion even when that frame's revision is stale", async () => {
+      const events = vi.fn();
+      subject.onEvent(events);
+      deliverOwnershipStateUpdate(socket, "newer-peer-update", 5);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      events.mockClear();
+      deliverOwnershipStateUpdate(socket, "own-stale-completion", 4, commandId);
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [{ marker: "own-stale-completion" }], log_entries: [] },
+      });
+      expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      // The stale snapshot itself is never applied.
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    });
+
     it.each(["ActionRejected", "ActionFailed"] as const)(
       "owns a matching %s but ignores its late echo during the next interaction",
       async (type) => {

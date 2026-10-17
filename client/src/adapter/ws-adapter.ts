@@ -2800,7 +2800,20 @@ export class WebSocketAdapter implements EngineAdapter {
       case "StateUpdate": {
         const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[]; full_key?: FullSessionKey };
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
-        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
+        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) {
+          // A stale snapshot is never applied, but if it is this connection's
+          // own correlated completion it still answers the pending command;
+          // dropping it would leave the submission slot occupied. Legacy
+          // (uncorrelated) frames keep the old drop-only behaviour.
+          if (msg.command_id !== undefined) {
+            const stalePending = this.submission.take(msg.command_id);
+            if (stalePending) {
+              stalePending.resolve({ events: data.events, log_entries: data.log_entries });
+              this.emit({ type: "actionPendingChanged", pending: false });
+            }
+          }
+          break;
+        }
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
