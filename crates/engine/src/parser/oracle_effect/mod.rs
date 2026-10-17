@@ -41872,7 +41872,7 @@ fn parse_effect_chain_ir_body(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
-    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+    'chunks: for (chunk_idx, chunk) in chunks.iter().enumerate() {
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
         // (the producer for the "If <cond>, instead <body>" rider that carries
@@ -44533,16 +44533,12 @@ fn parse_effect_chain_ir_body(
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }
 
-        let rejected_search_guard = if delayed_condition.is_none()
-            && player_scope.is_none()
-            && opponent_may_scope.is_none()
-            && repeat_for.is_none()
-            && !is_distributed_chunk
-        {
-            unsupported_search_result_guard(normalized_text, builder.clauses(), ctx)
-        } else {
-            None
-        };
+        let rejected_search_guard =
+            if player_scope.is_none() && opponent_may_scope.is_none() && repeat_for.is_none() {
+                unsupported_search_result_guard(normalized_text, builder.clauses(), ctx)
+            } else {
+                None
+            };
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -46009,7 +46005,13 @@ fn parse_effect_chain_ir_body(
             }
         }
         'source_clause: {
-            if let Some((fragment, body)) = rejected_search_guard {
+            if let Some((fragment, body)) = rejected_search_guard.filter(|_| {
+                delayed_condition.is_none()
+                    && player_scope.is_none()
+                    && opponent_may_scope.is_none()
+                    && repeat_for.is_none()
+                    && !is_distributed_chunk
+            }) {
                 // CR 608.2c + CR 609.3: retain this refused instruction at its own
                 // source position; independent later instructions remain executable.
                 builder
@@ -46421,7 +46423,7 @@ fn parse_effect_chain_ir_body(
                         .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                         .push();
                 }
-                continue;
+                continue 'chunks;
             }
 
             // Non-absorbed followup continuation — store on the current clause
@@ -46500,7 +46502,7 @@ fn parse_effect_chain_ir_body(
                 builder.clauses(),
             ) {
                 unimplemented_clause(&mut builder, gap, normalized_text, chunk.boundary_after);
-                continue;
+                continue 'chunks;
             }
 
             // CR 614.1a + CR 614.6: LAST RESORT for an "instead" override whose
@@ -46520,7 +46522,7 @@ fn parse_effect_chain_ir_body(
                     normalized_text,
                     chunk.boundary_after,
                 );
-                continue;
+                continue 'chunks;
             }
 
             let clause_declared_group = chunk_ctx.clause_declared_group.take();

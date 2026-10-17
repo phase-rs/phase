@@ -76,9 +76,9 @@ use crate::types::ability::{
     OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
-    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
