@@ -106,6 +106,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  127 — game_setup and state_update carry GameState whose trigger events may hold
+ *       CreatureExerted with origin and player (CR 701.43). Bumped in lockstep with
+ *       full-game protocol 145. ExertChoice now requires exact permission bindings
+ *       for its current and typed remaining costs; attack_permission receipts
+ *       bind linked payoffs. Definitions carry attack_cost_condition and the
+ *       SourceExertedThisTurn predicate; unbound saved prompts are refused.
  *  126 — game_setup and state_update carry GameState, whose one-time boons
  *       (#7495) add Effect.CreateBoon / Effect.NoteNumber, the HasBoon
  *       conditions, and WaitingFor.ChooseTokenHost, and whose perpetual P/T
@@ -685,7 +691,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 126 as const;
+export const WIRE_PROTOCOL_VERSION = 127 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

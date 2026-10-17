@@ -14671,6 +14671,7 @@ mod tests {
         on_board: [ObjectId; 2],
         in_hand: ObjectId,
         attacker: ObjectId,
+        exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
         use crate::types::game_state::WaitingFor;
         vec![
@@ -14881,6 +14882,7 @@ mod tests {
                     player: PlayerId(0),
                     // CR 701.43d exerts an ATTACKING permanent.
                     attacker: on_board[0],
+                    permission: exert_permission,
                     remaining: Vec::new(),
                 },
                 true,
@@ -15158,7 +15160,30 @@ mod tests {
         // CLASS-DRIFT GATE, run before the cast proof: every candidate's membership must
         // be what the list says it is. A deleted member reds its `true` row here; an
         // added non-member reds its `false` row.
-        let candidates = cast_proof_candidate_windows(on_board, in_hand, attacker);
+        // CR 508.1g: This optional-cost control needs an actual functioning
+        // permission on an attacking source, rather than an arbitrary object ID.
+        state
+            .objects
+            .get_mut(&on_board[0])
+            .unwrap()
+            .trigger_definitions =
+            vec![
+                TriggerDefinition::new(crate::types::triggers::TriggerMode::Exerted)
+                    .valid_card(TargetFilter::SelfRef),
+            ]
+            .into();
+        state.combat.as_mut().unwrap().attackers.push(
+            crate::game::combat::AttackerInfo::attacking_player(on_board[0], PlayerId(1)),
+        );
+        let exert_permission = crate::game::functioning_abilities::active_trigger_definitions(
+            &state,
+            &state.objects[&on_board[0]],
+        )
+        .next()
+        .expect("functioning attack permission")
+        .definition_ref;
+        let candidates =
+            cast_proof_candidate_windows(on_board, in_hand, attacker, exert_permission);
         for (why, window, expected_member) in &candidates {
             assert_eq!(
                 window.is_forced_cascade_window(),

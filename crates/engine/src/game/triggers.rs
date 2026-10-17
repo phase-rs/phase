@@ -14571,7 +14571,26 @@ fn check_trigger_constraint_with_ref(
     controller: PlayerId,
     event: Option<&GameEvent>,
 ) -> bool {
-    use crate::types::ability::TriggerConstraint;
+    // CR 701.43d + CR 603.1: A standalone static permission has no triggered
+    // effect to publish, including when collection uses a latched definition.
+    if trig_def.is_standalone_attack_exert_permission() {
+        return false;
+    }
+
+    // CR 607.2h: A linked payoff observes only its own optional-cost payment.
+    // Generic actor-filtered observers still see every exert, and completed
+    // historical events without a receipt retain their saved interpretation.
+    if trig_def.is_attack_exert_permission() {
+        if let Some(GameEvent::CreatureExerted {
+            attack_permission: Some(permission),
+            ..
+        }) = event
+        {
+            if definition_ref != Some(permission) {
+                return false;
+            }
+        }
+    }
 
     let constraint = match &trig_def.constraint {
         Some(c) => c,
@@ -30146,6 +30165,39 @@ pub mod tests {
             "Should NOT present trigger target selection"
         );
         assert_eq!(state.stack.len(), 0, "Should skip the ETB trigger");
+    }
+
+    #[test]
+    fn attack_exert_admission_rejects_only_static_components() {
+        let state = setup();
+        let permission =
+            TriggerDefinition::new(TriggerMode::Exerted).valid_card(TargetFilter::SelfRef);
+        // CR 701.43d + CR 603.1: Shared collection admission refuses only the
+        // static component, before its no-constraint fast return.
+        assert!(!check_trigger_constraint_with_ref(
+            &state,
+            &permission,
+            None,
+            None,
+            PlayerId(0),
+            None,
+        ));
+        let linked = permission.clone().execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("ExertLinkedBody", "unsupported linked effect"),
+        ));
+        let observer = permission.valid_target(TargetFilter::Controller);
+        let unrelated = TriggerDefinition::new(TriggerMode::ChangesZone);
+        for definition in [linked, observer, unrelated] {
+            assert!(check_trigger_constraint_with_ref(
+                &state,
+                &definition,
+                None,
+                None,
+                PlayerId(0),
+                None,
+            ));
+        }
     }
 
     #[test]

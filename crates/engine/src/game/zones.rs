@@ -159,6 +159,19 @@ pub(crate) fn capture_attachment_snapshot(
         .collect()
 }
 
+fn clear_exert_history_on_zone_change(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
+    // CR 400.7: Exert history belongs to the departed object, even when its
+    // replacement incarnation reuses the same storage id. Reorders keep it.
+    if from != to {
+        state.exerted_this_turn.remove(&object_id);
+    }
+}
+
 /// CR 400.7: Snapshot LKI and apply all cleanup side effects when an object
 /// leaves its current zone. Shared by `move_to_zone` and `move_to_library_at_index`.
 ///
@@ -233,6 +246,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     state
         .activated_abilities_this_game
         .retain(|(id, _), _| *id != object_id);
+    clear_exert_history_on_zone_change(state, object_id, from, to);
 
     // CR 400.7: Snapshot LKI before a zone change out of any zone whose
     // characteristics are not recomputed on demand. Power/toughness reflect
@@ -1209,6 +1223,8 @@ pub fn apply_resolved_zone_change(
             },
         );
     }
+
+    clear_exert_history_on_zone_change(state, command.object.object_id, command.from, command.to);
 
     if command.from == Zone::Battlefield {
         crate::game::effects::prepare::replay_remove_linked_prepared_copy_if_idle(
@@ -3092,15 +3108,57 @@ mod tests {
 
     use super::*;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        ContinuousModification, ControllerRef, FilterProp, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::game_state::GameState;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
+    use crate::types::resolved_commands::ResolvedObjectStatus;
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn exert_history_predicate_tracks_zone_lifetime() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(6991),
+            PlayerId(0),
+            "Exert source".into(),
+            Zone::Battlefield,
+        );
+        super::super::object_state::resolve_and_apply_object_edit(
+            &mut state,
+            source,
+            ResolvedObjectStatus::Exerted,
+            true,
+        )
+        .unwrap();
+        let exerted = StaticCondition::SourceExertedThisTurn;
+        let fresh = StaticCondition::Not {
+            condition: Box::new(exerted.clone()),
+        };
+        // CR 400.7 + CR 701.43b: The source predicate survives a same-object
+        // no-op, but both predicate polarities change after a real departure.
+        for before_departure in [true, false] {
+            if before_departure {
+                move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+            } else {
+                move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+                move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+            }
+            assert_eq!(
+                crate::game::layers::evaluate_condition(&state, &exerted, PlayerId(0), source),
+                before_departure
+            );
+            assert_eq!(
+                crate::game::layers::evaluate_condition(&state, &fresh, PlayerId(0), source),
+                !before_departure
+            );
+        }
     }
 
     #[test]

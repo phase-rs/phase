@@ -399,6 +399,7 @@ mod event_controller_last_known;
 mod event_target_controller_damage_anaphor;
 mod excess_damage_quantity_channel;
 mod exchange_life_totals_cards;
+mod exert_cost_bookkeeping;
 mod exhibition_tidecaller_target_player_mill;
 mod exile_dynamic_from_top;
 mod exiled_card_power_linked_pile;

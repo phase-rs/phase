@@ -211,6 +211,16 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 145 — GameEvent::CreatureExerted gains origin (attack cost or activated-ability
+ *      cost) and an optional player (who exerted), carried in GameState's trigger
+ *      events (a stack trigger's trigger_event, pending_attack_trigger_events) —
+ *      see PROTOCOL_VERSION's own `/// 145` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v144 peer drops both silently; the
+ *      exact-match version check at connect refuses the pairing. Wire 127 moves
+ *      with it. Required ExertChoice.permission and typed remaining entries bind
+ *      each optional cost; attack_permission receipts link only its own payoff.
+ *      Definitions carry attack_cost_condition / SourceExertedThisTurn; unbound
+ *      persisted prompts are refused.
  * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
  *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
  *       edit retypes power_delta/toughness_delta to required QuantityExpr
@@ -880,7 +890,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 144;
+export const PROTOCOL_VERSION = 145;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

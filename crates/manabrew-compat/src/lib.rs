@@ -6063,6 +6063,13 @@ mod tests {
         let exert = prepared_for(WaitingFor::ExertChoice {
             player: PlayerId(0),
             attacker: ObjectId(1),
+            permission: engine::types::ability::TriggerDefinitionRef {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0),
+                occurrence: engine::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: engine::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
             remaining: vec![],
         });
         assert_eq!(

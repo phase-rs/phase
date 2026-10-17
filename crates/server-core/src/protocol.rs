@@ -3346,6 +3346,13 @@ mod tests {
         }
     }
 
+    /// v145: CR 701.43 `GameEvent::CreatureExerted` gains `origin` and an
+    /// optional `player`, carried in a stack trigger's `trigger_event` and in
+    /// `pending_attack_trigger_events` inside `GameState`; a v144 peer drops
+    /// both silently and would let an activated-ability exert satisfy an
+    /// attack-linked "when you do" trigger, so it must be refused before it
+    /// receives v145 state.
+    ///
     /// v144: one-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
     /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
     /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
@@ -3564,8 +3571,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_144_for_one_time_boons() {
-        assert_eq!(PROTOCOL_VERSION, 144);
+    fn protocol_version_is_145_for_exert_origin() {
+        assert_eq!(PROTOCOL_VERSION, 145);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3576,7 +3583,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_144_for_one_time_boons` stays
+    /// `protocol_version_is_145_for_exert_origin` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
