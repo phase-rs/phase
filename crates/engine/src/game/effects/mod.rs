@@ -16,13 +16,13 @@ use crate::types::ability::{
     CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
     FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
-    MassLibraryShuffleMode, NameStickerSet, ObjectSelectionCardinality, OpponentMayScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
-    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    MassLibraryShuffleMode, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
+    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef,
+    ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -4817,14 +4817,12 @@ pub(super) fn resolve_optional_effect_decision(
 /// branch (modelling the reduced gate's condition both ways, a superset of
 /// what resolution runs).
 ///
-/// Invariant: a borrowed branch is a printed decline branch (an `else`, an "if
-/// you don't" clause, or an unconditional next instruction), unchanged. An
-/// owned branch is returned only when no printed decline branch is selected
-/// and `sub` is a plain positive "if you do" gate some later instruction of
-/// which survives the decline: `sub` itself, whose condition reads false once
-/// the decline is recorded, with its sub-chain replaced by exactly the
-/// surviving instructions in printed order
-/// ([`declined_gate_reduced_to_surviving_instructions`]).
+/// Invariant: borrowed branches are unchanged printed decline alternatives or
+/// surviving instructions. Owned branches are either a plain positive "if you
+/// do" gate reduced by [`declined_gate_reduced_to_surviving_instructions`], or
+/// an ordinary search continuation changed by removing instructions consuming
+/// its unproduced object. Independent player work, own targets and fresh
+/// producers survive; explicit decline alternatives keep their own authority.
 pub(crate) fn optional_decline_branch(
     ability: &ResolvedAbility,
 ) -> Option<Cow<'_, ResolvedAbility>> {
@@ -4855,23 +4853,327 @@ pub(crate) fn optional_decline_branch(
                 )
                 .is_some()
                     || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
-    if !selected {
-        // CR 608.2c: a declined "you may" fails the "if you do" gate `sub`,
-        // and the gate skips only the instructions it governs.
-        return declined_gate_reduced_to_surviving_instructions(sub).map(Cow::Owned);
-    }
-    if sub
-        .condition
-        .as_ref()
-        .is_some_and(|condition| condition.is_optional_effect_performed())
-        && sub.else_ability.is_none()
-    {
-        Some(Cow::Borrowed(
-            nested_optional_decline_clause(sub).unwrap_or(sub),
-        ))
+    let branch = if !selected {
+        // CR 608.2c: the positive performed gate retains its existing reduction.
+        Cow::Owned(declined_gate_reduced_to_surviving_instructions(sub)?)
     } else {
-        Some(Cow::Borrowed(sub))
+        if sub
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_optional_effect_performed())
+            && sub.else_ability.is_none()
+        {
+            if let Some(decline) = nested_optional_decline_clause(sub) {
+                return Some(Cow::Borrowed(decline));
+            }
+        }
+        Cow::Borrowed(sub)
+    };
+    // CR 608.2c + CR 609.3 + CR 701.23a: a declined search produced no found
+    // object. Select surviving instructions before any result gate or fallback
+    // reads the source. Runtime and search-ordering consume this same branch.
+    if matches!(ability.effect, Effect::SearchLibrary { .. })
+        && declined_search_branch_requires_reduction(&branch)
+    {
+        without_declined_search_object_dependencies(&branch).map(Cow::Owned)
+    } else {
+        Some(branch)
     }
+}
+
+// CR 608.2c: only implicit current-result references name this unperformed
+// search. Explicit prior sets and action-qualified sets retain their authority.
+fn declined_search_filter_dependency(filter: &TargetFilter) -> bool {
+    if filter_requires_parent_target_object(filter)
+        || filter_refs_same_name_as_parent_target(filter)
+    {
+        return true;
+    }
+    match filter {
+        TargetFilter::LastRevealed => true,
+        TargetFilter::TrackedSet { id } => *id == TrackedSetId(0),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => {
+            *id == TrackedSetId(0) && caused_by.is_none()
+        }
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(declined_search_property_dependency),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(declined_search_filter_dependency)
+        }
+        TargetFilter::Not { filter } => declined_search_filter_dependency(filter),
+        _ => false,
+    }
+}
+
+// CR 608.2c: a property keeps the authority of the reference it contains.
+fn declined_search_property_dependency(property: &FilterProp) -> bool {
+    match property {
+        FilterProp::InTrackedSet { id } => *id == TrackedSetId(0),
+        FilterProp::DistinctFrom { reference } => declined_search_filter_dependency(reference),
+        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+            declined_search_quantity_dependency(value, false)
+        }
+        FilterProp::Counters { count, .. } => declined_search_quantity_dependency(count, false),
+        FilterProp::Not { prop } => declined_search_property_dependency(prop),
+        FilterProp::AnyOf { props } => props.iter().any(declined_search_property_dependency),
+        _ => false,
+    }
+}
+
+// CR 608.2c: explicit action/event populations are independent of this search.
+fn declined_search_population_dependency(source: &CardTypeSetSource) -> bool {
+    let mut dependent = false;
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |member| {
+        dependent |= match member {
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            } => true,
+            CardTypeSetSource::Objects { filter } => declined_search_filter_dependency(filter),
+            _ => false,
+        };
+    });
+    dependent
+}
+
+// CR 608.2c + CR 608.2h: classify the quantity's operand authority without evaluating it.
+fn declined_search_quantity_dependency(quantity: &QuantityExpr, owns_object: bool) -> bool {
+    quantity.any_ref(&mut |reference| match reference {
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            !owns_object
+                && matches!(
+                    scope,
+                    ObjectScope::Target
+                        | ObjectScope::Recipient
+                        | ObjectScope::Anaphoric
+                        | ObjectScope::Demonstrative
+                )
+        }
+        QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize {
+            caused_by: None, ..
+        } => true,
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            declined_search_population_dependency(source)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            declined_search_population_dependency(aggregate.source())
+        }
+        QuantityRef::ObjectCount { filter, .. }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => {
+            declined_search_filter_dependency(filter)
+        }
+        QuantityRef::TargetObjectManaValue { filter } => declined_search_filter_dependency(filter),
+        _ => false,
+    })
+}
+
+// Player recipients are roles of the effect, even when spelled ParentTarget.
+// A mixed damage slot additionally consults its actual announced/bound role.
+// CR 608.2c: player recipients and object operands retain their distinct roles.
+fn declined_search_object_operands(ability: &ResolvedAbility) -> Vec<&TargetFilter> {
+    match &ability.effect {
+        Effect::Draw { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Mill { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::RevealTop { .. } => Vec::new(),
+        Effect::Discard {
+            filter,
+            unless_filter,
+            ..
+        } => filter.iter().chain(unless_filter).collect(),
+        Effect::SearchLibrary { filter, .. }
+        | Effect::Dig { filter, .. }
+        | Effect::RevealUntil { filter, .. } => vec![filter],
+        Effect::ExileFromTopUntil { until, .. } => match until {
+            crate::types::ability::UntilCondition::NextMatches { filter, .. } => vec![filter],
+            crate::types::ability::UntilCondition::CumulativeThreshold { .. } => Vec::new(),
+        },
+        Effect::RevealHand { card_filter, .. } => vec![card_filter],
+        Effect::Token { attach_to, .. } => attach_to.iter().collect(),
+        Effect::CopyTokenOf {
+            target,
+            source_filter,
+            ..
+        } => vec![source_filter.as_ref().unwrap_or(target)],
+        Effect::DealDamage { target, .. }
+            if target.is_player_scope()
+                || (!ability.targets.is_empty()
+                    && ability
+                        .targets
+                        .iter()
+                        .all(|target| matches!(target, TargetRef::Player(_)))) =>
+        {
+            Vec::new()
+        }
+        Effect::ChooseFromZone { filter, .. } => filter.iter().collect(),
+        _ => effect_parent_ref_slots(&ability.effect),
+    }
+}
+
+// CR 601.2c + CR 608.2c: an instruction's own declared target is a separate authority.
+fn declined_search_owns_target(ability: &ResolvedAbility) -> bool {
+    ability.target_reads == TargetReadOrigin::OwnAnnouncement
+        && (sub_has_independent_object_target_slot(ability)
+            || crate::game::ability_utils::node_has_stack_target_declaration(ability))
+}
+
+// CR 608.2c: each static uses its actual affected-over-target application operand.
+fn declined_search_static_dependency(
+    target: Option<&TargetFilter>,
+    static_def: &StaticDefinition,
+) -> bool {
+    effect::generic_effect_application_filter(target, static_def.affected.as_ref())
+        .is_some_and(declined_search_filter_dependency)
+}
+
+// CR 608.2c + CR 609.3: inspect inputs before retaining a possible result producer.
+fn declined_search_node_dependency(ability: &ResolvedAbility) -> bool {
+    if ability.reads_chosen_group.is_some() || ability.reads_return_result.is_some() {
+        return false;
+    }
+    let mut quantity_dependency = false;
+    let owns_object = declined_search_owns_target(ability);
+    ability.effect.for_each_quantity_expr(&mut |quantity| {
+        quantity_dependency |= declined_search_quantity_dependency(quantity, owns_object);
+    });
+    quantity_dependency |= ability
+        .repeat_for
+        .as_ref()
+        .is_some_and(|quantity| declined_search_quantity_dependency(quantity, owns_object));
+    if quantity_dependency {
+        return true;
+    }
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &ability.effect
+    {
+        return static_abilities
+            .iter()
+            .any(|static_def| declined_search_static_dependency(target.as_ref(), static_def));
+    }
+    declined_search_object_operands(ability)
+        .into_iter()
+        .any(declined_search_filter_dependency)
+}
+
+// CR 608.2c: a genuine later producer owns its continuation's referent.
+fn declined_search_fresh_authority(ability: &ResolvedAbility) -> bool {
+    declined_search_owns_target(ability)
+        || ability.reads_chosen_group.is_some()
+        || ability.reads_return_result.is_some()
+        || matches!(
+            ability.effect,
+            Effect::SearchLibrary { .. }
+                | Effect::ChooseFromZone { .. }
+                | Effect::ExileFromTopUntil { .. }
+        )
+        || effect_writes_last_revealed_ids(&ability.effect)
+        || reveal_hand::effect_parks_reveal_card_choice(&ability.effect)
+        || publishes_chain_created_referent(&ability.effect)
+        || (ability.forward_result
+            && matches!(
+                ability.effect,
+                Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+            ))
+}
+
+// CR 608.2c: retain borrowing when no instruction requires the unproduced object.
+fn declined_search_branch_requires_reduction(ability: &ResolvedAbility) -> bool {
+    if crosses_modal_boundary(ability) {
+        return false;
+    }
+    if declined_search_node_dependency(ability) {
+        return true;
+    }
+    !declined_search_fresh_authority(ability)
+        && (ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(declined_search_branch_requires_reduction)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(declined_search_branch_requires_reduction))
+}
+
+// CR 608.2c + CR 609.3: discard an impossible object instruction WITH its
+// resolution steps and branches, then resume at the next printed instruction.
+// This is local to ordinary search decline, never a general chain optimizer.
+fn without_declined_search_object_dependencies(
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    let mut kept = Vec::new();
+    let mut cursor = Some(ability);
+    let mut skipped_instruction = false;
+    while let Some(node) = cursor {
+        cursor = node.sub_ability.as_deref();
+        if crosses_modal_boundary(node) {
+            kept.extend(
+                std::iter::successors(Some(node), |node| node.sub_ability.as_deref()).cloned(),
+            );
+            break;
+        }
+        if skipped_instruction && !starts_independent_instruction(node) {
+            continue;
+        }
+        skipped_instruction = false;
+        let mut remaining = node.clone();
+        if let Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } = &mut remaining.effect
+        {
+            static_abilities.retain(|static_def| {
+                !declined_search_static_dependency(target.as_ref(), static_def)
+            });
+            if static_abilities.is_empty() {
+                skipped_instruction = true;
+                continue;
+            }
+        }
+        // Input dependency precedes freshness: revealing ParentTarget cannot
+        // create a new authority when the search never produced that object.
+        if declined_search_node_dependency(&remaining) {
+            skipped_instruction = true;
+            continue;
+        }
+        if declined_search_fresh_authority(&remaining) {
+            kept.push(remaining);
+            kept.extend(std::iter::successors(cursor, |node| node.sub_ability.as_deref()).cloned());
+            break;
+        }
+        remaining.else_ability = node
+            .else_ability
+            .as_deref()
+            .and_then(without_declined_search_object_dependencies)
+            .map(Box::new);
+        kept.push(remaining);
+    }
+    relink_in_printed_order(kept.iter().collect()).map(|root| *root)
 }
 
 /// Whether a sub-ability condition references a per-iteration outcome gate —
@@ -18586,9 +18888,8 @@ fn resolve_chain_body(
             // path; the `DiscardChoice` resume populates `last_zone_changed_ids`
             // from the cards that reached the graveyard before draining, so the
             // re-evaluation at chain top sees the discarded objects.
-            // CR 608.2c: a "that card / the revealed card"-referential destination
-            // gate on a suspended `SearchLibrary` sub can't be evaluated until the
-            // search injects the found card as the continuation target. Scoped to
+            // CR 608.2c + CR 608.2h: every later gate waits for a suspended
+            // search to settle, including live board conditions. Scoped to
             // `SearchChoice` specifically — the ONLY choice whose completion sets
             // `cont.chain.targets` to the result object; broadening to every
             // resolution choice would mis-defer e.g. a `Sacrifice`→`EffectZoneChoice`
@@ -18616,8 +18917,7 @@ fn resolve_chain_body(
                         && condition_depends_on_graveyard_size(condition))
                     || condition_depends_on_last_created(condition)
                     || condition.has_when_you_do_marker()
-                    || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
-                        && condition_depends_on_result_object(condition))
+                    || matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
                     || condition_awaits_resolution_only_referent(condition, state, ability))
             {
                 let mut sub_clone = sub.as_ref().clone();
@@ -21631,6 +21931,408 @@ mod tests {
         ChooseOneOfKind, LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
         SearchSelectionConstraint, SpentColor,
     };
+
+    // Structural controls for C6; printed runtime coverage lives in the
+    // search_result_conditional_destination integration module.
+    fn declined_search_test_ability(effect: Effect) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+        ability.sub_link = SubAbilityLink::SequentialSibling;
+        ability
+    }
+
+    fn declined_search_test_search() -> ResolvedAbility {
+        let mut search = declined_search_test_ability(Effect::SearchLibrary {
+            source_zones: vec![Zone::Library],
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+        });
+        search.optional = true;
+        search
+    }
+
+    fn declined_search_test_placement(target: TargetFilter) -> ResolvedAbility {
+        declined_search_test_ability(Effect::PutAtLibraryPosition {
+            target,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+        })
+    }
+
+    /// Structural — CR 608.2c + CR 609.3: remove the whole nonexistent-object
+    /// instruction before either gate, but preserve player work and both edges.
+    #[test]
+    fn declined_search_reduces_object_units_without_pruning_player_or_prior_authorities() {
+        let dependent = declined_search_test_placement(TargetFilter::ParentTarget);
+        let life = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::ParentTarget,
+        });
+        let mut gated = dependent.clone();
+        gated.targets = vec![TargetRef::Object(ObjectId(99))];
+        gated.target_reads = TargetReadOrigin::ParentAnnouncement;
+        gated.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                },
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        });
+        gated.else_ability = Some(Box::new(dependent.clone()));
+        let mut step = life.clone();
+        step.sub_link = SubAbilityLink::ContinuationStep;
+        gated.sub_ability = relink_in_printed_order(vec![&step, &life]);
+        let mut root = declined_search_test_search();
+        root.sub_ability = Some(Box::new(gated));
+        let reduced =
+            optional_decline_branch(&root).expect("independent player instruction survives");
+        assert!(matches!(reduced, Cow::Owned(_)));
+        assert!(matches!(reduced.effect, Effect::GainLife { .. }));
+        assert!(
+            reduced.sub_ability.is_none(),
+            "dependent resolution step was skipped with its object instruction"
+        );
+
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            Effect::Shuffle {
+                target: TargetFilter::ParentTarget,
+            },
+            life.effect.clone(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+        ] {
+            let mut player = declined_search_test_ability(effect);
+            player.targets = vec![TargetRef::Player(PlayerId(1))];
+            assert!(
+                !declined_search_node_dependency(&player),
+                "player operand is not an absent found object: {:?}",
+                player.effect
+            );
+            root.sub_ability = Some(Box::new(player));
+            assert!(matches!(
+                optional_decline_branch(&root),
+                Some(Cow::Borrowed(_))
+            ));
+        }
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::LastRevealed,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        ] {
+            root.sub_ability = Some(Box::new(declined_search_test_placement(filter)));
+            assert!(
+                optional_decline_branch(&root).is_none(),
+                "stale inherited targets cannot manufacture a result"
+            );
+        }
+        for filter in [
+            TargetFilter::SelfRef,
+            TargetFilter::TriggeringSource,
+            TargetFilter::CostPaidObject,
+            TargetFilter::SpecificObject { id: ObjectId(7) },
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Destroyed),
+            },
+        ] {
+            root.sub_ability = Some(Box::new(declined_search_test_placement(filter)));
+            assert!(
+                matches!(optional_decline_branch(&root), Some(Cow::Borrowed(_))),
+                "an explicit prior/source/cost authority is independent"
+            );
+        }
+        let mut player = life.clone();
+        player.optional = true;
+        player.condition = Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::effect_performed(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Fixed { value: 1 },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        });
+        player.sub_ability = Some(Box::new(dependent.clone()));
+        player.else_ability = Some(Box::new(dependent));
+        let reduced = without_declined_search_object_dependencies(&player).unwrap();
+        assert_eq!(reduced.condition, player.condition);
+        assert!(reduced.optional);
+        assert!(reduced.sub_ability.is_none() && reduced.else_ability.is_none());
+    }
+
+    /// Structural — independent targets and real producers reset the authority;
+    /// producer-shaped instructions consuming absent inputs do not.
+    #[test]
+    fn declined_search_preserves_fresh_producers_but_checks_their_inputs_first() {
+        let dependent = declined_search_test_placement(TargetFilter::ParentTarget);
+        let mut root = declined_search_test_search();
+        for effect in [
+            declined_search_test_search().effect,
+            serde_json::from_value(serde_json::json!({"type":"ChooseFromZone", "zone":"Hand"})).unwrap(),
+            Effect::RevealTop { player: TargetFilter::ParentTarget, count: 1 },
+            Effect::RevealHand { target: TargetFilter::ParentTarget, card_filter: TargetFilter::Any, count: Some(QuantityExpr::Fixed { value: 1 }), selection: Default::default(), choice_optional: false, reveal: true },
+            Effect::ExileFromTopUntil { player: TargetFilter::ParentTarget, until: UntilCondition::NextMatches { filter: TargetFilter::Any, count: QuantityExpr::Fixed { value: 1 } } },
+            Effect::Reveal { target: TargetFilter::SpecificObject { id: ObjectId(7) } },
+            serde_json::from_value(serde_json::json!({"type":"Token", "name":"Independent token", "power":{"type":"Fixed","value":1}, "toughness":{"type":"Fixed","value":1}})).unwrap(),
+        ] {
+            let producer = declined_search_test_ability(effect).sub_ability(dependent.clone());
+            root.sub_ability = Some(Box::new(producer));
+            let branch = optional_decline_branch(&root).unwrap();
+            assert!(matches!(branch, Cow::Borrowed(_)));
+            assert!(branch.sub_ability.is_some(), "new producer owns the later ParentTarget");
+        }
+        let mut own = declined_search_test_placement(TargetFilter::Typed(TypedFilter::creature()));
+        own.targets = vec![TargetRef::Object(ObjectId(8))];
+        own.sub_ability = Some(Box::new(dependent.clone()));
+        assert!(declined_search_owns_target(&own));
+        root.sub_ability = Some(Box::new(own));
+        assert!(matches!(
+            optional_decline_branch(&root),
+            Some(Cow::Borrowed(_))
+        ));
+        let mut dependent_producer = declined_search_test_search();
+        dependent_producer.effect = Effect::Reveal {
+            target: TargetFilter::ParentTarget,
+        };
+        assert!(declined_search_node_dependency(&dependent_producer));
+        assert!(without_declined_search_object_dependencies(&dependent_producer).is_none());
+        let mut count_dependent = declined_search_test_search();
+        if let Effect::SearchLibrary { count, .. } = &mut count_dependent.effect {
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            };
+        }
+        assert!(declined_search_node_dependency(&count_dependent));
+        assert!(without_declined_search_object_dependencies(&count_dependent).is_none());
+        if let Effect::SearchLibrary { count, .. } = &mut count_dependent.effect {
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(ThisWayCause::Destroyed),
+                },
+            };
+        }
+        assert!(
+            !declined_search_node_dependency(&count_dependent),
+            "explicit earlier action remains its own quantity authority"
+        );
+        let mut secondary = declined_search_test_ability(
+            serde_json::from_value(
+                serde_json::json!({"type":"Token", "name":"Counter-input token"}),
+            )
+            .unwrap(),
+        );
+        if let Effect::Token {
+            enter_with_counters,
+            ..
+        } = &mut secondary.effect
+        {
+            enter_with_counters.push((
+                CounterType::Plus1Plus1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+            ));
+        }
+        assert!(
+            declined_search_node_dependency(&secondary),
+            "secondary quantity input is checked before a token becomes fresh"
+        );
+        assert!(without_declined_search_object_dependencies(&secondary).is_none());
+        let mut named_prior = dependent.clone();
+        named_prior.reads_chosen_group = Some(crate::types::ability::ChosenGroupId(7));
+        root.sub_ability = Some(Box::new(named_prior));
+        assert!(
+            matches!(optional_decline_branch(&root), Some(Cow::Borrowed(_))),
+            "an explicitly named earlier group keeps its own result authority"
+        );
+        let mut mode = dependent.clone();
+        mode.modal_instruction_ordinal = Some(1);
+        assert!(without_declined_search_object_dependencies(&mode).is_some());
+        mode.sub_link = SubAbilityLink::ContinuationStep;
+        let crossing = dependent.clone().sub_ability(mode);
+        let preserved_mode = without_declined_search_object_dependencies(&crossing).unwrap();
+        assert_eq!(
+            preserved_mode.modal_instruction_ordinal,
+            Some(1),
+            "mode reset is independent of the preceding instruction's link kind"
+        );
+        let mut forward = declined_search_test_ability(serde_json::from_value(serde_json::json!({"type":"ChangeZone", "destination":"Hand", "target":{"type":"SpecificObject","id":7}})).unwrap());
+        forward.forward_result = true;
+        forward.sub_ability = Some(Box::new(dependent.clone()));
+        assert!(without_declined_search_object_dependencies(&forward)
+            .unwrap()
+            .sub_ability
+            .is_some());
+        let generic = declined_search_test_ability(Effect::GenericEffect {
+            target: Some(TargetFilter::ParentTarget),
+            duration: None,
+            end_cost: None,
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::SelfRef),
+                StaticDefinition::continuous().affected(TargetFilter::ParentTarget),
+            ],
+        });
+        let reduced = without_declined_search_object_dependencies(&generic).unwrap();
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = reduced.effect
+        else {
+            panic!("grant remains");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+        root.else_ability = Some(Box::new(dependent));
+        assert!(
+            matches!(optional_decline_branch(&root), Some(Cow::Borrowed(_))),
+            "explicit decline branch retains its original authority"
+        );
+    }
+
+    /// Structural mirror control: the actual ordering reader consumes the same
+    /// reduced selector result, including its independent top placement and reset.
+    #[test]
+    fn declined_search_ordering_mirror_uses_the_shared_reduced_branch() {
+        let mut outer = declined_search_test_search();
+        outer.optional = false;
+        let mut optional = declined_search_test_search();
+        let mut dependent = declined_search_test_placement(TargetFilter::ParentTarget);
+        dependent.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 1 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        let independent = declined_search_test_placement(TargetFilter::Any);
+        dependent.sub_ability = Some(Box::new(independent));
+        optional.sub_ability = Some(Box::new(dependent));
+        outer.sub_ability = Some(Box::new(optional.clone()));
+        let reduced = optional_decline_branch(&optional).unwrap();
+        assert!(matches!(
+            reduced.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+        assert_eq!(search_library::search_ordering_hint(&outer, 1), crate::types::ability::SearchOrderingHint::Unordered, "the nested accepted search resets the outer result even though its decline retains independent work");
+        let mut selected_branch = outer.clone();
+        selected_branch.sub_ability = Some(Box::new(reduced.into_owned()));
+        assert_eq!(
+            search_library::search_ordering_hint(&selected_branch, 1),
+            crate::types::ability::SearchOrderingHint::OrderedToLibraryTop,
+            "the actual reduced branch retains its independent top placement"
+        );
+        let mut later = declined_search_test_search();
+        later.optional = false;
+        optional.sub_ability = Some(Box::new(later));
+        outer.sub_ability = Some(Box::new(optional));
+        assert_eq!(
+            search_library::search_ordering_hint(&outer, 1),
+            crate::types::ability::SearchOrderingHint::Unordered
+        );
+    }
+
+    /// Structural/public-choice supplement — CR 608.2c + CR 609.3: an older
+    /// actual reveal and inherited object do not rescue a declined search's
+    /// object instruction, while its independently bound player still gains life.
+    #[test]
+    fn declined_search_public_choice_keeps_player_work_despite_stale_reveal() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Search source".into(),
+            Zone::Battlefield,
+        );
+        let old = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Prior revealed card".into(),
+            Zone::Library,
+        );
+        let prior = ResolvedAbility::new(
+            Effect::Reveal {
+                target: TargetFilter::SpecificObject { id: old },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &prior, &mut Vec::new(), 1).unwrap();
+        assert_eq!(state.last_revealed_ids, vec![old]);
+        let mut root = declined_search_test_search();
+        root.source_id = source;
+        root.targets = vec![TargetRef::Object(old)];
+        let mut destination = declined_search_test_placement(TargetFilter::LastRevealed);
+        destination.source_id = source;
+        let mut player = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::ParentTarget,
+        });
+        player.source_id = source;
+        player.targets = vec![TargetRef::Player(PlayerId(1))];
+        destination.sub_ability = Some(Box::new(player));
+        root.sub_ability = Some(Box::new(destination));
+        resolve_ability_chain(&mut state, &root, &mut Vec::new(), 1).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        let events = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap()
+        .events;
+        assert_eq!(state.players[1].life, 23);
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&old].zone, Zone::Library);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GainLife,
+                ..
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { .. } | GameEvent::CardsRevealed { .. }
+        )));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+        assert!(
+            state.active_library_searches.is_empty()
+                && state.active_search_decision_controls.is_empty()
+        );
+        assert!(state.pending_search_found_batch.is_none());
+    }
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
     /// exact cards that reveal looked at, on the continuation itself — so an

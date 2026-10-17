@@ -19441,11 +19441,10 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
 
 /// CR 701.23a + CR 608.2k: a search result is the parent target of its
 /// delivery continuation, even inside an ETB whose event source would
-/// otherwise lift `ParentTarget` to `TriggeringSource`. That protection ends
-/// at an independent sibling: a later "that creature" still denotes the
-/// entering creature.
+/// otherwise lift `ParentTarget` to `TriggeringSource`. Later siblings retain
+/// that found-object boundary as well.
 #[test]
-fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() {
+fn event_source_lift_stops_at_search_across_independent_siblings() {
     let sponsor = parse_trigger_line(
         "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
         "Scholarship Sponsor",
@@ -19498,8 +19497,8 @@ fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() 
     );
     assert_eq!(
         independent_exile_target,
-        Some(TargetFilter::TriggeringSource),
-        "the independent post-search sibling must still bind to the entering creature"
+        Some(TargetFilter::ParentTarget),
+        "the independent post-search sibling must retain the search-result antecedent"
     );
 }
 

@@ -1,6 +1,6 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
-use engine::types::ability::EffectKind;
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{GameRng, WaitingFor};
@@ -42,7 +42,7 @@ fn pass_to_pause(runner: &mut GameRunner, events: &mut Vec<GameEvent>) -> Vec<Ga
     panic!("priority did not reach a choice or settle");
 }
 
-fn assert_complete(runner: &GameRunner, last_action_events: &[GameEvent]) {
+fn assert_settled(runner: &GameRunner) {
     let state = runner.state();
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert!(state.stack.is_empty());
@@ -50,6 +50,10 @@ fn assert_complete(runner: &GameRunner, last_action_events: &[GameEvent]) {
     assert!(state.pending_search_found_batch.is_none());
     assert!(state.active_library_searches.is_empty());
     assert!(state.active_search_decision_controls.is_empty());
+}
+
+fn assert_complete(runner: &GameRunner, last_action_events: &[GameEvent]) {
+    assert_settled(runner);
     // CR 608.2c + CR 701.24a: the final response must reach the printed shuffle.
     assert!(
         last_action_events.iter().any(|event| matches!(
@@ -303,11 +307,7 @@ fn guidelight_declined_search_settles_without_moving_an_object() {
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
         .unwrap();
-    assert!(runner.state().stack.is_empty());
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
+    assert_settled(&runner);
     assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
     assert_eq!(
         runner.state().objects[&candidate.unwrap()].zone,
@@ -873,5 +873,261 @@ fn archdruids_charm_empty_result_drains_its_direct_conditional_destination() {
         assert_complete(&runner, &last);
         assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
         assert_search_reveal_and_delivery(&runner, &events, source, None, cover, true);
+    }
+}
+
+/// CR 608.2c + CR 609.3: the independent printed Draw survives either search
+/// decision. The searched land belongs to P1; the drawn card belongs to P0.
+#[test]
+fn declined_search_preserves_cleansing_wildfires_independent_draw() {
+    const ORACLE: &str = "Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield tapped, then shuffle.\nDraw a card.";
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cleansing Wildfire", false, ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        fund(&mut scenario, 1, &[ManaType::Red]);
+        let victim = scenario
+            .add_land_from_oracle(P1, "Opponent nonbasic", "")
+            .id();
+        let found = scenario.add_basic_land(P1, ManaColor::Green);
+        let cover = scenario
+            .add_spell_to_library_top(P1, "P1 hidden cover", false)
+            .id();
+        let drawn = scenario
+            .add_spell_to_library_top(P0, "Known independent draw", false)
+            .id();
+        let mut runner = scenario.build();
+        assert!(!move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::pregame(found, Zone::Library),
+            &mut Vec::new()
+        ));
+        assert_eq!(
+            runner.state().players[1]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![cover, found]
+        );
+        runner.cast(spell).target_object(victim).commit();
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged {
+            object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, ..
+        } if *object_id == victim)));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P1, .. }
+        ));
+        let mut last = runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .unwrap()
+            .events;
+        events.extend(last.clone());
+        if accept {
+            let WaitingFor::SearchChoice {
+                player,
+                cards,
+                reveal,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("opponent search must pause");
+            };
+            assert_eq!(*player, P1);
+            assert_eq!(cards, &[found]);
+            assert!(!reveal);
+            last = runner
+                .act(GameAction::SelectCards { cards: vec![found] })
+                .unwrap()
+                .events;
+            events.extend(last.clone());
+            assert_eq!(runner.state().objects[&found].zone, Zone::Battlefield);
+            assert!(runner.state().objects[&found].tapped);
+            let moved = events
+                .iter()
+                .position(|event| {
+                    matches!(event, GameEvent::ZoneChanged {
+                object_id, from: Some(Zone::Library), to: Zone::Battlefield, ..
+            } if *object_id == found)
+                })
+                .expect("selected land enters directly");
+            let shuffled = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        GameEvent::PlayerPerformedAction {
+                            player_id: P1,
+                            action: PlayerActionKind::ShuffledLibrary,
+                            ..
+                        }
+                    )
+                })
+                .expect("successful opponent search shuffles");
+            let draw = events
+                .iter()
+                .position(|event| {
+                    matches!(event, GameEvent::CardDrawn {
+                player_id: P0, object_id, ..
+            } if *object_id == drawn)
+                })
+                .expect("independent draw follows search");
+            assert!(moved < shuffled && shuffled < draw);
+        } else {
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        }
+        assert_settled(&runner);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+        assert_eq!(
+            runner.state().players[0]
+                .hand
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![drawn]
+        );
+        assert_eq!(last.iter().filter(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, object_id, .. } if *object_id == drawn)).count(), 1);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
+    }
+}
+
+/// CR 602.2 + CR 608.2c + CR 701.23b: declining the opponent search must leave
+/// the activator's separate search and its own selected/empty result intact.
+#[test]
+fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
+    const ORACLE: &str = "{T}: Add {C}.\n{2}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls. That land's controller may search their library for a basic land card, put it onto the battlefield, then shuffle. You may search your library for a basic land card, put it onto the battlefield, then shuffle.";
+    for find in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_land_from_oracle(P0, "Demolition Field", ORACLE)
+            .id();
+        let victim = scenario
+            .add_land_from_oracle(P1, "Opponent nonbasic", "")
+            .id();
+        let first = scenario.add_basic_land(P1, ManaColor::White);
+        let found = scenario.add_basic_land(P0, ManaColor::Green);
+        let cover = scenario
+            .add_spell_to_library_top(P0, "P0 nonland cover", false)
+            .id();
+        fund(&mut scenario, 2, &[]);
+        let mut runner = scenario.build();
+        for id in [first, found] {
+            assert!(!move_object_for_test(
+                runner.state_mut(),
+                ZoneMoveRequest::pregame(id, Zone::Library),
+                &mut Vec::new()
+            ));
+        }
+        assert_library_order(&runner, &[cover, found]);
+        let mut events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            })
+            .unwrap()
+            .events;
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { player: P0, .. }
+        ));
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: TargetRef::Object(victim),
+                })
+                .unwrap()
+                .events,
+        );
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().stack.len(), 1);
+        assert!(runner.state().players[0].mana_pool.is_empty());
+        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged {
+            object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, ..
+        } if *object_id == source)));
+        assert!(events.iter().any(|event| matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == source)), "activation paid its printed tap cost");
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P1, .. }
+        ));
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap()
+                .events,
+        );
+        assert_optional_prompt(&runner);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Library);
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap()
+                .events,
+        );
+        assert_search_prompt(&runner, &[found], false);
+        assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
+        let last = runner
+            .act(GameAction::SelectCards {
+                cards: if find { vec![found] } else { vec![] },
+            })
+            .unwrap()
+            .events;
+        events.extend(last.clone());
+        assert_complete(&runner, &last);
+        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+        if find {
+            assert_eq!(runner.state().objects[&found].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&found].controller, P0);
+            assert!(!runner.state().objects[&found].tapped);
+            assert!(last
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged {
+                object_id, from: Some(Zone::Library), to: Zone::Battlefield, ..
+            } if *object_id == found)));
+        } else {
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+            assert!(!last.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(Zone::Library),
+                    ..
+                }
+            )));
+        }
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
     }
 }

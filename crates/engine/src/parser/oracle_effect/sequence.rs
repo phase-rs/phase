@@ -220,6 +220,16 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
     .map(|(_, face_down)| face_down)
 }
 
+fn parse_search_result_referent(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("that card "),
+        tag("it "),
+        tag("them "),
+        tag("those cards "),
+    ))
+    .parse(input)
+}
+
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
 /// after a search compound — library-only (Assassin's Trophy comma-split) or
 /// multi-zone (The Hunger Tide Rises: "library and/or graveyard … and put it
@@ -230,13 +240,7 @@ fn parse_search_result_put_onto_battlefield_restatement(
     input: &str,
 ) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (input, _) = alt((tag::<_, _, OracleError<'_>>("put "), tag("puts "))).parse(input)?;
-    let (input, _) = alt((
-        tag("that card "),
-        tag("it "),
-        tag("them "),
-        tag("those cards "),
-    ))
-    .parse(input)?;
+    let (input, _) = parse_search_result_referent(input)?;
     let (input, _) = tag("onto the battlefield").parse(input)?;
     let (input, _) = opt(tag(" tapped")).parse(input)?;
     Ok((input, ()))
@@ -301,11 +305,27 @@ fn has_search_result_library_position_restatement(lower: &str) -> bool {
 fn has_conditional_search_result_destination(lower: &str) -> bool {
     fn parse_clause(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         let (input, _) = parse_search_result_put_onto_battlefield_restatement(input)?;
-        let (input, _) = alt((tag(" if it's "), tag(" if it is "))).parse(input)?;
-        let (input, _) = take_until(" card").parse(input)?;
-        let (input, _) = tag(" card").parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
-        Ok((input, ()))
+        alt((
+            value(
+                (),
+                (
+                    alt((tag(" if it's "), tag(" if it is "))),
+                    take_until(" card"),
+                    tag(" card"),
+                    opt(tag(".")),
+                ),
+            ),
+            value(
+                (),
+                (
+                    opt(preceded(tag(" if "), is_not("."))),
+                    tag(". otherwise, put "),
+                    parse_search_result_referent,
+                    tag("into your hand"),
+                ),
+            ),
+        ))
+        .parse(input)
     }
 
     let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));

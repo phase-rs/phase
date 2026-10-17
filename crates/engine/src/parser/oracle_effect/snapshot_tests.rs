@@ -8,6 +8,247 @@ const SEARCH_RUIN: &str = "Devoid (This card has no color.)\nSearch your library
 const SEARCH_CHEST: &str = "{4}, Sacrifice this artifact: Roll a d20.\n1 | Trapped! — You lose 3 life.\n2—9 | Create five Treasure tokens.\n10—19 | You gain 3 life and draw three cards.\n20 | Search your library for a card. If it's an artifact card, you may put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.";
 const SEARCH_CHARM: &str = "Choose one —\n• Search your library for a creature or land card and reveal it. Put it onto the battlefield tapped if it's a land card. Otherwise, put it into your hand. Then shuffle.\n• Put a +1/+1 counter on target creature you control. It deals damage equal to its power to target creature you don't control.\n• Exile target artifact or enchantment.";
 
+/// SHAPE — CR 608.2c: the rejected guard keeps its complete source unit and
+/// its minted identity, while the actual search/reveal and later work survive.
+#[test]
+fn unsupported_search_result_guard_retains_its_original_clause_identity() {
+    const GUARD: &str =
+        "If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield";
+    for search in [
+        "Search your library for an Equipment card and reveal it",
+        "Search your library for an Equipment card. Reveal it",
+    ] {
+        let text =
+            format!("{search}. {GUARD}. Otherwise, put that card into your hand. Then shuffle.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        let producer = ir
+            .clauses
+            .iter()
+            .find(|clause| matches!(clause.parsed.effect, Effect::SearchLibrary { .. }))
+            .expect("actual source search");
+        let gap = ir
+            .clauses
+            .iter()
+            .find(|clause| clause.parsed.effect.unimplemented_description() == Some(GUARD))
+            .expect("complete rejected guard, not Otherwise");
+        assert!(producer.id.0 < gap.id.0);
+        assert_eq!(gap.source.fragment(), Some(GUARD));
+        assert_eq!(
+            gap.source.span().precision,
+            crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+        );
+        assert_eq!(
+            &text[gap.source.span().start_byte..gap.source.span().end_byte],
+            GUARD
+        );
+        assert_eq!(gap.boundary, Some(ClauseBoundary::Sentence));
+        assert!(matches!(
+            gap.disposition,
+            ClauseDisposition::Emit {
+                intrinsic: None,
+                followup: None
+            }
+        ));
+        assert!(gap.condition.is_none() && !gap.is_optional && gap.delayed_condition.is_none());
+        assert!(gap.parsed.sub_ability.is_none());
+        let lowered = lower_effect_chain_ir(&ir);
+        assert!(matches!(
+            lowered.effect.as_ref(),
+            Effect::SearchLibrary { reveal: true, .. }
+        ));
+        assert!(chain_effects(&lowered)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Shuffle { .. })));
+    }
+}
+
+/// SHAPE: source adjacency and the explicit Hand-fold relation are the only
+/// antecedents. These synthetic controls supplement the printed runtime rows.
+#[test]
+fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority() {
+    fn search() -> ParsedEffectClause {
+        parsed_clause(
+            serde_json::from_value(
+                serde_json::json!({ "type": "SearchLibrary", "filter": { "type": "Any" } }),
+            )
+            .unwrap(),
+        )
+    }
+    let ctx = ParseContext::default();
+    let emit = || ClauseDisposition::Emit {
+        followup: None,
+        intrinsic: None,
+    };
+    let mut builder = ClauseIrBuilder::new("Search. Reveal it. Work.");
+    builder
+        .clause("Search", search(), Some(ClauseBoundary::Sentence), emit())
+        .push();
+    let owner = builder.clauses()[0].id;
+    assert_eq!(
+        adjacent_search_result_owners(builder.clauses(), &ctx),
+        Some(vec![owner])
+    );
+    builder
+        .clause(
+            "Reveal it",
+            parsed_clause(Effect::Reveal {
+                target: TargetFilter::ParentTarget,
+            }),
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Continue {
+                continuation: Some(ContinuationAst::SearchRevealResult),
+            },
+        )
+        .push();
+    assert_eq!(
+        adjacent_search_result_owners(builder.clauses(), &ctx),
+        Some(vec![owner])
+    );
+    for mutate in [
+        |clause: &mut ClauseIr| {
+            clause.condition = Some(AbilityCondition::effect_performed());
+        },
+        |clause: &mut ClauseIr| {
+            clause.is_optional = true;
+        },
+        |clause: &mut ClauseIr| {
+            clause.player_scope = Some(PlayerFilter::All);
+        },
+        |clause: &mut ClauseIr| {
+            clause.delayed_condition = Some(
+                crate::types::ability::DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            );
+        },
+        |clause: &mut ClauseIr| {
+            clause.disposition = ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            };
+        },
+    ] {
+        let mut clauses = builder.clauses().to_vec();
+        mutate(clauses.last_mut().unwrap());
+        assert!(adjacent_search_result_owners(&clauses, &ctx).is_none());
+    }
+    builder
+        .clause(
+            "Work",
+            parsed_clause(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            }),
+            Some(ClauseBoundary::Sentence),
+            emit(),
+        )
+        .push();
+    assert!(adjacent_search_result_owners(builder.clauses(), &ctx).is_none());
+    let guard = "If you reveal a card named Hammer of Nazahn this way, put target artifact onto the battlefield";
+    assert!(unsupported_search_result_guard(guard, &builder.clauses()[..1], &ctx).is_none());
+    assert!(
+        unsupported_search_result_guard(
+            "If you control a land named Wastes, put it onto the battlefield",
+            &builder.clauses()[..1],
+            &ctx
+        )
+        .is_none(),
+        "a represented condition must never become a guard gap"
+    );
+
+    let mut guarded_producer = builder.clauses()[..1].to_vec();
+    guarded_producer[0].condition = Some(AbilityCondition::effect_performed());
+    assert!(adjacent_search_result_owners(&guarded_producer, &ctx).is_none());
+    let mut competing = ClauseIrBuilder::new("Search. Choose a card.");
+    competing
+        .clause("Search", search(), Some(ClauseBoundary::Sentence), emit())
+        .push();
+    competing
+        .clause(
+            "Choose a card",
+            parsed_clause(
+                serde_json::from_value(serde_json::json!({"type":"ChooseFromZone", "zone":"Hand"}))
+                    .unwrap(),
+            ),
+            Some(ClauseBoundary::Sentence),
+            emit(),
+        )
+        .push();
+    assert!(
+        adjacent_search_result_owners(competing.clauses(), &ctx).is_none(),
+        "a different producer cannot borrow the earlier search"
+    );
+
+    let mut folded = ClauseIrBuilder::new("Search. Instead search.");
+    let hand = || {
+        Some(ContinuationAst::SearchDestination {
+            destination: Zone::Hand,
+            enter_tapped: false,
+            enters_under: Default::default(),
+            reveal: false,
+            attach_host: None,
+        })
+    };
+    folded
+        .clause(
+            "Search",
+            search(),
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: hand(),
+            },
+        )
+        .push();
+    folded
+        .clause(
+            "Instead search",
+            search(),
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::FoldSearchIntoElse { intrinsic: hand() },
+        )
+        .push();
+    let ids = folded
+        .clauses()
+        .iter()
+        .rev()
+        .map(|clause| clause.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        adjacent_search_result_owners(folded.clauses(), &ctx),
+        Some(ids)
+    );
+    if let ClauseDisposition::Emit {
+        intrinsic: Some(ContinuationAst::SearchDestination { destination, .. }),
+        ..
+    } = &mut folded.clauses_mut()[0].disposition
+    {
+        *destination = Zone::Battlefield;
+    }
+    assert!(
+        adjacent_search_result_owners(folded.clauses(), &ctx).is_none(),
+        "a competing destination cannot masquerade as the explicit Hand base"
+    );
+}
+
+/// SHAPE: each selected mode owns its own source chain; a search in one mode
+/// cannot supply a rejected guard's operand in another mode.
+#[test]
+fn search_result_guard_does_not_cross_a_mode_boundary() {
+    let parsed = parse_card("Choose one —\n• Search your library for an Equipment card and reveal it.\n• If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield.", "Mode boundary fixture", &[], &["Sorcery"]);
+    assert_eq!(parsed.abilities.len(), 1);
+    let modes = &parsed.abilities[0].mode_abilities;
+    assert_eq!(modes.len(), 2);
+    assert!(chain_effects(&modes[0])
+        .iter()
+        .any(|effect| matches!(effect, Effect::SearchLibrary { .. })));
+    assert!(
+        chain_effects(&modes[1])
+            .iter()
+            .any(|effect| matches!(effect, Effect::ChangeZone { .. })),
+        "positive reach of the existing unrelated-State body policy"
+    );
+    assert!(!chain_effects(&modes[1]).iter().any(|effect| matches!(effect, Effect::Unimplemented { name, .. } if name == "search_result_condition")));
+}
+
 /// SHAPE — CR 608.2c + CR 701.20a: search/reveal precedes the represented
 /// conditional destination, its hand fallback, and the printed shuffle.
 #[test]
@@ -68,7 +309,15 @@ fn conditional_search_pair_preserves_reveal_and_direct_destination() {
             assert!(
                 matches!(
                     destination.condition,
-                    Some(AbilityCondition::TargetMatchesFilter { .. })
+                    Some(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Recipient
+                            },
+                        },
+                        comparator: crate::types::ability::Comparator::LE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                    })
                 ),
                 "selected-object MV condition: {destination:?}"
             );

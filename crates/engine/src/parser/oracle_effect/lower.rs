@@ -4781,12 +4781,13 @@ pub(super) fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
             | Effect::ExileFromTopUntil { .. }
             | Effect::Clash
             | Effect::TurnFaceUp { .. }
+            // CR 701.20a: only a search that actually reveals publishes this subject.
+            | Effect::SearchLibrary { reveal: true, .. }
             // Zone-change-class (emit ZoneChanged → last_zone_changed_ids).
             | Effect::ChangeZone { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::ExileTop { .. }
             | Effect::Mill { .. }
-            | Effect::SearchLibrary { .. }
     )
 }
 
