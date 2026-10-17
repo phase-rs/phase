@@ -4822,6 +4822,7 @@ async fn handle_socket(
                 message: client_msg,
                 received_at,
                 admission,
+                ..
             } = tokio::select! {
                 biased;
                 _ = closed.wait_for(Option::is_some) => break,

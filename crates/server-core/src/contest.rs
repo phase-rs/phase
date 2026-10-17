@@ -977,6 +977,33 @@ mod tests {
         assert!(session.drain_contest_outbox().transitions.is_empty());
     }
 
+    #[test]
+    fn queued_presence_then_concede_cannot_publish_an_older_contest_snapshot() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        session.mark_disconnected(PlayerId(1));
+        let result = session
+            .handle_action_with_card_db_outcome(
+                HOST,
+                engine::types::actions::GameAction::Concede {
+                    player_id: PlayerId(0),
+                },
+                None,
+            )
+            .expect("a connected player can concede during a contest");
+        assert!(matches!(result.0.waiting_for, WaitingFor::GameOver { .. }));
+        session.advance_state_revision();
+        let published_revision = session.state_revision;
+        let drain = session.drain_contest_outbox();
+        assert!(
+            drain
+                .transitions
+                .iter()
+                .all(|transition| transition.state_revision >= published_revision),
+            "ordinary action publication must not be followed by an older presence snapshot",
+        );
+    }
+
     /// A frame delayed from an earlier contest names that contest's identity; it is
     /// dropped before it can count as activity — or consume the running contest's
     /// sequence numbers — in the one that is Active now.

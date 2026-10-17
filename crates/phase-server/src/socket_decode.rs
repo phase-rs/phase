@@ -14,7 +14,7 @@ use server_core::protocol::{ClientMessage, ServerMessage, ServerMode};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
-use crate::socket_io::{NegotiatedSocket, Received};
+use crate::socket_io::{HeartbeatInspection, NegotiatedSocket, Received};
 use crate::{
     classify_hello_gate, hello_acceptance, reject_if_disabled, wire, ClientHelloInfo,
     HelloGateOutcome, SharedLobby, SysEnv, MAX_WS_MESSAGE_BYTES,
@@ -30,10 +30,11 @@ enum RateCharge {
     RefusalInspection,
 }
 
-// Quota refusals may inspect a compact Action/Interaction envelope, never an
-// arbitrary command-sized payload. A separate rate window bounds that work;
-// the mailbox's independent flush-held refusal admission bounds retained replies.
-const MAX_REFUSAL_INSPECTION_BYTES: usize = 1024;
+// The ordinary quota admits 30 full commands/s. A separate 30/s allowance
+// admits only top-level correlation metadata scans (including error recovery).
+// Both are capped at MAX_WS_MESSAGE_BYTES, so recovery adds at most one ordinary
+// quota's JSON work, never an unbounded fallback parse or engine deserialization.
+// Flush-held refusal admission independently bounds retained replies.
 
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
@@ -52,6 +53,7 @@ pub(crate) async fn run(
     #[cfg(test)]
     if let Some(work) = &parser_work {
         limiter.inner.freeze(work.quota_at());
+        socket.observe_probe_work(work.clone());
         refusal_inspection.freeze(work.quota_at());
     }
     let mut refresh: Option<HostRefresh> = None;
@@ -64,6 +66,7 @@ pub(crate) async fn run(
             message: frame,
             received_at,
             mut admission,
+            heartbeat,
         } = match wake {
             DecoderWake::Heartbeat => {
                 if host.borrow().is_some() {
@@ -76,22 +79,40 @@ pub(crate) async fn run(
             DecoderWake::Frame(Some(frame)) => frame,
             DecoderWake::Frame(None) => break,
         };
-        // Admit every full parse (and malformed-command metadata recovery)
-        // before touching JSON. Binary quota is spent before envelope decode.
-        // Only small text frames may use the separate, bounded refusal route;
-        // exhausting it closes rather than buying unrestricted recovery parses.
+        // Frames read before ClientHello acceptance were not reader-probed.
+        // Use the SAME charged allowance once negotiation finishes, never twice.
+        if hello.is_none() && matches!(heartbeat, HeartbeatInspection::Deferred) {
+            if let Some(timestamp) = socket.probe_heartbeat(&frame) {
+                socket.enqueue_pong(timestamp);
+                continue;
+            }
+        }
+        // Admit before deserialization, metadata recovery or inflation.
+        // Every reader parse spends probe-work credit (64 burst + 64/s refill).
+        // Decoder JSON entries are bounded by 30 full parses plus 30 metadata
+        // scans/s. Error metadata shares the SAME scan allowance. Discarding
+        // replenishes no budget and performs zero JSON/decompression work.
+        // Discard unadmitted traffic UNPARSED rather than disconnecting a
+        // legitimate fire-and-forget contest click burst.
         if !matches!(&frame, Message::Text(_) | Message::Binary(_)) {
             continue;
         }
         let charge = if limiter.allow() {
             RateCharge::Applied
-        } else if matches!(&frame, Message::Text(text) if text.len() <= MAX_REFUSAL_INSPECTION_BYTES)
-            && refusal_inspection.check()
-        {
-            RateCharge::RefusalInspection
         } else {
-            socket.raw_decode_quota();
-            break;
+            #[cfg(test)]
+            if let Some(work) = &parser_work {
+                work.rate_limited();
+            }
+            // CommandIdV1 submissions are sequential. Even a large action just
+            // after a legitimate click burst gets an owned refusal: recovery
+            // skips payload structures and never dispatches an engine command.
+            // Only traffic past BOTH work windows is discarded unparsed.
+            if refusal_inspection.check() {
+                RateCharge::RefusalInspection
+            } else {
+                continue;
+            }
         };
         let text = match frame {
             Message::Text(text) => text,
@@ -116,6 +137,17 @@ pub(crate) async fn run(
             socket.ingress_overflow();
             break;
         }
+        if matches!(charge, RateCharge::RefusalInspection) {
+            #[cfg(test)]
+            if let Some(work) = &parser_work {
+                work.metadata_recovery();
+            }
+            let command_id = crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text);
+            if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
+                break;
+            }
+            continue;
+        }
         #[cfg(test)]
         if let Some(work) = &parser_work {
             work.deserialization();
@@ -123,17 +155,15 @@ pub(crate) async fn run(
         let envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text) {
             Ok(message) => message,
             Err(error) => {
-                #[cfg(test)]
-                if let Some(work) = &parser_work {
-                    work.metadata_recovery();
-                }
-                let command_id = crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text);
-                if matches!(charge, RateCharge::RefusalInspection) {
-                    if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
-                        break;
+                let command_id = if refusal_inspection.check() {
+                    #[cfg(test)]
+                    if let Some(work) = &parser_work {
+                        work.metadata_recovery();
                     }
-                    continue;
-                }
+                    crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text)
+                } else {
+                    None
+                };
                 warn!(%error, "failed to parse client message");
                 let message = format!("Invalid message: {error}");
                 let rejection = if command_id.is_some() {
@@ -149,15 +179,11 @@ pub(crate) async fn run(
         };
         let command_id = envelope.command_id();
         let message = &envelope.message;
-        if matches!(charge, RateCharge::RefusalInspection) {
-            if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
-                break;
-            }
-            continue;
-        }
         let rejection = match classify_hello_gate(hello.is_none(), message, hello_acceptance(mode))
         {
             HelloGateOutcome::Accept(info) => {
+                #[cfg(test)]
+                socket.bootstrap_hooks().before_hello_accept().await;
                 info!(version = %info.client_version, commit = %info.build_commit, "ClientHello accepted");
                 socket.set_wire_format(info.wire_format);
                 if hello
@@ -243,6 +269,7 @@ pub(crate) async fn run(
                 message: envelope,
                 received_at,
                 admission,
+                heartbeat: HeartbeatInspection::Complete,
             }) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {

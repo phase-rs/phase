@@ -59,7 +59,7 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
-| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow`, `raw_decode_quota` and `quota_refusal_overflow` |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow` and `quota_refusal_overflow` |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -174,26 +174,40 @@ does not replace the native WebSocket response deadline above.
 Queued application ingress is limited to 64 commands and 1 MiB of retained
 payload across the raw and decoded queues. Overflow closes the connection with
 WebSocket code 1013 rather than silently discarding a command. Established
-connections may bypass this command budget only through a reader heartbeat
-probe of at most 256 bytes, with a burst allowance of eight heartbeats replenished
-at two per second. Recognized Pings and malformed probes spend this allowance;
-valid non-Ping commands preserve it, so fast play cannot exhaust the heartbeat
-reserve. Replies remain coalesced. Larger frames and excess heartbeats fall
-through to normal ingress admission and the decoder's 30-message/s quota,
-including JSON Pings. Every full JSON parse and malformed-command metadata
-recovery is admitted before inspecting the payload. Binary frames, including
-malformed and compressed envelopes, consume that quota before decompression.
-After text quota is exhausted, frames of at most 1 KiB may spend a separate
-30-inspection/s allowance solely to recover a correlated Action/Interaction
-quota refusal; they cannot dispatch an application command or answer a Pong.
-Larger text, exhausted inspection allowance, and exhausted binary quota close
-with 1013 and record `raw_decode_quota`. Normal client JSON Pings are smaller
-than the 256-byte compression threshold and use the plain/raw form.
+connections may bypass command slots only through a probe of at most 256 bytes.
+Every probe parse, including a non-Ping, spends a separate work allowance
+(burst 64, replenished at 64/s). Recognized Pings and malformed probes also spend
+the reply reserve (burst eight, replenished at two/s). Ordinary command bursts
+therefore preserve heartbeat credit without buying unlimited JSON parsing.
+Reader and decoder share these allowances; frames queued before ClientHello
+acceptance are probed only after negotiation, without repeating reader work.
+Replies remain coalesced.
+
+Every full JSON parse and metadata recovery is admitted before inspecting the
+payload. Ordinary admission permits 30 full parses/s, up to the 64 KiB command
+cap. Recovery permits at most 30 additional top-level metadata scans/s under
+the same cap, skipping the engine payload without per-field allocations.
+Malformed ordinary commands share that recovery allowance. Thus JSON work is
+bounded by at most twice ordinary admission plus the probe bucket, not an
+unlimited fallback. Gzip inflation is admitted first and capped at 64 KiB.
+
+An action larger than 1 KiB just after a legitimate click burst still gets an
+owned CommandIdV1 refusal. Past both work windows, traffic is discarded without
+parsing or decompression, not disconnected. Fire-and-forget contest click
+bursts may legitimately exceed ordinary quota. Discards refill no allowance;
+only abuse rates exhaust both windows. Normal client JSON Pings use plain/raw
+frames and retain their separate credited fast path.
 Up to eight correlated quota refusals may remain unflushed per connection;
 that admission is released only after socket flush, so a draining client may
 receive later refusals without a lifetime strike limit. Exhausting it closes
 with 1013 and records `quota_refusal_overflow` rather than retaining an
 unbounded reply backlog.
+
+Local policy closes retain the transport's read half for the peer's Close
+acknowledgement, bounded by one second, 64 frames and 1 MiB of drained payload.
+The drain parses no JSON, retains no command, and holds no game or CPU permit.
+Disconnect detection and the reconnect clock precede it; an already accepted
+mutation finishes independently rather than delaying the transport Close.
 
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level

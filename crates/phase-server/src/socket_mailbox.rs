@@ -31,7 +31,9 @@ impl ClientEnvelope {
         }
     }
 
-    /// Error-only recovery: a malformed action can still name its command.
+    /// Recover valid or malformed command correlation without decoding its body.
+    /// Serde skips all fields except this fixed-size header with `IgnoredAny`;
+    /// no engine action/interaction or per-payload-field structure is allocated.
     pub(crate) fn malformed_command_id(text: &str) -> Option<CommandId> {
         #[derive(Deserialize)]
         enum Kind {
