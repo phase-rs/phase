@@ -3154,6 +3154,14 @@ fn collect_matching_triggers_inner(
             // marker so manual `TapLandForMana` taps (still `FromTap`) still
             // fire, and on `is_triggered_mana_ability` so non-mana `TapsForMana`
             // triggers still fire (CR 603.3).
+            //
+            // CR 608.2d exemption: a multi-type mana-echo trigger is never
+            // skipped by this marker — Pass 1 deliberately leaves exactly that
+            // shape unresolved (it owes a SingleColor choice the bare loop
+            // cannot pause for), so skipping it here would drop the trigger
+            // instead of merely de-duplicating it. `echo_body_owes_type_choice`
+            // is the single authority both sites share, so the skip and the
+            // exemption cannot drift apart.
             if matches!(
                 (trig_def.mode.clone(), event),
                 (
@@ -3171,6 +3179,7 @@ fn collect_matching_triggers_inner(
                     }
                 )
             ) && super::mana_abilities::is_triggered_mana_ability(&ability, Some(event))
+                && !super::mana_abilities::echo_body_owes_type_choice(&ability, Some(event))
             {
                 continue;
             }
@@ -3892,6 +3901,18 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             );
         }
         for (definition_ref, ability) in coupled {
+            // CR 608.2d + CR 106.12a: a mana-echo body resolving from a
+            // multi-type tap event owes the player a choice of exactly one
+            // type, and this bare loop has no pause/resume step — resolving
+            // those here would strand the prompt with no continuation (and
+            // cost-payment previews must never prompt). Leave them for the
+            // frame batch: the resolved-marker guard below exempts exactly
+            // this shape from the marker, and the fixed-point authority pauses
+            // for and resumes the choice there. Single-type echo still
+            // resolves here with no choice to make.
+            if super::mana_abilities::echo_body_owes_type_choice(&ability, Some(&tap_event)) {
+                continue;
+            }
             // Look up the color override the auto-tap planner chose for this aura's
             // triggered mana ability. Only non-None for AnyOneColor bonus triggers
             // (Fertile Ground) when called from the auto-tap path; None for manual
@@ -3929,6 +3950,84 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     // consumed in Pass 1. Clear them now so the map is always empty outside the
     // synchronous auto-tap + trigger-resolution window.
     state.pending_taps_for_mana_overrides.clear();
+}
+
+/// CR 605.4a + CR 608.2d + CR 601.2g-h: preview helper for the synchronous
+/// payment affordability probe. Returns the distinct bonus types owed by
+/// skipped multi-type mana-echo triggers in `events` (the Pass-1 `continue`
+/// shape), deduplicated across the batch. Only unrestricted echo bodies
+/// (`restrictions` empty) are reported: a restricted bonus cannot generally
+/// fund an arbitrary spell cost, so previews must not count it. Previews stay
+/// choice-free (no prompt); the live payment pauses for a real choice via the
+/// typed fixed-point continuation instead.
+pub(crate) fn mixed_echo_bonus_options_for_preview(
+    state: &mut GameState,
+    events: &[GameEvent],
+) -> Vec<crate::types::mana::ManaType> {
+    super::layers::flush_layers(state);
+    super::trigger_index::ensure_ready(state);
+    let mut options: Vec<crate::types::mana::ManaType> = Vec::new();
+    for tap_event in events.iter().filter(|ev| {
+        matches!(
+            ev,
+            GameEvent::TappedForMana { .. } | GameEvent::ManaAbilityProduced { .. }
+        )
+    }) {
+        let candidates = super::trigger_index::candidates_for_event(state, tap_event);
+        for (_, ability) in
+            inline_tap_mana_trigger_abilities(state, tap_event, candidates.iter().copied())
+        {
+            if !super::mana_abilities::echo_body_owes_type_choice(&ability, Some(tap_event)) {
+                continue;
+            }
+            // CR 106.4: only an unrestricted echo bonus is generally spendable;
+            // a restricted one (e.g. spend-only-on-X) cannot be counted
+            // optimistically for an arbitrary cost.
+            let restricted = match &ability.effect {
+                Effect::Mana { restrictions, .. } => !restrictions.is_empty(),
+                _ => true,
+            };
+            if restricted {
+                continue;
+            }
+            for mana_type in super::mana_abilities::echo_distinct_types(tap_event) {
+                if !options.contains(&mana_type) {
+                    options.push(mana_type);
+                }
+            }
+        }
+    }
+    options.sort();
+    options
+}
+
+/// CR 605.4a + CR 608.2d + CR 601.2g-h: pre-spend echo pause for synchronous
+/// auto-tap payment. Drives the typed fixed-point batch over `raw_batch`
+/// (the auto-tap tap events, already marked `FromTapTriggersResolved` with the
+/// mixed-echo exemption) with `outer_resume` as its continuation, but — unlike
+/// [`collect_mana_action_trigger_batch`] — does NOT defer ordinary contexts.
+/// Ordinary observers (Manabarbs, etc.) stay for the owner's post-payment
+/// boundary, which forms one release group over every micro-frame; deferring
+/// them here would let the later post-action scan rediscover the same
+/// `FromTapTriggersResolved` occurrences (ordinary is not marker-skipped) and
+/// double-queue. Accepted echo work runs immediately; a `ChooseManaColor`
+/// pause returns `Some` with `pending_triggered_mana_resume` stored, otherwise
+/// `None`.
+pub(crate) fn pause_for_skipped_echo_before_spend(
+    state: &mut GameState,
+    raw_batch: &[GameEvent],
+    outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
+    let events_out = &mut Vec::new();
+    let seed = collect_triggers_for_batch(state, raw_batch);
+    let collected = collect_pending_and_delayed_triggers_for_batch(
+        state,
+        seed,
+        raw_batch,
+        DelayedTriggerEventScope::Any,
+    );
+    let (accepted, _ordinary) = partition_collected_mana_frame_contexts(state, collected.contexts);
+    run_accepted_triggered_mana_fixed_point(state, accepted, outer_resume, events_out)
 }
 
 /// CR 101.4 + CR 603.3b: APNAP rank of `controller` for trigger ordering — its
@@ -9823,6 +9922,12 @@ fn dispatch_pending_trigger_context_core(
                 &trigger.ability,
                 trigger.trigger_event.as_ref(),
             ) {
+                // CR 608.2d: an inline body can still pause — a multi-type
+                // mana-echo body pauses for its SingleColor choice (see the
+                // echo pre-check in `effects::mana::resolve`). Mirror the
+                // immediate backend's pause check so the pause is reported,
+                // not stranded as a silent `ResolvedInline`.
+                let waiting_before = state.waiting_for.clone();
                 super::mana_abilities::resolve_triggered_mana_ability_inline(
                     state,
                     &trigger.ability,
@@ -9831,6 +9936,11 @@ fn dispatch_pending_trigger_context_core(
                     None,
                 );
                 restore_trigger_event_context(state, context_snapshot);
+                if state.waiting_for != waiting_before
+                    && is_accepted_triggered_mana_pause(&state.waiting_for)
+                {
+                    return TriggerDispatchDisposition::Paused;
+                }
                 return TriggerDispatchDisposition::ResolvedInline;
             }
             push_pending_trigger_to_stack_with_firing_and_duration_events(
@@ -9952,9 +10062,13 @@ fn dispatch_pending_trigger_context_core(
 /// body may pause on (CR 605.4a).
 ///
 /// A triggered-body colour choice and every unless/nested-cost prompt are
-/// deliberately absent: the classifier proved the graph choice-free at
-/// acceptance and rejected every `unless_pay` link, so encountering one is an
-/// invariant failure rather than a wait to serialize generically.
+/// deliberately absent: the classifier proved the graph free of optional /
+/// repeat / replacement pauses at acceptance and rejected every `unless_pay`
+/// link, so encountering one is an invariant failure rather than a wait to
+/// serialize generically. (`ChooseManaColor` is the one listed exception: a
+/// mana-echo body needs no annotation in its graph to owe a type choice — the
+/// choice depends on the firing event's produced set, which only exists at
+/// resolution — so the pause is admitted here and carried by the resume.)
 fn is_accepted_triggered_mana_pause(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
@@ -9962,6 +10076,11 @@ fn is_accepted_triggered_mana_pause(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::ReplacementChoice { .. }
+            // CR 608.2d: a multi-type mana-echo body pauses for its SingleColor
+            // choice inside immediate resolution (see the echo pre-check in
+            // `effects::mana::resolve`); the fixed-point authority carries and
+            // resumes it like any other whitelisted pause.
+            | WaitingFor::ChooseManaColor { .. }
     )
 }
 

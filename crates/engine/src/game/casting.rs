@@ -20868,27 +20868,56 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
         player,
         mana_spend_permission,
     );
-    simulated
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .is_some_and(|player_data| {
-            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
-                || ctx.is_some_and(|ctx| {
-                    matches!(ctx, PaymentContext::Spell(_))
-                        && source_id.is_some_and(|source_id| {
-                            can_pay_with_spell_tap_payments(
-                                simulated,
-                                player,
-                                source_id,
-                                cost,
-                                Some(ctx),
-                                permissions,
-                                options.explicit_tap_payment_mode,
-                            )
-                        })
-                })
-        })
+    // CR 605.4a + CR 608.2d + CR 601.2g-h: shared affordability check used for
+    // the real pool and for each virtual echo-bonus pool below. Extracted so
+    // previews stay choice-free while accounting for exactly one legal bonus.
+    let payable_from_state = |simulated: &GameState| {
+        simulated
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .is_some_and(|player_data| {
+                mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
+                    || ctx.is_some_and(|ctx| {
+                        matches!(ctx, PaymentContext::Spell(_))
+                            && source_id.is_some_and(|source_id| {
+                                can_pay_with_spell_tap_payments(
+                                    simulated,
+                                    player,
+                                    source_id,
+                                    cost,
+                                    Some(ctx),
+                                    permissions,
+                                    options.explicit_tap_payment_mode,
+                                )
+                            })
+                    })
+            })
+    };
+    if payable_from_state(simulated) {
+        return true;
+    }
+    // CR 608.2d: a skipped multi-type mana-echo owes exactly one chosen bonus
+    // that the bare inline loop cannot deposit. Previews must never prompt, so
+    // account for one legal bonus optimistically: if any single produced type
+    // added to the pool makes the cost payable, the spell is castable (the live
+    // payment will pause for the real choice before spending).
+    for bonus_type in super::triggers::mixed_echo_bonus_options_for_preview(simulated, &tap_events)
+    {
+        let mut virtual_state = simulated.clone();
+        if let Some(player_data) = virtual_state.players.iter_mut().find(|p| p.id == player) {
+            player_data.mana_pool.add(crate::types::mana::ManaUnit::new(
+                bonus_type,
+                crate::types::identifiers::ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        }
+        if payable_from_state(&virtual_state) {
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 702.51a: Convoke functions on the spell being cast.
@@ -23279,6 +23308,34 @@ fn auto_tap_and_pay_cost_excluding(
     // before the spend). The post-action trigger scan skips what is resolved
     // here via the `FromTapTriggersResolved` marker — no double-fire.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
+
+    // CR 605.4a + CR 608.2d + CR 601.2g-h: a skipped multi-type mana-echo owes
+    // exactly one chosen bonus BEFORE the spend. The bare inline loop cannot
+    // pause, so drive the typed fixed-point batch here with the exact outer
+    // payment as its continuation. If it pauses for `ChooseManaColor`, suspend
+    // this payment: the finalizer restores `pending_cast` and returns the
+    // prompt, and answering resumes this same payment with the bonus in the
+    // pool. Previews (no outer `resume`) stay choice-free via the virtual
+    // accounting in `can_pay_mana_cost_after_auto_tap_with_context_and_cache`.
+    if let Some(outer_payment) = resume {
+        let raw_batch = events[events_before..].to_vec();
+        let outer_resume = crate::types::game_state::ManaTriggerFixedPointResume::Root {
+            player,
+            resume: Box::new(outer_payment.clone()),
+        };
+        if super::triggers::pause_for_skipped_echo_before_spend(state, &raw_batch, outer_resume)
+            .is_some()
+        {
+            return Err(EngineError::InvalidAction(
+                "Mana payment is awaiting a mana choice".to_string(),
+            ));
+        }
+        if mana_ability_cost_payment_is_paused(state) {
+            return Err(EngineError::InvalidAction(
+                "Mana payment is awaiting a replacement choice".to_string(),
+            ));
+        }
+    }
 
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle payment-time permissions
     // (`mana_spend_permission`, `max_life`, `life_colors`) once for the cast — K'rrik-style
