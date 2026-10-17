@@ -753,6 +753,13 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: Vec::new(),
+        illegal_target_slots: Vec::new(),
+        chain_root_target_pins: Vec::new(),
+        declared_targets: Vec::new(),
+        declared_target_pins: Vec::new(),
+        declared_ahead: 0,
+        local_target_pins: Vec::new(),
+        keyed_target_incarnations: Vec::new(),
     };
     runner.state_mut().push_die_roll_frame(pending);
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
@@ -1167,6 +1174,13 @@ fn ai_candidates_cover_every_ignore_count() {
                 rolled_any: false,
                 forced_ignored: vec![],
                 chain_root_targets: Vec::new(),
+                illegal_target_slots: Vec::new(),
+                chain_root_target_pins: Vec::new(),
+                declared_targets: Vec::new(),
+                declared_target_pins: Vec::new(),
+                declared_ahead: 0,
+                local_target_pins: Vec::new(),
+                keyed_target_incarnations: Vec::new(),
             });
         runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
             player: P0,
@@ -1404,6 +1418,13 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
             // The 4 is determined; only the tied 7s were offered to the roller.
             forced_ignored: vec![0],
             chain_root_targets: Vec::new(),
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
+            declared_targets: Vec::new(),
+            declared_target_pins: Vec::new(),
+            declared_ahead: 0,
+            local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
         });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,

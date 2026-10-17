@@ -707,6 +707,13 @@ fn effect_type_name(effect: &Effect) -> String {
 // Detail formatters — extract human-readable parameter summaries
 // ---------------------------------------------------------------------------
 
+/// CR 115.1: the canonical declared-slot label, shared by the target-filter
+/// renderer below and the targeted-objects population renderer — one
+/// authority, so two signatures can never spell the same slot differently.
+fn fmt_slot_label(index: usize) -> String {
+    format!("slot {index}")
+}
+
 fn fmt_target(filter: &TargetFilter) -> String {
     match filter {
         TargetFilter::None => "none".into(),
@@ -769,7 +776,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
-        TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
+        TargetFilter::ParentTargetSlot { index } => {
+            format!("parent target {}", fmt_slot_label(*index))
+        }
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
@@ -1814,7 +1823,18 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectProperty::ManaValue => "mana value",
                 ObjectProperty::ManaSymbolCount(_) => "mana symbols",
             };
-            let population = if matches!(aggregate.source(), CardTypeSetSource::TrackedSet { .. }) {
+            // The "those cards" short-circuit holds only for the UNFILTERED
+            // tracked set: with a member filter present that string omits the
+            // restriction, so fall through to the renderer that names it.
+            // CR 608.2c + CR 115.1: it also holds for the unslotted
+            // targeted-objects population — "those cards" names the ability's
+            // chosen targets, which is exactly this population. A slot-selected
+            // subset is not "those cards" and falls through below.
+            let population = if matches!(
+                aggregate.source(),
+                CardTypeSetSource::TrackedSet { filter: None, .. }
+                    | CardTypeSetSource::TargetedObjects { slot: None }
+            ) {
                 "those cards".into()
             } else {
                 fmt_characteristic_population_bounded(aggregate.source())
@@ -1840,7 +1860,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::Objects { .. }
+            // A member filter renders through the bounded population
+            // renderer below, which names the restriction.
             | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::TargetedObjects { .. }
             | CardTypeSetSource::TurnJournal { .. }
             | CardTypeSetSource::AnyOf { .. } => {
                 format!(
@@ -2683,26 +2706,37 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
         }
         CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
         CardTypeSetSource::Objects { filter } => fmt_target(filter),
-        CardTypeSetSource::TrackedSet { caused_by, .. } => match caused_by {
-            Some(cause) => {
-                use crate::types::ability::ThisWayCause;
-                let verb = match cause {
-                    ThisWayCause::OwnerLibraryShuffleSubject => {
-                        "designated for an owner-library shuffle"
-                    }
-                    ThisWayCause::Discarded => "discarded",
-                    ThisWayCause::Exiled => "exiled",
-                    ThisWayCause::Milled => "milled",
-                    ThisWayCause::Destroyed => "destroyed",
-                    ThisWayCause::Sacrificed => "sacrificed",
-                    ThisWayCause::Returned => "returned",
-                    ThisWayCause::Bounced => "bounced",
-                    ThisWayCause::PutIntoGraveyard => "put into a graveyard",
-                };
-                format!("cards {verb} this way")
+        CardTypeSetSource::TrackedSet {
+            caused_by, filter, ..
+        } => {
+            let base = match caused_by {
+                Some(cause) => {
+                    use crate::types::ability::ThisWayCause;
+                    let verb = match cause {
+                        ThisWayCause::OwnerLibraryShuffleSubject => {
+                            "designated for an owner-library shuffle"
+                        }
+                        ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Exiled => "exiled",
+                        ThisWayCause::Milled => "milled",
+                        ThisWayCause::Destroyed => "destroyed",
+                        ThisWayCause::Sacrificed => "sacrificed",
+                        ThisWayCause::Returned => "returned",
+                        ThisWayCause::Bounced => "bounced",
+                        ThisWayCause::PutIntoGraveyard => "put into a graveyard",
+                    };
+                    format!("cards {verb} this way")
+                }
+                None => "tracked cards".into(),
+            };
+            // A filtered source must render its restriction: the bare base
+            // string would claim every member while the resolver counts a
+            // subset — a coverage lie. Mirrors the `TurnJournal` arm below.
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
             }
-            None => "tracked cards".into(),
-        },
+        }
         // CR 601.2a: the per-turn cast journal, not a live board census.
         CardTypeSetSource::TurnJournal {
             journal,
@@ -2719,6 +2753,16 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                 None => base,
             }
         }
+        // CR 608.2c + CR 115.1: the Oracle antecedent for the ability's chosen
+        // targets is "those cards" (Song of Inspiration's own surface form);
+        // a slot-selected subset is singular — "that card" — and names its
+        // slot through the canonical label, so slot 0 and slot 1 render
+        // distinct signatures. The unslotted string matches the short-circuit
+        // above by construction.
+        CardTypeSetSource::TargetedObjects { slot } => match slot {
+            None => "those cards".into(),
+            Some(index) => format!("that card ({})", fmt_slot_label(*index)),
+        },
         // CR 109.2: a set union renders as its members joined by "and", mirroring
         // the Oracle surface form ("permanents you control and spells you've cast
         // this turn").
@@ -10201,6 +10245,17 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
     }
 }
 
+/// The support class of a source-bearing head: `Unhandled` when the source
+/// carries a filtered triggering batch anywhere (nested unions included),
+/// since admission refuses the form and resolution can only fail closed.
+fn batch_filter_support(source: &CardTypeSetSource) -> FeatureSupport {
+    if source.validate_admission().is_ok() {
+        FeatureSupport::Handled
+    } else {
+        FeatureSupport::Unhandled
+    }
+}
+
 /// Map a `QuantityRef` variant to its tag name and resolver-support class.
 /// Handled variants are resolved by `game::quantity::resolve_quantity`.
 fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
@@ -10441,14 +10496,27 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
-        QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
-        QuantityRef::SharedCardTypes { .. } => ("SharedCardTypes", Handled),
-        QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
+        // M4r2: a filtered triggering batch has no agreed-upon reading and
+        // is refused at source admission — a head carrying one anywhere in
+        // its source (nested unions included) is unsupported, not handled.
+        // (`PropertyAggregate` needs no arm here: its constructor admits no
+        // such source.)
+        QuantityRef::DistinctCardTypes { source } => {
+            ("DistinctCardTypes", batch_filter_support(source))
+        }
+        QuantityRef::SharedCardTypes { source } => {
+            ("SharedCardTypes", batch_filter_support(source))
+        }
+        QuantityRef::DistinctSubtypes { source, .. } => {
+            ("DistinctSubtypes", batch_filter_support(source))
+        }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
-        QuantityRef::DistinctColorsAmong { .. } => ("DistinctColorsAmong", Handled),
+        QuantityRef::DistinctColorsAmong { source } => {
+            ("DistinctColorsAmong", batch_filter_support(source))
+        }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
@@ -19849,6 +19917,61 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// M4r2: heads carrying a filtered triggering batch anywhere in their
+    /// source classify unsupported — admission refuses the form, so coverage
+    /// must not report it handled. The unfiltered twin is the control
+    /// (handled).
+    #[test]
+    fn filtered_triggering_batch_heads_classify_unsupported() {
+        use crate::types::ability::TrackedAnaphorSource;
+
+        let source = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+            filter,
+        };
+        let poisoned = source(Some(TargetFilter::Any));
+        let clean = source(None);
+        for (name, qty) in [
+            (
+                "DistinctCardTypes",
+                QuantityRef::DistinctCardTypes {
+                    source: poisoned.clone(),
+                },
+            ),
+            (
+                "SharedCardTypes",
+                QuantityRef::SharedCardTypes {
+                    source: poisoned.clone(),
+                },
+            ),
+            (
+                "DistinctSubtypes",
+                QuantityRef::DistinctSubtypes {
+                    source: poisoned.clone(),
+                    exclude: crate::types::ability::SubtypeExclusion::None,
+                },
+            ),
+            (
+                "DistinctColorsAmong",
+                QuantityRef::DistinctColorsAmong {
+                    source: poisoned.clone(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                quantity_ref_feature(&qty),
+                (name, FeatureSupport::Unhandled),
+                "{name} over a filtered batch is unsupported, not handled"
+            );
+        }
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::DistinctCardTypes { source: clean }),
+            ("DistinctCardTypes", FeatureSupport::Handled),
+            "the unfiltered twin stays handled"
+        );
+    }
+
     /// M2: a `CreateBoon` grant with no executable body classifies
     /// unsupported — the grant resolver errors on a bodyless boon, so the
     /// classifier must agree even though `is_trigger_supported` permits
@@ -22997,5 +23120,103 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             items.is_empty(),
             "modeled tree must emit no unsupported item"
         );
+    }
+
+    /// A member-filtered tracked set renders its restriction ("matching …"),
+    /// never the bare short-circuit: a formatter that dropped the filter
+    /// would render two predicates the runtime treats differently as one
+    /// signature. The unfiltered short-circuit keeps its exact legacy
+    /// string, and the `DistinctCardTypes` or-pattern path renders the
+    /// restriction too.
+    #[test]
+    fn filtered_tracked_set_population_renders_its_restriction() {
+        use crate::types::ability::{
+            AggregateFunction, CardTypeSetSource, ControllerRef, ObjectProperty, PropertyAggregate,
+            QuantityRef, TargetFilter, ThisWayCause, TrackedAnaphorSource, TypedFilter,
+        };
+        let member = || TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You));
+        let aggregate = |source| {
+            QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Toughness, source)
+                    .expect("statically valid property aggregate"),
+            )
+        };
+
+        // Unfiltered: the "those cards" short-circuit is preserved exactly.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: None,
+            })),
+            "total toughness of those cards"
+        );
+        // Filtered: the restriction renders through "matching", not the bare base.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: Some(member()),
+            })),
+            "total toughness of tracked cards matching you control card"
+        );
+        // Filtered with a cause word: both the cause and the restriction render.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: Some(ThisWayCause::Sacrificed),
+                filter: Some(member()),
+            })),
+            "total toughness of cards sacrificed this way matching you control card"
+        );
+        // The `DistinctCardTypes` or-pattern path names the restriction too.
+        assert_eq!(
+            fmt_quantity_ref(&QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: Some(member()),
+                },
+            }),
+            "card types among tracked cards matching you control card"
+        );
+    }
+
+    /// F8 (CR 115.1): a slot-selected targeted-objects subset names its slot
+    /// through the canonical slot label — slot 0 and slot 1 are different
+    /// populations and must render distinct signatures — while the unslotted
+    /// population keeps the legacy "those cards" string.
+    #[test]
+    fn indexed_targeted_objects_population_renders_its_slot() {
+        use crate::types::ability::{
+            AggregateFunction, CardTypeSetSource, ObjectProperty, PropertyAggregate, QuantityRef,
+        };
+        let aggregate = |source| {
+            QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::ManaValue, source)
+                    .expect("statically valid property aggregate"),
+            )
+        };
+        // Unslotted: the legacy "those cards" short-circuit is retained exactly.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TargetedObjects {
+                slot: None
+            })),
+            "total mana value of those cards"
+        );
+        // Indexed: each slot renders distinctly; identical strings here would
+        // hide a slot0→slot1 semantic change in the coverage signature.
+        let slot0 = fmt_quantity_ref(&aggregate(CardTypeSetSource::TargetedObjects {
+            slot: Some(0),
+        }));
+        let slot1 = fmt_quantity_ref(&aggregate(CardTypeSetSource::TargetedObjects {
+            slot: Some(1),
+        }));
+        assert_ne!(
+            slot0, slot1,
+            "slot 0 and slot 1 select different objects and must not share a signature"
+        );
+        assert_eq!(slot0, "total mana value of that card (slot 0)");
+        assert_eq!(slot1, "total mana value of that card (slot 1)");
     }
 }

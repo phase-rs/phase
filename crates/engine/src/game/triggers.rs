@@ -12443,8 +12443,18 @@ fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
                 }
                 // CR 607.2a + CR 608.2i: the same two resolution-scoped
                 // populations `CardsExiledBySource` / `TrackedSetSize` are
-                // declined for.
+                // declined for. Declining is fail-closed; a member filter
+                // cannot make the hoist safe.
+                // CR 608.2c + CR 115.1: a targeted-objects population IS the
+                // canonical slot filter's referent (ability-bound targets,
+                // CR 601.2c — unchosen at fire time), so it declines exactly
+                // when that filter declines, via the single
+                // `targeted_objects_filter` authority rather than a
+                // hardcoded constant.
                 CardTypeSetSource::ExiledBySource | CardTypeSetSource::TrackedSet { .. } => true,
+                CardTypeSetSource::TargetedObjects { slot } => {
+                    filter_binding_diverges(&CardTypeSetSource::targeted_objects_filter(slot))
+                }
                 // Unrolled by the walker; never reaches this arm.
                 CardTypeSetSource::AnyOf { .. } => false,
             };
@@ -17078,10 +17088,19 @@ fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource)
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                // CR 608.2c + CR 115.1: a targeted-objects population references
+                // the cost-paid object exactly when its canonical slot filter
+                // does — via the single `targeted_objects_filter` authority,
+                // never a hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => {
+                    CardTypeSetSource::targeted_objects_filter(slot).references_cost_paid_object()
+                }
             };
         });
     // A truncated walk claims the reference: this gate exists to stop a
@@ -24286,6 +24305,7 @@ pub mod tests {
             CardTypeSetSource::TrackedSet {
                 set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
         ] {
             assert!(

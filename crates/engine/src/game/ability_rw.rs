@@ -4039,9 +4039,25 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // rule is about following a spell's instructions in the order written,
         // which is why a "this way" reference HAS a referent at all — it says
         // nothing about reading membership.
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => reads_zone_membership(),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
+            reads_zone_membership()
+        }
+        // CR 608.2i (look-back membership, as above) plus the member filter's
+        // own board read when present: an OMITTED read is FAIL-OPEN for the
+        // CR 603.3b gate, so a filter that names controller-scoped members
+        // must merge its profile rather than ride on the zone default.
+        CardTypeSetSource::TrackedSet { filter, .. } => {
+            let mut profile = reads_zone_membership();
+            if let Some(filter) = filter {
+                profile.merge(board_membership_read(filter));
+                // CR 603.3b: a member filter narrows the read to the members
+                // each source exposes, so the read is member-bound — the
+                // same event can feed two different member populations and
+                // must not take the `profiles_conflict` fast path.
+                profile.reads_member_bound = true;
+            }
+            profile
+        }
         // CR 608.2i: the cast journal is read by looking BACK at actions already
         // taken this turn — the recorded spells have left the stack (CR 400.7)
         // and are read from their snapshots, not from the board. That is why
@@ -4055,6 +4071,16 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         CardTypeSetSource::TurnJournal { journal, .. } => match journal {
             TurnJournalKind::SpellsCast => reads_player_of(StateKind::JournalCast),
         },
+        // CR 608.2c + CR 115.1: the resolving ability's announcement-bound
+        // targets (CR 601.2c), read by identity with an LKI fallback. Reports
+        // the SAME profile as the canonical slot filter it denotes (via the
+        // single `targeted_objects_filter` authority) — in particular a zone
+        // census is never claimed here (C-7: not `reads_zone_membership()`),
+        // and member-boundness follows the canonical filter (slot: member-
+        // bound; every-target: not), never a hardcoded constant.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            board_membership_read(&CardTypeSetSource::targeted_objects_filter(slot))
+        }
         // The union reads everything its members read. Deliberately UNCITED: no
         // CR rule defines set union of populations — "among <A> and <B>" is
         // English, and each member carries its own citation above. (This arm
@@ -6543,9 +6569,27 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
                 crate::types::ability::UNION_DEPTH_BUDGET,
                 &mut |leaf| match leaf {
                     CardTypeSetSource::TurnJournal { .. } => {}
+                    // A member filter narrows which members resolve, not
+                    // whether the leaf reads tracked-set membership.
                     CardTypeSetSource::TrackedSet { .. } => {
                         reads_live_object = true;
                         reads_tracked = true;
+                    }
+                    // CR 608.2c + CR 115.1: the leaf reads live objects by
+                    // identity (state.objects with LKI fallback) whenever a
+                    // resolving ability is in scope. Member-boundness follows
+                    // the canonical slot filter via the single
+                    // `targeted_objects_filter` authority (indexed slot:
+                    // member-bound; every-target: not) — never a hardcoded
+                    // constant, so the flag cannot drift from the filter's.
+                    CardTypeSetSource::TargetedObjects { slot } => {
+                        reads_live_object = true;
+                        // CR 603.3b: OR-accumulate — an earlier union member
+                        // may already read a tracked set, and a later
+                        // every-target leaf must not clear that bit.
+                        reads_tracked |= member_bound_target_filter(
+                            &CardTypeSetSource::targeted_objects_filter(slot),
+                        );
                     }
                     CardTypeSetSource::Zone { .. }
                     | CardTypeSetSource::ExiledBySource
@@ -7552,9 +7596,21 @@ mod tests {
             source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
                 match leaf {
                     CardTypeSetSource::TurnJournal { .. } => {}
+                    // Test mirror of the production arm above: membership
+                    // flags, unaffected by member narrowing.
                     CardTypeSetSource::TrackedSet { .. } => {
                         live = true;
                         tracked = true;
+                    }
+                    // Test mirror of the `TargetedObjects` production arm:
+                    // the canonical slot filter's target read (live), with
+                    // member-boundness following the canonical filter
+                    // (slot: bound; every-target: not) — never hardcoded.
+                    CardTypeSetSource::TargetedObjects { slot } => {
+                        live = true;
+                        tracked |= member_bound_target_filter(
+                            &CardTypeSetSource::targeted_objects_filter(slot),
+                        );
                     }
                     CardTypeSetSource::Zone { .. }
                     | CardTypeSetSource::ExiledBySource
@@ -7589,13 +7645,29 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::TriggeringBatch,
                 caused_by: None,
+                filter: None,
             },
+            CardTypeSetSource::TargetedObjects { slot: None },
+            CardTypeSetSource::TargetedObjects { slot: Some(1) },
             journal.clone(),
             CardTypeSetSource::any_of(vec![objects, journal]).unwrap(),
+            // F7: a union whose tracked leaf must survive a later
+            // every-target leaf — a plain assignment erases the tracked bit
+            // and wrongly clears the same-event ordering gate.
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: None,
+                },
+                CardTypeSetSource::TargetedObjects { slot: None },
+            ])
+            .unwrap(),
         ];
         for source in sources {
             let qty = QuantityRef::PropertyAggregate(
@@ -7621,7 +7693,9 @@ mod tests {
     /// fails here.
     #[test]
     fn characteristic_source_reads_are_exact_per_population() {
-        use crate::types::ability::{CardTypeSetSource, TurnJournalKind, TypeFilter, TypedFilter};
+        use crate::types::ability::{
+            CardTypeSetSource, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter,
+        };
 
         let board_filter = TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
@@ -7688,6 +7762,47 @@ mod tests {
             union_profile,
             RwProfile::empty(),
             "a fold that collapses to empty is FAIL-OPEN for CR 603.3b"
+        );
+
+        // (e) CR 603.3b: a member-filtered chain set merges the filter's
+        // board read onto the zone-membership base — omitting it is
+        // fail-open (the controller span would silently narrow), while an
+        // unfiltered chain set keeps exactly the base profile.
+        let filtered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(board_filter.clone()),
+        };
+        let mut expected_filtered = reads_zone_membership();
+        expected_filtered.merge(board_membership_read(&board_filter));
+        expected_filtered.reads_member_bound = true;
+        assert_eq!(
+            characteristic_source_read(&filtered_chain),
+            expected_filtered,
+            "a filtered chain set must merge its member filter's board read"
+        );
+        assert_ne!(
+            characteristic_source_read(&filtered_chain),
+            reads_zone_membership(),
+            "a merge that drops the member filter's controller span must fail"
+        );
+        assert!(
+            characteristic_source_read(&filtered_chain).reads_member_bound(),
+            "F7: a filtered chain set read is member-bound — each source reads its own set (CR 603.3b)"
+        );
+        let unfiltered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        assert_eq!(
+            characteristic_source_read(&unfiltered_chain),
+            reads_zone_membership(),
+            "an unfiltered chain set keeps the zone-membership profile"
+        );
+        assert!(
+            !characteristic_source_read(&unfiltered_chain).reads_member_bound(),
+            "an unfiltered chain set read is not member-bound"
         );
 
         // Idempotence: a union of two identical members equals that member.

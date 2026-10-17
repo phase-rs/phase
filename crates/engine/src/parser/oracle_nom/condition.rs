@@ -299,6 +299,7 @@ fn parse_creatures_with_total_power_or_greater(input: &str) -> OracleResult<'_, 
                         CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("object property aggregate is valid"),
@@ -24177,6 +24178,7 @@ mod tests {
                             CardTypeSetSource::TrackedSet {
                                 set: TrackedAnaphorSource::TriggeringBatch,
                                 caused_by: None,
+                                filter: None,
                             },
                         )
                         .expect("valid aggregate"),

@@ -215,6 +215,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 148 — CardTypeSetSource gains TargetedObjects (CR 608.2c + CR 115.1: the
+ *      resolving ability's chosen targets, read by identity for "those cards"
+ *      aggregates), carried in a property aggregate inside GameState — see
+ *      PROTOCOL_VERSION's own `/// 148` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v147 peer cannot parse the tag,
+ *      and silently drops the new TrackedSet member filter it does parse; the
+ *      exact-match version check at connect refuses the pairing. Wire 130
+ *      moves with it.
  * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
  *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
@@ -898,7 +906,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 147;
+export const PROTOCOL_VERSION = 148;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

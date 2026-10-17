@@ -7219,9 +7219,10 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<QuantitySlotDeriva
 /// The first target-slot filter reachable through a [`CardTypeSetSource`]
 /// population.
 ///
-/// Only the object-filter and journal-filter arms carry a `TargetFilter` that
-/// could name a target slot; the zone / linked-exile / tracked-set arms are
-/// fixed-vocabulary. `AnyOf` recurses so a union member's slot is not dropped.
+/// Only the object-filter, journal-filter, and tracked-set-filter arms carry
+/// a `TargetFilter` that could name a target slot; the zone / linked-exile
+/// arms are fixed-vocabulary. `AnyOf` recurses so a union member's slot is not
+/// dropped.
 ///
 /// Deliberately UNCITED. This is a structural query over the AST — which arms
 /// hold a filter — not a rule implementation. It previously cited CR 109.2,
@@ -7246,9 +7247,20 @@ fn characteristic_source_target_slot_filter(
             CardTypeSetSource::TurnJournal { filter, .. } => {
                 filter.as_ref().and_then(filter_target_slot_filter)
             }
+            CardTypeSetSource::TrackedSet { filter, .. } => {
+                filter.as_ref().and_then(filter_target_slot_filter)
+            }
+            // CR 601.2c + CR 115.1: a targeted-objects population READS the
+            // chain's announced targets — it never declares its own slot. The
+            // declaring head surfaces the announcement through the generic
+            // path; a ParentTarget-derived slot here would be unfillable at
+            // announcement (nothing is chosen yet) and wrongly reject
+            // well-formed chains (Command the Dreadhorde). The parser only
+            // emits this population behind a proven target-set publisher, so
+            // no dangling read can reach this arm.
+            CardTypeSetSource::TargetedObjects { .. } => None,
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. }
             | CardTypeSetSource::AnyOf { .. } => None,
         };
     });
@@ -23209,6 +23221,27 @@ mod tests {
                     "TargetZoneCardCount{{TargetPlayer}} must surface the any-player slot",
                 );
             }
+        }
+
+        // F10 (CR 601.2c + CR 115.1): a targeted-objects population reads the
+        // chain's announced targets — it never declares its own slot. The
+        // declaring head surfaces the announcement; a ParentTarget-derived
+        // slot here would be unfillable at announcement (nothing chosen yet)
+        // and wrongly reject well-formed chains (Command the Dreadhorde).
+        for slot in [None, Some(0)] {
+            let aggregate = QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    crate::types::ability::AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::ManaValue,
+                    CardTypeSetSource::TargetedObjects { slot },
+                )
+                .expect("statically valid property aggregate"),
+            );
+            assert_eq!(
+                quantity_ref_target_slot_spec(&aggregate),
+                None,
+                "TargetedObjects {{ slot: {slot:?} }} must surface NO slot",
+            );
         }
     }
 

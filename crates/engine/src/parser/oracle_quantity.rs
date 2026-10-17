@@ -321,6 +321,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -384,6 +385,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("statically valid property aggregate"),
@@ -435,6 +437,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("statically valid property aggregate"),
@@ -2683,12 +2686,8 @@ fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<Quanti
 
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
-        let (rest, _) = alt((
-            value((), tag::<_, _, OracleError<'_>>("counters")),
-            value((), tag::<_, _, OracleError<'_>>("counter")),
-        ))
-        .parse(input)?;
-        let (rest, _) = tag(" removed this way").parse(rest)?;
+        let (rest, _) =
+            crate::parser::oracle_nom::quantity::parse_counters_removed_this_way_suffix(input)?;
         Ok((rest, ()))
     })
     .is_some()
@@ -4064,6 +4063,8 @@ mod tests {
         let (rest, qty) = narrow("card type among cards discarded this way")
             .expect("the tracked-set reading must survive consolidation");
         assert_eq!(rest, "");
+        // Variant-level assertion (is this a tracked-set source?);
+        // a member filter would not change the expected answer.
         assert!(
             matches!(
                 qty,
@@ -6022,7 +6023,8 @@ mod tests {
                     aggregate.source(),
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
-                        caused_by: None
+                        caused_by: None,
+                        filter: None
                     }
                 )
         };
@@ -6054,7 +6056,8 @@ mod tests {
             aggregate.source(),
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::TriggeringBatch,
-                caused_by: None
+                caused_by: None,
+                filter: None
             }
         ));
 
@@ -6065,6 +6068,8 @@ mod tests {
         // context-free TriggeringBatch mapping is a rules-incorrect misparse.
         // Keep it out of the batch anaphor until a trigger-context-gated pass.
         let cards = parse_cda_quantity("the total mana value of those cards");
+        // Negative keys on `set` alone: no member filter can rescue a
+        // batch-keyed misparse into acceptance.
         assert!(
             !matches!(
                 cards,

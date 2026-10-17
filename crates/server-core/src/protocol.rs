@@ -3473,6 +3473,11 @@ mod tests {
         }
     }
 
+    /// v148: `CardTypeSetSource` gains `TargetedObjects` (CR 608.2c + CR 115.1:
+    /// the resolving ability's chosen targets), carried in a property aggregate
+    /// inside `GameState`, and `TrackedSet` gains a semantics-bearing `filter`
+    /// member restriction. A v147 peer cannot parse the tag and silently drops
+    /// the restriction, so it must be refused before it receives v148 state.
     /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
     /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
     /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
@@ -3704,8 +3709,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_147_for_physical_contest() {
-        assert_eq!(PROTOCOL_VERSION, 147);
+    fn protocol_version_is_148_for_targeted_objects_and_tracked_set_filter() {
+        assert_eq!(PROTOCOL_VERSION, 148);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3716,8 +3721,8 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_147_for_physical_contest` stays
-    /// green, which is why the two are separate assertions.
+    /// `protocol_version_is_148_for_targeted_objects_and_tracked_set_filter`
+    /// stays green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
         assert_eq!(

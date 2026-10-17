@@ -31,7 +31,7 @@ use crate::types::game_state::{
     PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
     ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
-use crate::types::identifiers::{DiscardFrameId, ObjectId};
+use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
@@ -237,6 +237,50 @@ pub struct PendingDieRoll {
     /// serialized before this field existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2b: declared slots (chain-root numbering) stamped illegal as
+    /// the chain began to resolve, captured at park time so a resumed
+    /// indexed read applies the same legality the live slot authority
+    /// would. `#[serde(default)]` for in-flight states serialized before
+    /// this field existed.
+    #[serde(default)]
+    pub illegal_target_slots: Vec<usize>,
+    /// CR 400.7: announced pins aligned position-for-position with
+    /// `chain_root_targets` (`None` for players and unpinned occurrences),
+    /// captured at park time so a resumed indexed read applies the same
+    /// incarnation check the live slot authority would. Currency is
+    /// evaluated at resume, not at park. `#[serde(default)]` for
+    /// in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared (target, pin) entries counted from the slot
+    /// base, captured via `targeting::capture_parked_slot_context`. Resume
+    /// indexes these — never the legacy chain-root list — so modal bases,
+    /// downstream offsets, and repeated IDs resolve exactly like the live
+    /// authority. Empty on pre-M2 frames, which keep the legacy root path.
+    #[serde(default)]
+    pub declared_targets: Vec<TargetRef>,
+    /// CR 400.7: the announced pin of each declared entry, aligned with
+    /// `declared_targets`. Positional — repeated IDs keep distinct pins.
+    #[serde(default)]
+    pub declared_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, so resume judges
+    /// the root-numbered illegality stamp at `ahead + index` like the live
+    /// authority. Zero on pre-M2 frames (raw root indexing).
+    #[serde(default)]
+    pub declared_ahead: usize,
+    /// CR 400.7: the suspending node's own positional pins, aligned with
+    /// `targets`, for the local fallback and occurrence-aware parked reads.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins
+    /// (`ResolvedAbility::target_incarnations`), captured at park time so a
+    /// resumed indexed read applies the same eligibility guard the live
+    /// slot authority would. Keyed by object id, not positional — an id
+    /// with no entry passes (fail-open). Currency is evaluated at resume,
+    /// not at park. `#[serde(default)]` for in-flight states serialized
+    /// before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -289,6 +333,46 @@ pub struct PendingDieRollInstruction {
     /// for in-flight states serialized before this field existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2b: declared slots stamped illegal, carried across the CR
+    /// 616.1 choice so they survive into the `PendingDieRoll` this
+    /// instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub illegal_target_slots: Vec<usize>,
+    /// CR 400.7: announced pins aligned with `chain_root_targets`, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared entries counted from the slot base (see
+    /// `PendingDieRoll::declared_targets`), carried across the CR 616.1
+    /// choice so they survive into the `PendingDieRoll` this instruction
+    /// produces. `#[serde(default)]` for in-flight states serialized before
+    /// this field existed.
+    #[serde(default)]
+    pub declared_targets: Vec<TargetRef>,
+    /// CR 400.7: announced pins aligned with `declared_targets`, carried
+    /// across the CR 616.1 choice. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub declared_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, carried across
+    /// the CR 616.1 choice. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub declared_ahead: usize,
+    /// CR 400.7: the suspending node's positional pins aligned with
+    /// `targets`, carried across the CR 616.1 choice. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1
