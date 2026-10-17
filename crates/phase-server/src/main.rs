@@ -7628,12 +7628,21 @@ async fn ensure_contest_driver(
     game_code: &str,
 ) {
     let claimed = match lock_session(state, game_code).await {
-        Ok(mut session) => session.claim_contest_driver(),
-        Err(_) => false,
+        Ok(mut session) => {
+            if !session.claim_contest_driver() {
+                None
+            } else if let Some(runtime) = session.full_runtime.as_ref() {
+                Some((runtime.key.clone(), runtime.activation_epoch))
+            } else {
+                session.release_contest_driver();
+                None
+            }
+        }
+        Err(_) => None,
     };
-    if !claimed {
+    let Some((full_key, activation_epoch)) = claimed else {
         return;
-    }
+    };
     tokio::spawn(run_contest_driver(
         executor.clone(),
         state.clone(),
@@ -7643,7 +7652,8 @@ async fn ensure_contest_driver(
         game_spectators.clone(),
         lobby.clone(),
         lobby_subscribers.clone(),
-        game_code.to_string(),
+        full_key,
+        activation_epoch,
     ));
 }
 
@@ -7662,8 +7672,11 @@ async fn run_contest_driver(
     game_spectators: SharedGameSpectators,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
-    game_code: String,
+    expected_key: server_core::FullSessionKey,
+    activation_epoch: Option<u64>,
 ) {
+    let game_code = expected_key.game_code;
+    let expected_generation = expected_key.generation;
     let mut ticker = tokio::time::interval(CONTEST_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The terminal artifact of a game this driver ended, kept across retries: rebuilding
@@ -7672,24 +7685,34 @@ async fn run_contest_driver(
     let mut pending_terminal: Option<persistence::FullTerminalArtifact> = None;
     loop {
         ticker.tick().await;
-        let Ok(mut session) = lock_session(&state, &game_code).await else {
+        let Ok(session) = lock_session(&state, &game_code).await else {
             return;
         };
         let Some(full_key) = session
             .full_runtime
             .as_ref()
+            .filter(|runtime| {
+                runtime.key.game_code == game_code
+                    && runtime.key.generation == expected_generation
+                    && runtime.activation_epoch == activation_epoch
+            })
             .map(|runtime| runtime.key.clone())
         else {
-            session.release_contest_driver();
+            // An old driver must never mutate a replacement Full lifetime.
             return;
         };
+        // Match upstream's clock observation under the session lease, but do
+        // not charge subsequent CPU admission/worker scheduling to this tick.
+        let observed_at = Instant::now();
+        let (session, ()) = executor
+            .with_session(session, move |session| session.tick_contest_at(observed_at))
+            .await;
+        let (session, drain) = executor.drain_contest(session).await;
         let persistence = game_db.clone();
         let persistence_executor = executor.clone();
         let existing_terminal = pending_terminal.clone();
         let (session, tick) = executor
             .with_session(session, move |session| {
-                session.tick_contest();
-                let drain = session.drain_contest_outbox();
                 let progress = session.contest_progress();
                 let done = !session.contest_active();
                 let session = &mut *session;
@@ -7884,6 +7907,7 @@ async fn run_contest_driver(
 /// never answered (a throttled or ignored click is not an error to the player), and
 /// the result reaches clients through the driver task's state transitions.
 async fn handle_contest_click(
+    executor: &game_executor::GameExecutor,
     contest: u64,
     seq: u32,
     state: &SharedState,
@@ -7897,13 +7921,20 @@ async fn handle_contest_click(
     ) else {
         return;
     };
-    let Ok(mut session) = lock_session(state, game_code).await else {
+    let Ok(session) = lock_session(state, game_code).await else {
         return;
     };
     if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await {
         return;
     }
-    session.handle_contest_click(player_token, contest, seq);
+    let observed_at = Instant::now();
+    let player_token = player_token.to_string();
+    let (session, _) = executor
+        .with_session(session, move |session| {
+            session.handle_contest_click_at(&player_token, contest, seq, observed_at)
+        })
+        .await;
+    drop(session);
 }
 
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
@@ -9757,7 +9788,16 @@ async fn handle_client_message(
         }
 
         ClientMessage::ContestClick { contest, seq } => {
-            handle_contest_click(contest, seq, state, connections, tx, identity).await;
+            handle_contest_click(
+                &context.game_executor,
+                contest,
+                seq,
+                state,
+                connections,
+                tx,
+                identity,
+            )
+            .await;
         }
 
         ClientMessage::Reconnect {
@@ -18317,6 +18357,8 @@ mod game_submission_tests {
         socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
         booster_pack_pool: Option<Vec<String>>,
         public: bool,
+        deck: DeckData,
+        format_config: Option<engine::types::format::FormatConfig>,
     ) -> (String, String, server_core::FullSessionKey) {
         let create = ClientMessage::CreateGameWithSettings {
             deck: deck.clone(),
@@ -18520,6 +18562,77 @@ mod game_submission_tests {
                 return games.iter().any(|game| game.game_code == code);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_contest_seat_forfeits_without_further_traffic() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+        use engine::types::game_state::WaitingFor;
+        use std::time::Duration;
+
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut host = connect_and_hello(url).await;
+            let (code, _, _) =
+                create_started_ai_game(&mut host, None, DeckData::default(), None).await;
+            {
+                let mut session = lock_session(&app.sessions, &code).await.unwrap();
+                let config = ContestConfig {
+                    countdown_ms: 1,
+                    inactivity_timeout_ms: 60_000,
+                    reconnect_grace_ms: 100,
+                    settle_window_ms: 0,
+                    max_active_ms: 60_000,
+                };
+                session.contest.policy.config = config;
+                session.state.phase = engine::types::phase::Phase::PreCombatMain;
+                session.state.active_player = PlayerId(0);
+                session.state.waiting_for = WaitingFor::PhysicalContest {
+                    contest: Box::new(ContestState::new(
+                        1,
+                        ContestKind::Staring,
+                        PlayerId(0),
+                        PlayerId(1),
+                        config,
+                    )),
+                    source_id: engine::types::identifiers::ObjectId(1),
+                };
+            }
+            ensure_contest_driver(
+                &app.context.game_executor,
+                &app.sessions,
+                &app.connections,
+                &app.draft_sessions,
+                &app.game_db,
+                &app.game_spectators,
+                &app.lobby,
+                &app.lobby_subscribers,
+                &code,
+            )
+            .await;
+            host.send(WsMessage::Close(None))
+                .await
+                .expect("close the real host transport");
+            drop(host);
+
+            // Observe only server state after transport death: no click, action
+            // or reconnect is available to apply the queued presence edge.
+            loop {
+                {
+                    let session = lock_session(&app.sessions, &code).await.unwrap();
+                    if !session.connected[0]
+                        && matches!(session.state.waiting_for, WaitingFor::Priority { .. })
+                    {
+                        assert!(!session.contest_active());
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("the autonomous tick must forfeit the contest without further traffic");
     }
 
     /// A contest that settles into the end of the game (the winner's opponent was at

@@ -216,6 +216,30 @@ impl GameExecutor {
         }
     }
 
+    /// Drain host transitions while yielding CPU admission between follow-up AI
+    /// decisions. The same session lease spans capture, AI and publication.
+    pub(crate) async fn drain_contest(
+        &self,
+        session: OwnedMutexGuard<GameSession>,
+    ) -> (
+        OwnedMutexGuard<GameSession>,
+        server_core::contest::ContestDrain,
+    ) {
+        let (session, step) = self
+            .with_session(session, |session| session.begin_contest_drain())
+            .await;
+        match step {
+            std::ops::ControlFlow::Break(drain) => (session, drain),
+            std::ops::ControlFlow::Continue((transitions, cursor)) => {
+                let (session, outcome) = self.continue_ai(session, cursor).await;
+                self.with_session(session, move |session| {
+                    session.finish_contest_drain(transitions, outcome)
+                })
+                .await
+            }
+        }
+    }
+
     #[cfg(test)]
     fn with_ai_step_hook(mut self, hook: impl Fn(&GameSession) + Send + Sync + 'static) -> Self {
         self.ai_step_hook = Some(Arc::new(hook));
@@ -1152,7 +1176,22 @@ mod tests {
 
     #[test]
     fn another_games_human_submission_finishes_between_ai_decisions() {
-        crate::socket_test_hooks::run_async_test(|| async {
+        assert_ai_batch_yields_to_another_game(AiBatchSource::Decisions);
+    }
+
+    #[test]
+    fn a_contest_followup_yields_cpu_to_another_games_human_action() {
+        assert_ai_batch_yields_to_another_game(AiBatchSource::ContestSettlement);
+    }
+
+    #[derive(Clone, Copy)]
+    enum AiBatchSource {
+        Decisions,
+        ContestSettlement,
+    }
+
+    fn assert_ai_batch_yields_to_another_game(source: AiBatchSource) {
+        crate::socket_test_hooks::run_async_test(move || async move {
             use crate::issue_4548_deadlock_tests::empty_identity;
             use engine::types::actions::MulliganChoice;
             use engine::types::game_state::WaitingFor;
@@ -1183,12 +1222,63 @@ mod tests {
                     }
                 }
             });
-            let a = crate::lock_session(&state, &code_a).await.unwrap();
+            let mut a = crate::lock_session(&state, &code_a).await.unwrap();
+            if matches!(source, AiBatchSource::ContestSettlement) {
+                use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+                let observed = std::time::Instant::now();
+                let config = ContestConfig {
+                    countdown_ms: 1,
+                    reconnect_grace_ms: 1,
+                    ..Default::default()
+                };
+                a.contest.policy.config = config;
+                a.state.phase = engine::types::phase::Phase::PreCombatMain;
+                a.state.waiting_for = WaitingFor::PhysicalContest {
+                    contest: Box::new(ContestState::new(
+                        1,
+                        ContestKind::Staring,
+                        PlayerId(0),
+                        PlayerId(1),
+                        config,
+                    )),
+                    source_id: engine::types::identifiers::ObjectId(1),
+                };
+                a.tick_contest_at(observed);
+                a.note_contest_connection(PlayerId(1), false);
+                a.tick_contest_at(std::time::Instant::now() + Duration::from_millis(10));
+                assert!(
+                    !a.contest_active(),
+                    "the contest must settle before its AI follow-up"
+                );
+            }
             let mut ai_job = tokio::spawn({
                 let executor = executor.clone();
-                async move { executor.run_ai(a).await }
+                async move {
+                    match source {
+                        AiBatchSource::Decisions => executor.run_ai(a).await,
+                        AiBatchSource::ContestSettlement => {
+                            let (session, drain) = executor.drain_contest(a).await;
+                            let failure =
+                                drain.ai_failure.as_ref().map(|fault| fault.cause.clone());
+                            (
+                                session,
+                                AiRunOutcome {
+                                    transitions: drain.transitions,
+                                    failure,
+                                    fault: drain.ai_failure,
+                                },
+                            )
+                        }
+                    }
+                }
             });
-            assert_eq!(steps.recv().await.unwrap(), 1);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), steps.recv())
+                    .await
+                    .expect("the contest follow-up did not enter the per-decision executor")
+                    .expect("the AI driver stopped before its first decision"),
+                1,
+            );
 
             let (tx, mut messages) = crate::socket_mailbox::channel();
             let connections: SharedConnections = Arc::new(tokio::sync::Mutex::new(HashMap::from(

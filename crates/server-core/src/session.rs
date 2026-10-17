@@ -1821,6 +1821,7 @@ impl GameSession {
         let player = self
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+        self.flush_contest_connections();
 
         // GH #1507: while a takeback request is awaiting approval, the
         // authoritative state must not move out from under it — a new
@@ -2053,6 +2054,7 @@ impl GameSession {
         let player = self
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+        self.flush_contest_connections();
 
         // GH #1507: the authoritative state must not move while the table is
         // voting on a rollback. Same interlock, same reason, as `handle_action`.
@@ -2178,9 +2180,8 @@ impl GameSession {
     /// caller under the same held session guard.
     pub fn mark_disconnected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = false;
-        // A seat away mid-contest pauses the contest clock and starts its
-        // reconnect grace (`engine::game::contest`).
-        self.note_contest_connection(player, false);
+        // Queue host-stamped presence; the admitted contest driver applies it.
+        self.queue_contest_connection(player, crate::contest::ContestPresence::Disconnected);
     }
 
     /// Mark a seat connected again, after the registry half
@@ -2188,7 +2189,7 @@ impl GameSession {
     /// allows it.
     pub fn mark_connected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = true;
-        self.note_contest_connection(player, true);
+        self.queue_contest_connection(player, crate::contest::ContestPresence::Connected);
     }
 
     pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
