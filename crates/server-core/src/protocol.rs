@@ -3402,6 +3402,9 @@ mod tests {
         }
     }
 
+    /// v148: target-bearing Unattach costs select their granting Equipment.
+    /// A v147 peer cannot preserve that cost subject, so it is refused before
+    /// receiving v148 state. Earlier full-game contracts remain in force.
     /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
     /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
     /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
@@ -3633,8 +3636,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_147_for_physical_contest() {
-        assert_eq!(PROTOCOL_VERSION, 147);
+    fn protocol_version_is_148_for_unattach_cost_target() {
+        assert_eq!(PROTOCOL_VERSION, 148);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3645,7 +3648,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_147_for_physical_contest` stays
+    /// `protocol_version_is_148_for_unattach_cost_target` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

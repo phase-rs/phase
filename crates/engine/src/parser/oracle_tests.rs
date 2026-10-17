@@ -34306,13 +34306,48 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
 }
 
-/// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same
-/// unsupported residual as the production pipeline.
+/// CR 201.5a: the IR facade binds the granting Equipment named by its Unattach cost.
 #[test]
-fn ir_facade_demotes_a_refused_granter_name() {
+fn ir_facade_accepts_unattach_of_the_granting_equipment() {
     let mut ir = parse_oracle_ir(
         "Equipped creature gets +2/+1 and has \"{T}, Unattach Heartseeker: Destroy target creature.\"\nEquip {5}",
         "Heartseeker",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    assert!(ir.granter_name_refusals.is_empty(), "{ir:#?}");
+    let parsed = lower_oracle_ir(&mut ir);
+    let granted = parsed
+        .statics
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("reach-guard: Heartseeker grants its activated ability");
+    assert!(
+        matches!(
+            &granted.cost,
+            Some(AbilityCost::Composite { costs }) if costs.iter().any(|cost| matches!(
+                cost,
+                AbilityCost::Unattach { target: Some(TargetFilter::GrantingObject { bound: None }) }
+            ))
+        ),
+        "{granted:#?}"
+    );
+    assert!(!def_chain_has_unimplemented(granted), "{granted:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+}
+
+/// CR 201.5a: the IR facade still refuses quoted damage-source and control-of
+/// positions that cannot bind the granting Equipment.
+#[test]
+fn ir_facade_demotes_a_refused_granter_name() {
+    let mut ir = parse_oracle_ir(
+        "Equipped creature has \"{T}, Unattach Shuriken: Shuriken deals 2 damage to target creature. That creature's controller gains control of Shuriken unless it was unattached from a Ninja.\"\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)",
+        "Shuriken",
         &[],
         &["Artifact".to_string()],
         &["Equipment".to_string()],

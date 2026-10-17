@@ -106,6 +106,8 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  130 — Target-bearing Unattach costs select their granting Equipment rather
+ *       than the ability host. Full-game protocol 148 moves with it.
  *  129 — game_setup and state_update carry GameState whose waiting_for may be
  *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
  *       abilities may hold Effect::PhysicalContest; a v128 peer cannot parse
@@ -696,7 +698,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 129 as const;
+export const WIRE_PROTOCOL_VERSION = 130 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

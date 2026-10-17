@@ -597,6 +597,19 @@ const CLASS_CORPUS: &[(&str, &str, &[&str], &[&str])] = &[
     ),
     (FISHING_POLE, "Fishing Pole", &["Artifact"], &["Equipment"]),
     (HANKYU, "Hankyu", &["Artifact"], &["Equipment"]),
+    (HEARTSEEKER, "Heartseeker", &["Artifact"], &["Equipment"]),
+    (
+        RAZOR_BOOMERANG,
+        "Razor Boomerang",
+        &["Artifact"],
+        &["Equipment"],
+    ),
+    (
+        TORALFS_HAMMER,
+        "Toralf's Hammer",
+        &["Artifact"],
+        &["Equipment"],
+    ),
     (
         RAKDOS_RITEKNIFE,
         "Rakdos Riteknife",
@@ -692,7 +705,6 @@ const REFUSED_CORPUS: &[(&str, &str, &[&str], &[&str])] = &[
         &["Artifact"],
         &["Equipment"],
     ),
-    (HEARTSEEKER, "Heartseeker", &["Artifact"], &["Equipment"]),
     (
         MEANDERED_TOWERSHELL,
         "Meandered Towershell",
@@ -700,18 +712,6 @@ const REFUSED_CORPUS: &[(&str, &str, &[&str], &[&str])] = &[
         &["Aura"],
     ),
     (NINJAS_KUNAI, "Ninja's Kunai", &["Artifact"], &["Equipment"]),
-    (
-        RAZOR_BOOMERANG,
-        "Razor Boomerang",
-        &["Artifact"],
-        &["Equipment"],
-    ),
-    (
-        TORALFS_HAMMER,
-        "Toralf's Hammer",
-        &["Artifact"],
-        &["Equipment"],
-    ),
 ];
 
 /// CR 201.5a: no raw U+E0004 may survive into ANY string reachable from
@@ -789,6 +789,48 @@ fn class_corpus_has_no_unreached_granter_reference() {
             "reach-guard: {name}"
         );
         assert!(!json.contains("granter_reference_unreached"), "{name}");
+    }
+}
+
+/// CR 201.5a: both the Unattach cost and the return effect name the granting Equipment.
+#[test]
+fn unattach_return_grants_bind_both_granter_references() {
+    for (oracle, name) in [
+        (RAZOR_BOOMERANG, "Razor Boomerang"),
+        (TORALFS_HAMMER, "Toralf's Hammer"),
+    ] {
+        let def = granted_activated_def(oracle, name);
+        let Some(AbilityCost::Composite { costs }) = &def.cost else {
+            panic!("{name}: the granted activation must retain its complete cost: {def:#?}");
+        };
+        assert!(
+            costs.iter().any(|cost| matches!(
+                cost,
+                AbilityCost::Unattach {
+                    target: Some(TargetFilter::GrantingObject { bound: None })
+                }
+            )),
+            "{name}: the Unattach cost must name the granter, not the host: {def:#?}"
+        );
+        assert!(
+            find_effect(&def, |effect| matches!(
+                effect,
+                Effect::Bounce {
+                    target: TargetFilter::GrantingObject { bound: None },
+                    ..
+                }
+            ))
+            .is_some(),
+            "{name}: the return effect must name the same granter: {def:#?}"
+        );
+        assert!(
+            find_effect(&def, |effect| matches!(
+                effect,
+                Effect::Unimplemented { .. }
+            ))
+            .is_none(),
+            "{name}: both typed references must reach a supported granted body: {def:#?}"
+        );
     }
 }
 

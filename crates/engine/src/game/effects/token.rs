@@ -9766,12 +9766,50 @@ mod tests {
         );
     }
 
+    /// CR 201.5a: the catalog binds an Unattach cost to the granting object and
+    /// renders its printed name. Rock is a synthetic grammar witness.
+    #[test]
+    fn catalog_rules_text_accepts_unattach_of_the_granting_object() {
+        let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Equipped creature has \"{T}, Unattach Rock: This creature deals 2 damage to any target.\"\nEquip {1}",
+            "Rock",
+        );
+        assert!(unparsed_lines.is_empty(), "{unparsed_lines:?}");
+        let granted = static_definitions
+            .iter()
+            .flat_map(|definition| &definition.modifications)
+            .chain(&modifications)
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .expect("reach-guard: the catalog grants the activated ability");
+        assert!(
+            matches!(
+                &granted.cost,
+                Some(AbilityCost::Composite { costs }) if costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::Unattach { target: Some(TargetFilter::GrantingObject { bound: None }) }
+                ))
+            ),
+            "{granted:#?}"
+        );
+        let json = serde_json::to_string(&(&static_definitions, &modifications))
+            .expect("the parsed token abilities serialize");
+        assert!(!json.contains("\"Unimplemented\""), "{json}");
+        assert!(json.contains("Unattach Rock"), "{json}");
+        assert!(
+            !json.contains(crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER),
+            "no raw granter marker may survive the reached catalog parse"
+        );
+    }
+
     /// CR 201.5a: a catalog body naming the token where the masker refuses the name would
     /// read the equipped creature, so that line is unparsed while the rest still parses.
     #[test]
     fn catalog_rules_text_refuses_a_granter_name_left_as_the_host() {
         let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
-            "Equipped creature has \"{T}, Unattach Rock: This creature deals 2 damage to any target.\"\nEquip {1}",
+            "Equipped creature has \"{T}: Rock deals 2 damage to any target.\"\nEquip {1}",
             "Rock",
         );
         assert!(
@@ -9780,7 +9818,7 @@ mod tests {
         );
         assert_eq!(
             unparsed_lines,
-            vec!["Equipped creature has \"{T}, Unattach ~: ~ deals 2 damage to any target.\""]
+            vec!["Equipped creature has \"{T}: ~ deals 2 damage to any target.\""]
         );
     }
 

@@ -14510,9 +14510,14 @@ pub enum AbilityCost {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_zone: Option<Zone>,
     },
-    /// CR 701.3d: Unattach this Equipment from the object it is equipping.
-    /// Used by activated costs such as Sunforger's "Unattach this Equipment".
-    Unattach,
+    /// CR 701.3d: Unattach this Equipment from the object it is equipping, or unattach
+    /// a specific granting/targeted Equipment from the host.
+    /// Used by activated costs such as Sunforger's "Unattach this Equipment" (`target: None`),
+    /// and by granted abilities such as Leonin Bola's "Unattach Leonin Bola" (`target: Some(...)`).
+    Unattach {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
+    },
     /// CR 701.3d + CR 608.2k: Unattach `count` attachments matching `filter`
     /// from the source host as a cost; the detached object stays on the
     /// battlefield and becomes this ability's cost-referent (Captain America's
@@ -14722,7 +14727,7 @@ impl AbilityCost {
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }
             | AbilityCost::ReturnToHand { .. }
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
@@ -14769,7 +14774,7 @@ impl AbilityCost {
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
@@ -14953,7 +14958,7 @@ impl AbilityCost {
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::Exert
             // CR 701.3d: unattaching leaves the object on the battlefield.
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             // Battlefield -> graveyard.
             | AbilityCost::Sacrifice(_)
@@ -15022,7 +15027,7 @@ impl AbilityCost {
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
@@ -15143,7 +15148,7 @@ impl AbilityCost {
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
@@ -15248,7 +15253,7 @@ impl AbilityCost {
             AbilityCost::PayEnergy { .. } => vec![CostCategory::PaysEnergy],
             AbilityCost::PaySpeed { .. } => vec![CostCategory::PaysSpeed],
             AbilityCost::ReturnToHand { .. } => vec![CostCategory::ReturnsToHand],
-            AbilityCost::Unattach => vec![CostCategory::Unattaches],
+            AbilityCost::Unattach { .. } => vec![CostCategory::Unattaches],
             AbilityCost::UnattachFrom { .. } => vec![CostCategory::Unattaches],
             AbilityCost::Mill { .. } => vec![CostCategory::Mills],
             AbilityCost::Exert => vec![CostCategory::Exerts],
@@ -15356,7 +15361,7 @@ impl AbilityCost {
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
@@ -41432,7 +41437,7 @@ mod tests {
                 TypedFilter::new(TypeFilter::Artifact).into(),
                 1,
             )),
-            AbilityCost::Unattach,
+            AbilityCost::Unattach { target: None },
         ];
         let json = serde_json::to_string(&costs).unwrap();
         let deserialized: Vec<AbilityCost> = serde_json::from_str(&json).unwrap();
@@ -42802,7 +42807,7 @@ mod tests {
                 ),
                 (
                     "unattach",
-                    AbilityCost::Unattach,
+                    AbilityCost::Unattach { target: None },
                     vec![CostCategory::Unattaches],
                 ),
                 (

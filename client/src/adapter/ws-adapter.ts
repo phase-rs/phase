@@ -215,6 +215,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 148 — Target-bearing Unattach costs select their granting Equipment, not
+ *      the ability host. Older peers cannot preserve that cost subject. Wire
+ *      130 moves with it; previous full-game and wire histories are retained.
  * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
  *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
@@ -898,7 +901,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 147;
+export const PROTOCOL_VERSION = 148;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

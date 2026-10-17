@@ -2703,6 +2703,7 @@ const GRANTER_SELF_REF_VERB_PREFIXES: &[&str] = &[
     "sacrifice ",     // Sacrifice cost
     "exile ",         // Exile cost
     "return ",        // ReturnToHand cost / Bounce effect
+    "unattach ",      // Unattach cost naming the granting Equipment
     "counter on ",    // PutCounter target ("put a <kind> counter on <name>")
     "counters on ",   // CountersOn quantity / plural PutCounter target
     "counter from ",  // RemoveCounter target ("remove a <kind> counter from <name>")
@@ -2717,7 +2718,6 @@ const GRANTER_SELF_REF_VERB_PREFIXES: &[&str] = &[
 // Refused positions, which stay `~`:
 // - `by `: a damage source ("dealt … by <name>").
 // - `named `: a name filter ("permanents named <name>").
-// - `unattach `: a nullary host cost; the word boundary keeps `attach ` off it.
 // - `control of `: a control change carrying an unless-rider.
 // - `exiled with `: a linked-exile reference.
 // - `'s controller`: a possessive player reference, not an object position.
@@ -4031,8 +4031,19 @@ mod tests {
         assert_eq!(
             normalized,
             format!(
-                "Equipped creature has \"{{T}}, Unattach ~: Attach {GRANTING_SELF_PLACEHOLDER} to target creature.\""
+                "Equipped creature has \"{{T}}, Unattach {GRANTING_SELF_PLACEHOLDER}: Attach {GRANTING_SELF_PLACEHOLDER} to target creature.\""
             )
+        );
+    }
+
+    #[test]
+    fn granter_lookbehind_rejects_a_verb_suffix() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Equipped creature has \"Reunattach Foo Bar: Draw a card.\"",
+                "Foo Bar",
+            ),
+            "Equipped creature has \"Reunattach ~: Draw a card.\""
         );
     }
 

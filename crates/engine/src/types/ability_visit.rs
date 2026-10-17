@@ -562,7 +562,7 @@ where
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
@@ -1301,6 +1301,7 @@ fn ability_cost(cost: &$($mut_)? AbilityCost, v: &mut impl FnMut(Symbol<'_>)) {
         AbilityCost::Sacrifice(sacrifice) => filter(&$($mut_)? sacrifice.target, v),
         AbilityCost::Exile { filter: Some(f), .. }
         | AbilityCost::RemoveCounter { target: Some(f), .. }
+        | AbilityCost::Unattach { target: Some(f) }
         | AbilityCost::ReturnToHand { filter: Some(f), .. }
         | AbilityCost::Reveal { filter: Some(f), .. } => filter(f, v),
         AbilityCost::EffectCost { effect: e } => effect(e, v),

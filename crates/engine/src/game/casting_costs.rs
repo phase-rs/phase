@@ -6742,7 +6742,7 @@ fn validate_x_mana_sacrifice_residual(
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
-            | AbilityCost::Unattach
+            | AbilityCost::Unattach { .. }
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
@@ -28580,7 +28580,7 @@ its replicate cost was paid.)\nDraw a card.";
                     from_zone: None,
                 },
             ),
-            ("unattach", AbilityCost::Unattach),
+            ("unattach", AbilityCost::Unattach { target: None }),
             (
                 "unattach from",
                 AbilityCost::UnattachFrom {
