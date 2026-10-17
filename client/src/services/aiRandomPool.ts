@@ -98,13 +98,50 @@ export function pickOpponentDeck(
   // non-empty, else the full legal catalog (an empty restriction warns at
   // setup, so reaching here means the fallback was accepted). Archetype +
   // coverage are soft preferences applied within that pool.
+  return pickRandomDeckCandidate(
+    applySoftPoolFallback(pool, archetypeFilter, coverageFloor),
+    { selectedFormat, excludeIds },
+  ) ?? catalog[0];
+}
+
+export interface EffectiveAiRandomPoolOptions extends RandomDrawPoolOptions {
+  archetypeFilter: AiArchetypeFilter;
+  coverageFloor: number;
+}
+
+/**
+ * Soft archetype/coverage preferences with production's fallback: when the
+ * preferences match nothing in the draw pool, Random draws from the full
+ * draw pool instead of failing. Shared by game start and the setup previews
+ * so "Random (N)" counts what production can actually draw.
+ */
+export function applySoftPoolFallback<T extends AiDeckCandidate>(
+  pool: readonly T[],
+  archetypeFilter: AiArchetypeFilter,
+  coverageFloor: number,
+): T[] {
   const filtered = pool.filter((candidate) =>
-    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
+    candidatePassesFilters(candidate, archetypeFilter, coverageFloor),
   );
-  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : pool, {
-    selectedFormat,
-    excludeIds,
-  }) ?? catalog[0];
+  return filtered.length > 0 ? filtered : [...pool];
+}
+
+/**
+ * The effective AI Random draw universe: bracket/cEDH restriction (falling
+ * back to the catalog), then folder/deck curation (falling back to the
+ * bracket pool), then archetype/coverage soft preferences (falling back to
+ * the curated pool). Single authority behind production draws and every
+ * "Random (N)" preview.
+ */
+export function resolveEffectiveAiRandomPool<
+  T extends PoolCandidate & BracketTaggedCandidate & AiDeckCandidate,
+>(
+  candidates: readonly T[],
+  options: EffectiveAiRandomPoolOptions,
+  index?: FolderIndex,
+): T[] {
+  const { pool: drawPool } = resolveRandomDrawPool(candidates, options, index);
+  return applySoftPoolFallback(drawPool, options.archetypeFilter, options.coverageFloor);
 }
 
 export interface CedhSeatProblemOptions {

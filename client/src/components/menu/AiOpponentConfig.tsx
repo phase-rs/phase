@@ -7,16 +7,15 @@ import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { useAiDeckCatalog, type UseAiDeckCatalogResult } from "../../services/aiDeckCatalog";
 import {
-  candidatePassesFilters,
   resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
   restrictAiPoolByBracket,
 } from "../../services/aiRandomPool";
 import {
-  applyPoolSelection,
-  loadFolderIndex,
   summarizePoolSelection,
   withCatalogSavedNames,
 } from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
@@ -103,6 +102,10 @@ export function AiOpponentConfig({
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
   const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the preview memos below resolve through this
+  // index so a deck moved between folders recomputes instead of serving
+  // stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
   const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
   const effectiveCedhMode = cedhMode && isCedhFormat;
   // Fixed-deck formats (Momir's Madness) have the engine supply every AI seat's
@@ -155,17 +158,35 @@ export function AiOpponentConfig({
       }),
     [candidates, bracketFilter, cedhMode, selectedFormat],
   );
-  // The folder/deck curation applies after the bracket restriction — the same
-  // layering `pickAiSeatDecks` uses at game start — so the "Random (N)" counts
-  // preview exactly what Random seats draw from. A selection that matches
-  // nothing falls back to the bracket pool; the tree below warns about that.
-  const selectedPool = useMemo(
-    () => applyPoolSelection(withCatalogSavedNames(bracketPool), aiPoolSelection).pool,
-    [bracketPool, aiPoolSelection],
-  );
+  // The "Random (N)" counts resolve the full production layering — bracket
+  // with catalog fallback, curation with bracket-pool fallback, soft
+  // preferences with draw-pool fallback — through the same authority game
+  // start uses, so the preview matches what seats can actually draw. The raw
+  // bracket pool above stays separate for the empty-bracket diagnostic below.
   const filteredDecks = useMemo(
-    () => selectedPool.filter((d) => candidatePassesFilters(d, archetypeFilter, coverageFloor)),
-    [selectedPool, coverageFloor, archetypeFilter],
+    () =>
+      resolveEffectiveAiRandomPool(
+        withCatalogSavedNames(candidates),
+        {
+          bracketFilter,
+          cedhMode,
+          selectedFormat: selectedFormat ?? null,
+          poolSelection: aiPoolSelection,
+          archetypeFilter,
+          coverageFloor,
+        },
+        poolFolderIndex,
+      ),
+    [
+      candidates,
+      bracketFilter,
+      cedhMode,
+      selectedFormat,
+      aiPoolSelection,
+      archetypeFilter,
+      coverageFloor,
+      poolFolderIndex,
+    ],
   );
   // The tree lists the full legal catalog (the curation is format-global),
   // but reports playable counts against the draw base — the same base
@@ -187,9 +208,9 @@ export function AiOpponentConfig({
   // seats silently fall back to the full bracket pool. Say so next to the
   // seats (the tree warns too) — the "Random (N)" count alone hides the why.
   const poolConflict = useMemo(() => {
-    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, loadFolderIndex());
+    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex);
     return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
-  }, [poolTreeItems, aiPoolSelection, poolBaseIds]);
+  }, [poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex]);
   // Soft gate: the catalog is non-empty but the bracket constraint matched
   // nothing, so game start will fall back to the full legal catalog. Warn
   // here (Start stays enabled) rather than failing the game.

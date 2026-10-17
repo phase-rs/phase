@@ -31,19 +31,17 @@ import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
-  candidatePassesFilters,
   cedhSeatProblem,
   pickAiSeatDecks,
   resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
   type CedhSeatProblem,
-  restrictAiPoolByBracket,
 } from "../../services/aiRandomPool";
 import {
-  applyPoolSelection,
-  loadFolderIndex,
   summarizePoolSelection,
   withCatalogSavedNames,
 } from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { CEDH_DIFFICULTY } from "../../services/cedhLock";
 import { AI_DECK_RANDOM, usePreferencesStore, type AiDeckSelection } from "../../stores/preferencesStore";
 import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
@@ -543,6 +541,10 @@ export function HostSetup({
   const aiCoverageFloor = usePreferencesStore((s) => s.aiCoverageFloor);
   const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the preview memos below resolve through this
+  // index so a deck moved between folders recomputes instead of serving
+  // stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(formatConfig.format);
@@ -558,33 +560,35 @@ export function HostSetup({
   // A remembered config can carry a CEDH seat; the table is then cEDH and its
   // Random pool is restricted to bracket 5 (Commander formats only).
   const hostCedh = effectiveAiSeats.some((s) => s.difficulty === CEDH_DIFFICULTY);
-  // Same layering as game start (`pickAiSeatDecks`): bracket, then the
-  // folder/deck curation (falling back when it matches nothing), then the
-  // archetype + coverage soft preferences.
-  const aiSelectedPool = useMemo(
+  // Same layering as game start (`pickAiSeatDecks`): bracket with catalog
+  // fallback, then the folder/deck curation (falling back when it matches
+  // nothing), then the archetype + coverage soft preferences (falling back to
+  // the curated pool) — resolved through the shared authority so the seat
+  // pickers preview what Random seats can actually draw.
+  const aiRandomPool = useMemo(
     () =>
-      applyPoolSelection(
-        withCatalogSavedNames(
-          restrictAiPoolByBracket(aiDeckCatalog.candidates, {
-            bracketFilter: aiBracketFilter,
-            cedhMode: hostCedh,
-            selectedFormat: formatConfig.format,
-          }),
-        ),
-        aiPoolSelection,
-      ).pool,
+      resolveEffectiveAiRandomPool(
+        withCatalogSavedNames(aiDeckCatalog.candidates),
+        {
+          bracketFilter: aiBracketFilter,
+          cedhMode: hostCedh,
+          selectedFormat: formatConfig.format,
+          poolSelection: aiPoolSelection,
+          archetypeFilter: aiArchetypeFilter,
+          coverageFloor: aiCoverageFloor,
+        },
+        poolFolderIndex,
+      ),
     [
       aiDeckCatalog.candidates,
       aiBracketFilter,
       hostCedh,
       formatConfig.format,
       aiPoolSelection,
+      aiArchetypeFilter,
+      aiCoverageFloor,
+      poolFolderIndex,
     ],
-  );
-  const aiRandomPool = useMemo(
-    () =>
-      aiSelectedPool.filter((d) => candidatePassesFilters(d, aiArchetypeFilter, aiCoverageFloor)),
-    [aiSelectedPool, aiArchetypeFilter, aiCoverageFloor],
   );
   // The tree lists the full legal catalog (the curation is format-global),
   // but reports playable counts against the draw base — the same base
@@ -609,9 +613,9 @@ export function HostSetup({
   // seats silently fall back to the full bracket pool. Say so next to the
   // seats (the tree warns too) — the "Random (N)" count alone hides the why.
   const poolConflictForHost = useMemo(() => {
-    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, loadFolderIndex());
+    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex);
     return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
-  }, [poolTreeItems, aiPoolSelection, poolBaseIds]);
+  }, [poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex]);
   // A cEDH table with an AI seat no bracket-5 deck can serve (a Random seat over
   // an empty bracket-5 pool, or a seat pinned to a non-bracket-5 deck) would be
   // refused by the engine's bracket gate, so block hosting.

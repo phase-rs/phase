@@ -5,6 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { MyDecks } from "../MyDecks";
 import {
   ACTIVE_DECK_KEY,
+  DECK_FOLDERS_KEY,
+  DECK_METADATA_KEY,
   RANDOM_DECK_SELECTION,
   createFolder,
   getDeckMeta,
@@ -29,6 +31,17 @@ import {
 } from "../../../test/helpers/webLocks";
 import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../../services/savedDeckTransaction";
 import { useAppNotificationStore } from "../../../stores/appToastStore";
+import { AI_DECK_RANDOM, usePreferencesStore } from "../../../stores/preferencesStore";
+import { savedDeckCatalogId } from "../../../services/deckCatalog";
+import {
+  PRECON_POOL_GROUP,
+  UNFILED_POOL_GROUP,
+  emptyPoolSelection,
+  feedPoolGroup,
+  folderPoolGroup,
+  setPoolDeckIncluded,
+  setPoolGroupIncluded,
+} from "../../../services/randomPoolSelection";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
 import { setCachedFeed } from "../../../services/feedPersistence";
 import { loadPreconDeckMap, useDecks } from "../../../hooks/useDecks";
@@ -1116,6 +1129,184 @@ describe("MyDecks", () => {
     expect(onSelectDeck).not.toHaveBeenCalledWith("User Pauper");
   });
 
+  it("falls back to a legal deck when the pool selection holds only an incompatible one", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User Pauper", { main: [{ name: "Lightning Bolt", count: 60 }], sideboard: [] });
+    saveDeckOrigins({ "Known Standard": "mtggoldfish-standard" });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
+      "User Pauper": {
+        standard: { compatible: false, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: false,
+        selected_format_reasons: ["Not Standard legal"],
+        color_identity: ["R"],
+        color_distribution: [],
+      },
+    });
+    // The legal feed mirror is visible but unselected; only the unchecked
+    // user deck is selected. The first click must discover the mismatch and
+    // still serve the legal deck.
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          {
+            ...emptyPoolSelection(),
+            excludedGroups: [UNFILED_POOL_GROUP, feedPoolGroup("mtggoldfish-standard")],
+          },
+          savedDeckCatalogId("User Pauper"),
+          true,
+        ),
+      });
+    });
+    try {
+      const onSelectDeck = vi.fn();
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={onSelectDeck}
+        />,
+      );
+
+      expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+
+      await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("Known Standard"));
+      expect(onSelectDeck).not.toHaveBeenCalledWith("User Pauper");
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("clears a search-hidden explicit include when its folder is unselected", async () => {
+    saveDeck("Alpha Aggro", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Beta Beatdown", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+    localStorage.setItem(
+      DECK_FOLDERS_KEY,
+      JSON.stringify([{ id: "f1", name: "Battlebox", order: 0 }]),
+    );
+    localStorage.setItem(
+      DECK_METADATA_KEY,
+      JSON.stringify({
+        "Alpha Aggro": { addedAt: 1, folderId: "f1" },
+        "Beta Beatdown": { addedAt: 2, folderId: "f1" },
+      }),
+    );
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    // Beta carries a pre-existing explicit include (rescued before searching).
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          emptyPoolSelection(),
+          savedDeckCatalogId("Beta Beatdown"),
+          true,
+        ),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+        />,
+      );
+
+      await screen.findByText("Alpha Aggro");
+      await screen.findByText("Beta Beatdown");
+      await userEvent.type(screen.getByPlaceholderText(/Search decks/), "alpha");
+      expect(screen.queryByText("Beta Beatdown")).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      await userEvent.click(screen.getByRole("checkbox", { name: "Battlebox" }));
+
+      const selection = usePreferencesStore.getState().humanPoolSelection;
+      expect(selection.excludedGroups).toEqual([folderPoolGroup("f1")]);
+      expect(selection.includedDecks).toEqual([]);
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("drops a deck moved to an excluded folder by a storage event from the random pool", async () => {
+    saveDeck("Mover", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Stayer", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+    localStorage.setItem(
+      DECK_FOLDERS_KEY,
+      JSON.stringify([
+        { id: "f1", name: "Kept", order: 0 },
+        { id: "f2", name: "Cut", order: 1 },
+      ]),
+    );
+    localStorage.setItem(
+      DECK_METADATA_KEY,
+      JSON.stringify({
+        Mover: { addedAt: 1, folderId: "f1" },
+        Stayer: { addedAt: 2, folderId: "f1" },
+      }),
+    );
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    // Both decks start included; Stayer never moves, so no fallback can mask
+    // a stale membership memo.
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: { ...emptyPoolSelection(), excludedGroups: [folderPoolGroup("f2")] },
+      });
+    });
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const onSelectDeck = vi.fn();
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={onSelectDeck}
+        />,
+      );
+
+      await screen.findByText("Mover");
+      await screen.findByText("Stayer");
+
+      // Another tab moves Mover into the excluded folder: same catalog, same
+      // selection, only the folder assignment changes.
+      localStorage.setItem(
+        DECK_METADATA_KEY,
+        JSON.stringify({
+          Mover: { addedAt: 1, folderId: "f2" },
+          Stayer: { addedAt: 2, folderId: "f1" },
+        }),
+      );
+      act(() => {
+        window.dispatchEvent(new Event("storage"));
+      });
+      await screen.findByRole("button", { name: /Your random pool 1 of 2/ });
+
+      await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+      await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("Stayer"));
+      expect(onSelectDeck).not.toHaveBeenCalledWith("Mover");
+    } finally {
+      randomSpy.mockRestore();
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
   it("can defer random selection without materializing a concrete deck", async () => {
     saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
     const onSelectDeck = vi.fn();
@@ -1138,6 +1329,66 @@ describe("MyDecks", () => {
       expect.any(Array),
       expect.objectContaining({ summaryOnly: true }),
     );
+  });
+
+  it("restricts the human pool preview by cedhMode even when every seat is Medium", async () => {
+    saveDeck("Bracket Two", { main: [{ name: "Island", count: 99 }], sideboard: [], format: "Commander" } as ParsedDeck);
+    saveDeck("Bracket Five", { main: [{ name: "Swamp", count: 99 }], sideboard: [], format: "Commander" } as ParsedDeck);
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    const twoId = savedDeckCatalogId("Bracket Two");
+    const fiveId = savedDeckCatalogId("Bracket Five");
+    // cEDH is table-wide: the persisted seats keep their remembered Medium
+    // difficulty while the toggle restricts the draw to bracket 5.
+    const prefs = usePreferencesStore.getState();
+    const restore = {
+      aiSeats: prefs.aiSeats,
+      cedhMode: prefs.cedhMode,
+      aiBracketFilter: prefs.aiBracketFilter,
+      humanPoolSelection: prefs.humanPoolSelection,
+    };
+    act(() => {
+      usePreferencesStore.setState({
+        aiSeats: [{ difficulty: "Medium", deckId: AI_DECK_RANDOM }],
+        cedhMode: true,
+        aiBracketFilter: [],
+        humanPoolSelection: setPoolDeckIncluded(
+          setPoolGroupIncluded(
+            setPoolGroupIncluded(emptyPoolSelection(), UNFILED_POOL_GROUP, [twoId, fiveId], false),
+            // The bundled precon demos stay out of this selection; the member
+            // list only clears stale per-deck overrides (there are none yet).
+            PRECON_POOL_GROUP,
+            [],
+            false,
+          ),
+          twoId,
+          true,
+        ),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Commander"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiBrackets={new Map([[twoId, 2], [fiveId, 5]])}
+        />,
+      );
+
+      await screen.findByText("Bracket Two");
+      await screen.findByText("Bracket Five");
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 5.*0 playable/ })).toBeInTheDocument();
+      // Both the tree warning and the seat-adjacent banner fire: the lone
+      // bracket-2 pick cannot survive the cEDH bracket-5 draw base.
+      expect(screen.getAllByText(/None of the 1 selected/)).toHaveLength(2);
+      expect(within(screen.getByRole("status")).getByText(/your random deck/)).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState(restore);
+      });
+    }
   });
 
   it("preserves saved cover printing identity and advances the installed art crop", async () => {

@@ -12,6 +12,7 @@ import {
 } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { applyPoolSelection, withCatalogSavedNames } from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
@@ -312,6 +313,9 @@ export function HostControlTile() {
     selectedMatchType: hostSession?.matchType,
   });
   const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the curated pool below recomputes when a deck
+  // moves between folders instead of serving stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
 
   const isConnecting = hostingStatus === "connecting";
   const minPlayers = hostSession?.formatConfig.min_players ?? 2;
@@ -337,10 +341,11 @@ export function HostControlTile() {
       applyPoolSelection(
         withCatalogSavedNames(aiDeckCatalog.candidates),
         aiPoolSelection,
+        poolFolderIndex,
       ).pool.map((candidate) => candidate.id),
     );
     return deckChoices.filter(({ id }) => keep.has(id));
-  }, [suppliedFormat, deckChoices, aiDeckCatalog.candidates, aiPoolSelection]);
+  }, [suppliedFormat, deckChoices, aiDeckCatalog.candidates, aiPoolSelection, poolFolderIndex]);
   // Pick a random format-legal deck for each fresh AI-seat assignment.
   // Previously this defaulted to `deckChoices[0]`, which meant every AI seat
   // got the same deck — uninteresting and exposed catalog ordering. The

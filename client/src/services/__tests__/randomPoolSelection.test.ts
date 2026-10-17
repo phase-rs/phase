@@ -107,6 +107,19 @@ describe("poolGroupForCandidate", () => {
       ),
     ).toBe(PRECON_POOL_GROUP);
   });
+
+  it("groups saved feed mirrors by their feed, not their folder", () => {
+    // The mirror lives in folder f1, but the feed toggle owns it.
+    expect(
+      poolGroupForCandidate(candidate("saved:aggro", saved("meta"), "aggro"), index),
+    ).toBe(feedPoolGroup("meta"));
+  });
+
+  it("sends an adopted deck (provenance removed) back to user organization", () => {
+    expect(
+      poolGroupForCandidate(candidate("saved:aggro", saved(), "aggro"), index),
+    ).toBe(folderPoolGroup("f1"));
+  });
 });
 
 describe("candidateInPool", () => {
@@ -132,6 +145,27 @@ describe("candidateInPool", () => {
     const singledOut = { ...emptyPoolSelection(), excludedDecks: ["saved:aggro"] };
     expect(candidateInPool(aggro, singledOut, index)).toBe(false);
     expect(candidateInPool(control, singledOut, index)).toBe(true);
+  });
+
+  it("excludes a saved feed mirror with its feed, ignoring folder state", () => {
+    const mirror = candidate("saved:aggro", saved("meta"), "aggro");
+    const feedOff = { ...emptyPoolSelection(), excludedGroups: [feedPoolGroup("meta")] };
+    expect(candidateInPool(mirror, feedOff, index)).toBe(false);
+
+    // The mirror's folder membership is irrelevant while it has provenance:
+    // excluding f1 leaves it in, and an explicit include still rescues it
+    // from the feed exclusion.
+    const folderOff = { ...emptyPoolSelection(), excludedGroups: [folderPoolGroup("f1")] };
+    expect(candidateInPool(mirror, folderOff, index)).toBe(true);
+    const rescued = { ...feedOff, includedDecks: ["saved:aggro"] };
+    expect(candidateInPool(mirror, rescued, index)).toBe(true);
+  });
+
+  it("excludes raw feed candidates with their feed", () => {
+    const raw = candidate("feed:meta:burn", { type: "feed", feedId: "meta" });
+    const feedOff = { ...emptyPoolSelection(), excludedGroups: [feedPoolGroup("meta")] };
+    expect(candidateInPool(raw, feedOff, index)).toBe(false);
+    expect(candidateInPool(raw, emptyPoolSelection(), index)).toBe(true);
   });
 });
 

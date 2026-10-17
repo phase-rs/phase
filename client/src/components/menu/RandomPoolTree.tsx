@@ -44,6 +44,14 @@ interface RandomPoolTreeProps {
    * The AI setup has its own chips row, so this stays human-only.
    */
   showBracketFilter?: boolean;
+  /**
+   * Complete toggleable universe. `items` is the filtered display view (deck
+   * search narrows it), but a folder toggle means "select/unselect ALL decks
+   * in that folder" — its override-clearing must cover hidden members too, or
+   * a searched-out explicit include lingers invisibly. Defaults to `items`
+   * for callers with no display filtering (the AI pool surfaces).
+   */
+  allItems?: PoolCandidate[];
 }
 
 const COLLAPSED: ReadonlySet<string> = new Set();
@@ -58,7 +66,7 @@ function feedNameOf(feedId: string): string {
  * Groups start collapsed — the common action is toggling a whole folder from
  * its header; expanding flips individual decks against the group.
  */
-export function RandomPoolTree({ pool, items, baseIds, showBracketFilter }: RandomPoolTreeProps) {
+export function RandomPoolTree({ pool, items, baseIds, showBracketFilter, allItems }: RandomPoolTreeProps) {
   const { t } = useTranslation("menu");
   const selection = usePreferencesStore((s) =>
     pool === "ai" ? s.aiPoolSelection : s.humanPoolSelection,
@@ -85,6 +93,16 @@ export function RandomPoolTree({ pool, items, baseIds, showBracketFilter }: Rand
     for (const item of items) map.set(item.id, candidateInPool(item, selection, index));
     return map;
   }, [items, selection, index]);
+  // Complete per-group membership for toggles: displayed members drive the
+  // rows, but the toggle action covers every true member (see `allItems`).
+  const completeMembers = useMemo(() => {
+    const map = new Map<string, string[]>();
+    if (!allItems) return map;
+    for (const section of buildPoolSections(allItems, { folders, feedNameOf }, index)) {
+      map.set(section.key, section.members.map((member) => member.id));
+    }
+    return map;
+  }, [allItems, folders, index]);
   const rows = useMemo(
     () =>
       sections.map((section) => {
@@ -96,11 +114,12 @@ export function RandomPoolTree({ pool, items, baseIds, showBracketFilter }: Rand
         return {
           section,
           memberIds,
+          toggleIds: completeMembers.get(section.key) ?? memberIds,
           inCount,
           state: poolGroupState(memberIds, section.key, selection),
         };
       }),
-    [sections, included, selection],
+    [sections, completeMembers, included, selection],
   );
   const summary = useMemo(
     () => summarizePoolSelection(items, selection, baseIds, index),
@@ -177,7 +196,7 @@ export function RandomPoolTree({ pool, items, baseIds, showBracketFilter }: Rand
       {open && (
         <div className="flex flex-col gap-1">
           <span className="text-[10px] text-slate-500">{t("randomPool.hint")}</span>
-          {rows.map(({ section, memberIds, inCount, state }) => {
+          {rows.map(({ section, memberIds, toggleIds, inCount, state }) => {
             const label = section.name
               ?? (section.kind === "precon"
                 ? t("randomPool.precons")
@@ -195,7 +214,7 @@ export function RandomPoolTree({ pool, items, baseIds, showBracketFilter }: Rand
                       if (el) el.indeterminate = state === "mixed";
                     }}
                     onChange={() =>
-                      setSelection(setPoolGroupIncluded(selection, section.key, memberIds, state !== "all"))
+                      setSelection(setPoolGroupIncluded(selection, section.key, toggleIds, state !== "all"))
                     }
                     className="h-4 w-4 shrink-0 accent-indigo-400"
                   />

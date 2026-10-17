@@ -135,6 +135,12 @@ export function poolGroupForCandidate(candidate: PoolCandidate, index: FolderInd
     case "precon":
       return PRECON_POOL_GROUP;
     case "saved": {
+      // A saved feed mirror keeps its origin: the `feed:<id>` toggle must
+      // catch it even though it lives in saved storage (possibly inside a
+      // user folder). An adopted deck, whose provenance was removed, falls
+      // through to user organization below. Explicit per-deck overrides live
+      // outside grouping, so they keep winning either way.
+      if (candidate.source.feedId) return feedPoolGroup(candidate.source.feedId);
       if (!candidate.savedName) return UNFILED_POOL_GROUP;
       const folderId = index.folderIdOf(candidate.savedName);
       return folderId ? folderPoolGroup(folderId) : UNFILED_POOL_GROUP;

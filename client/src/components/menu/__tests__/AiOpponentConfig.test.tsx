@@ -348,4 +348,32 @@ describe("AiOpponentConfig — bracket filter", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
   });
+
+  it("counts Random seats from the soft-filter fallback pool instead of zero", () => {
+    mockCandidates = [
+      { ...candidate("hi", 2), coveragePct: 95 },
+      { ...candidate("lo", 2), coveragePct: 55 },
+    ];
+    act(() => {
+      usePreferencesStore.getState().setAiCoverageFloor(90);
+      usePreferencesStore.getState().setAiPoolSelection({
+        ...emptyPoolSelection(),
+        excludedDecks: ["hi"],
+      });
+    });
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    // The curated pool holds only the coverage-55 deck, which misses floor 90:
+    // production falls back to it, so the seat previews Random (1), not (0).
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
+  });
+
+  it("falls back to the catalog count when the bracket filter matches nothing", () => {
+    mockCandidates = [candidate("b2", 2), candidate("b4", 4)];
+    act(() => {
+      usePreferencesStore.getState().setAiBracketFilter([5]);
+      usePreferencesStore.getState().setAiCoverageFloor(0);
+    });
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(2\)/);
+  });
 });

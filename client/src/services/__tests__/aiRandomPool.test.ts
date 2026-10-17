@@ -8,10 +8,12 @@ import {
   cedhSeatProblem,
   pickAiSeatDecks,
   resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
   resolveRandomDrawPool,
   restrictAiPoolByBracket,
   type BracketTaggedCandidate,
   type CedhSeatProblem,
+  type EffectiveAiRandomPoolOptions,
   type PickAiSeatDecksOptions,
   type RandomDrawPoolOptions,
 } from "../aiRandomPool";
@@ -373,6 +375,46 @@ describe("resolveRandomDrawPool", () => {
     const { pool, fellBack } = resolveRandomDrawPool(catalog, options);
     expect(pool.map((d) => d.id)).toEqual(["a", "b"]);
     expect(fellBack).toBe(false);
+  });
+});
+
+describe("resolveEffectiveAiRandomPool", () => {
+  const base: EffectiveAiRandomPoolOptions = {
+    bracketFilter: [],
+    cedhMode: false,
+    selectedFormat: "Commander",
+    archetypeFilter: "Any",
+    coverageFloor: 90,
+  };
+
+  it("falls back to the curated pool when soft preferences empty it", () => {
+    // The reported case: excluding only the coverage-95 deck must preview
+    // Random (1) — the coverage-55 deck production would draw — not Random (0).
+    const catalog = [deck("hi", { coveragePct: 95 }), deck("lo", { coveragePct: 55 })];
+    expect(
+      resolveEffectiveAiRandomPool(catalog, {
+        ...base,
+        poolSelection: { ...emptyPoolSelection(), excludedDecks: ["hi"] },
+      }).map((d) => d.id),
+    ).toEqual(["lo"]);
+  });
+
+  it("falls back to the catalog when the bracket restriction matches nothing", () => {
+    const catalog = [deck("b2", { bracket: 2 }), deck("b4", { bracket: 4 })];
+    expect(
+      resolveEffectiveAiRandomPool(catalog, {
+        ...base,
+        bracketFilter: [5],
+        coverageFloor: 0,
+      }).map((d) => d.id),
+    ).toEqual(["b2", "b4"]);
+  });
+
+  it("narrows to the soft-filtered pool when preferences match", () => {
+    const catalog = [deck("hi", { coveragePct: 95 }), deck("lo", { coveragePct: 55 })];
+    expect(
+      resolveEffectiveAiRandomPool(catalog, base).map((d) => d.id),
+    ).toEqual(["hi"]);
   });
 });
 
