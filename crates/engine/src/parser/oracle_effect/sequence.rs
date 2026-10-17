@@ -8284,13 +8284,18 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
 /// `is_moved_object_enters_modifier_clause`: it keys on the entry-this-way
 /// condition AND a "counter" payoff tail so it drops only the represented clause.
 ///
-/// CLAUSE VOICES accepted (all three are represented by the same typed slot):
+/// CLAUSE VOICES accepted (all four are represented by the same typed slot):
 ///   * active — "If you put an artifact onto the battlefield this way, put two
 ///     +1/+1 counters on it" (Oviya, Automech Artisan);
 ///   * present-tense typed — "If a Hero enters this way, it enters with two
 ///     additional +1/+1 counters on it" (Heroic Return, Recommission, Winter
 ///     Soldier Reborn Avenger);
-///   * passive typed — "If an Equipment is put onto the battlefield this way, …".
+///   * passive typed — "If an Equipment is put onto the battlefield this way, …";
+///   * anaphoric — "It enters with two additional +1/+1 counters on it if it's a
+///     creature" / "If it's an artifact, it enters with an additional +1/+1
+///     counter on it" (What Must Be Done), represented once
+///     `parse_effect_chain_ir_body` converts its `if it's a <type>` gate to the
+///     entry-this-way gate after a battlefield move.
 ///
 /// CONDITIONAL VOICE is deliberately held at `if ` only, POLARITY at affirmative
 /// only, and the SUBJECT at typed-filter-carrying only — all three are enforced by
@@ -8310,12 +8315,40 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
 pub(crate) fn is_moved_object_entry_this_way_counters_clause(sentence: &str) -> bool {
     let lower = sentence.to_lowercase();
     let lower = lower.trim();
-    let Ok((body, _)) =
+    if let Ok((body, _)) =
         crate::parser::oracle_nom::condition::parse_conditional_entry_this_way_rider(lower)
-    else {
-        return false;
+    {
+        return nom_primitives::scan_contains(body, "counter");
+    }
+    is_anaphoric_entry_counters_clause(sentence)
+}
+
+/// CR 614.1c + CR 614.12: the anaphoric voices of the entry-counter rider — "It
+/// enters with two additional +1/+1 counters on it if it's a creature" (trailing)
+/// and "If it's an artifact, it enters with an additional +1/+1 counter on it"
+/// (leading). Decided by the same strippers the effect-chain parser uses, in its
+/// order, and the same predicate its guard conversion uses
+/// (`conditions::anaphoric_entry_counter_gate`), so a sentence is recognized
+/// exactly when that conversion represents it.
+fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
+    let represented = |cond: &AbilityCondition, body: &str| {
+        super::conditions::anaphoric_entry_counter_gate(cond, body).is_some()
     };
-    nom_primitives::scan_contains(body, "counter")
+    let (leading, body) = super::conditions::strip_routed_leading_general_conditional(
+        sentence,
+        &mut ParseContext::default(),
+    );
+    if let Some((cond, _)) = leading {
+        return represented(&cond, &body);
+    }
+    if let (Some(cond), body) = super::conditions::strip_card_type_conditional(sentence) {
+        return represented(&cond, &body);
+    }
+    match super::conditions::strip_routed_suffix_conditional(sentence, &mut ParseContext::default())
+    {
+        (Some((cond, _)), body) => represented(&cond, &body),
+        (None, _) => false,
+    }
 }
 
 /// CR 120.4a + CR 608.2c + CR 702: Parse an excess-damage redirect rider,
@@ -16468,6 +16501,34 @@ mod tests {
             result.is_none(),
             "reflexive attach gate must not re-patch the Dig, got {result:?}"
         );
+    }
+
+    /// CR 614.1c + CR 614.12 (V-L7): the swallow recognizer accepts the two
+    /// anaphoric entry-counter voices the guard conversion represents, keeps the
+    /// existing voices, and rejects the "put" instruction and a multi-type gate
+    /// (neither of which the conversion represents).
+    #[test]
+    fn entry_counters_clause_recognizes_anaphoric_voices() {
+        for represented in [
+            "It enters with two additional +1/+1 counters on it if it's a creature.",
+            "If it's an artifact, it enters with an additional +1/+1 counter on it.",
+            "If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
+            "If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+        ] {
+            assert!(
+                is_moved_object_entry_this_way_counters_clause(represented),
+                "{represented}"
+            );
+        }
+        for unrepresented in [
+            "Put two +1/+1 counters on it if it's a creature.",
+            "It enters with two additional +1/+1 counters on it if it's an artifact or creature.",
+        ] {
+            assert!(
+                !is_moved_object_entry_this_way_counters_clause(unrepresented),
+                "{unrepresented}"
+            );
+        }
     }
 }
 

@@ -1085,6 +1085,11 @@ pub fn resolve(
             let (eff_tapped, eff_attacking) = effective_enter_mods(
                 state,
                 chosen,
+                EntryGateContext {
+                    destination: dest_zone,
+                    controller_override: enters_under_player,
+                    enter_transformed: effect_enter_transformed,
+                },
                 ability.source_id,
                 effect_enter_tapped,
                 effect_enters_attacking,
@@ -1174,6 +1179,11 @@ pub fn resolve(
             let (eff_tapped, eff_attacking) = effective_enter_mods(
                 state,
                 chosen,
+                EntryGateContext {
+                    destination: dest_zone,
+                    controller_override: enters_under_player,
+                    enter_transformed: effect_enter_transformed,
+                },
                 ability.source_id,
                 effect_enter_tapped,
                 effect_enters_attacking,
@@ -1578,8 +1588,94 @@ pub(crate) fn count_selected_zone_arrivals(
         .count()
 }
 
+/// CR 614.12 + CR 110.2a + CR 712.14a: how a moved object will enter — the
+/// inputs an effect-carried entry gate needs to read it as it would exist on
+/// the battlefield.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EntryGateContext {
+    pub destination: Zone,
+    /// The resolved `enters_under` override; `None` = the zone move's default.
+    pub controller_override: Option<PlayerId>,
+    pub enter_transformed: bool,
+}
+
+impl EntryGateContext {
+    /// The entry descriptor of a `ChangeZone` ability; `None` for any other
+    /// effect, which keeps the pre-move read.
+    fn from_change_zone(state: &GameState, ability: &ResolvedAbility) -> Option<Self> {
+        let Effect::ChangeZone {
+            destination,
+            enters_under,
+            enter_transformed,
+            ..
+        } = &ability.effect
+        else {
+            return None;
+        };
+        let controller_override = match resolve_enters_under_player(
+            state,
+            ability,
+            "ChangeZone",
+            enters_under.as_ref(),
+        ) {
+            Ok(controller_override) => controller_override,
+            // CR 110.2a: the resolver already surfaced this error at resolver entry; keep the pre-move read.
+            Err(_) => return None,
+        };
+        Some(Self {
+            destination: *destination,
+            controller_override,
+            enter_transformed: *enter_transformed,
+        })
+    }
+
+    /// The entry descriptor carried by a multi-object `ChangeZone` iteration.
+    fn from_iteration(ctx: &ChangeZoneIterationCtx) -> Self {
+        Self {
+            destination: ctx.destination,
+            controller_override: ctx.enters_under_player,
+            enter_transformed: ctx.enter_transformed,
+        }
+    }
+}
+
+/// CR 614.12: the reading an effect-carried entry gate checks. Battlefield entry
+/// reads the projected entrant; any other destination keeps the pre-move read.
+fn entry_gate_projection(
+    state: &GameState,
+    obj_id: ObjectId,
+    entry: EntryGateContext,
+) -> Option<crate::game::filter::BattlefieldEntrantProjection> {
+    if entry.destination != Zone::Battlefield {
+        return None;
+    }
+    crate::game::filter::BattlefieldEntrantProjection::new(
+        state,
+        obj_id,
+        entry.controller_override,
+        entry.enter_transformed,
+    )
+}
+
+/// CR 614.12: evaluate an entry gate's `filter` against the projected entrant
+/// when there is one, otherwise against the object where it is.
+fn entry_gate_matches(
+    state: &GameState,
+    obj_id: ObjectId,
+    projection: Option<&crate::game::filter::BattlefieldEntrantProjection>,
+    filter: &TargetFilter,
+    ctx: &crate::game::filter::FilterContext<'_>,
+) -> bool {
+    projection.map_or_else(
+        || crate::game::filter::matches_target_filter(state, obj_id, filter, ctx),
+        |projection| projection.matches(filter, ctx),
+    )
+}
+
 /// CR 122.1 + CR 614.1c: Merge unconditional and conditional entry-time counters
 /// for one object about to enter via `ChangeZone`.
+///
+/// CR 614.12: on battlefield entry each conditional filter reads the entrant as it would exist on the battlefield (`BattlefieldEntrantProjection`); other destinations read the object where it is.
 pub(crate) fn enter_with_counters_for_object(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1592,8 +1688,10 @@ pub(crate) fn enter_with_counters_for_object(
         return counters;
     }
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let projection = EntryGateContext::from_change_zone(state, ability)
+        .and_then(|entry| entry_gate_projection(state, obj_id, entry));
     for (filter, counter_type, count) in conditional {
-        if crate::game::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+        if entry_gate_matches(state, obj_id, projection.as_ref(), filter, &ctx) {
             let n = crate::game::quantity::resolve_quantity_with_targets(state, count, ability)
                 .max(0) as u32;
             counters.push((counter_type.clone(), n));
@@ -1687,16 +1785,15 @@ pub(crate) struct ChangeZoneIterationCtx {
 
 /// CR 614.12 + CR 614.12a: Resolve the effective enter-modifiers for one moved
 /// object. The riders (`base_tapped`, `base_attacking`) apply only when `gate`
-/// is `None` (unconditional) or the chosen object matches the gate filter;
-/// otherwise the object enters normally `(Unspecified, false)`.
-///
-/// The object is still in its origin zone here — the choice is made before it
-/// enters (CR 614.12a) — and a card-type filter is stable from hand to
-/// battlefield, so this pre-move `matches_target_filter` check equals the
-/// as-it-would-exist-on-battlefield check (CR 614.12).
+/// is `None` (unconditional) or the moved object, read as it would exist on the
+/// battlefield (`BattlefieldEntrantProjection`), matches it; otherwise the object
+/// enters normally `(Unspecified, false)`. The choice is still made before the
+/// object enters (CR 614.12a). A non-battlefield destination reads the object
+/// where it is.
 pub(crate) fn effective_enter_mods(
     state: &GameState,
     obj_id: ObjectId,
+    entry: EntryGateContext,
     source_id: ObjectId,
     base_tapped: EtbTapState,
     base_attacking: bool,
@@ -1706,7 +1803,8 @@ pub(crate) fn effective_enter_mods(
         None => (base_tapped, base_attacking),
         Some(filter) => {
             let ctx = crate::game::filter::FilterContext::from_source(state, source_id);
-            if crate::game::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+            let projection = entry_gate_projection(state, obj_id, entry);
+            if entry_gate_matches(state, obj_id, projection.as_ref(), filter, &ctx) {
                 (base_tapped, base_attacking)
             } else {
                 (EtbTapState::Unspecified, false)
@@ -1788,6 +1886,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
     let (eff_tapped, eff_attacking) = effective_enter_mods(
         state,
         obj_id,
+        EntryGateContext::from_iteration(ctx),
         ctx.source_id,
         ctx.enter_tapped,
         ctx.enters_attacking,
@@ -4122,11 +4221,17 @@ mod tests {
             properties: vec![],
         });
         let src = ObjectId(100);
+        let entry = EntryGateContext {
+            destination: Zone::Battlefield,
+            controller_override: None,
+            enter_transformed: false,
+        };
         // Enchantment moved object -> base riders apply.
         assert_eq!(
             effective_enter_mods(
                 &state,
                 ench,
+                entry,
                 src,
                 crate::types::zones::EtbTapState::Tapped,
                 true,
@@ -4139,6 +4244,7 @@ mod tests {
             effective_enter_mods(
                 &state,
                 plain,
+                entry,
                 src,
                 crate::types::zones::EtbTapState::Tapped,
                 true,
@@ -4151,6 +4257,7 @@ mod tests {
             effective_enter_mods(
                 &state,
                 plain,
+                entry,
                 src,
                 crate::types::zones::EtbTapState::Tapped,
                 true,
@@ -4247,6 +4354,332 @@ mod tests {
                 attacking, expect_tapped,
                 "enchantment={is_enchantment}: attacking rider must be gated on the moved object's type (CR 508.4 / CR 614.12)"
             );
+        }
+    }
+
+    /// March of the Machines — verbatim Oracle text.
+    const MARCH_OF_THE_MACHINES: &str = "Each noncreature artifact is an artifact creature with \
+         power and toughness each equal to its mana value. (Equipment that's a creature can't \
+         equip a creature.)";
+
+    /// Enchanted Evening — verbatim Oracle text.
+    const ENCHANTED_EVENING: &str =
+        "All permanents are enchantments in addition to their other types.";
+
+    /// A noncreature artifact card (mana value 1) in `owner`'s graveyard.
+    fn graveyard_noncreature_artifact(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(900),
+            owner,
+            "Graveyard Artifact".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = crate::types::mana::ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        id
+    }
+
+    fn typed(type_filter: TypeFilter) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(type_filter))
+    }
+
+    /// A graveyard-to-`destination` `ChangeZone` carrying a conditional
+    /// "if a creature enters this way, +1/+1 counter" entry gate.
+    fn conditional_creature_counter_move(
+        destination: Zone,
+        enters_under: Option<ControllerRef>,
+        targets: Vec<TargetRef>,
+    ) -> (
+        ResolvedAbility,
+        Vec<(TargetFilter, CounterType, QuantityExpr)>,
+    ) {
+        let conditional = vec![(
+            typed(TypeFilter::Creature),
+            CounterType::Plus1Plus1,
+            QuantityExpr::Fixed { value: 1 },
+        )];
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: conditional.clone(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            targets,
+            ObjectId(100),
+            PlayerId(0),
+        );
+        (ability, conditional)
+    }
+
+    /// CR 614.12 (V-P4, destination axis): the conditional entry-counter gate
+    /// reads the projected entrant only on battlefield entry. On a March of the
+    /// Machines board a graveyard noncreature artifact would be a creature on the
+    /// battlefield, so the battlefield move gets the counter; the same ability
+    /// moving it to exile reads the card where it is (not a creature) and gets
+    /// none. Reverting the projection flips the battlefield arm to `[]`.
+    #[test]
+    fn conditional_entry_counters_project_only_on_battlefield_entry() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.add_enchantment_from_oracle(
+            PlayerId(0),
+            "March of the Machines",
+            MARCH_OF_THE_MACHINES,
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let artifact = graveyard_noncreature_artifact(state, PlayerId(0));
+
+        let (to_battlefield, conditional) =
+            conditional_creature_counter_move(Zone::Battlefield, None, vec![]);
+        assert_eq!(
+            enter_with_counters_for_object(state, &to_battlefield, artifact, &[], &conditional),
+            vec![(CounterType::Plus1Plus1, 1)],
+            "battlefield entry must read the March-projected creature (CR 614.12)"
+        );
+
+        let (to_exile, conditional) = conditional_creature_counter_move(Zone::Exile, None, vec![]);
+        assert_eq!(
+            enter_with_counters_for_object(state, &to_exile, artifact, &[], &conditional),
+            vec![],
+            "a non-battlefield destination keeps the read of the card where it is"
+        );
+    }
+
+    /// CR 110.2a + CR 614.12 (V-P5, controller axis): the projection places the
+    /// entrant under the controller it will enter under. P1 controls a static
+    /// "artifacts you control are creatures"; P0 owns the graveyard noncreature
+    /// artifact. With no `enters_under` it enters under its owner P0, P1's static
+    /// doesn't apply, and no counter; with `enters_under: TargetPlayer` and P1
+    /// targeted it enters under P1, the static applies, and it gets the counter.
+    /// No P0-controlled static exists, so the override is the only route to the
+    /// counter.
+    #[test]
+    fn conditional_entry_counters_project_under_entering_controller() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario
+            .add_enchantment_from_oracle(PlayerId(1), "Artifact Animator", "")
+            .with_static_definition(
+                crate::types::ability::StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Artifact],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }))
+                    .modifications(vec![
+                        crate::types::ability::ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                    ]),
+            );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let artifact = graveyard_noncreature_artifact(state, PlayerId(0));
+
+        let (owner_entry, conditional) =
+            conditional_creature_counter_move(Zone::Battlefield, None, vec![]);
+        assert_eq!(
+            enter_with_counters_for_object(state, &owner_entry, artifact, &[], &conditional),
+            vec![],
+            "entering under its owner P0, P1's static must not apply"
+        );
+
+        let (override_entry, conditional) = conditional_creature_counter_move(
+            Zone::Battlefield,
+            Some(ControllerRef::TargetPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+        );
+        assert_eq!(
+            enter_with_counters_for_object(state, &override_entry, artifact, &[], &conditional),
+            vec![(CounterType::Plus1Plus1, 1)],
+            "entering under P1 (CR 110.2a), P1's static applies on the projection"
+        );
+    }
+
+    /// CR 614.12 (V-P7): the `enters_modified_if` gate reads the projected
+    /// entrant. Under Enchanted Evening a plain creature card in hand would be an
+    /// enchantment on the battlefield, so the tapped/attacking riders apply.
+    /// Without Enchanted Evening, or for a non-battlefield destination, the gate
+    /// reads the card as it is and suppresses them. Reverting the projection
+    /// flips the Enchanted Evening arm to `(Unspecified, false)`.
+    #[test]
+    fn effective_enter_mods_reads_projected_types() {
+        for with_evening in [true, false] {
+            let mut scenario = crate::game::scenario::GameScenario::new();
+            if with_evening {
+                scenario.add_enchantment_from_oracle(
+                    PlayerId(0),
+                    "Enchanted Evening",
+                    ENCHANTED_EVENING,
+                );
+            }
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            let card = create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "Bear".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&card).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+            }
+            let gate = typed(TypeFilter::Enchantment);
+            let to = |destination| EntryGateContext {
+                destination,
+                controller_override: None,
+                enter_transformed: false,
+            };
+            let expected = if with_evening {
+                (crate::types::zones::EtbTapState::Tapped, true)
+            } else {
+                (crate::types::zones::EtbTapState::Unspecified, false)
+            };
+            assert_eq!(
+                effective_enter_mods(
+                    state,
+                    card,
+                    to(Zone::Battlefield),
+                    ObjectId(100),
+                    crate::types::zones::EtbTapState::Tapped,
+                    true,
+                    Some(&gate),
+                ),
+                expected,
+                "evening={with_evening}: battlefield entry reads the projected types"
+            );
+            assert_eq!(
+                effective_enter_mods(
+                    state,
+                    card,
+                    to(Zone::Graveyard),
+                    ObjectId(100),
+                    crate::types::zones::EtbTapState::Tapped,
+                    true,
+                    Some(&gate),
+                ),
+                (crate::types::zones::EtbTapState::Unspecified, false),
+                "evening={with_evening}: a non-battlefield destination reads the card as it is"
+            );
+        }
+    }
+
+    /// CR 614.12 + CR 508.4 (V-P7b, production path): drive `resolve` through
+    /// both `effective_enter_mods` call-site families. Arm 1 is the
+    /// `EffectZoneChoice` resume (`process_one_zone_move_with_terminal`, the
+    /// ctx-built entry context); arm 2 is the single-eligible auto-pick branch
+    /// (the locally built entry context). Under Enchanted Evening the plain
+    /// creature card would be an enchantment on the battlefield, so it enters
+    /// tapped and attacking; without it, it enters normally. A call site that
+    /// passed the wrong destination or skipped the projection fails the
+    /// Enchanted Evening arm.
+    #[test]
+    fn enters_modified_if_reads_projection_through_resolve() {
+        for choice_resume in [true, false] {
+            for with_evening in [true, false] {
+                let mut scenario = crate::game::scenario::GameScenario::new();
+                if with_evening {
+                    scenario.add_enchantment_from_oracle(
+                        PlayerId(0),
+                        "Enchanted Evening",
+                        ENCHANTED_EVENING,
+                    );
+                }
+                let mut runner = scenario.build();
+                let state = runner.state_mut();
+                // CR 508.4: the attacking rider is observable only with live combat.
+                state.combat = Some(crate::game::combat::CombatState::default());
+                let card = create_object(
+                    state,
+                    CardId(1),
+                    PlayerId(0),
+                    "Bear".to_string(),
+                    Zone::Hand,
+                );
+                {
+                    let obj = state.objects.get_mut(&card).unwrap();
+                    obj.card_types.core_types.push(CoreType::Creature);
+                    obj.base_card_types = obj.card_types.clone();
+                }
+                let mut ability = ResolvedAbility::new(
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Hand),
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+                        }),
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                        enters_attacking: true,
+                        up_to: choice_resume,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: Some(typed(TypeFilter::Enchantment)),
+                    },
+                    vec![],
+                    ObjectId(100),
+                    PlayerId(0),
+                );
+                if choice_resume {
+                    ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+                }
+                ability.target_choice_timing =
+                    crate::types::ability::TargetChoiceTiming::Resolution;
+                let mut events = Vec::new();
+                resolve(state, &ability, &mut events).unwrap();
+                if choice_resume {
+                    assert!(
+                        matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+                        "arm 1 must reach the EffectZoneChoice pause"
+                    );
+                    apply_as_current(state, GameAction::SelectCards { cards: vec![card] }).unwrap();
+                } else {
+                    assert!(
+                        !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+                        "arm 2 must auto-pick the single eligible card"
+                    );
+                }
+                assert!(
+                    state.battlefield.contains(&card),
+                    "resume={choice_resume} evening={with_evening}: the card must enter"
+                );
+                assert_eq!(
+                    state.objects[&card].tapped, with_evening,
+                    "resume={choice_resume} evening={with_evening}: tapped rider reads the projection"
+                );
+                let attacking = state
+                    .combat
+                    .as_ref()
+                    .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == card));
+                assert_eq!(
+                    attacking, with_evening,
+                    "resume={choice_resume} evening={with_evening}: attacking rider reads the projection"
+                );
+            }
         }
     }
 

@@ -1905,6 +1905,30 @@ pub(crate) fn terminal_battlefield_departure_row(
         .then(|| &state.zone_changes_this_turn[index])
 }
 
+impl GameState {
+    /// CR 603.10 + CR 400.7: the settled observation of the battlefield entry `record` describes,
+    /// or `None`. Exact: this turn's row at this record's ledger index, naming this record's object
+    /// at its post-entry incarnation; a later entry reusing the storage id is a different object
+    /// (CR 400.7) and never answers for this one. Self-validating, so a restored row answers only
+    /// for the identical (turn, index, object, incarnation) entry.
+    pub(crate) fn battlefield_entry_observation(
+        &self,
+        record: &ZoneChangeRecord,
+    ) -> Option<&TriggerSourceContext> {
+        if record.to_zone != Zone::Battlefield || record.recorded_turn_number != self.turn_number {
+            return None;
+        }
+        self.battlefield_entry_observations
+            .get(&record.turn_zone_change_index)
+            .filter(|row| {
+                row.identity.reference.object_id == record.object_id
+                    && record
+                        .entered_incarnation
+                        .is_none_or(|incarnation| row.identity.reference.incarnation == incarnation)
+            })
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22784,6 +22808,16 @@ declare_game_state! {
     /// CR 400.7: Zone-change snapshots this turn, enabling data-driven condition queries.
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
     pub zone_changes_this_turn: im::Vector<ZoneChangeRecord>,
+    /// CR 603.10 + CR 603.6a + CR 611.3c: each battlefield entry's entrant as it existed
+    /// immediately after its entry event — continuous effects applied, later instructions of the
+    /// same resolution (CR 608.2c) not yet applied. Keyed by the entry's
+    /// `ZoneChangeRecord::turn_zone_change_index` (the `zone_changes_this_turn` index space;
+    /// cleared with it). Written only by `zones::settle_battlefield_entry_observations`; read only
+    /// through `GameState::battlefield_entry_observation`. An entry with no row was never settled,
+    /// and enter observers read the live entrant (or its record). Engine-internal: stripped from
+    /// every viewer projection.
+    #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
+    pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -24783,6 +24817,11 @@ impl PostReplacementDrain {
 impl PostReplacementDrainStack {
     pub fn is_empty(&self) -> bool {
         self.drains.is_empty()
+    }
+
+    /// Every drain in this frame, outermost first. Read-only.
+    pub(crate) fn drains(&self) -> impl Iterator<Item = &PostReplacementDrain> {
+        self.drains.iter()
     }
 
     /// Is there a continuation that has not run yet?
@@ -29508,6 +29547,7 @@ impl GameState {
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
+            battlefield_entry_observations: im::OrdMap::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -32541,6 +32581,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_who_sacrificed_artifact_this_turn: _,
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
+        battlefield_entry_observations: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -32902,6 +32943,7 @@ impl PartialEq for GameState {
                 == other.players_who_sacrificed_artifact_this_turn
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
+            && self.battlefield_entry_observations == other.battlefield_entry_observations
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn

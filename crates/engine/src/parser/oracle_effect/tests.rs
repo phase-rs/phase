@@ -87866,6 +87866,256 @@ fn subject_creatures_not_of_chosen_type_pumps_all_excluding_chosen_type() {
     assert_eq!(pump.duration, Some(Duration::UntilEndOfTurn));
 }
 
+/// The `conditional_enter_with_counters` slot of a battlefield `ChangeZone` head.
+fn battlefield_move_entry_gate(
+    def: &AbilityDefinition,
+) -> &[(TargetFilter, CounterType, QuantityExpr)] {
+    match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            conditional_enter_with_counters,
+            ..
+        } => conditional_enter_with_counters,
+        other => panic!("head must be a battlefield ChangeZone, got {other:#?}"),
+    }
+}
+
+fn typed_entry_gate(
+    type_filter: TypeFilter,
+    count: i32,
+) -> Vec<(TargetFilter, CounterType, QuantityExpr)> {
+    vec![(
+        TargetFilter::Typed(TypedFilter::new(type_filter)),
+        CounterType::Plus1Plus1,
+        QuantityExpr::Fixed { value: count },
+    )]
+}
+
+/// CR 614.1c + CR 614.12 (V-L1): What Must Be Done mode 2's trailing anaphoric
+/// rider "It enters with two additional +1/+1 counters on it if it's a creature"
+/// lowers to the battlefield move's entry gate, not a later `PutCounter`.
+#[test]
+fn what_must_be_done_rider_lowers_to_entry_gate() {
+    let def = parse_effect_chain(
+        "Return target historic permanent card from your graveyard to the battlefield. \
+         It enters with two additional +1/+1 counters on it if it's a creature.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        battlefield_move_entry_gate(&def),
+        typed_entry_gate(TypeFilter::Creature, 2).as_slice()
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the rider must be folded: {def:#?}"
+    );
+}
+
+/// CR 614.1c + CR 614.12 (V-L2): the leading anaphoric voice "If it's an
+/// artifact, it enters with an additional +1/+1 counter on it" lowers the same way.
+#[test]
+fn anaphoric_leading_voice_lowers_to_entry_gate() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield. \
+         If it's an artifact, it enters with an additional +1/+1 counter on it.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        battlefield_move_entry_gate(&def),
+        typed_entry_gate(TypeFilter::Artifact, 1).as_slice()
+    );
+    assert!(def.sub_ability.is_none(), "{def:#?}");
+}
+
+/// CR 608.2c (V-L3): "Put two +1/+1 counters on it if it's a creature" is a
+/// later instruction, not an entry replacement — it keeps its `PutCounter` sub
+/// and the move's entry gate stays empty.
+#[test]
+fn put_counter_if_its_a_type_stays_later_instruction() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield. \
+         Put two +1/+1 counters on it if it's a creature.",
+        AbilityKind::Spell,
+    );
+    assert!(battlefield_move_entry_gate(&def).is_empty(), "{def:#?}");
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the later instruction survives");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "{sub:#?}"
+    );
+    assert!(
+        !matches!(
+            sub.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "{sub:#?}"
+    );
+}
+
+/// CR 614.1c (V-L4): a multi-type anaphoric gate ("if it's an artifact or
+/// creature") is not a single-type entry gate the converter represents, so the
+/// rider is not folded into the entry and stays visible.
+#[test]
+fn multi_type_entry_rider_is_not_folded() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield. \
+         It enters with two additional +1/+1 counters on it if it's an artifact or creature.",
+        AbilityKind::Spell,
+    );
+    assert!(battlefield_move_entry_gate(&def).is_empty(), "{def:#?}");
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the unconverted rider stays a sub-ability");
+    assert!(
+        !matches!(
+            sub.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "{sub:#?}"
+    );
+}
+
+/// CR 614.1c (V-L4b): after a token creation (not a battlefield move) the
+/// anaphoric rider is not converted — the token path is untouched.
+#[test]
+fn anaphoric_rider_after_token_is_not_converted() {
+    let def = parse_effect_chain(
+        "Create a 1/1 white Ally creature token. \
+         It enters with an additional +1/+1 counter on it if it's a creature.",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the rider stays a sub-ability");
+    assert!(
+        !matches!(
+            sub.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "{sub:#?}"
+    );
+}
+
+/// CR 614.1c + CR 608.2c (V-L4c): the conversion's parent precondition — the
+/// chain's latest clause is a battlefield `ChangeZone` with no compound sub of
+/// its own, the shape `fold_enters_this_way_counter_rider` folds under.
+#[test]
+fn previous_clause_requires_bare_battlefield_move() {
+    use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
+    use crate::parser::oracle_ir::effect_chain::ClauseIrBuilder;
+
+    let battlefield_move = || Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::Any,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    };
+    let clauses_with = |parsed| {
+        let mut builder = ClauseIrBuilder::new("");
+        builder
+            .clause(
+                "",
+                parsed,
+                Some(ClauseBoundary::Sentence),
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+        builder.finish()
+    };
+
+    assert!(previous_clause_moves_to_battlefield(&clauses_with(
+        parsed_clause(battlefield_move())
+    )));
+
+    let mut compound = parsed_clause(battlefield_move());
+    compound.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    assert!(!previous_clause_moves_to_battlefield(&clauses_with(
+        compound
+    )));
+
+    let token = parse_effect_chain(
+        "Create a 1/1 white Ally creature token.",
+        AbilityKind::Spell,
+    );
+    assert!(!previous_clause_moves_to_battlefield(&clauses_with(
+        parsed_clause(*token.effect)
+    )));
+    assert!(!previous_clause_moves_to_battlefield(&[]));
+}
+
+/// CR 614.1c + CR 122.1 (V-L5): the shared rider grammar accepts both subjects,
+/// both count shapes and both P/T counter kinds, and rejects other verbs,
+/// counter kinds and entry modifiers. The producer accepts the rider with and
+/// without its final period.
+#[test]
+fn moved_object_enters_with_counters_combinator() {
+    let parse = |text: &str| {
+        all_consuming(parse_moved_object_enters_with_counters)
+            .parse(text)
+            .ok()
+            .map(|(_, parsed)| parsed)
+    };
+    assert_eq!(
+        parse("it enters with an additional +1/+1 counter on it"),
+        Some((CounterType::Plus1Plus1, 1))
+    );
+    assert_eq!(
+        parse("that creature enters with two additional -1/-1 counters on it"),
+        Some((CounterType::Minus1Minus1, 2))
+    );
+    assert_eq!(parse("put two +1/+1 counters on it"), None);
+    assert_eq!(
+        parse("it enters with an additional loyalty counter on it"),
+        None
+    );
+    assert_eq!(parse("it enters tapped"), None);
+
+    for text in [
+        "it enters with two additional +1/+1 counters on it",
+        "it enters with two additional +1/+1 counters on it.",
+    ] {
+        assert_eq!(
+            try_parse_enters_this_way_additional_counter(text),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTarget,
+            }),
+            "{text}"
+        );
+    }
+}
+
 // ── #9658: producer-bound entry-counter riders (CR 608.2c + CR 614.1c) ──────
 
 /// Every ability definition reachable from `def` (sub and else branches).
@@ -88019,12 +88269,13 @@ fn entry_counter_riders_are_producer_bound() {
     }
 }
 
-/// CR 608.2c + CR 614.1c: What Must Be Done's second mode (verbatim, MTGJSON).
-/// The rider is gated on a trailing "if it's a creature" (a card-type
-/// condition, not "enters this way"), so the battlefield-mover arm refuses it
-/// and the rider stays an explicit gap. It is never a post-move
-/// `PutCounter { ParentTarget }`, which would put counters after the entry
-/// rather than as the permanent enters.
+/// CR 608.2c + CR 614.1c + CR 614.12: What Must Be Done's second mode (verbatim,
+/// MTGJSON). The rider's trailing "if it's a creature" gate is converted to the
+/// entry-this-way gate after the battlefield move
+/// (`conditions::anaphoric_entry_counter_gate`), so the battlefield-mover arm
+/// reads it and it folds into the move's entry counters. It is never a
+/// post-move `PutCounter { ParentTarget }`, which would put counters after the
+/// entry rather than as the permanent enters.
 #[test]
 fn what_must_be_done_rider_is_not_a_post_move_put() {
     let abilities = spell_chain_definitions(
@@ -88036,10 +88287,12 @@ fn what_must_be_done_rider_is_not_a_post_move_put() {
             &*def.effect,
             Effect::ChangeZone {
                 destination: Zone::Battlefield,
+                conditional_enter_with_counters,
                 ..
-            }
+            } if conditional_enter_with_counters.as_slice()
+                == typed_entry_gate(TypeFilter::Creature, 2).as_slice()
         )),
-        "reach guard: the battlefield ChangeZone exists, got {abilities:?}"
+        "the rider folds into the battlefield ChangeZone's entry gate, got {abilities:?}"
     );
     assert!(
         !has_parent_target_put(&defs),
@@ -88054,7 +88307,7 @@ fn what_must_be_done_rider_is_not_a_post_move_put() {
                 )),
         "no RevealedHasCardType-gated put, got {abilities:?}"
     );
-    assert!(has_unimplemented_rider(&defs), "got {abilities:?}");
+    assert!(!has_unimplemented_rider(&defs), "got {abilities:?}");
 }
 
 /// CR 608.2c + CR 614.1c: the cast-this-way entry rider is read only under a

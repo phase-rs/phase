@@ -1616,6 +1616,48 @@ pub(super) fn card_type_condition_as_target_match(
     })
 }
 
+/// CR 614.1c + CR 614.12: an anaphoric "if it's a <type>" gate on an "enters with …
+/// counters" rider names the characteristics of the permanent an earlier instruction
+/// moved onto the battlefield, as it would exist there — the gate the "if a <type>
+/// enters this way" voice already expresses. `None` for any other condition (several
+/// types, an additional or subtype filter, a negation), which stays a later gate.
+pub(super) fn card_type_condition_as_entry_this_way(
+    cond: &AbilityCondition,
+) -> Option<AbilityCondition> {
+    let AbilityCondition::RevealedHasCardType {
+        card_types,
+        additional_filter: None,
+        subtype_filter: None,
+    } = cond
+    else {
+        return None;
+    };
+    let [core] = card_types.as_slice() else {
+        return None;
+    };
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(core_type_to_type_filter(*core))),
+        destination: Some(Zone::Battlefield),
+    })
+}
+
+/// CR 614.1c + CR 614.12: the typed entry gate for an anaphoric entry-counter rider —
+/// `Some` exactly when `body` is the rider (all-consuming, optional final ".") and `cond`
+/// converts through `card_type_condition_as_entry_this_way`.
+pub(super) fn anaphoric_entry_counter_gate(
+    cond: &AbilityCondition,
+    body: &str,
+) -> Option<AbilityCondition> {
+    nom_parse_lower(&body.trim().to_lowercase(), |i| {
+        all_consuming(terminated(
+            super::parse_moved_object_enters_with_counters,
+            opt(tag(".")),
+        ))
+        .parse(i)
+    })?;
+    card_type_condition_as_entry_this_way(cond)
+}
+
 /// CR 701.20a: `"If a[n] <types> card [<property>] is revealed this way, …"` —
 /// gates a sub_ability on the card the preceding look/reveal step produced.
 /// CR 701.20a ("To reveal a card, show that card to all players…") is the
@@ -13913,5 +13955,61 @@ mod tests {
             })
             .collect();
         assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 614.1c + CR 614.12 (V-L6): only a single-core-type, unqualified,
+    /// affirmative "if it's a <type>" gate converts to the entry-this-way gate.
+    #[test]
+    fn card_type_condition_as_entry_this_way_cases() {
+        let revealed = |card_types: Vec<CoreType>| AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter: None,
+            subtype_filter: None,
+        };
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![CoreType::Creature])),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Some(Zone::Battlefield),
+            })
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: Some(FilterProp::Token),
+                subtype_filter: None,
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: None,
+                subtype_filter: Some(Box::new(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Subtype("Hero".to_string()),
+                )))),
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![
+                CoreType::Artifact,
+                CoreType::Creature
+            ])),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::Not {
+                condition: Box::new(revealed(vec![CoreType::Creature])),
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Some(Zone::Battlefield),
+            }),
+            None
+        );
     }
 }

@@ -1221,6 +1221,9 @@ fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint
 /// CR 603.6 + CR 603.6c: Tests whether one zone-change event satisfies a single
 /// origin/destination/valid_card clause. Shared by both the scalar
 /// `match_changes_zone` path and the disjunctive `zone_change_clauses` path.
+/// CR 603.10 + CR 611.3c: an enters observer's subject filter reads the entrant as it existed
+/// immediately after its entry event, continuous effects in force at that time applied
+/// (`filter::matches_target_filter_on_entry_observation`).
 #[allow(clippy::too_many_arguments)]
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
@@ -1251,14 +1254,20 @@ fn zone_change_clause_matches(
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-        let live_entrant =
-            *to == Zone::Battlefield && state.objects.contains_key(&record.object_id);
         let departed = named_origin_zone(origin, record.from_zone);
-        let matches = match (live_entrant, departed) {
-            // CR 603.6a: an enters trigger reads the permanent as it exists on the battlefield,
-            // so a named battlefield destination leaves the pile unlicensed.
-            (true, Some(from))
-                if !destination_constraint_names(destination, destination_constraint, *to) =>
+        // CR 603.6a + CR 603.10: an enters observer (destination battlefield, and either no named
+        // origin or a named battlefield destination) reads the entrant as it existed immediately
+        // after its entry event. A named-origin clause without a named battlefield destination is
+        // a leaves-a-zone observer (CR 603.10a) and keeps the departure reading.
+        let enters_observer = *to == Zone::Battlefield
+            && (departed.is_none()
+                || destination_constraint_names(destination, destination_constraint, *to));
+        let matches = match (enters_observer, departed) {
+            (true, _) => super::filter::matches_target_filter_on_entry_observation(
+                state, record, departed, filter, &ctx,
+            ),
+            (false, Some(from))
+                if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) =>
             {
                 super::filter::matches_target_filter_on_departure(
                     state,
@@ -1268,14 +1277,9 @@ fn zone_change_clause_matches(
                     &ctx,
                 )
             }
-            (true, _) => {
-                super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
-            }
-            (false, departed) => {
-                super::filter::matches_target_filter_on_zone_change_record_licensed(
-                    state, record, departed, filter, &ctx,
-                )
-            }
+            (false, _) => super::filter::matches_target_filter_on_zone_change_record_licensed(
+                state, record, departed, filter, &ctx,
+            ),
         };
         if !matches {
             return false;

@@ -2683,50 +2683,46 @@ fn try_parse_lose_control_delayed_trigger(
     ))
 }
 
+/// CR 614.1c + CR 122.1: "<it | that creature> enters with <an additional | N additional>
+/// <+1/+1 | -1/-1> counter(s) on it" — an entry-replacement rider naming the object an
+/// earlier instruction moved. Single authority for this rider grammar: the effect
+/// producer (`try_parse_enters_this_way_additional_counter`, reached through
+/// `entry_counter_rider_clause`), the guard conversion in `parse_effect_chain_ir_body`,
+/// and the sequence-level swallow recognizer all call it.
+pub(crate) fn parse_moved_object_enters_with_counters(
+    input: &str,
+) -> OracleResult<'_, (CounterType, u32)> {
+    preceded(
+        alt((tag("that creature enters with "), tag("it enters with "))),
+        (
+            alt((
+                value(1u32, tag("an additional ")),
+                terminated(nom_primitives::parse_number, tag(" additional ")),
+            )),
+            alt((
+                value(CounterType::Plus1Plus1, tag("+1/+1")),
+                value(CounterType::Minus1Minus1, tag("-1/-1")),
+            )),
+            alt((tag(" counter on it"), tag(" counters on it"))),
+        ),
+    )
+    .map(|(count, counter_type, _)| (counter_type, count))
+    .parse(input)
+}
+
 /// CR 122.1 + CR 608.2c: "it enters with an additional +1/+1 counter on it" rider
 /// after a zone-change-this-way gate (Winter Soldier, Reborn Avenger). Valid only
 /// under its battlefield-mover producer: reached solely through
 /// `entry_counter_rider_clause`, so its `ParentTarget` always names the object
 /// the preceding `ChangeZone` moved (and is folded into that move).
 fn try_parse_enters_this_way_additional_counter(lower: &str) -> Option<Effect> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature enters with "),
-        tag("it enters with "),
-    ))
-    .parse(lower.trim())
-    .ok()?;
-
-    let (rest, count) =
-        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
-            (r, 1u32)
-        } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
-            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ").parse(r).ok()?;
-            (r, n)
-        } else {
-            return None;
-        };
-
-    let (rest, counter_type) = alt((
-        value(
-            CounterType::Plus1Plus1,
-            tag::<_, _, OracleError<'_>>("+1/+1"),
-        ),
-        value(CounterType::Minus1Minus1, tag("-1/-1")),
-    ))
-    .parse(rest)
-    .ok()?;
-
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>(" counter on it"),
-        tag(" counters on it"),
-    ))
-    .parse(rest)
-    .ok()?;
-
-    if !rest.trim_end_matches('.').trim().is_empty() {
-        return None;
-    }
-
+    let (counter_type, count) = super::oracle_nom::bridge::nom_parse_lower(lower.trim(), |i| {
+        all_consuming(terminated(
+            parse_moved_object_enters_with_counters,
+            opt(tag(".")),
+        ))
+        .parse(i)
+    })?;
     Some(Effect::PutCounter {
         counter_type,
         count: QuantityExpr::Fixed {
@@ -4348,8 +4344,10 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
 ///    future cast (`cast_from_zone::grant_lingering_permissions`, the only
 ///    extractor of the rider);
 /// 2. a battlefield mover whose rider is gated on an object entering this way
-///    (Heroic Return, Recommission) — `lower::entry_rider_folds_into`, the
-///    predicate the fold into `ChangeZone.conditional_enter_with_counters` uses.
+///    (Heroic Return, Recommission, and What Must Be Done's anaphoric "if it's a
+///    <type>" gate, which `parse_effect_chain_ir_body` converts to that shape
+///    via `conditions::anaphoric_entry_counter_gate`) — `lower::entry_rider_folds_into`,
+///    the predicate the fold into `ChangeZone.conditional_enter_with_counters` uses.
 ///
 /// The first arm whose producer holds owns the clause; when its recognizer
 /// declines, the clause falls to the generic path rather than to a later arm
@@ -26840,6 +26838,22 @@ fn refuse_target_pt_threshold_rider_with_own_target(clause: &mut ClauseIr) {
     }
 }
 
+/// CR 614.1c + CR 608.2c: whether the chain's latest clause is a bare battlefield
+/// move — a `ChangeZone` to the battlefield with no compound sub of its own — the
+/// only parent under which `lower::fold_enters_this_way_counter_rider` represents a
+/// following "enters with … counters" rider as the move's entry gate.
+fn previous_clause_moves_to_battlefield(clauses: &[ClauseIr]) -> bool {
+    clauses.last().is_some_and(|clause| {
+        matches!(
+            clause.parsed.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && clause.parsed.sub_ability.is_none()
+    })
+}
+
 /// [`chain_declared_object_target`], also naming WHICH clause declared the
 /// antecedent (its index in `clauses`). Same walk, same exclusions: the only
 /// difference is that the declaring clause's position is returned alongside the
@@ -43426,6 +43440,15 @@ fn parse_effect_chain_ir_body(
             .or(turn_cond)
             .or(target_has_cond)
             .or(suffix_cond);
+        // CR 614.1c + CR 614.12 + CR 608.2c: "it enters with N additional counters on it
+        // if it's a <type>" (either voice), after a battlefield move, gates an entry
+        // replacement on the moved permanent, not a later instruction.
+        let guard_condition = match guard_condition {
+            Some(cond) if previous_clause_moves_to_battlefield(builder.clauses()) => {
+                Some(conditions::anaphoric_entry_counter_gate(&cond, &text).unwrap_or(cond))
+            }
+            other => other,
+        };
         // CR 603.12 + CR 603.4 + CR 608.2a: A `When you do, if <guard>, ...` rider is
         // not equivalent to a bare reflexive trigger. The shared leading
         // conditional parser deferred this guard so the specialized guard
