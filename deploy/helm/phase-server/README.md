@@ -174,12 +174,16 @@ does not replace the native WebSocket response deadline above.
 Queued application ingress is limited to 64 commands and 1 MiB of retained
 payload across the raw and decoded queues. Overflow closes the connection with
 WebSocket code 1013 rather than silently discarding a command. Established
-connections' plain-text and raw-envelope JSON Pings bypass this command budget;
-their replies are coalesced. Other binary frames, including malformed and
+connections may bypass this command budget only through a reader heartbeat
+probe of at most 256 bytes, with a burst allowance of eight probes replenished
+at two per second. All probe attempts spend this allowance, including malformed
+or unrelated small JSON; replies remain coalesced. Larger frames and excess
+probes fall through to normal ingress admission and the decoder's 30-message/s
+quota, including JSON Pings. Other binary frames, including malformed and
 compressed envelopes, consume the raw decode quota before decompression.
-Exceeding that quota also closes with 1013 and records the distinct
+Exceeding that quota closes with 1013 and records the distinct
 `raw_decode_quota` disconnect cause. Normal client JSON Pings are smaller than
-the 256-byte compression threshold and use the exempt plain/raw form.
+the 256-byte compression threshold and use the plain/raw form.
 Decoded Action/Interaction quota failures instead receive an owned
 `ActionFailed`. Up to eight such refusals may remain unflushed per connection;
 that admission is released only after socket flush, so a draining client may

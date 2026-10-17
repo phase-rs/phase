@@ -29,27 +29,71 @@ struct PingProbe {
     data: PingData,
 }
 
-/// Borrow the input and skip unrelated fields without materializing a command.
-pub(crate) fn timestamp(frame: &Message, format: Option<WireFormat>) -> Option<u64> {
-    let json = match (frame, format) {
-        (Message::Text(text), _) => text.as_str(),
-        (Message::Binary(bytes), Some(WireFormat::GzipEnvelopeV1)) => {
-            let payload = bytes.strip_prefix(&[crate::wire::FORMAT_RAW])?;
-            std::str::from_utf8(payload).ok()?
+/// Match the client's wireEnvelope.ts compression threshold. Never parse a
+/// command-sized frame on the reader before ingress admission.
+pub(crate) const MAX_HEARTBEAT_PROBE_BYTES: usize = 256;
+pub(crate) const FAST_PATH_BURST: u32 = 8;
+const PROBE_REFILL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Bound JSON probe work, including probes which do not recognize a Ping.
+/// Excess frames retain the normal ingress and decoder rate-limit path.
+pub(crate) struct HeartbeatProbe {
+    tokens: u32,
+    refilled_at: tokio::time::Instant,
+}
+
+impl Default for HeartbeatProbe {
+    fn default() -> Self {
+        Self {
+            tokens: FAST_PATH_BURST,
+            refilled_at: tokio::time::Instant::now(),
         }
-        (Message::Binary(_), None | Some(WireFormat::Unknown))
-        | (Message::Ping(_) | Message::Pong(_) | Message::Close(_), _) => return None,
-    };
-    let probe: PingProbe = serde_json::from_str(json).ok()?;
-    match probe.kind {
-        MessageKind::Ping => probe.data.timestamp,
-        MessageKind::Other => None,
+    }
+}
+
+impl HeartbeatProbe {
+    pub(crate) fn timestamp(&mut self, frame: &Message, format: Option<WireFormat>) -> Option<u64> {
+        let json = match (frame, format) {
+            (Message::Text(text), _) if text.len() <= MAX_HEARTBEAT_PROBE_BYTES => text.as_str(),
+            (Message::Binary(bytes), Some(WireFormat::GzipEnvelopeV1))
+                if bytes.len() <= MAX_HEARTBEAT_PROBE_BYTES =>
+            {
+                let payload = bytes.strip_prefix(&[crate::wire::FORMAT_RAW])?;
+                std::str::from_utf8(payload).ok()?
+            }
+            (Message::Text(_) | Message::Binary(_), _)
+            | (Message::Ping(_) | Message::Pong(_) | Message::Close(_), _) => return None,
+        };
+        let now = tokio::time::Instant::now();
+        let refill = (now.duration_since(self.refilled_at).as_millis()
+            / PROBE_REFILL_INTERVAL.as_millis())
+        .min(u128::from(FAST_PATH_BURST)) as u32;
+        if refill > 0 {
+            self.tokens = (self.tokens + refill).min(FAST_PATH_BURST);
+            self.refilled_at = if self.tokens == FAST_PATH_BURST {
+                now
+            } else {
+                self.refilled_at + PROBE_REFILL_INTERVAL * refill
+            };
+        }
+        // Charge attempts before parsing: malformed/unrelated small JSON must
+        // not bypass this CPU bound merely because it produces no Pong.
+        self.tokens = self.tokens.checked_sub(1)?;
+        let probe: PingProbe = serde_json::from_str(json).ok()?;
+        match probe.kind {
+            MessageKind::Ping => probe.data.timestamp,
+            MessageKind::Other => None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timestamp(frame: &Message, format: Option<WireFormat>) -> Option<u64> {
+        HeartbeatProbe::default().timestamp(frame, format)
+    }
 
     #[test]
     fn only_valid_top_level_ping_can_bypass_command_admission() {
@@ -89,5 +133,72 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn oversized_valid_pings_do_not_enter_the_reader_probe() {
+        let ping = r#"{"type":"Ping","data":{"timestamp":4}}"#;
+        let boundary = format!(
+            "{ping}{}",
+            " ".repeat(MAX_HEARTBEAT_PROBE_BYTES - ping.len())
+        );
+        assert_eq!(timestamp(&Message::text(boundary.clone()), None), Some(4));
+        assert_eq!(
+            timestamp(&Message::text(format!("{boundary} ")), None),
+            None
+        );
+        let mut raw = vec![crate::wire::FORMAT_RAW];
+        raw.extend_from_slice(boundary.trim_end().as_bytes());
+        raw.resize(MAX_HEARTBEAT_PROBE_BYTES, b' ');
+        assert_eq!(
+            timestamp(
+                &Message::binary(raw.clone()),
+                Some(WireFormat::GzipEnvelopeV1)
+            ),
+            Some(4)
+        );
+        raw.push(b' ');
+        assert_eq!(
+            timestamp(&Message::binary(raw), Some(WireFormat::GzipEnvelopeV1)),
+            None
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_burst_is_bounded_and_refills_without_idle_credit_above_capacity() {
+        let mut probe = HeartbeatProbe::default();
+        let ping = Message::text(r#"{"type":"Ping","data":{"timestamp":4}}"#);
+        for _ in 0..FAST_PATH_BURST {
+            assert_eq!(probe.timestamp(&ping, None), Some(4));
+        }
+        assert_eq!(probe.timestamp(&ping, None), None);
+        tokio::time::advance(PROBE_REFILL_INTERVAL - std::time::Duration::from_millis(1)).await;
+        assert_eq!(probe.timestamp(&ping, None), None);
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert_eq!(probe.timestamp(&ping, None), Some(4));
+        assert_eq!(probe.timestamp(&ping, None), None);
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        for _ in 0..FAST_PATH_BURST {
+            assert_eq!(probe.timestamp(&ping, None), Some(4));
+        }
+        assert_eq!(probe.timestamp(&ping, None), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_and_malformed_probes_cannot_preserve_unlimited_parse_credit() {
+        for json in [r#"{"type":"SubscribeLobby"}"#, "{"] {
+            let mut probe = HeartbeatProbe::default();
+            for _ in 0..FAST_PATH_BURST {
+                assert_eq!(probe.timestamp(&Message::text(json), None), None);
+            }
+            assert_eq!(
+                probe.timestamp(
+                    &Message::text(r#"{"type":"Ping","data":{"timestamp":4}}"#),
+                    None,
+                ),
+                None,
+                "{json} escaped the reader probe budget"
+            );
+        }
     }
 }

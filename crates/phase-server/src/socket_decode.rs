@@ -63,9 +63,9 @@ pub(crate) async fn run(
             DecoderWake::Frame(Some(frame)) => frame,
             DecoderWake::Frame(None) => break,
         };
-        // The client's <256-byte Pings are text or FORMAT_RAW and have already
-        // bypassed command admission in the reader. GZIP frames, whatever their
-        // content, must spend raw quota before decompression or warning work.
+        // Only the reader's small, rate-admitted heartbeat allowance bypasses
+        // this task. All fallthrough Pings spend ordinary decoder quota.
+        // Binary frames spend it before decompression or warning work.
         let charge = if matches!(&frame, Message::Binary(_)) {
             if !limiter.allow() {
                 socket.raw_decode_quota();
@@ -124,12 +124,7 @@ pub(crate) async fn run(
         };
         let command_id = envelope.command_id();
         let message = &envelope.message;
-        // JSON heartbeats are a control-plane message, not an application-rate
-        // quota consumer. Their replies are coalesced by the bounded control lane.
-        if matches!(charge, RateCharge::Required)
-            && !(hello.is_none() && matches!(message, ClientMessage::Ping { .. }))
-            && !limiter.allow()
-        {
+        if matches!(charge, RateCharge::Required) && !limiter.allow() {
             if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
                 break;
             }

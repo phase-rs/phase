@@ -572,6 +572,7 @@ async fn read_socket<S>(
 {
     let mut closed = death.closed();
     let mut activity = liveness.reader();
+    let mut heartbeat_probe = crate::socket_heartbeat::HeartbeatProbe::default();
     loop {
         let deadline = activity.borrow_and_update().deadline();
         let next = tokio::select! {
@@ -605,14 +606,13 @@ async fn read_socket<S>(
                 break;
             }
             Some(Ok(frame @ (Message::Text(_) | Message::Binary(_)))) => {
-                // wireEnvelope.ts keeps <256-byte Pings text/FORMAT_RAW.
-                // Exempt established controls before retaining command slots;
-                // GZIP frames stay subject to the decoder's raw CPU quota.
+                // Only bounded, rate-admitted probes may bypass command slots.
+                // Other frames retain normal ingress and decoder rate limits.
                 let encoding = control.encoding();
                 let ping = match encoding {
                     Encoding::Pending => None,
                     Encoding::Plain | Encoding::GzipEnvelope => {
-                        crate::socket_heartbeat::timestamp(&frame, encoding.wire_format())
+                        heartbeat_probe.timestamp(&frame, encoding.wire_format())
                     }
                 };
                 if let Some(timestamp) = ping {
@@ -1284,12 +1284,13 @@ mod transport_fixup_tests {
     }
 
     #[tokio::test]
-    async fn json_ping_survives_an_exhausted_application_rate_limit() {
+    async fn compact_command_burst_still_allows_ping_while_handler_is_blocked() {
         let (url, server, _directory, app) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(3), async {
             let mut socket = connect_and_hello(url).await;
             let held = app.lobby.lock().await;
-            for _ in 0..40 {
+            // Exhaust the eight reader probes without exceeding decoder quota.
+            for _ in 0..16 {
                 socket
                     .send(WsMessage::Text(
                         serde_json::to_string(&ClientMessage::SubscribeLobby)
@@ -1319,7 +1320,7 @@ mod transport_fixup_tests {
         })
         .await;
         server.abort();
-        result.expect("rate limiting silently discarded the heartbeat");
+        result.expect("a normal command burst blocked the fallback heartbeat");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1384,96 +1385,146 @@ mod transport_fixup_tests {
         result.expect("mode rejection did not complete its operation");
     }
 
-    async fn assert_buffered_heartbeats_survive(format: Option<server_core::protocol::WireFormat>) {
-        use crate::issue_4548_full_create_tests::{
-            recv_enveloped_server_message, send_test_message, test_client_hello,
-        };
-        let (url, server, _directory, app) = spawn_full_mode_server().await;
+    #[tokio::test]
+    async fn oversized_text_pings_fall_through_to_the_decoder_rate_limit() {
+        let (url, server, _directory, _app) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-            assert!(matches!(
-                recv_server_message(&mut socket).await,
-                ServerMessage::ServerHello { .. }
-            ));
-            send_test_message(
-                &mut socket,
-                &test_client_hello(format.into_iter().collect()),
-                false,
-            )
-            .await;
-            send_test_message(
-                &mut socket,
-                &ClientMessage::Ping { timestamp: 0 },
-                format.is_some(),
-            )
-            .await;
-            let warmup = if format.is_some() {
-                recv_enveloped_server_message(&mut socket).await
-            } else {
-                recv_server_message(&mut socket).await
-            };
-            assert!(matches!(warmup, ServerMessage::Pong { timestamp: 0 }));
-            let held = app.lobby.lock().await;
-            send_test_message(
-                &mut socket,
-                &ClientMessage::SubscribeLobby,
-                format.is_some(),
-            )
-            .await;
-            let mut deck = serde_json::to_value(ClientMessage::CreateGame {
-                deck: Default::default(),
+            let mut socket = connect_and_hello(url).await;
+            for timestamp in 1..=crate::RATE_LIMIT_MESSAGES + 2 {
+                let ping = serde_json::json!({
+                    "type": "Ping", "data": { "timestamp": timestamp },
+                    "padding": "x".repeat(crate::socket_heartbeat::MAX_HEARTBEAT_PROBE_BYTES)
+                });
+                socket
+                    .send(WsMessage::Text(ping.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            // Decoder refusals use the ordered application lane. This reply
+            // follows all admitted Pings, whose Pongs have writer priority.
+            let mut delimiter = serde_json::to_value(ClientMessage::Action {
+                action: engine::types::actions::GameAction::PassPriority,
             })
             .unwrap();
-            deck.as_object_mut().unwrap().insert(
-                "padding".to_string(),
-                serde_json::Value::String("x".repeat(63 * 1024)),
-            );
-            let deck = serde_json::to_string(&deck).unwrap();
-            if format.is_some() {
-                let frame = wire::encode_json_message(deck, true).await.unwrap();
-                let Message::Binary(bytes) = frame else {
-                    panic!("expected envelope")
-                };
-                socket.send(WsMessage::Binary(bytes)).await.unwrap();
-            } else {
-                socket.send(WsMessage::Text(deck.into())).await.unwrap();
-            }
-            // All these heartbeats can be buffered while a game/server is
-            // stalled. They are not pending application commands.
-            for timestamp in 1..=128 {
-                send_test_message(
-                    &mut socket,
-                    &ClientMessage::Ping { timestamp },
-                    format.is_some(),
-                )
-                .await;
-            }
+            delimiter
+                .as_object_mut()
+                .unwrap()
+                .insert("command_id".to_string(), serde_json::json!(991));
+            socket
+                .send(WsMessage::Text(delimiter.to_string().into()))
+                .await
+                .unwrap();
+            let mut last_pong = 0;
             loop {
-                let reply = if format.is_some() {
-                    recv_enveloped_server_message(&mut socket).await
-                } else {
-                    recv_server_message(&mut socket).await
-                };
-                if matches!(reply, ServerMessage::Pong { timestamp: 128 }) {
-                    break;
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::Pong { timestamp } => last_pong = last_pong.max(timestamp),
+                    ServerMessage::ActionFailed { .. } => break,
+                    _ => {}
                 }
             }
-            drop(held);
+            assert!(last_pong > 0, "the flood reached no admitted heartbeat");
+            assert!(
+                last_pong <= u64::from(crate::RATE_LIMIT_MESSAGES),
+                "oversized Pings escaped decoder quota: timestamp={last_pong}"
+            );
         })
         .await;
         server.abort();
-        result.expect("buffered heartbeats caused command admission overflow");
+        result.expect("the decoder did not delimit its heartbeat flood");
     }
 
-    #[tokio::test]
-    async fn buffered_text_heartbeats_do_not_consume_command_admission() {
-        assert_buffered_heartbeats_survive(None).await;
-    }
-
-    #[tokio::test]
-    async fn buffered_raw_envelope_heartbeats_do_not_consume_command_admission() {
-        assert_buffered_heartbeats_survive(Some(server_core::protocol::WireFormat::GzipEnvelopeV1))
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_flood_falls_back_to_bounded_command_admission() {
+        for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
+            let control = ControlLane::default();
+            control.accept_wire_format(format);
+            let death = Death::new(Arc::default(), 0);
+            let budget = IngressBudget::default();
+            let (incoming, mut commands) = mpsc::channel(MAX_COMMANDS);
+            let count = crate::socket_heartbeat::FAST_PATH_BURST as usize + MAX_COMMANDS + 1;
+            let stream = futures_util::stream::iter((0..count).map(|timestamp| {
+                let json = serde_json::to_string(&ClientMessage::Ping {
+                    timestamp: timestamp as u64,
+                })
+                .unwrap();
+                let frame = if format.is_some() {
+                    let mut raw = vec![wire::FORMAT_RAW];
+                    raw.extend_from_slice(json.as_bytes());
+                    Message::binary(raw)
+                } else {
+                    Message::text(json)
+                };
+                Ok::<_, axum::Error>(frame)
+            }));
+            read_socket(
+                stream,
+                control.clone(),
+                incoming,
+                death.clone(),
+                Liveness::default(),
+                budget.clone(),
+                0,
+            )
             .await;
+            assert_eq!(death.event().unwrap().cause, Cause::IngressOverflow);
+            assert!(matches!(
+                control.take_ready(),
+                Some(Control::Close { frame: Some(frame), origin: CloseOrigin::Server })
+                    if frame.code == 1013
+            ));
+            assert_eq!(budget.usage().commands, MAX_COMMANDS);
+            assert!(matches!(
+                commands.try_recv().unwrap().message,
+                Message::Text(_) | Message::Binary(_)
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn normal_five_second_pings_stay_fast_when_the_decoder_is_blocked() {
+        for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
+            let control = ControlLane::default();
+            control.accept_wire_format(format);
+            let budget = IngressBudget::default();
+            let (frames, mut stream_rx) = mpsc::unbounded_channel();
+            let stream = futures_util::stream::poll_fn(move |cx| stream_rx.poll_recv(cx));
+            let (incoming, mut commands) = mpsc::channel(MAX_COMMANDS);
+            let reader = tokio::spawn(read_socket(
+                stream,
+                control.clone(),
+                incoming,
+                Death::new(Arc::default(), 0),
+                Liveness::default(),
+                budget.clone(),
+                0,
+            ));
+            for timestamp in 1..=crate::socket_heartbeat::FAST_PATH_BURST * 2 {
+                let timestamp = u64::from(timestamp);
+                let json = serde_json::to_string(&ClientMessage::Ping { timestamp }).unwrap();
+                let frame = if format.is_some() {
+                    let mut raw = vec![wire::FORMAT_RAW];
+                    raw.extend_from_slice(json.as_bytes());
+                    Message::binary(raw)
+                } else {
+                    Message::text(json)
+                };
+                frames.send(Ok(frame)).unwrap();
+                let reply = tokio::time::timeout(Duration::from_millis(1), control.next())
+                    .await
+                    .expect("ordinary heartbeat waited for command decoding");
+                assert!(matches!(
+                    reply,
+                    Control::ApplicationPong { timestamp: echoed, .. } if echoed == timestamp
+                ));
+                assert_eq!(budget.usage(), crate::socket_ingress::Usage::default());
+                assert!(matches!(
+                    commands.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                tokio::time::advance(Duration::from_secs(5)).await;
+            }
+            reader.abort();
+        }
     }
 
     #[tokio::test]
