@@ -19441,11 +19441,10 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
 
 /// CR 701.23a + CR 608.2k: a search result is the parent target of its
 /// delivery continuation, even inside an ETB whose event source would
-/// otherwise lift `ParentTarget` to `TriggeringSource`. That protection ends
-/// at an independent sibling: a later "that creature" still denotes the
-/// entering creature.
+/// otherwise lift `ParentTarget` to `TriggeringSource`. Later siblings retain
+/// that found-object boundary as well.
 #[test]
-fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() {
+fn event_source_lift_stops_at_search_across_independent_siblings() {
     let sponsor = parse_trigger_line(
         "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
         "Scholarship Sponsor",
@@ -19498,9 +19497,51 @@ fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() 
     );
     assert_eq!(
         independent_exile_target,
-        Some(TargetFilter::TriggeringSource),
-        "the independent post-search sibling must still bind to the entering creature"
+        Some(TargetFilter::ParentTarget),
+        "the independent post-search sibling must retain the search-result antecedent"
     );
+}
+
+/// SHAPE — CR 608.2c + CR 701.23a: every library search introduces its chosen
+/// result before later anaphors; the common boundary must stop all five walks.
+#[test]
+fn library_search_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    for (name, oracle, types) in [
+        ("Guidelight Pathmaker", "Vigilance\nWhen this Vehicle enters, you may search your library for an artifact card and reveal it. Put it onto the battlefield if its mana value is 2 or less. Otherwise, put it into your hand. If you search your library this way, shuffle.\nCrew 2", vec!["Artifact".to_string()]),
+        ("Stoic Farmer", "When this creature enters, search your library for a basic Plains card and reveal it. If an opponent controls more lands than you, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.\nForetell {1}{W} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)", vec!["Creature".to_string()]),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        assert_eq!(parsed.triggers.len(), 1, "real ETB trigger: {name}");
+        let execute = parsed.triggers[0].execute.as_deref().expect("ETB execute chain");
+        assert!(matches!(execute.effect.as_ref(), Effect::SearchLibrary { .. }), "positive search root: {execute:?}");
+        assert!(introduces_chosen_object_target(execute.effect.as_ref()), "{name}: search must be a common chosen-object boundary");
+        let destination = execute.sub_ability.as_deref().expect("conditional destination");
+        assert!(destination.condition.is_some(), "represented result/board gate: {destination:?}");
+        assert!(matches!(destination.effect.as_ref(), Effect::ChangeZone {
+            target: TargetFilter::ParentTarget, destination: Zone::Battlefield, ..
+        }), "{name}: found card stays ParentTarget: {destination:?}");
+        assert!(matches!(destination.else_ability.as_deref().expect("hand fallback").effect.as_ref(),
+            Effect::ChangeZone { target: TargetFilter::ParentTarget, destination: Zone::Hand, .. }
+        ));
+        assert!(!has_unimplemented(execute), "supported search instruction: {execute:?}");
+    }
+    // Existing non-search event-source lifts remain positive controls.
+    let necropotence = parse_trigger_line(
+        "Whenever you discard a card, exile that card from your graveyard.",
+        "Necropotence",
+    );
+    assert!(matches!(
+        necropotence
+            .execute
+            .as_deref()
+            .expect("discard trigger")
+            .effect
+            .as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
 }
 
 /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
