@@ -236,8 +236,13 @@ pub struct SetRelatedCards {
 
 /// Load and deserialize an AtomicCards.json file.
 pub fn load_atomic_cards(path: &Path) -> Result<AtomicCardsFile, Box<dyn Error>> {
-    let contents = std::fs::read_to_string(path)?;
-    let mut file: AtomicCardsFile = serde_json::from_str(&contents)?;
+    let bytes = std::fs::read(path)?;
+    load_atomic_cards_from_bytes(&bytes)
+}
+
+/// Deserialize the exact AtomicCards.json bytes selected by a caller.
+pub fn load_atomic_cards_from_bytes(bytes: &[u8]) -> Result<AtomicCardsFile, Box<dyn Error>> {
+    let mut file: AtomicCardsFile = serde_json::from_slice(bytes)?;
     regroup_meld_cards(&mut file.data);
     Ok(file)
 }

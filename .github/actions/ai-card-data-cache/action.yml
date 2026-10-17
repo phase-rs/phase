@@ -37,4 +37,5 @@ runs:
         path: |
           data/card-data.json
           data/card-names.json
-        key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          data/card-data.provenance.json
+        key: cardgen-provenance-v1-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
