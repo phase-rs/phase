@@ -19005,7 +19005,9 @@ fn resolve_chain_body(
             // trailing sentence was silently dropped. Defer it WITH its
             // condition; the drain re-evaluates it at chain top after the entry
             // completes, which is the order CR 608.2c requires anyway.
-            if waits_for_resolution_choice(&state.waiting_for)
+            // CR 608.2c: only this invocation's unfinished work defers its
+            // contingent tail; an enclosing caller's answered prompt does not.
+            if progress.is_pending()
                 && (condition_depends_on_effect_performed(condition)
                     || condition_depends_on_zone_change_this_way(condition)
                     // CR 608.2c + CR 404.1: a discard choice has not moved its

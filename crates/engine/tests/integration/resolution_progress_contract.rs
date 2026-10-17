@@ -216,25 +216,34 @@ fn value_equal_successive_scry_prompts_keep_the_second_choice_before_the_tail() 
 
 #[test]
 fn answered_mana_color_finishes_each_instead_tail_before_repeating() {
-    for else_chain in [true, false] {
+    let override_clause = gain(99).condition(AbilityCondition::ConditionInstead {
+        inner: Box::new(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+        }),
+    });
+    let mut else_clause = override_clause.clone();
+    else_clause.else_ability = Some(Box::new(gain(7)));
+    let mut sibling_clause = override_clause;
+    let mut tail = gain(7);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    sibling_clause.sub_ability = Some(Box::new(tail));
+    let contingent_clause = gain(7).condition(AbilityCondition::Or {
+        conditions: vec![
+            AbilityCondition::effect_performed(),
+            AbilityCondition::IsYourTurn,
+        ],
+    });
+    for (tail_kind, clause) in [
+        ("instead else", else_clause),
+        ("instead sibling", sibling_clause),
+        ("contingent", contingent_clause),
+    ] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
-        let mut override_clause = gain(99).condition(AbilityCondition::ConditionInstead {
-            inner: Box::new(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IsYourTurn),
-            }),
-        });
-        if else_chain {
-            override_clause.else_ability = Some(Box::new(gain(7)));
-        } else {
-            let mut tail = gain(7);
-            tail.sub_link = SubAbilityLink::SequentialSibling;
-            override_clause.sub_ability = Some(Box::new(tail));
-        }
-        let mut body = gain(1).sub_ability(override_clause);
+        let mut body = gain(1).sub_ability(clause);
         body.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
         // Typed building-block fixture: a color-producing mana ability whose
-        // repeated instruction has either form of a not-swapped instead tail.
+        // repeated instruction has a not-swapped instead or contingent tail.
         // CR 605.1a: its costs and effects never move cards to/from a library.
         let root = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -280,7 +289,7 @@ fn answered_mana_color_finishes_each_instead_tail_before_repeating() {
             .events;
         // CR 608.2c: each completed parent runs its tail before the next
         // iteration; the ambient mana prompt never queues these instructions.
-        assert_eq!(life(&r, P0), 44, "else={else_chain}");
+        assert_eq!(life(&r, P0), 44, "tail={tail_kind}");
         assert_eq!(
             events
                 .iter()
