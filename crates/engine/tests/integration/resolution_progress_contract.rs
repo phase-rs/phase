@@ -2,16 +2,19 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CardPlayMode, CastFromZoneDriver, DieResultBranch, Effect,
-    EffectKind, LibraryInstructionActor, LibraryPosition, PlayerFilter, PlayerScope, QuantityExpr,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+    CastFromZoneDriver, DieResultBranch, Effect, EffectKind, LibraryInstructionActor,
+    LibraryPosition, ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr,
     QuantityRef, SubAbilityLink, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{ClashResult, GameEvent};
-use engine::types::game_state::{PersistedGameState, WaitingFor};
+use engine::types::game_state::{
+    ManaChoice, ManaChoiceContext, ManaChoicePrompt, PersistedGameState, WaitingFor,
+};
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolution::ResolutionStateWire;
@@ -24,6 +27,9 @@ const CLAIM_JUMPER: &str = "Vigilance\nWhen this creature enters, if an opponent
 const BARDS_COMPANY: &str = "You may cast this spell as though it had flash if you control a Human.\nOther creatures you control get +1/+1.\nWhenever this creature enters or attacks, recruit. (Draw a card, then discard a card. If you discarded a nonland card, create a 1/1 white Human Soldier creature token.)";
 const OAKEN_BRAWLER: &str = "When this creature enters, clash with an opponent. If you win, put a +1/+1 counter on this creature. (Each clashing player reveals the top card of their library, then puts that card on their choice of the top or bottom. A player wins if their card had a greater mana value.)";
 const GLIMMER: &str = "Scry 2, then draw two cards. You get {E}{E} (two energy counters).";
+const GROVE: &str = "{T}: Add {C}.\n{T}: Add {R} or {G}. Each opponent gains 1 life.";
+const TAINTED_REMEDY: &str =
+    "If an opponent would gain life, that player loses that much life instead.";
 
 fn def(effect: Effect) -> AbilityDefinition {
     AbilityDefinition::new(AbilityKind::Spell, effect)
@@ -108,6 +114,190 @@ fn restore(runner: &mut GameRunner) {
         .into_game_state()
         .expect("live resolution restores through the persistence boundary");
     *runner = GameRunner::from_state(restored);
+}
+
+#[test]
+fn answered_mana_color_does_not_suspend_each_opponents_life_change() {
+    for remedy in [false, true] {
+        let mut s = GameScenario::new_n_player(4, 42);
+        s.at_phase(Phase::PreCombatMain);
+        let grove = s
+            .add_land_from_oracle(P0, "Grove of the Burnwillows", GROVE)
+            .id();
+        if remedy {
+            s.add_enchantment_from_oracle(P0, "Tainted Remedy", TAINTED_REMEDY);
+        }
+        let mut r = s.build();
+        r.act(GameAction::ActivateAbility {
+            source_id: grove,
+            ability_index: 1,
+        })
+        .unwrap();
+        assert!(matches!(
+            &r.state().waiting_for,
+            WaitingFor::ChooseManaColor {
+                player: P0,
+                choice: ManaChoicePrompt::SingleColor { options },
+                context: ManaChoiceContext::ManaAbility(pending),
+            } if pending.source_id == grove
+                && options.contains(&ManaType::Red)
+                && options.contains(&ManaType::Green)
+        ));
+        assert_eq!(life(&r, P1), 20, "production awaits the color answer");
+        let events = r
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+            .unwrap()
+            .events;
+        assert_eq!(r.state().players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert!(r.state().objects[&grove].tapped);
+        // CR 605.3b + CR 608.2c + CR 614.1a: the mana ability finishes its
+        // instruction for every opponent, including each replaced life gain.
+        let change = if remedy { -1 } else { 1 };
+        assert_eq!(life(&r, P0), 20);
+        for opponent in [P1, P2, PlayerId(3)] {
+            assert_eq!(life(&r, opponent), 20 + change, "{opponent:?}");
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                        GameEvent::LifeChanged { player_id, amount, .. }
+                            if *player_id == opponent && *amount == change))
+                    .count(),
+                1,
+                "each opponent's instruction completes exactly once"
+            );
+        }
+        assert_finished(&r);
+    }
+}
+
+#[test]
+fn value_equal_successive_scry_prompts_keep_the_second_choice_before_the_tail() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.with_library_top(P0, &["First", "Second", "Third"]);
+    let scry = def(Effect::Scry {
+        count: QuantityExpr::Fixed { value: 2 },
+        target: TargetFilter::Controller,
+    });
+    let spell = s
+        .add_spell_to_hand(P0, "Synthetic successive equal choices", true)
+        .with_ability_definition(scry.clone().sub_ability(scry.sub_ability(gain(7))))
+        .id();
+    let mut r = s.build();
+    r.cast(spell).commit();
+    pass_stack(&mut r);
+    let first_prompt = r.state().waiting_for.clone();
+    let WaitingFor::ScryChoice { player: P0, cards } = &first_prompt else {
+        panic!("first scry must offer its real choice: {first_prompt:?}");
+    };
+    assert_eq!(cards.len(), 2);
+    r.act(GameAction::SelectCards {
+        cards: cards.clone(),
+    })
+    .unwrap();
+    // CR 608.2c + CR 608.2d: equal choices still belong to separate
+    // instructions; the life-gain tail follows the second actual answer.
+    assert_eq!(r.state().waiting_for, first_prompt);
+    assert_eq!(life(&r, P0), 20);
+    assert!(!r.state().resolution_stack.is_empty());
+    r.act(GameAction::SelectCards {
+        cards: vec![cards[1]],
+    })
+    .unwrap();
+    assert_eq!(r.state().library_of(P0).front(), Some(&cards[1]));
+    assert_eq!(r.state().library_of(P0).back(), Some(&cards[0]));
+    assert_eq!(life(&r, P0), 27);
+    assert_finished(&r);
+}
+
+#[test]
+fn answered_mana_color_finishes_each_instead_tail_before_repeating() {
+    for else_chain in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let mut override_clause = gain(99).condition(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+            }),
+        });
+        if else_chain {
+            override_clause.else_ability = Some(Box::new(gain(7)));
+        } else {
+            let mut tail = gain(7);
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            override_clause.sub_ability = Some(Box::new(tail));
+        }
+        let mut body = gain(1).sub_ability(override_clause);
+        body.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
+        // Typed building-block fixture: a color-producing mana ability whose
+        // repeated instruction has either form of a not-swapped instead tail.
+        // CR 605.1a: its costs and effects never move cards to/from a library.
+        let root = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Red, ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+        .sub_ability(body);
+        let source = s
+            .add_land_from_oracle(P0, "Synthetic repeated instead mana source", "")
+            .with_ability_definition(root)
+            .id();
+        let mut r = s.build();
+        r.act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .unwrap();
+        assert!(matches!(
+            &r.state().waiting_for,
+            WaitingFor::ChooseManaColor {
+                player: P0,
+                context: ManaChoiceContext::ManaAbility(pending),
+                ..
+            } if pending.source_id == source
+        ));
+        assert_eq!(life(&r, P0), 20);
+        let events = r
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+            .unwrap()
+            .events;
+        // CR 608.2c: each completed parent runs its tail before the next
+        // iteration; the ambient mana prompt never queues these instructions.
+        assert_eq!(life(&r, P0), 44, "else={else_chain}");
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id: P0,
+                        amount,
+                        ..
+                    } => Some(*amount),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![1, 7, 1, 7, 1, 7]
+        );
+        assert_eq!(r.state().players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_finished(&r);
+    }
 }
 
 #[test]

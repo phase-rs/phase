@@ -7972,6 +7972,33 @@ struct LegacyEffectBoundary {
 }
 
 impl LegacyEffectBoundary {
+    fn run<T>(
+        state: &mut GameState,
+        ability: &ResolvedAbility,
+        resolve: impl FnOnce(&mut GameState, &Self) -> Result<T, EffectError>,
+    ) -> Result<(T, ResolutionProgress), EffectError> {
+        let boundary = Self::capture(state);
+        // CR 608.2c + CR 608.2d: an inline producer can run while its caller's
+        // answered prompt is still ambient. Only a choice raised by this
+        // invocation suspends it, even if that choice equals the old prompt.
+        let prior_waiting_for = waits_for_resolution_choice(&state.waiting_for).then(|| {
+            std::mem::replace(
+                &mut state.waiting_for,
+                WaitingFor::Priority {
+                    player: state.active_player,
+                },
+            )
+        });
+        let result = resolve(state, &boundary);
+        let progress = boundary.classify(state, ability);
+        if let Some(prior_waiting_for) =
+            prior_waiting_for.filter(|_| matches!(state.waiting_for, WaitingFor::Priority { .. }))
+        {
+            state.waiting_for = prior_waiting_for;
+        }
+        result.map(|result| (result, progress))
+    }
+
     fn capture(state: &GameState) -> Self {
         Self {
             child_boundary: state.resolution_stack.capture_child_boundary(),
@@ -8096,23 +8123,28 @@ fn resolve_effect_step(
             Ok(finish_clash_resolution(state, ability, clash))
         }
         _ => {
-            let boundary = LegacyEffectBoundary::capture(state);
-            let result = resolve_legacy_effect(state, ability, events)?;
-            // CR 608.2c: an exhausted replacement bookkeeping frame is not
-            // unfinished child work. Retire only new active empty frames;
-            // populated residents and frames predating this effect keep ownership.
-            while state.resolution_stack.capture_child_boundary() > boundary.child_boundary
-                && state
-                    .active_post_replacement_drains()
-                    .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
-            {
-                state
-                    .resolution_stack
-                    .take_active_post_replacement()
-                    .expect("legacy effect may retire only its active empty replacement frame");
-            }
+            let (result, progress) =
+                LegacyEffectBoundary::run(state, ability, |state, boundary| {
+                    let result = resolve_legacy_effect(state, ability, events)?;
+                    // CR 608.2c: an exhausted replacement bookkeeping frame is not
+                    // unfinished child work. Retire only new active empty frames;
+                    // populated residents and frames predating this effect keep ownership.
+                    while state.resolution_stack.capture_child_boundary() > boundary.child_boundary
+                        && state.active_post_replacement_drains().is_some_and(
+                            crate::types::game_state::PostReplacementDrainStack::is_empty,
+                        )
+                    {
+                        state
+                            .resolution_stack
+                            .take_active_post_replacement()
+                            .expect(
+                                "legacy effect may retire only its active empty replacement frame",
+                            );
+                    }
+                    Ok(result)
+                })?;
             Ok(EffectStep {
-                progress: boundary.classify(state, ability),
+                progress,
                 result,
                 tail: TailOwnership::Caller,
             })
@@ -11048,19 +11080,22 @@ fn drive_empty_reciprocal_producer(
             }
         }
         [opponent] => {
-            let boundary = LegacyEffectBoundary::capture(state);
-            prepend_to_pending_continuation(state, consumer.clone());
-            bind_reciprocal_consumer_from_picker(state, *opponent)?;
-            let bound = state
-                .active_ability_continuation()
-                .ok_or_else(|| {
-                    EffectError::MissingParam("bound reciprocal consumer disappeared".to_string())
-                })?
-                .chain
-                .as_ref()
-                .clone();
-            choose_from_zone::resolve_with_choosing_player(state, &bound, *opponent, events)?;
-            return Ok(Some(boundary.classify(state, &bound)));
+            let (_, progress) = LegacyEffectBoundary::run(state, consumer, |state, _| {
+                prepend_to_pending_continuation(state, consumer.clone());
+                bind_reciprocal_consumer_from_picker(state, *opponent)?;
+                let bound = state
+                    .active_ability_continuation()
+                    .ok_or_else(|| {
+                        EffectError::MissingParam(
+                            "bound reciprocal consumer disappeared".to_string(),
+                        )
+                    })?
+                    .chain
+                    .as_ref()
+                    .clone();
+                choose_from_zone::resolve_with_choosing_player(state, &bound, *opponent, events)
+            })?;
+            return Ok(Some(progress));
         }
         _ => {
             prepend_to_pending_continuation(state, consumer.clone());
@@ -16298,15 +16333,17 @@ fn resolve_chain_body(
         if scoped_search_delivery_is_safe
             && scoped_library_search::supports_simultaneous_delivery(&scoped_template)
         {
-            let boundary = LegacyEffectBoundary::capture(state);
-            scoped_library_search::start(
-                state,
-                &scoped_template,
-                &matching_players,
-                after_scope,
-                events,
-            )?;
-            progress = boundary.classify(state, &scoped_template);
+            let (_, search_progress) =
+                LegacyEffectBoundary::run(state, &scoped_template, |state, _| {
+                    scoped_library_search::start(
+                        state,
+                        &scoped_template,
+                        &matching_players,
+                        after_scope,
+                        events,
+                    )
+                })?;
+            progress = search_progress;
             if progress == ResolutionProgress::Complete
                 && state.pending_scoped_library_search.is_some()
             {
@@ -18799,17 +18836,23 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                         state,
                     );
-                    // If the parent effect entered an interactive state (e.g.,
-                    // SearchChoice), stash the else chain as a continuation so it
-                    // runs after the player responds — not immediately.
-                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                        debug_assert!(
-                            state.active_ability_continuation().is_none(),
-                            "pending_continuation overwritten before consumption — else_ability chain will be lost"
-                        );
+                    // CR 608.2c: only unfinished parent work delays this chain;
+                    // an enclosing caller's prompt does not suspend this instruction.
+                    if progress.is_pending() {
                         // The shared continuation authority places it relative to
                         // whatever paused (a draw pair, a direct choice).
-                        append_to_pending_continuation(state, Some(Box::new(resolved)));
+                        if state.resolution_stack.capture_child_boundary() == child_stack_start
+                            && state.active_ability_continuation().is_some()
+                            && state.active_ability_continuation()
+                                == pending_continuation_before.as_ref()
+                        {
+                            state.park_ability_continuation(PendingContinuation::new(
+                                Box::new(resolved),
+                                state,
+                            ));
+                        } else {
+                            append_to_pending_continuation(state, Some(Box::new(resolved)));
+                        }
                     } else {
                         progress = resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
                     }
@@ -18889,15 +18932,22 @@ fn resolve_chain_body(
                                 );
                             }
                         }
-                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                            debug_assert!(
-                                state.active_ability_continuation().is_none(),
-                                "pending_continuation overwritten before consumption — instead-tail chain will be lost"
-                            );
+                        if progress.is_pending() {
                             // CR 608.2c: the tail is a later instruction of the
                             // parent; the shared continuation authority keeps it
                             // outside a paused replacement draw pair.
-                            append_to_pending_continuation(state, Some(Box::new(resolved)));
+                            if state.resolution_stack.capture_child_boundary() == child_stack_start
+                                && state.active_ability_continuation().is_some()
+                                && state.active_ability_continuation()
+                                    == pending_continuation_before.as_ref()
+                            {
+                                state.park_ability_continuation(PendingContinuation::new(
+                                    Box::new(resolved),
+                                    state,
+                                ));
+                            } else {
+                                append_to_pending_continuation(state, Some(Box::new(resolved)));
+                            }
                         } else {
                             progress =
                                 resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
@@ -35650,69 +35700,39 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 109.5: Direct unit test of the synchronous-continuation
-    /// re-park predicate inside `drain_active_repeat_for`. Constructs
-    /// a multi-iteration resume whose iterations install a `pending_continuation`
-    /// without changing `waiting_for`, then verifies the drain detects the
-    /// continuation transition and re-stashes the remaining iterations rather
-    /// than letting them be silently dropped.
-    ///
-    /// Strategy: use `ConditionInstead` with `else_ability` set. When the
-    /// instead condition is NOT met, line 1486-1487 of `resolve_ability_chain`
-    /// stashes the `else_ability` chain into `pending_continuation` whenever
-    /// `waiting_for != Priority`. We pre-set `waiting_for` to a non-Priority
-    /// state so the stash fires synchronously without any waiting_for change,
-    /// directly exercising the new `installed_continuation` predicate.
+    /// CR 608.2c + CR 608.2d: A queued native producer retains later repeat
+    /// iterations while its saved tail reaches a real player choice.
     #[test]
     fn drain_active_repeat_for_reparks_on_synchronous_continuation() {
-        use crate::types::ability::AbilityCondition;
-        use crate::types::game_state::PendingRepeatIteration;
-
         let mut state = GameState::new_two_player(42);
-        for i in 0..10 {
-            create_object(
-                &mut state,
-                CardId(i + 10),
-                PlayerId(0),
-                format!("Card {}", i),
-                Zone::Library,
-            );
-        }
-
-        // Pre-seed waiting_for to a non-Priority state so the
-        // `ConditionInstead` else-branch stash path fires synchronously
-        // (line 1486 requires `waiting_for != Priority`). The drain's
-        // `entered_choice` predicate compares against this initial value, so
-        // the same waiting_for at end-of-iteration registers as "no
-        // transition" — only `installed_continuation` can fire the re-stash.
-        state.waiting_for = WaitingFor::SearchChoice {
-            player: PlayerId(0),
-            library_owner: None,
-            cards: vec![],
-            count: 0,
-            reveal: false,
-            up_to: true,
-            allows_partial_find: false,
-            constraint: crate::types::ability::SearchSelectionConstraint::None,
-            ordering_hint: Default::default(),
-            split: None,
-        };
-
-        // Build a Draw ability (synchronous, no waiting_for change) with a
-        // sub_ability whose condition is `ConditionInstead` carrying an
-        // `else_ability`. When the inner condition evaluates to false, the
-        // else branch is stashed synchronously into pending_continuation
-        // via line 1486.
-        let else_branch = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
+        create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Only draw".to_string(),
+            Zone::Library,
+        );
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
             PlayerId(0),
         );
-        let mut sub = ResolvedAbility::new(
+        let choice = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::color(),
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(tail);
+        let iter_ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
@@ -35721,29 +35741,23 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::ConditionInstead {
-            // Pick a condition that evaluates to false in this state so the
-            // swap does NOT fire and the else branch stash path runs.
-            inner: Box::new(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IsYourTurn),
-            }),
-        });
-        sub.else_ability = Some(Box::new(else_branch));
+        .sub_ability(
+            ResolvedAbility::new(Effect::Clash, vec![], ObjectId(100), PlayerId(0))
+                .sub_ability(choice),
+        );
 
-        let mut iter_ability = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        )
-        .sub_ability(sub);
-        iter_ability.repeat_for = None;
+        // The draw empties the only nonempty library. Native Clash then
+        // queues its unconditional tail without opening a placement choice.
+        let mut probe = state.clone();
+        assert_eq!(
+            resolve_ability_chain_step(&mut probe, &iter_ability, &mut Vec::new(), 1).unwrap(),
+            ResolutionProgress::Queued
+        );
+        assert!(matches!(probe.waiting_for, WaitingFor::Priority { .. }));
+        assert!(probe.active_ability_continuation().is_some());
 
         // Stage a resume of 3 iterations starting at iteration 1.
-        state.push_repeat_for(PendingRepeatIteration {
+        state.push_repeat_for(crate::types::game_state::PendingRepeatIteration {
             ability: Box::new(iter_ability),
             tracked_members: vec![],
             iterated_counter_kinds: vec![],
@@ -35755,15 +35769,20 @@ mod tests {
         let mut events = Vec::new();
         super::drain_active_repeat_for(&mut state, &mut events);
 
-        // Iteration 1 ran: parent Draw fired (1 card), then the
-        // ConditionInstead sub stashed its else_ability into
-        // pending_continuation synchronously (no waiting_for change). The
-        // drain's `installed_continuation` predicate must observe this
-        // transition and re-stash iteration 2 for the next drain pass.
+        // Iteration 1's queued tail opens a real color choice. Its life tail
+        // and iteration 2 remain saved rather than running before the answer.
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::NamedChoice {
+                player: PlayerId(0),
+                choice_type: ChoiceType::Color { .. },
+                options,
+                ..
+            } if options.len() == 5
+        ));
         assert!(
             state.active_ability_continuation().is_some(),
-            "iteration 1 must have installed a synchronous pending_continuation \
-             (else_ability of ConditionInstead)"
+            "iteration 1's life tail must remain behind its actual color choice"
         );
         let pending = state
             .resolution_stack
@@ -35772,20 +35791,14 @@ mod tests {
                 ResolutionFrame::RepeatFor(pending) => Some(pending),
                 _ => None,
             })
-            .expect(
-                "iteration 2 must be re-stashed — without the synchronous-continuation \
-             predicate, this would be None and iteration 2 would be silently dropped",
-            );
+            .expect("iteration 2 must remain outside the queued producer's unfinished tail");
         assert_eq!(
             pending.next_iteration, 2,
             "re-stash must advance to iteration 2"
         );
         assert_eq!(pending.total_iterations, 3);
 
-        // Exactly one iteration's worth of effects fired before the break:
-        // iteration 1's parent Draw (1 card). The else_ability chain has not
-        // run yet — it is stashed in pending_continuation, awaiting the next
-        // drain_pending_continuation call.
+        assert_eq!(state.players[0].life, 20);
         assert_eq!(
             state.players[0].hand.len(),
             1,
@@ -47815,6 +47828,90 @@ mod resolution_progress_contract_tests {
             matches!(&state.waiting_for, WaitingFor::ScryChoice { cards, .. } if cards.len() == 2)
         );
         assert_eq!(state.active_post_replacement_drains(), Some(&paused));
+    }
+
+    #[test]
+    fn legacy_boundary_separates_an_ambient_prompt_from_a_value_equal_new_choice() {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<_> = (0..2)
+            .map(|index| {
+                create_object(
+                    &mut state,
+                    CardId(4060 + index),
+                    P0,
+                    format!("Equal prompt card {index}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        let prompt = WaitingFor::ScryChoice { player: P0, cards };
+        state.waiting_for = prompt.clone();
+        let scry = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        );
+        // CR 608.2d: this invocation offers a new choice even though its
+        // actor and cards equal those of the ambient answered prompt.
+        assert_eq!(
+            resolve_effect_step(&mut state, &scry, &mut Vec::new())
+                .unwrap()
+                .progress,
+            ResolutionProgress::Waiting
+        );
+        assert_eq!(state.waiting_for, prompt);
+        assert_eq!(
+            resolve_effect_step(&mut state, &life(2), &mut Vec::new())
+                .unwrap()
+                .progress,
+            ResolutionProgress::Complete
+        );
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.waiting_for, prompt, "preserve the caller's prompt");
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    #[test]
+    fn legacy_boundary_restores_ambient_prompt_on_error_and_retains_queued_child() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        LegacyEffectBoundary::run(&mut state, &life(2), |state, _| {
+            assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+        let prompt = WaitingFor::ScryChoice {
+            player: P0,
+            cards: vec![],
+        };
+        state.waiting_for = prompt.clone();
+        let error = LegacyEffectBoundary::run(&mut state, &life(2), |_, _| {
+            Err::<(), _>(EffectError::MissingParam("boundary failure".into()))
+        });
+        assert!(
+            matches!(error, Err(EffectError::MissingParam(message)) if message == "boundary failure")
+        );
+        assert_eq!(state.waiting_for, prompt);
+        assert!(state.resolution_stack.is_empty());
+
+        let outer = PendingContinuation::new(Box::new(life(9)), &state);
+        state.park_ability_continuation(outer);
+        let child = PendingContinuation::new(Box::new(life(3)), &state);
+        let (_, progress) = LegacyEffectBoundary::run(&mut state, &life(2), |state, _| {
+            state.park_ability_continuation(child.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(progress, ResolutionProgress::Queued);
+        assert_eq!(state.waiting_for, prompt);
+        assert_eq!(state.resolution_stack.len(), 2);
+        assert_eq!(state.active_ability_continuation(), Some(&child));
+        assert_eq!(state.players[0].life, 20, "classification does not drain");
     }
 
     #[test]
