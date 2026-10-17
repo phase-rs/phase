@@ -22,6 +22,7 @@ import {
   STORAGE_KEY_PREFIX,
 } from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
+import type { CommanderBracket } from "../../../types/bracket";
 import {
   awaitSavedDeckLibraryIdle,
   installFifoWebLocks,
@@ -34,7 +35,6 @@ import { useAppNotificationStore } from "../../../stores/appToastStore";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../../../stores/preferencesStore";
 import { savedDeckCatalogId } from "../../../services/deckCatalog";
 import {
-  PRECON_POOL_GROUP,
   UNFILED_POOL_GROUP,
   emptyPoolSelection,
   feedPoolGroup,
@@ -1185,6 +1185,51 @@ describe("MyDecks", () => {
     }
   });
 
+  it("keeps a legal curated user deck instead of falling back to an excluded known-format deck", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User Standard", { main: [{ name: "Plains", count: 60 }], sideboard: [] });
+    saveDeckOrigins({ "Known Standard": "mtggoldfish-standard" });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    // The known-format feed mirror is visible but excluded; only the
+    // compatibility-confirmed user deck is selected. Tier 1 is fully legal,
+    // so curation must hold — no fallback to the tier-0 mirror.
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          {
+            ...emptyPoolSelection(),
+            excludedGroups: [UNFILED_POOL_GROUP, feedPoolGroup("mtggoldfish-standard")],
+          },
+          savedDeckCatalogId("User Standard"),
+          true,
+        ),
+      });
+    });
+    try {
+      const onSelectDeck = vi.fn();
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={onSelectDeck}
+        />,
+      );
+
+      expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+
+      await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("User Standard"));
+      expect(onSelectDeck).not.toHaveBeenCalledWith("Known Standard");
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
   it("clears a search-hidden explicit include when its folder is unselected", async () => {
     saveDeck("Alpha Aggro", { main: [{ name: "Island", count: 60 }], sideboard: [] });
     saveDeck("Beta Beatdown", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });
@@ -1351,15 +1396,10 @@ describe("MyDecks", () => {
         aiSeats: [{ difficulty: "Medium", deckId: AI_DECK_RANDOM }],
         cedhMode: true,
         aiBracketFilter: [],
+        // The simulated legal catalog holds only the two saved decks, so the
+        // bundled precon demos never enter the deferred tree.
         humanPoolSelection: setPoolDeckIncluded(
-          setPoolGroupIncluded(
-            setPoolGroupIncluded(emptyPoolSelection(), UNFILED_POOL_GROUP, [twoId, fiveId], false),
-            // The bundled precon demos stay out of this selection; the member
-            // list only clears stale per-deck overrides (there are none yet).
-            PRECON_POOL_GROUP,
-            [],
-            false,
-          ),
+          setPoolGroupIncluded(emptyPoolSelection(), UNFILED_POOL_GROUP, [twoId, fiveId], false),
           twoId,
           true,
         ),
@@ -1379,7 +1419,7 @@ describe("MyDecks", () => {
 
       await screen.findByText("Bracket Two");
       await screen.findByText("Bracket Five");
-      expect(screen.getByRole("button", { name: /Your random pool 1 of 5.*0 playable/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 2.*0 playable/ })).toBeInTheDocument();
       // Both the tree warning and the seat-adjacent banner fire: the lone
       // bracket-2 pick cannot survive the cEDH bracket-5 draw base.
       expect(screen.getAllByText(/None of the 1 selected/)).toHaveLength(2);
@@ -1387,6 +1427,54 @@ describe("MyDecks", () => {
     } finally {
       act(() => {
         usePreferencesStore.setState(restore);
+      });
+    }
+  });
+
+  it("warns zero selected when the only selected deck is absent from the legal catalog", async () => {
+    saveDeck("Pauper Deck", { main: [{ name: "Lightning Bolt", count: 60 }], sideboard: [] });
+    saveDeck("Standard Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    // Only the Standard deck has scanned: the Pauper deck stays visible (the
+    // display retains unscanned user decks) but the completed legal catalog
+    // finished without it, so game start cannot draw it.
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) =>
+      compatibleBatch(decks.filter((deck) => deck.name === "Standard Deck")),
+    );
+    const pauperId = savedDeckCatalogId("Pauper Deck");
+    const standardId = savedDeckCatalogId("Standard Deck");
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          setPoolGroupIncluded(emptyPoolSelection(), UNFILED_POOL_GROUP, [pauperId, standardId], false),
+          pauperId,
+          true,
+        ),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiBrackets={new Map<string, CommanderBracket | null>([[standardId, null]])}
+        />,
+      );
+
+      // The display universe is untouched: both tiles still show.
+      await screen.findByText("Pauper Deck");
+      await screen.findByText("Standard Deck");
+      // But the deferred preview counts the legal universe, where the
+      // selection matches nothing: the zero-selection fallback warning fires.
+      expect(screen.getByRole("button", { name: /Your random pool 0 of 1/ })).toBeInTheDocument();
+      expect(screen.getByText(/Everything is excluded/)).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
       });
     }
   });

@@ -1250,10 +1250,21 @@ export function MyDecks({
     tableCedh,
     useBracketBase,
   ]);
-  const poolTreeItems = useMemo(
-    () => withCatalogSavedNames(randomBaseCandidates),
-    [randomBaseCandidates],
+  // Deferred preview legality: game start draws the human Random deck from
+  // the hoisted legal catalog, while the display deliberately retains
+  // unscanned decks — so the deferred tree/counts/fallback intersect the
+  // display with legal-catalog membership (the bracket map's keys; its
+  // presence also signals the analysis finished). Tiles, search, and
+  // immediate mode keep the display universe.
+  const legalCatalogIds = useMemo(
+    () => (useBracketBase && aiBrackets ? new Set(aiBrackets.keys()) : undefined),
+    [useBracketBase, aiBrackets],
   );
+  const poolTreeItems = useMemo(() => {
+    const items = withCatalogSavedNames(randomBaseCandidates);
+    if (!legalCatalogIds) return items;
+    return items.filter((item) => legalCatalogIds.has(item.id));
+  }, [randomBaseCandidates, legalCatalogIds]);
   // Complete toggleable universe for folder toggles: the display base above
   // is narrowed by search/source/set filters, but a toggle clears overrides
   // for every true group member. Saved-duplicate precons stay deduped (the
@@ -1288,7 +1299,7 @@ export function MyDecks({
     () =>
       useBracketBase
         ? new Set(
-            resolveBracketDrawBase(withCatalogSavedNames(randomBaseCandidates), {
+            resolveBracketDrawBase(poolTreeItems, {
               bracketFilter: aiBracketFilter,
               cedhMode: tableCedh,
               selectedFormat: selectedFormatForCompatibility ?? null,
@@ -1297,7 +1308,7 @@ export function MyDecks({
         : undefined,
     [
       aiBracketFilter,
-      randomBaseCandidates,
+      poolTreeItems,
       selectedFormatForCompatibility,
       tableCedh,
       useBracketBase,
@@ -1529,10 +1540,18 @@ export function MyDecks({
     const curated = validatedBase.filter((candidate) => curatedIds.has(candidate.id));
     // A curation whose best deck is worse than the base's best falls back to
     // the full validated base, judged by the same tier authority the picker
-    // uses below — so the fallback can only ever improve legality.
-    const bestTier = (list: RandomDeckCandidate[]): number =>
-      Math.min(...list.map((candidate) => randomDeckPriority(candidate, selectedFormatForCompatibility)));
-    const pool = curated.length > 0 && bestTier(curated) <= bestTier(validatedBase)
+    // uses below — so the fallback can only ever improve legality. Tiers 0
+    // (known-format match) and 1 (compatibility-confirmed) are both fully
+    // legal and compare equivalently here: a curation holding a legal deck is
+    // never abandoned for an excluded deck that merely ranks higher.
+    const fallbackTier = (tier: number): number => (tier <= 1 ? 0 : tier);
+    const bestFallbackTier = (list: RandomDeckCandidate[]): number =>
+      Math.min(
+        ...list.map((candidate) =>
+          fallbackTier(randomDeckPriority(candidate, selectedFormatForCompatibility))
+        ),
+      );
+    const pool = curated.length > 0 && bestFallbackTier(curated) <= bestFallbackTier(validatedBase)
       ? curated
       : validatedBase;
     const pick = pickRandomDeckCandidate(pool, { selectedFormat: selectedFormatForCompatibility });
