@@ -4836,7 +4836,16 @@ pub(crate) fn optional_decline_branch(
     if let Some(branch) = ability.else_ability.as_deref() {
         return Some(Cow::Borrowed(branch));
     }
-    let mut sub = ability.sub_ability.as_deref()?;
+    // CR 608.2c: a consumed cast-metadata rider (enters-with-counter,
+    // gains-modifications) is not an instruction of its own — the decline
+    // decision belongs to the next written instruction beneath it. The same
+    // continuation authority the accepted path uses splices the metadata run
+    // out here too, so a later independent `SequentialSibling` ("Draw a card.")
+    // survives the declined cast; a chain that is pure metadata yields no
+    // decline branch.
+    let continuation =
+        cast_from_zone::cast_metadata_continuation(ability, ability.sub_ability.as_ref()?)?;
+    let mut sub: &ResolvedAbility = continuation;
     // CR 608.2c: an unconditional `ContinuationStep` is a resolution step of the
     // declined instruction itself (Choice of Fortunes' "shuffle them into your
     // library" = move, then shuffle), so it is skipped with that instruction and
@@ -4853,13 +4862,16 @@ pub(crate) fn optional_decline_branch(
     let selected = should_resolve_subability_on_optional_decline(sub)
         || (sub.sub_link == SubAbilityLink::SequentialSibling
             && !sub_ability_is_reflexive(sub)
-            && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                && (cast_from_zone::graveyard_destination_rider(
-                    &sub.effect,
-                    sub.condition.as_ref(),
-                )
-                .is_some()
-                    || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
+            && !(matches!(
+                &ability.effect,
+                Effect::CastFromZone { .. } | Effect::CastCopyOfCard { .. }
+            ) && (cast_from_zone::graveyard_destination_rider(
+                &sub.effect,
+                sub.condition.as_ref(),
+            )
+            .is_some()
+                || cast_from_zone::is_enters_with_counter_rider_subability(sub)
+                || cast_from_zone::is_enters_with_modifications_rider_subability(sub))));
     if !selected {
         // CR 608.2c: a declined "you may" fails the "if you do" gate `sub`,
         // and the gate skips only the instructions it governs.
@@ -18074,6 +18086,15 @@ fn resolve_chain_body(
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
     if let Some(ref sub) = ability.sub_ability {
+        // CR 608.2c: a cast parent's typed metadata riders (enters-with-counter,
+        // gains-modifications) are consumed, not resolved. Splice the metadata
+        // run out of the walk so the generic tail below resolves the next
+        // written instruction a rider may carry ("… it gains haste. Draw a
+        // card.") — accepted and declined paths share this authority — and so a
+        // chain that is pure metadata resolves nothing.
+        let Some(sub) = cast_from_zone::cast_metadata_continuation(ability, sub) else {
+            return Ok(());
+        };
         // CR 614.1a + CR 608.2c: CastFromZone consumes the Torrential/Kylox
         // graveyard-redirect rider by stamping the granted casting permission. Do
         // not also execute the parser's structural rider (`ChangeZone` /
@@ -18407,12 +18428,12 @@ fn resolve_chain_body(
         // (recorded on the granted `ExileWithAltCost`). Resolving the structural
         // `AddPendingETBCounters` rider here would read the (absent) SpellCast
         // trigger event of the granting ability, not the future graveyard cast —
-        // so skip it (Osteomancer Adept, The Tomb of Aclazotz).
-        if matches!(&ability.effect, Effect::CastFromZone { .. })
-            && cast_from_zone::is_enters_with_counter_rider_subability(sub)
-        {
-            return Ok(());
-        }
+        // so it is skipped (Osteomancer Adept, The Tomb of Aclazotz). The same
+        // metadata treatment applies to the gains-modifications rider ("If you
+        // cast a [quality] spell this way, it gains …", Strago and Relm); both
+        // are spliced out of the walk at the top of this block
+        // (`cast_metadata_continuation`), which is the single authority for the
+        // skip on the accepted path.
 
         // CR 608.2c + CR 608.2g: A hand-pick `CastFromZone` (Kellan, the Kid —
         // "you may cast a permanent spell … from your hand without paying its
@@ -22455,6 +22476,333 @@ mod tests {
         assert_eq!(
             surviving(vec![&token, &rider, &gain_life]),
             vec![gain_life.effect.clone()]
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: the gains-modifications rider ("If you cast a
+    /// [quality] spell this way, it gains …", Strago and Relm) is consumed as
+    /// `CastFromZone` permission metadata. Chain-resolving a `CastFromZone`
+    /// with the rider as its sequential sibling must therefore SKIP the rider
+    /// — it must never reach `resolve_add_pending_enters_modifications`'s
+    /// fail-loud standalone path (which emits an
+    /// `EffectResolved { AddPendingEntersModifications }` event).
+    ///
+    /// The reach guard is the same chain with a `Draw` sibling instead: its
+    /// `EffectResolved` event proves the walker actually reached the sibling
+    /// position, so the rider's event absence is the skip and not a chain that
+    /// never walked that far.
+    #[test]
+    fn cast_from_zone_gains_rider_is_skipped_as_permission_metadata() {
+        fn cast_parent_with_sub(sub: ResolvedAbility) -> ResolvedAbility {
+            let mut parent = ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            let mut sub = sub;
+            sub.sub_link = SubAbilityLink::SequentialSibling;
+            parent.sub_ability = Some(Box::new(sub));
+            parent
+        }
+        fn mods_rider() -> ResolvedAbility {
+            ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        }
+        fn draw_sibling() -> ResolvedAbility {
+            ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        }
+
+        // Reach guard — a non-rider sibling resolves and reports.
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state,
+            &cast_parent_with_sub(draw_sibling()),
+            &mut events,
+            0,
+        )
+        .expect("the chain must resolve");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Draw,
+                    ..
+                }
+            )),
+            "reach guard: the chain walker must reach the sibling position; events: {events:?}"
+        );
+
+        // The rider sibling is skipped.
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state,
+            &cast_parent_with_sub(mods_rider()),
+            &mut events,
+            0,
+        )
+        .expect("the chain must resolve");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the gains rider must be consumed as metadata, never resolved standalone; \
+             events: {events:?}"
+        );
+
+        // Review control — rider → independent instruction: the metadata node
+        // is spliced out of the walk and the nested Draw still resolves in
+        // written order (CR 608.2c).
+        let mut rider_with_tail = mods_rider();
+        rider_with_tail.sub_ability = Some(Box::new({
+            let mut draw = draw_sibling();
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            draw
+        }));
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state,
+            &cast_parent_with_sub(rider_with_tail),
+            &mut events,
+            0,
+        )
+        .expect("the chain with a tail must resolve");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Draw,
+                    ..
+                }
+            )),
+            "the independent instruction under the metadata rider must still resolve; \
+             events: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider must stay consumed metadata; events: {events:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: the same metadata treatment under a
+    /// `CastCopyOfCard` parent (The Mysterious Sphere's recorded-not-applied
+    /// copy route). The copy grant resolves against an empty tracked set and
+    /// the rider sub must still be skipped, not resolved standalone.
+    #[test]
+    fn cast_copy_of_card_gains_rider_is_skipped_as_permission_metadata() {
+        fn copy_parent_with_sub(sub: ResolvedAbility) -> ResolvedAbility {
+            let mut parent = ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"CastCopyOfCard","target":{"type":"TrackedSet","id":0}}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            let mut sub = sub;
+            sub.sub_link = SubAbilityLink::SequentialSibling;
+            parent.sub_ability = Some(Box::new(sub));
+            parent
+        }
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state,
+            &copy_parent_with_sub(ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            &mut events,
+            0,
+        )
+        .expect("the copy chain must resolve");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CastCopyOfCard,
+                    ..
+                }
+            )),
+            "reach guard: the copy grant must resolve; events: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the gains rider under a CastCopyOfCard parent must be skipped as metadata; \
+             events: {events:?}"
+        );
+
+        // Review control — an ordinary Draw sibling beneath the metadata rider
+        // still resolves, paired with the rider-skip assertion above.
+        let mut rider_with_tail = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
+            ),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        rider_with_tail.sub_ability = Some(Box::new({
+            let mut draw = ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            draw
+        }));
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state,
+            &copy_parent_with_sub(rider_with_tail),
+            &mut events,
+            0,
+        )
+        .expect("the copy chain with a tail must resolve");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Draw,
+                    ..
+                }
+            )),
+            "the Draw sibling under the copy-parented rider must still resolve; events: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider must stay consumed metadata under the copy parent; events: {events:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d: declining the optional `CastFromZone` ("you may
+    /// cast that card …") must not select the gains-modifications rider as the
+    /// decline branch. The rider is cast-permission metadata of the declined
+    /// cast, so the decline branch is `None`; a non-rider sequential sibling
+    /// still survives, proving the exclusion is rider-specific.
+    #[test]
+    fn declined_cast_from_zone_does_not_select_the_gains_rider() {
+        fn cast_parent_with_sub(sub: ResolvedAbility) -> ResolvedAbility {
+            let mut parent = ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            parent.optional = true;
+            let mut sub = sub;
+            sub.sub_link = SubAbilityLink::SequentialSibling;
+            parent.sub_ability = Some(Box::new(sub));
+            parent
+        }
+        let rider = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
+            ),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let rider_parent = cast_parent_with_sub(rider.clone());
+        assert!(
+            optional_decline_branch(&rider_parent).is_none(),
+            "a declined cast grant must not select its gains rider as the decline branch"
+        );
+
+        // Review control — rider → independent instruction: the decline branch
+        // skips the metadata and selects the nested Draw, preserving the
+        // written instruction order (CR 608.2c).
+        let mut rider_with_tail = rider.clone();
+        rider_with_tail.sub_ability = Some(Box::new({
+            let mut draw = ResolvedAbility::new(
+                effect_from_json(
+                    r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+                ),
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            draw
+        }));
+        let rider_with_tail_parent = cast_parent_with_sub(rider_with_tail);
+        let branch = optional_decline_branch(&rider_with_tail_parent);
+        assert!(
+            matches!(
+                branch.as_ref().map(|branch| &branch.effect),
+                Some(Effect::Draw { .. })
+            ),
+            "a declined cast grant must skip the metadata rider and keep the nested instruction, \
+             got {branch:?}"
+        );
+
+        // Positive reach guard — a non-rider sequential sibling IS selected.
+        let sibling = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+            ),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let parent = cast_parent_with_sub(sibling);
+        let branch = optional_decline_branch(&parent);
+        assert!(
+            matches!(
+                branch.as_ref().map(|branch| &branch.effect),
+                Some(Effect::Draw { .. })
+            ),
+            "reach guard: an ordinary sequential sibling must survive the decline, got {branch:?}"
         );
     }
 
@@ -33661,7 +34009,7 @@ mod tests {
 
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     },
@@ -33766,7 +34114,7 @@ mod tests {
 
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     },
@@ -33844,7 +34192,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 },

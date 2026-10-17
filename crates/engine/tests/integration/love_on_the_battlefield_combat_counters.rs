@@ -23,6 +23,16 @@ use engine::types::ability::{
 };
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
+
+/// CR 508.1 + CR 603.4: the trigger-head count producers wrap their event-time
+/// count in `TriggerCondition::EventTime`; shape assertions read the inner
+/// count through here.
+fn head_attack_count(trigger: &engine::types::TriggerDefinition) -> Option<&TriggerCondition> {
+    match trigger.condition.as_ref()? {
+        TriggerCondition::EventTime { condition } => Some(condition.as_ref()),
+        other => Some(other),
+    }
+}
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -314,11 +324,7 @@ fn parse_shape_exactly_two_and_delayed_damage_rider() {
         .expect("YouAttack trigger");
 
     // Gap B: the exactly-two count constraint.
-    match trigger
-        .condition
-        .as_ref()
-        .expect("count constraint present")
-    {
+    match head_attack_count(trigger).expect("count constraint present") {
         TriggerCondition::AttackersDeclaredCount {
             comparator, count, ..
         } => {
@@ -402,9 +408,7 @@ fn parse_shape_alluring_suitor_exactly_two_attack_constraint() {
         .find(|t| t.mode == TriggerMode::YouAttack)
         .expect("YouAttack trigger");
 
-    match trigger
-        .condition
-        .as_ref()
+    match head_attack_count(trigger)
         .expect("exactly-two count constraint present (not dropped → no over-fire)")
     {
         TriggerCondition::AttackersDeclaredCount {
