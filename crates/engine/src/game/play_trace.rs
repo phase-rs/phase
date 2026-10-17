@@ -1131,6 +1131,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::ExploreChoice { .. }
         // CR 701.30c: each clashing player puts their card on top or on the bottom.
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }

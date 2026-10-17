@@ -66644,6 +66644,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -86315,6 +86316,69 @@ fn a_mana_rider_conjunct_must_end_its_sentence() {
     assert!(!super::sequence::starts_bare_and_clause(&format!(
         "{bare}. draw a card"
     )));
+}
+
+/// Every effect in a parsed chain, following `sub_ability` links.
+fn contest_chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+    let mut effects = vec![&*def.effect];
+    let mut next = def.sub_ability.as_deref();
+    while let Some(sub) = next {
+        effects.push(&*sub.effect);
+        next = sub.sub_ability.as_deref();
+    }
+    effects
+}
+
+fn contest_clause_effects(text: &str) -> Vec<Effect> {
+    contest_chain_effects(&parse_effect_chain(text, AbilityKind::Spell))
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+fn has_contest(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PhysicalContest { .. }))
+}
+
+fn has_unimplemented(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
+}
+
+/// A contestant the ability has bound — a relation to a declared object target, or an
+/// anaphor to a player slot an earlier clause declared — becomes a contest.
+#[test]
+fn a_physical_contest_with_a_bound_contestant_parses() {
+    let by_relation =
+        contest_clause_effects("You and target creature's controller have a staring contest.");
+    assert!(has_contest(&by_relation), "{by_relation:?}");
+    assert!(!has_unimplemented(&by_relation), "{by_relation:?}");
+
+    let by_anaphor = contest_clause_effects(
+        "Choose target opponent and target creature they control. You and that player have a breath-holding contest.",
+    );
+    assert!(has_contest(&by_anaphor), "{by_anaphor:?}");
+    assert!(!has_unimplemented(&by_anaphor), "{by_anaphor:?}");
+}
+
+/// CR 115.1 + CR 608.2c: an unbound player population names no particular player, and
+/// the resolver would fall back to the controller (the contest would then skip itself).
+/// It is declined — surfacing as an `Unimplemented` diagnostic — rather than guessed.
+#[test]
+fn a_physical_contest_with_an_unbound_contestant_is_declined() {
+    for text in [
+        "You and an opponent have a staring contest.",
+        "You and each opponent have a staring contest.",
+        "You and your opponents have a breath-holding contest.",
+    ] {
+        let effects = contest_clause_effects(text);
+        assert!(!has_contest(&effects), "{text}: {effects:?}");
+        // Reach-guard: the clause was seen and reported, not silently dropped.
+        assert!(has_unimplemented(&effects), "{text}: {effects:?}");
+    }
 }
 
 // ── One count position, fail closed (`oracle_util::parse_count_slot`) ──────

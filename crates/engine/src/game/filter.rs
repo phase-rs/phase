@@ -9490,8 +9490,6 @@ fn matches_filter_prop(
                 .fold(0, |sum: u32, record| sum.saturating_add(record.count));
             comparator.evaluate(i32::try_from(total).unwrap_or(i32::MAX), *count as i32)
         }
-        // CR 115.7: Stack entry has exactly one target — permissive at filter level,
-        // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
         // CR 700.2: The object is modal iff its printed modality is present. Read
         // from the static printed characteristic populated at object creation,
@@ -9595,7 +9593,8 @@ fn stack_entry_targets_satisfy(
     let Some(ability) = entry.ability() else {
         return true; // KeywordAction entries carry no ability targets — permissive.
     };
-    if ability.targets.is_empty() {
+    let targets = crate::game::ability_utils::declared_targets_in_chain(ability);
+    if targets.is_empty() {
         return false; // "targets X" with no targets cannot be satisfied.
     }
     let ctx = match source_controller {
@@ -9613,9 +9612,9 @@ fn stack_entry_targets_satisfy(
         ),
     };
     if require_all {
-        ability.targets.iter().all(check)
+        targets.iter().all(check)
     } else {
-        ability.targets.iter().any(check)
+        targets.iter().any(check)
     }
 }
 
@@ -10924,6 +10923,105 @@ pub(crate) fn extract_targets(filter: &TargetFilter) -> Option<TargetFilter> {
             filters.iter().find_map(extract_targets)
         }
         _ => None,
+    }
+}
+
+/// How a `HasSingleTarget` requirement counts a stack entry's targets.
+pub(crate) enum SingleTargetCount {
+    /// CR 115.9a: "with a single target" counts each time an object or player
+    /// was chosen as a target.
+    Instances,
+    /// CR 115.9c: "that targets only a single …" counts the different objects
+    /// and players chosen as targets.
+    DifferentObjectsOrPlayers,
+}
+
+impl SingleTargetCount {
+    /// Whether `targets` count as a single target.
+    pub(crate) fn admits(self, targets: &[TargetRef]) -> bool {
+        match self {
+            Self::Instances => targets.len() == 1,
+            Self::DifferentObjectsOrPlayers => targets
+                .first()
+                .is_some_and(|first| targets.iter().all(|t| t == first)),
+        }
+    }
+}
+
+/// The `HasSingleTarget` requirement anywhere in `filter`'s tree, if any. It
+/// counts as CR 115.9c's when its property list also carries `TargetsOnly`
+/// (`oracle_target.rs::parse_targets_only_constraint` writes both for "that
+/// targets only a single …"), and as CR 115.9a's otherwise.
+pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetCount> {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let has = |wanted: fn(&FilterProp) -> bool| tf.properties.iter().any(wanted);
+            has(|p| matches!(p, FilterProp::HasSingleTarget)).then(|| {
+                if has(|p| matches!(p, FilterProp::TargetsOnly { .. })) {
+                    SingleTargetCount::DifferentObjectsOrPlayers
+                } else {
+                    SingleTargetCount::Instances
+                }
+            })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(single_target_count)
+        }
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => None,
     }
 }
 

@@ -35,6 +35,7 @@ import type {
   DraftKind,
   SharedStackPileDecision,
 } from "./draft-adapter";
+import { SubmissionSlot } from "./submissionSlot";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -159,8 +160,7 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   // ── Infrastructure ─────────────────────────────────────────────────
   private ws: PhaseSocketTransport | null = null;
-  private pendingResolve: ((result: SubmitResult) => void) | null = null;
-  private pendingReject: ((error: Error) => void) | null = null;
+  private readonly submission = new SubmissionSlot();
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -268,7 +268,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   private assertNoPendingSubmission(): void {
-    if (this.pendingResolve !== null || this.pendingReject !== null) {
+    if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
         "Another game submission is pending; this submission was not sent.",
@@ -277,28 +277,26 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
   }
 
-  private submitGameFrame(frame: unknown, sendFailure: AdapterError): Promise<SubmitResult> {
+  private submitGameFrame(frame: object, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
       // Claim before emitting: event listeners run synchronously and may submit
       // again while handling actionPendingChanged.
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
+      const submission = this.submission.claim(
+        resolve,
+        reject,
+        this._serverInfo?.commandCorrelation === "CommandIdV1",
+      );
       try {
         this.emit({ type: "actionPendingChanged", pending: true });
       } catch (error) {
-        if (this.pendingResolve === resolve) {
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        }
+        this.submission.release(submission);
         reject(error instanceof Error ? error : new Error(String(error)));
         return;
       }
       // A synchronous listener may close/dispose the adapter or otherwise
       // settle this slot. Do not send after that owner has been released.
-      if (this.pendingResolve !== resolve) return;
-      if (!this.send(frame) && this.pendingResolve === resolve) {
-        this.pendingResolve = null;
-        this.pendingReject = null;
+      if (!this.submission.owns(submission)) return;
+      if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(sendFailure);
       }
@@ -650,13 +648,10 @@ export class ServerDraftAdapter implements EngineAdapter {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
       }
-      if (this.pendingReject) {
+      const dropped = this.submission.drop();
+      if (dropped) {
+        dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
         this.emit({ type: "actionPendingChanged", pending: false });
-        this.pendingReject(
-          new AdapterError("WS_CLOSED", "Connection closed during action", true),
-        );
-        this.pendingResolve = null;
-        this.pendingReject = null;
       }
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
@@ -700,7 +695,7 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   // ── Message handling ───────────────────────────────────────────────
 
-  private handleMessage(msg: { type: string; data?: unknown }): void {
+  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
     switch (msg.type) {
       // ── Draft-phase messages ──────────────────────────────────────
       case "DraftCreated": {
@@ -922,11 +917,11 @@ export class ServerDraftAdapter implements EngineAdapter {
             viewerInteraction: data.viewer_interaction,
           },
         );
-        if (this.pendingResolve) {
+        // A peer's StateUpdate is not an acknowledgement of our command.
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
+          pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingResolve({ events: data.events, log_entries: data.log_entries });
-          this.pendingResolve = null;
-          this.pendingReject = null;
         } else {
           this.emit({
             type: "gameStateUpdated",
@@ -941,8 +936,8 @@ export class ServerDraftAdapter implements EngineAdapter {
 
       case "ActionRejected": {
         const data = msg.data as { rejection?: unknown };
-        this.emit({ type: "actionPendingChanged", pending: false });
-        if (this.pendingReject) {
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
           // Game-phase action rejection. `ServerDraftAdapter` is a full
           // `EngineAdapter` once the pod's game starts, so it must classify the
           // engine's stale verdicts exactly as the WebSocket and P2P transports
@@ -955,36 +950,39 @@ export class ServerDraftAdapter implements EngineAdapter {
           // carries a pick/pass rejection, which is not a `GameAction` at all,
           // so no stale-action verdict is possible — it is a separate draft
           // protocol concern and stays a plain recoverable rejection.
-          this.pendingReject(
+          pending.reject(
             isActionRejection(data.rejection)
               ? actionRejectionError(data.rejection)
               : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false),
           );
-          this.pendingResolve = null;
-          this.pendingReject = null;
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+          // Legacy servers always released the pending indicator here.
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
         break;
       }
 
       case "ActionFailed": {
         const data = msg.data as { message: string };
-        if (this.pendingReject) {
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingReject(new AdapterError("WS_ERROR", data.message, false));
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        } else {
+        } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "error", message: data.message });
         }
         break;
       }
 
       case "ActionNoOp": {
-        this.emit({ type: "actionPendingChanged", pending: false });
-        if (this.pendingResolve) {
-          this.pendingResolve({ events: [], log_entries: [] });
-          this.pendingResolve = null;
-          this.pendingReject = null;
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
+          pending.resolve({ events: [], log_entries: [] });
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+          // Legacy servers always released the pending indicator here.
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
         break;
       }
@@ -1229,13 +1227,9 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.activeMatchId = null;
     this.activeFullKey = null;
     this.acceptedFullKey = null;
-    if (this.pendingReject) {
-      this.pendingReject(
-        new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
-      );
-      this.pendingResolve = null;
-      this.pendingReject = null;
-    }
+    this.submission.drop()?.reject(
+      new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+    );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );

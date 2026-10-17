@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
@@ -36,14 +36,13 @@ use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
 use lobby_broker::protocol::code_in_use_message;
-use phase_ai::auto_play::AiActionsStop;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::Rng;
 use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::filter::filter_state_for_player;
 use crate::game_log::GameFileCache;
@@ -51,6 +50,9 @@ use crate::persist::{PersistedLobbyMeta, PersistedSession};
 use crate::protocol::{PlayerSlotInfo, ServerErrorCode, ServerMessage};
 use crate::reconnect::ReconnectManager;
 use crate::takeback::PendingTakeback;
+
+mod ai_run;
+pub use ai_run::AiRunCursor;
 
 const TAKEBACK_INTERACTION_SESSION_PREFIX: &str = "rewind-";
 
@@ -253,15 +255,6 @@ pub struct AiRunOutcome {
     /// an AI driver failure. Transports must send the final state frames before
     /// publishing this record.
     pub fault: Option<AiDriverFault>,
-}
-
-/// Internal result of one uninterrupted AI decision batch. Keeping the exact
-/// stop reason until [`GameSession::run_ai`] has finished the engine-owned
-/// stack-resolution session is necessary: a safety cap is terminal only when
-/// an AI submitter is still eligible in the resulting state.
-struct AiActionBatch {
-    transitions: Vec<AiTransition>,
-    stop: AiActionsStop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -646,6 +639,9 @@ pub struct GameSession {
     /// ([`GameSession::seed_deck_pools_encoding`]), so the first persist after
     /// a restart re-serializes nothing either.
     deck_pools_cache: Option<(Vec<PlayerDeckPool>, Arc<str>)>,
+    /// Runtime state for the online sustained-clicking contests (Eye to Eye,
+    /// Mouth to Mouth). Never persisted; see `crate::contest`.
+    pub contest: crate::contest::ContestRuntime,
 }
 
 impl GameSession {
@@ -1378,7 +1374,7 @@ impl GameSession {
     /// Only the final entry carries a decision snapshot. Stack automation remains
     /// in that ordinary transition stream rather than a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
-    /// Returns an empty vec if the session has no AI seats.
+    /// Returns an empty transition stream if the session has no AI seats.
     ///
     /// GH #1507: also a no-op while a takeback request is pending. AI moves
     /// mutate `self.state` directly (not through `handle_action`'s pending-
@@ -1388,113 +1384,20 @@ impl GameSession {
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
     pub fn run_ai(&mut self) -> AiRunOutcome {
-        if let Some(fault) = self.ai_driver_fault.clone() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: Some(fault),
-            };
-        }
-        if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: None,
-            };
-        }
-
-        let batch = self.run_ai_action_batch();
-        let transitions = batch.transitions;
-        let failure = match batch.stop {
-            AiActionsStop::NoEligibleAiActor | AiActionsStop::ActionBudgetReached { .. } => None,
-            AiActionsStop::MissingAiConfig { player } => {
-                Some(AiDriverFailure::MissingAiConfig { player })
-            }
-            AiActionsStop::ChooseActionNone { player } => {
-                Some(AiDriverFailure::ChooseActionNone { player })
-            }
-            AiActionsStop::ApplyFailed { player, error, .. } => {
-                Some(AiDriverFailure::ApplyFailed {
-                    player,
-                    error: error.to_string(),
-                })
-            }
-            AiActionsStop::ActionSafetyCapReached { limit } if self.ai_seat_can_act() => {
-                Some(AiDriverFailure::ActionSafetyCapReached { limit })
-            }
-            AiActionsStop::ActionSafetyCapReached { .. } => None,
+        let mut cursor = match self.begin_ai_run() {
+            std::ops::ControlFlow::Break(outcome) => return outcome,
+            std::ops::ControlFlow::Continue(cursor) => cursor,
         };
-        let fault = failure
-            .clone()
-            .map(|failure| self.record_ai_driver_fault(failure));
-        AiRunOutcome {
-            transitions,
-            failure,
-            fault,
+        loop {
+            match self.advance_ai_run(cursor) {
+                std::ops::ControlFlow::Break(outcome) => return outcome,
+                std::ops::ControlFlow::Continue(next) => cursor = next,
+            }
         }
-    }
-
-    /// One uninterrupted run of AI decisions from the current state.
-    fn run_ai_action_batch(&mut self) -> AiActionBatch {
-        let mut rng = rand::rng();
-        let ai_session = self
-            .ai_session
-            .get_or_insert_with(|| AiSession::arc_from_game(&self.state));
-        let ai_results = phase_ai::auto_play::run_ai_actions(
-            &mut self.state,
-            &self.ai_seats,
-            &self.ai_configs,
-            &mut rng,
-            ai_session,
-        );
-
-        if !ai_results.is_empty() {
-            debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
-        }
-
-        let stop = ai_results.stop;
-
-        let result_count = ai_results.results.len();
-        let transitions = ai_results
-            .results
-            .into_iter()
-            .enumerate()
-            .map(|(index, r)| {
-                let decision =
-                    (index + 1 == result_count).then(|| DecisionSnapshot::from_state(&r.state));
-                let revision = self.advance_state_revision();
-                // Per AI result, which is exactly the granularity
-                // `run_ai_actions` reports. This is what makes a turn that
-                // elapses entirely inside AI play still produce a rewind
-                // point; a rule that promoted entries out of
-                // `takeback_history` could not, because `run_ai` pushes none.
-                self.observe_transition(&r.events, &r.state);
-                // Per-game JSON debug log (issue #7978): this is the single
-                // AI-transition mint point every caller of `run_ai` funnels
-                // through (takeback approve/reject, reconnect, game start,
-                // Play-vs-AI start, and the AI follow-up after a human
-                // action) — one hook here covers all of them, matching the
-                // human-action hooks in `handle_action`/
-                // `handle_interaction_with_rejection`.
-                self.game_log
-                    .write_game_log_entries(&self.game_code, &r.log_entries);
-                AiTransition {
-                    state_revision: revision,
-                    state: r.state,
-                    events: r.events,
-                    log_entries: r.log_entries,
-                    decision,
-                }
-            })
-            .collect();
-
-        AiActionBatch { transitions, stop }
     }
 
     fn ai_seat_can_act(&self) -> bool {
-        acting_players(&self.state)
-            .into_iter()
-            .any(|player| self.ai_seats.contains(&player))
+        phase_ai::auto_play::eligible_ai_decision(&self.state, &self.ai_seats).is_some()
     }
 
     /// Recomputes the broadcast-ready fields (legal actions, auto-pass,
@@ -1756,6 +1659,7 @@ impl GameSession {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number,
+            contest: Default::default(),
         })
     }
 
@@ -1917,6 +1821,7 @@ impl GameSession {
         let player = self
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+        self.flush_contest_connections();
 
         // GH #1507: while a takeback request is awaiting approval, the
         // authoritative state must not move out from under it — a new
@@ -2149,6 +2054,7 @@ impl GameSession {
         let player = self
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+        self.flush_contest_connections();
 
         // GH #1507: the authoritative state must not move while the table is
         // voting on a rollback. Same interlock, same reason, as `handle_action`.
@@ -2274,6 +2180,8 @@ impl GameSession {
     /// caller under the same held session guard.
     pub fn mark_disconnected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = false;
+        // Queue host-stamped presence; the admitted contest driver applies it.
+        self.queue_contest_connection(player, crate::contest::ContestPresence::Disconnected);
     }
 
     /// Mark a seat connected again, after the registry half
@@ -2281,6 +2189,7 @@ impl GameSession {
     /// allows it.
     pub fn mark_connected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = true;
+        self.queue_contest_connection(player, crate::contest::ContestPresence::Connected);
     }
 
     pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
@@ -2734,6 +2643,7 @@ impl SessionManager {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number,
+            contest: Default::default(),
         };
         // Seat 0 is installed the way every other seat is, through the
         // per-seat setter, rather than seeded into the struct literal.
@@ -2849,10 +2759,15 @@ impl SessionManager {
     /// the session half. Both run under one held session guard, so the presence
     /// gate the single `handle_disconnect` used to get from its registry lookup
     /// is supplied by the guard plus this call in the same critical section.
-    pub fn record_disconnect(&mut self, game_code: &str, player: PlayerId) {
+    pub fn record_disconnect(
+        &mut self,
+        game_code: &str,
+        player: PlayerId,
+        disconnected_at: Instant,
+    ) {
         let default_grace = self.reconnect.grace_period;
         self.reconnect
-            .record_disconnect(game_code, player, default_grace);
+            .record_disconnect(game_code, player, default_grace, disconnected_at);
         info!(game = %game_code, player = ?player, "player disconnected");
     }
 
@@ -2862,8 +2777,10 @@ impl SessionManager {
         &mut self,
         game_code: &str,
         player: PlayerId,
+        received_at: Instant,
     ) -> crate::reconnect::ReconnectResult {
-        self.reconnect.attempt_reconnect(game_code, player)
+        self.reconnect
+            .attempt_reconnect(game_code, player, received_at)
     }
 
     /// Look up game_code by player_token.
@@ -2947,6 +2864,8 @@ impl SessionManager {
         // walk straight into a shared server. Order matters: this reads the
         // `hosting` just stamped.
         session.revoke_unentitled_debug_capability();
+        // A contest's clock epoch did not survive the restart.
+        session.cancel_contest_after_restore();
         let game_code = session.game_code.clone();
         for token in &session.player_tokens {
             if !token.is_empty() {
@@ -3052,7 +2971,7 @@ mod tests {
             };
             session.mark_disconnected(player);
         }
-        mgr.record_disconnect(game_code, player);
+        mgr.record_disconnect(game_code, player, std::time::Instant::now());
     }
 
     /// The pair `handle_reconnect` used to be: the session resolves the token,
@@ -3070,7 +2989,7 @@ mod tests {
                 .player_for_token(player_token)
                 .ok_or_else(|| "Invalid player token".to_string())?
         };
-        let outcome = mgr.attempt_reconnect(game_code, player);
+        let outcome = mgr.attempt_reconnect(game_code, player, std::time::Instant::now());
         let mut session = mgr
             .try_session(game_code)
             .ok_or_else(|| game_not_found(game_code))?;
@@ -3786,9 +3705,9 @@ mod tests {
         let (token2, _state) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
         let (other_code, other_token) = mgr.create_game(make_deck(), None);
 
-        mgr.record_disconnect(&code, PlayerId(0));
-        mgr.record_disconnect(&code, PlayerId(1));
-        mgr.record_disconnect(&other_code, PlayerId(0));
+        mgr.record_disconnect(&code, PlayerId(0), std::time::Instant::now());
+        mgr.record_disconnect(&code, PlayerId(1), std::time::Instant::now());
+        mgr.record_disconnect(&other_code, PlayerId(0), std::time::Instant::now());
 
         // While the game exists, both players' tokens resolve to it and both
         // seats hold a disconnect record.
@@ -4717,6 +4636,92 @@ mod tests {
             Some(&pre_activation),
             "the newest takeback point is still the pre-activation state"
         );
+    }
+
+    /// A contest's identity must survive a takeback of a COMPLETED contest. Undoing the
+    /// cast and replaying it reaches the same state revision, so an identity derived from
+    /// the revision alone would repeat — and a click frame stamped for the discarded
+    /// branch's contest would count in the replayed one. The restore rotates the
+    /// interaction session, and the identity is bound to it.
+    #[test]
+    fn a_contest_replayed_after_a_takeback_has_a_new_identity_and_rejects_the_old_frame() {
+        use engine::game::contest::{cancel_contest, contest_click, start_contest};
+        use engine::types::contest::{
+            ClickDisposition, ClickRejection, ContestCancelReason, ContestConfig,
+        };
+
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let (mgr, code, _token0, _token1) = setup_two_player_game();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = scenario.build().state().clone();
+        bind_fresh_interaction_session(&mut session.state, &code);
+        session.push_takeback_snapshot(P0);
+
+        let cast_into_contest = |session: &mut GameSession| {
+            let mut runner = GameRunner::from_state(session.state.clone());
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            session.state = runner.state().clone();
+            match &session.state.waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first = cast_into_contest(&mut session);
+        // A running contest refuses a takeback, so the contest completes first (the case
+        // this guards is undoing one that already has).
+        let mut events = Vec::new();
+        cancel_contest(
+            &mut session.state,
+            ContestCancelReason::HostAborted,
+            0,
+            &mut events,
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the contest completed"
+        );
+
+        assert_eq!(
+            session.request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Approved)
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the takeback undid the cast that started the contest"
+        );
+        let second = cast_into_contest(&mut session);
+
+        assert_ne!(
+            first, second,
+            "a replayed contest must not reuse the old identity"
+        );
+        start_contest(&mut session.state, ContestConfig::default(), 0, &mut events);
+        // Past the countdown the contest is Active, and only the new identity counts.
+        let go = ContestConfig::default().countdown_ms;
+        let (stale, _) = contest_click(&mut session.state, first, P0, 1, go + 10, &mut events);
+        assert_eq!(
+            stale,
+            ClickDisposition::Rejected(ClickRejection::WrongContest),
+            "the frame stamped for the discarded branch's contest must not count"
+        );
+        let (current, _) = contest_click(&mut session.state, second, P0, 1, go + 20, &mut events);
+        assert_eq!(current, ClickDisposition::Counted);
     }
 
     /// A takeback restores a live shortcut offer through the same rekeying
@@ -7541,6 +7546,7 @@ mod tests {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number: 1,
+            contest: Default::default(),
         };
 
         let game_started_before = session.game_started;

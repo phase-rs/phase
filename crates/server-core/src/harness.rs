@@ -126,13 +126,17 @@ impl TournamentHarness {
 
     /// Simulate a seat disconnecting.
     pub fn disconnect_seat(&mut self, seat: usize) {
-        self.manager.handle_disconnect(&self.draft_code, seat);
+        self.manager
+            .handle_disconnect(&self.draft_code, seat, std::time::Instant::now());
     }
 
     /// Simulate a seat reconnecting. Returns the refreshed view.
     pub fn reconnect_seat(&mut self, seat: usize) -> Result<DraftPlayerView, String> {
-        self.manager
-            .handle_reconnect(&self.draft_code, &self.tokens[seat])
+        self.manager.handle_reconnect(
+            &self.draft_code,
+            &self.tokens[seat],
+            std::time::Instant::now(),
+        )
     }
 
     /// Get current draft status.

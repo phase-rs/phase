@@ -3198,6 +3198,11 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::SetLifeTotal { target, amount } | Effect::DealDamage { amount, target, .. } => {
             legacy_quantity_expr(amount) || legacy_target_filter(target)
         }
+        // The second contestant is the only filter the contest reads.
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => legacy_target_filter(contestant),
         Effect::Endure {
             amount: count,
             subject: target,
@@ -4254,6 +4259,7 @@ fn walk_ability(
         target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
         target_pins: _,        // CR 400.7 selected-target pins, no read/write effect
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 announced-target record, no read/write effect
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no read/write effect
@@ -4888,6 +4894,12 @@ fn rw_effect(
         Effect::Learn => (ext_write(StateKind::HandLibrary), None),
         Effect::DraftFromSpellbook { .. } => (ext_write(StateKind::HandLibrary), None),
         Effect::Clash => (ext_write(StateKind::HandLibrary), None),
+        // The contest itself writes no state; its result only gates the rider that
+        // follows. It reads the second contestant's filter.
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => (rw_target_filter(contestant), None),
         Effect::ChooseDrawnThisTurnPayOrTopdeck {
             count,
             life_payment,

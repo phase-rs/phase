@@ -16760,6 +16760,21 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bottom_cards: Vec<ObjectId>,
     },
+    /// Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest between
+    /// the resolving ability's controller (contestant 0) and `contest.contestants[1]`.
+    ///
+    /// Nobody submits a `GameAction` here: the host stamps each click with its own
+    /// monotonic clock and drives the state machine through
+    /// `game::contest::{start_contest, advance_contest, contest_click,
+    /// set_contest_connection, cancel_contest}`. When the machine reaches a terminal
+    /// phase those entry points settle it — recording the outcome as the
+    /// controller's win/non-win for the "if you win" rider and resuming the parked
+    /// continuation — and hand priority back, exactly like a settled clash.
+    PhysicalContest {
+        contest: Box<crate::types::contest::ContestState>,
+        /// The resolving ability's source, for the settled `EffectResolved` event.
+        source_id: ObjectId,
+    },
     /// CR 701.38: A player is voting on the listed choices. After this player
     /// has cast all of their votes (1 + extras from "you may vote an additional
     /// time" static abilities), the engine advances to the next player in
@@ -17794,6 +17809,11 @@ pub enum NoActor {
     /// latch and no transport consumed it, so a 3-player Commander game parked
     /// forever with no acting player and no client rendering it.
     ResolveAllReadyPrefix,
+    /// A real-time contest (Eye to Eye, Mouth to Mouth) whose inputs are
+    /// host-stamped clicks and clock ticks rather than `GameAction`s. Advanced by
+    /// [`crate::game::contest::advance_contest`]; every transport that can enter
+    /// the state must drive it, or the game parks with nobody able to move it.
+    HostContestDriver,
 }
 
 impl WaitingFor {
@@ -17962,6 +17982,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
             WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
+            WaitingFor::PhysicalContest { .. } => "PhysicalContest",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
@@ -18170,6 +18191,7 @@ impl WaitingFor {
                 ActingAuthority::One(*proposer)
             }
             WaitingFor::GameOver { .. } => ActingAuthority::None(NoActor::MatchTeardown),
+            WaitingFor::PhysicalContest { .. } => ActingAuthority::None(NoActor::HostContestDriver),
         }
     }
 
@@ -18472,6 +18494,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::PhysicalContest { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
@@ -18679,6 +18702,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::PhysicalContest { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
@@ -31234,6 +31258,8 @@ impl GameState {
                 | GameEvent::PlayerCounterChanged { .. }
                 | GameEvent::ManaExpended { .. }
                 | GameEvent::Clash { .. }
+                | GameEvent::PhysicalContestStarted { .. }
+                | GameEvent::PhysicalContestResolved { .. }
                 | GameEvent::VoteCast { .. }
                 | GameEvent::VoteResolved { .. }
                 | GameEvent::PowerToughnessChanged { .. }

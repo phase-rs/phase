@@ -2684,5 +2684,34 @@
     "substituteTitle": "选择牌手",
     "subtitle": "选择由哪位对手做出选择。",
     "title": "选择对手"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "瞪眼比赛",
+      "breathHolding": "憋气比赛"
+    },
+    "versus": "{{first}} 对 {{second}}",
+    "instructions": "尽可能久地持续点击、轻触或按空格键。第一个停止超过 {{seconds}} 秒的玩家落败。",
+    "status": {
+      "pending": "等待比赛开始…",
+      "preparing": "准备…",
+      "go": "开始！继续点击！",
+      "paused": "比赛已暂停，等待玩家重新连接…",
+      "spectating": "正在观看比赛…",
+      "resolving": "正在判定结果…"
+    },
+    "button": {
+      "wait": "等待开始…",
+      "active": "继续点击！"
+    },
+    "you": "你",
+    "clicks": "{{name}}：{{count}}",
+    "result": {
+      "won": "你赢得了比赛！",
+      "lost": "你输掉了比赛。",
+      "winner": "{{name}} 赢得了比赛。",
+      "tie": "平局：什么也不会发生。",
+      "cancelled": "比赛已取消：什么也不会发生。"
+    }
   }
 }

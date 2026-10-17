@@ -328,6 +328,12 @@ impl GameSession {
         target: RewindTarget,
     ) -> Result<TakebackOutcome, String> {
         self.reject_if_ai_driver_faulted()?;
+        // A contest is host-driven and real-time: ordinary actions are frozen while a
+        // takeback vote is open, so a vote opened mid-contest would leave the contest
+        // mutating under it. Refuse before any vote is installed.
+        if self.contest_active() {
+            return Err("A takeback cannot be requested while a contest is running".to_string());
+        }
         if self.pending_takeback.is_some() {
             return Err("A takeback request is already pending for this game".to_string());
         }

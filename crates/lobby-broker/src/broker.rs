@@ -507,6 +507,13 @@ impl Broker {
             .map(crate::protocol::TournamentView::from)
     }
 
+    /// The heartbeat timestamp echo, independent of listing presence refresh.
+    /// Both broker dispatch and shells with a separate refresh task use this
+    /// constructor, so answering a heartbeat never needs a fabricated connection.
+    #[must_use]
+    pub fn heartbeat_reply(timestamp: u64) -> LobbyServerMessage {
+        LobbyServerMessage::Pong { timestamp }
+    }
     /// The reply to a frame that needs no broker state and has no side effects,
     /// or `None` when the frame must go through [`Broker::handle`].
     ///
@@ -525,7 +532,7 @@ impl Broker {
     ) -> Option<LobbyServerMessage> {
         match msg {
             LobbyClientMessage::Ping { timestamp } if conn.host_game.is_none() => {
-                Some(pong_reply(*timestamp))
+                Some(Self::heartbeat_reply(*timestamp))
             }
             _ => None,
         }
@@ -677,7 +684,7 @@ impl Broker {
             // Reached only by a hosting connection (an unhosted Ping is
             // answered by `stateless_reply` above), after its liveness refresh.
             LobbyClientMessage::Ping { timestamp } => {
-                vec![Outbound::ToSelf(pong_reply(timestamp))]
+                vec![Outbound::ToSelf(Self::heartbeat_reply(timestamp))]
             }
 
             LobbyClientMessage::UpdateLobbyMetadata {
@@ -1865,13 +1872,6 @@ pub fn server_hello(
 
 fn error(message: &str) -> Outbound {
     Outbound::ToSelf(LobbyServerMessage::error(message))
-}
-
-/// The keepalive reply: echoes the client's timestamp. The single constructor
-/// for `Pong`, shared by [`Broker::stateless_reply`] and the `Ping` arm of
-/// [`Broker::handle`].
-fn pong_reply(timestamp: u64) -> LobbyServerMessage {
-    LobbyServerMessage::Pong { timestamp }
 }
 
 /// The refusal for one gated tournament action: a `TournamentActionRejected`

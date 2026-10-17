@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-16T00:00:00Z",
+  "updated": "2026-10-17T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -203,16 +203,12 @@
           "name": "Riverpyre Verge"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Wrenn's Resolve"
         },
         {
           "count": 1,
           "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Scar Mage"
         },
         {
           "count": 4,
@@ -227,7 +223,7 @@
           "name": "Pompous Battlemage"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Heroes' Hangout"
         },
         {
@@ -235,7 +231,7 @@
           "name": "Monstrous Rage"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Slickshot Show-Off"
         },
         {
@@ -244,7 +240,7 @@
         },
         {
           "count": 1,
-          "name": "Fiery Impulse"
+          "name": "Hearth Elemental"
         }
       ],
       "sideboard": [
@@ -266,10 +262,6 @@
         },
         {
           "count": 1,
-          "name": "Teachings of the Archaics"
-        },
-        {
-          "count": 1,
           "name": "Abandon Attachments"
         },
         {
@@ -282,7 +274,7 @@
         },
         {
           "count": 1,
-          "name": "Hearth Elemental"
+          "name": "Stormwing Entity"
         },
         {
           "count": 1,
@@ -293,7 +285,7 @@
           "name": "Spider-Sense"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Precise Redaction"
         },
         {
@@ -802,20 +794,20 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Blazemire Verge"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Swamp"
         },
         {
           "count": 4,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 3,
           "name": "Blightstep Pathway"
         },
         {
-          "count": 2,
-          "name": "The Sackville-Bagginses"
+          "count": 4,
+          "name": "Blood Crypt"
         },
         {
           "count": 4,
@@ -834,7 +826,7 @@
           "name": "Deadly Dispute"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Den of the Bugbear"
         },
         {
@@ -844,6 +836,10 @@
         {
           "count": 4,
           "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 4,
@@ -858,28 +854,28 @@
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
-          "count": 1,
-          "name": "Sulfurous Springs"
+          "count": 4,
+          "name": "Blackcleave Cliffs"
         },
         {
           "count": 1,
           "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 4,
-          "name": "Fatal Push"
+          "count": 2,
+          "name": "The Sackville-Bagginses"
         },
         {
           "count": 4,
           "name": "Witch's Oven"
         },
         {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
+          "count": 1,
+          "name": "Swamp"
         },
         {
-          "count": 4,
-          "name": "Blood Crypt"
+          "count": 1,
+          "name": "Swamp"
         }
       ],
       "sideboard": [
@@ -888,8 +884,8 @@
           "name": "Abandon Attachments"
         },
         {
-          "count": 1,
-          "name": "Decorum Dissertation"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
@@ -897,6 +893,10 @@
         },
         {
           "count": 2,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
           "name": "Go Blank"
         },
         {
@@ -904,16 +904,16 @@
           "name": "Ozai's Cruelty"
         },
         {
-          "count": 2,
-          "name": "Ghost Vacuum"
+          "count": 1,
+          "name": "Ruinous Waterbending"
         },
         {
           "count": 3,
           "name": "The Legend of Roku"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 1,
+          "name": "Decorum Dissertation"
         }
       ]
     },
@@ -1049,6 +1049,122 @@
       ]
     },
     {
+      "name": "Jund Sacrifice",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "G",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Shambling Ghast"
+        },
+        {
+          "count": 4,
+          "name": "Greedy Freebooter"
+        },
+        {
+          "count": 4,
+          "name": "Deadly Dispute"
+        },
+        {
+          "count": 4,
+          "name": "The Sackville-Bagginses"
+        },
+        {
+          "count": 4,
+          "name": "Biotech Specialist"
+        },
+        {
+          "count": 4,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Witch's Oven"
+        },
+        {
+          "count": 4,
+          "name": "Cauldron Familiar"
+        },
+        {
+          "count": 4,
+          "name": "Mayhem Devil"
+        },
+        {
+          "count": 3,
+          "name": "Lively Dirge"
+        },
+        {
+          "count": 2,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 2,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 2,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Umbral Collar Zealot"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 2,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 3,
+          "name": "Witherbloom Charm"
+        },
+        {
+          "count": 2,
+          "name": "Ygra, Eater of All"
+        },
+        {
+          "count": 1,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 3,
+          "name": "Tormod's Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Dark Betrayal"
+        }
+      ]
+    },
+    {
       "name": "Dimir Self-Bounce",
       "author": "MTGGoldfish",
       "colors": [
@@ -1180,170 +1296,6 @@
         {
           "count": 2,
           "name": "Go Blank"
-        }
-      ]
-    },
-    {
-      "name": "Abzan Greasefang",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "G",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Cache Grab"
-        },
-        {
-          "count": 1,
-          "name": "Emptiness"
-        },
-        {
-          "count": 4,
-          "name": "Esika's Chariot"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
-        },
-        {
-          "count": 4,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 4,
-          "name": "Professor of Symbology"
-        },
-        {
-          "count": 4,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 1,
-          "name": "Collective Brutality"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Thundering Broodwagon"
-        },
-        {
-          "count": 1,
-          "name": "Yathan Roadwatcher"
-        },
-        {
-          "count": 1,
-          "name": "Jennifer Walters"
-        },
-        {
-          "count": 1,
-          "name": "Caves of Koilos"
-        },
-        {
-          "count": 1,
-          "name": "Agadeem's Awakening"
-        },
-        {
-          "count": 1,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 4,
-          "name": "Formidable Speaker"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Witherbloom Command"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Enter the Avatar State"
-        },
-        {
-          "count": 1,
-          "name": "Origin of Metalbending"
-        },
-        {
-          "count": 2,
-          "name": "Abrupt Decay"
-        },
-        {
-          "count": 2,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 2,
-          "name": "Pest Control"
-        },
-        {
-          "count": 1,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 1,
-          "name": "True Ancestry"
-        },
-        {
-          "count": 1,
-          "name": "Ruinous Waterbending"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Yasharn, Implacable Earth"
-        },
-        {
-          "count": 1,
-          "name": "Witherbloom Command"
         }
       ]
     }
