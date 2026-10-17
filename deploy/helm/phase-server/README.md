@@ -246,10 +246,17 @@ Publication drains flush only through the engine's already-observed contest
 clock, not wall time. They cannot advance time past an earlier pending click.
 The autonomous tick still applies disconnects and grace forfeits without
 further client traffic. Full reconnect admission keeps the original transport
-receipt for registry grace; only the contest edge's ordering stamp is clamped
-to causal history. Executor wait alone cannot turn a timely return into a
-contest forfeit. This does not resolve the separate registry
-expiry-finalization race.
+receipt for registry grace. The contest's causal stamp controls both ordering
+and the time passed to the engine, whose monotonic clock can raise it further.
+For example, absent a later engine observation, D@200/C@100 applies the return
+at 200 with a zero-length pause. An admitted return is not restamped to a later
+worker time or sorted before the departure it reverses.
+
+**Known timing limits:** a return received within registry grace can still lose
+the session lease to an autonomous tick after the contest's reconnect grace.
+If that tick forfeits the contest before the return handler is admitted, the
+earlier receipt does not undo the forfeit. This pre-existing admission race is
+unchanged, alongside the separate registry expiry-finalization race.
 
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level

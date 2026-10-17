@@ -353,45 +353,57 @@ fn queued_reconnect_before_departure_keeps_contest_presence_causal() {
                 &table.key.game_code,
             )
             .await;
-            let published_revision = loop {
+            let mut departure = None;
+            let (departed_at, resumed_revision) = loop {
+                match receive_wire_message(&mut replacement).await {
+                    ServerMessage::StateUpdate {
+                        state_revision,
+                        state,
+                        ..
+                    } if state_revision > before_tick => {
+                        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+                            panic!("the accepted replacement must not forfeit");
+                        };
+                        assert_eq!(contest.id, 91);
+                        match contest.contestants[0].connection {
+                            ContestantConnection::Disconnected { since_ms } => {
+                                assert_eq!(contest.paused_since_ms, Some(since_ms));
+                                departure = Some((state_revision, since_ms));
+                            }
+                            ContestantConnection::Connected => {
+                                let Some((departure_revision, departed_at)) = departure else {
+                                    continue;
+                                };
+                                assert!(state_revision > departure_revision);
+                                assert!(contest.clock_ms >= departed_at);
+                                assert_eq!(contest.paused_since_ms, None);
+                                break (departed_at, state_revision);
+                            }
+                        }
+                    }
+                    ServerMessage::Error { message, .. } => {
+                        panic!("contest publication: {message}");
+                    }
+                    _ => {}
+                }
+            };
+            // A revision bump alone could precede the driver. Ordered departure
+            // AND return snapshots positively prove that both queued edges ran.
+            {
                 let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
                     .await
                     .unwrap();
-                if lease.state_revision > before_tick {
-                    let WaitingFor::PhysicalContest { contest, .. } = &lease.state.waiting_for
-                    else {
-                        panic!("the accepted replacement must not forfeit");
-                    };
-                    assert!(lease.connected[0]);
-                    assert_eq!(
-                        contest.contestants[0].connection,
-                        ContestantConnection::Connected
-                    );
-                    assert_eq!(contest.paused_since_ms, None);
-                    break lease.state_revision;
-                }
-                drop(lease);
-                tokio::task::yield_now().await;
-            };
-            loop {
-                if let ServerMessage::StateUpdate {
-                    state_revision,
-                    state,
-                    ..
-                } = receive_wire_message(&mut replacement).await
-                {
-                    if state_revision >= published_revision {
-                        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
-                            panic!("the live socket must receive the resumed contest");
-                        };
-                        assert_eq!(
-                            contest.contestants[0].connection,
-                            ContestantConnection::Connected
-                        );
-                        assert_eq!(contest.paused_since_ms, None);
-                        break;
-                    }
-                }
+                let WaitingFor::PhysicalContest { contest, .. } = &lease.state.waiting_for else {
+                    panic!("the published return must remain active");
+                };
+                assert!(lease.state_revision >= resumed_revision);
+                assert!(lease.connected[0]);
+                assert!(contest.clock_ms >= departed_at);
+                assert_eq!(
+                    contest.contestants[0].connection,
+                    ContestantConnection::Connected
+                );
+                assert_eq!(contest.paused_since_ms, None);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
             let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
