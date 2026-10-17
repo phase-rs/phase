@@ -15669,6 +15669,8 @@ mod tests {
             "that are instant cards, are sorcery cards, and/or have an adventure",
             "that are sorcery cards or have an adventure or are instant cards",
             "that's an instant, sorcery, or card that has an adventure",
+            "that are instants",
+            "that are instant cards, are sorceries",
         ] {
             assert!(
                 nom::combinator::all_consuming(parse_relative_card_filter)
@@ -15678,8 +15680,8 @@ mod tests {
             );
         }
         for malformed in [
-            "that are instants",
-            "that are instant cards, are sorceries",
+            "that are instantsx",
+            "that are instant cards, are sorceriesx",
             "that are instant cards and have",
             "that are instant cards and have an adventures",
             "that are instant cards and have an unknown adventure",
