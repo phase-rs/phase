@@ -44,7 +44,7 @@ use crate::types::ability_visit::{
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
-    is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
+    is_land_subtype, noncreature_subtype_set, CardType, CoreType, SubtypeSet, Supertype,
 };
 use crate::types::counter::{has_positive_counters, CounterType};
 use crate::types::game_state::{
@@ -221,34 +221,69 @@ enum ContinuousEffectGroupKey {
 
 type StartedContinuousEffectSets = HashMap<ContinuousEffectGroupKey, Vec<ObjectId>>;
 
+/// CR 205.3: The subtype set a card type owns. Kindred (and the legacy Tribal
+/// type) share the creature types (CR 205.3m, CR 308.2, CR 308.3). Card types
+/// with no subtype list of their own correlate with no subtype set.
+fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
+    match core_type {
+        // CR 205.3m + CR 308.2 + CR 308.3: creatures and kindreds share creature types.
+        CoreType::Creature | CoreType::Kindred | CoreType::Tribal => Some(SubtypeSet::Creature),
+        // CR 205.3g: artifact types.
+        CoreType::Artifact => Some(SubtypeSet::Artifact),
+        // CR 205.3h: enchantment types.
+        CoreType::Enchantment => Some(SubtypeSet::Enchantment),
+        // CR 205.3i: land types.
+        CoreType::Land => Some(SubtypeSet::Land),
+        // CR 205.3j: planeswalker types.
+        CoreType::Planeswalker => Some(SubtypeSet::Planeswalker),
+        // CR 205.3k: instants and sorceries share spell types.
+        CoreType::Instant | CoreType::Sorcery => Some(SubtypeSet::Spell),
+        // CR 205.3q: battle types.
+        CoreType::Battle => Some(SubtypeSet::Battle),
+        CoreType::Dungeon
+        | CoreType::Plane
+        | CoreType::Phenomenon
+        | CoreType::Scheme
+        | CoreType::Conspiracy => None,
+    }
+}
+
+/// CR 205.3: The subtype set a subtype belongs to. The fixed noncreature lists
+/// are authoritative; every other subtype is a creature type (CR 205.3m).
+fn subtype_set_of(subtype: &str) -> SubtypeSet {
+    noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature)
+}
+
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-/// CR 205.1a: Whether a subtype correlates to at least one of the given core
-/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// CR 205.1a + CR 205.3d: Whether a subtype correlates to at least one of the
+/// given core types - i.e. whether it survives a card-type replacement or
+/// removal. A creature type correlates only to Creature, Kindred or Tribal, so
+/// it never survives on an object that has none of them. Shared with the
 /// token-copy "stamp at creation" path so both the layered and baked
 /// applications of `SetCardTypes` drop the same uncorrelated subtypes.
-pub(crate) fn subtype_matches_core_types(
-    subtype: &str,
-    core_types: &[CoreType],
-    all_creature_types: &[String],
-) -> bool {
-    let Some(set) = noncreature_subtype_set(subtype) else {
-        return core_types.contains(&CoreType::Creature)
-            || core_types.contains(&CoreType::Kindred)
-            || all_creature_types
-                .iter()
-                .any(|creature_type| creature_type == subtype);
+pub(crate) fn subtype_matches_core_types(subtype: &str, core_types: &[CoreType]) -> bool {
+    let set = subtype_set_of(subtype);
+    core_types
+        .iter()
+        .any(|core_type| core_type_subtype_set(*core_type) == Some(set))
+}
+
+/// CR 205.1a: Remove a card type. "If an object's card type is removed, the
+/// subtypes correlated with that card type will remain if they are also the
+/// subtypes of a card type the object currently has; otherwise, they are also
+/// removed for the entire time the object's card type is removed." Only
+/// subtypes of the removed type's own set are considered, so an unrelated
+/// subtype added by a later effect is untouched. Shared by the layered
+/// `RemoveType` application, the baked token-copy arms and the bestow form.
+pub(crate) fn remove_core_type(card_types: &mut CardType, core_type: CoreType) {
+    card_types.core_types.retain(|t| *t != core_type);
+    let Some(removed_set) = core_type_subtype_set(core_type) else {
+        return;
     };
-    core_types.iter().any(|core_type| {
-        matches!(
-            (core_type, set),
-            (CoreType::Artifact, SubtypeSet::Artifact)
-                | (CoreType::Enchantment, SubtypeSet::Enchantment)
-                | (CoreType::Land, SubtypeSet::Land)
-                | (CoreType::Planeswalker, SubtypeSet::Planeswalker)
-                | (CoreType::Instant | CoreType::Sorcery, SubtypeSet::Spell)
-                | (CoreType::Battle, SubtypeSet::Battle)
-        )
-    })
+    let remaining = &card_types.core_types;
+    card_types.subtypes.retain(|subtype| {
+        subtype_set_of(subtype) != removed_set || subtype_matches_core_types(subtype, remaining)
+    });
 }
 
 /// CR 205.3: Remove every subtype belonging to `set`. Creature-type membership
@@ -11750,8 +11785,12 @@ pub(crate) fn apply_type_or_color_modification(
                 obj.card_types.core_types.push(*core_type);
             }
         }
+        // CR 205.1a: removing a card type also removes its correlated subtypes
+        // (unless another remaining type owns the same subtype set), so an
+        // object that stops being a creature has no creature types while it
+        // isn't one. A later `AddType` never resurrects them (CR 613.7).
         ContinuousModification::RemoveType { core_type } => {
-            obj.card_types.core_types.retain(|t| t != core_type);
+            remove_core_type(&mut obj.card_types, *core_type);
         }
         ContinuousModification::SetColor { colors } => {
             obj.color = colors.clone();
@@ -11772,9 +11811,9 @@ pub(crate) fn apply_type_or_color_modification(
         // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
         ContinuousModification::SetCardTypes { core_types } => {
             obj.card_types.core_types = core_types.clone();
-            obj.card_types.subtypes.retain(|subtype| {
-                subtype_matches_core_types(subtype, core_types, all_creature_types)
-            });
+            obj.card_types
+                .subtypes
+                .retain(|subtype| subtype_matches_core_types(subtype, core_types));
         }
         // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
         // named subtype set. Membership for the `Creature` set is resolved
@@ -12449,31 +12488,220 @@ mod tests {
         let mut state = setup();
         state.all_creature_types = vec!["Bear".to_string(), "Berserker".to_string()];
 
-        assert!(subtype_matches_core_types(
-            "Bear",
-            &[CoreType::Creature],
-            &state.all_creature_types
-        ));
+        assert!(subtype_matches_core_types("Bear", &[CoreType::Creature]));
         assert!(!subtype_matches_core_types(
             "Equipment",
-            &[CoreType::Creature],
-            &state.all_creature_types
+            &[CoreType::Creature]
         ));
         assert!(!subtype_matches_core_types(
             "Mountain",
-            &[CoreType::Creature],
-            &state.all_creature_types
+            &[CoreType::Creature]
         ));
         assert!(subtype_matches_core_types(
             "Equipment",
-            &[CoreType::Artifact, CoreType::Creature],
-            &state.all_creature_types
+            &[CoreType::Artifact, CoreType::Creature]
         ));
-        assert!(subtype_matches_core_types(
-            "Siege",
-            &[CoreType::Battle],
-            &state.all_creature_types
-        ));
+        assert!(subtype_matches_core_types("Siege", &[CoreType::Battle]));
+    }
+
+    /// CR 205.3m + CR 308.2 + CR 308.3 + CR 205.1a/205.3d: creature types
+    /// correlate only to Creature, Kindred or Tribal; every other subtype set is
+    /// fixed. Registry-free by signature.
+    #[test]
+    fn subtype_matches_core_types_creature_types_require_creature_kindred_or_tribal() {
+        for (subtype, core_types, expected) in [
+            ("Avatar", vec![CoreType::Enchantment], false),
+            (
+                "Avatar",
+                vec![CoreType::Enchantment, CoreType::Creature],
+                true,
+            ),
+            (
+                "Avatar",
+                vec![CoreType::Kindred, CoreType::Enchantment],
+                true,
+            ),
+            ("Avatar", vec![CoreType::Tribal, CoreType::Artifact], true),
+            ("Equipment", vec![CoreType::Artifact], true),
+            ("Equipment", vec![CoreType::Creature], false),
+            ("Forest", vec![CoreType::Land, CoreType::Creature], true),
+            ("Forest", vec![CoreType::Creature], false),
+            ("Siege", vec![CoreType::Battle], true),
+            ("Adventure", vec![CoreType::Instant], true),
+        ] {
+            assert_eq!(
+                subtype_matches_core_types(subtype, &core_types),
+                expected,
+                "{subtype} vs {core_types:?}"
+            );
+        }
+    }
+
+    /// CR 205.1a + CR 205.3d: `SetCardTypes` to a result with no creature type
+    /// drops registered creature types (the registry no longer keeps them alive).
+    /// Deliberately synthetic: the registry clause has no real-card owner.
+    #[test]
+    fn set_card_types_drops_registered_creature_types_from_a_noncreature_result() {
+        for (result_type, keeps_bear) in [(CoreType::Land, false), (CoreType::Creature, true)] {
+            let mut state = setup();
+            state.all_creature_types = vec!["Bear".to_string()];
+            let target = make_creature(&mut state, "Bear Object", 2, 2, PlayerId(0));
+            {
+                let obj = state.objects.get_mut(&target).unwrap();
+                obj.card_types.subtypes = vec!["Bear".to_string()];
+                obj.base_card_types = obj.card_types.clone();
+            }
+            let source = make_creature(&mut state, "Type Setter", 1, 1, PlayerId(0));
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: target })
+                        .modifications(vec![ContinuousModification::SetCardTypes {
+                            core_types: vec![result_type],
+                        }]),
+                );
+
+            evaluate_layers(&mut state);
+
+            let obj = &state.objects[&target];
+            assert_eq!(obj.card_types.core_types, vec![result_type]);
+            assert_eq!(
+                obj.card_types.subtypes.iter().any(|s| s == "Bear"),
+                keeps_bear,
+                "SetCardTypes to {result_type:?}"
+            );
+        }
+    }
+
+    /// CR 205.1a + CR 613.7: a creature type removed with the Creature type is
+    /// not resurrected by a later `AddType { Creature }`, in either timestamp
+    /// order.
+    #[test]
+    fn remove_type_then_later_add_type_creature_keeps_creature_types_removed() {
+        for (remove_ts, add_ts, ends_creature) in [(5, 10, true), (10, 5, false)] {
+            let mut state = setup();
+            state.all_creature_types = vec!["Bear".to_string()];
+            let target = make_creature(&mut state, "Bear Object", 2, 2, PlayerId(0));
+            {
+                let obj = state.objects.get_mut(&target).unwrap();
+                obj.card_types.subtypes = vec!["Bear".to_string()];
+                obj.base_card_types = obj.card_types.clone();
+            }
+            for (name, ts, modification) in [
+                (
+                    "Remover",
+                    remove_ts,
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    },
+                ),
+                (
+                    "Adder",
+                    add_ts,
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                ),
+            ] {
+                let source = make_creature(&mut state, name, 1, 1, PlayerId(0));
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.timestamp = ts;
+                obj.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: target })
+                        .modifications(vec![modification]),
+                );
+            }
+
+            evaluate_layers(&mut state);
+
+            let obj = &state.objects[&target];
+            assert_eq!(
+                obj.card_types.core_types.contains(&CoreType::Creature),
+                ends_creature,
+                "reach guard: remove ts {remove_ts}, add ts {add_ts}"
+            );
+            assert!(
+                !obj.card_types.subtypes.iter().any(|s| s == "Bear"),
+                "CR 205.1a: a later AddType Creature must not restore Bear (remove ts {remove_ts}, add ts {add_ts})"
+            );
+        }
+    }
+
+    /// CR 205.1a: `remove_core_type` drops the removed type's correlated
+    /// subtypes unless a remaining type owns the same subtype set.
+    #[test]
+    fn remove_core_type_helper_cases() {
+        use crate::types::card_type::CardType;
+        use CoreType::*;
+
+        fn card_type(core_types: &[CoreType], subtypes: &[&str]) -> CardType {
+            CardType {
+                supertypes: vec![],
+                core_types: core_types.to_vec(),
+                subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+        fn removed(core_types: &[CoreType], subtypes: &[&str], remove: CoreType) -> CardType {
+            let mut ct = card_type(core_types, subtypes);
+            remove_core_type(&mut ct, remove);
+            ct
+        }
+
+        // Land Creature - Forest Dryad (Dryad Arbor shape).
+        assert_eq!(
+            removed(&[Land, Creature], &["Forest", "Dryad"], Creature),
+            card_type(&[Land], &["Forest"])
+        );
+        assert_eq!(
+            removed(&[Land, Creature], &["Forest", "Dryad"], Land),
+            card_type(&[Creature], &["Dryad"])
+        );
+        // Kindred / Tribal keep the creature set (CR 308.2, CR 308.3).
+        assert_eq!(
+            removed(&[Kindred, Creature], &["Eldrazi"], Creature),
+            card_type(&[Kindred], &["Eldrazi"])
+        );
+        assert_eq!(
+            removed(&[Tribal, Creature], &["Eldrazi"], Creature),
+            card_type(&[Tribal], &["Eldrazi"])
+        );
+        assert_eq!(
+            removed(&[Kindred, Creature], &["Eldrazi"], Kindred),
+            card_type(&[Creature], &["Eldrazi"])
+        );
+        // Already lacks the type (the bestow shape): the set is still pruned.
+        assert_eq!(
+            removed(&[Enchantment], &["Insect", "Aura"], Creature),
+            card_type(&[Enchantment], &["Aura"])
+        );
+        // A type with no subtype set changes nothing.
+        assert_eq!(
+            removed(&[Dungeon], &["Insect"], Dungeon),
+            card_type(&[], &["Insect"])
+        );
+        // The remaining sets.
+        assert_eq!(
+            removed(&[Enchantment, Creature], &["Saga", "Insect"], Enchantment),
+            card_type(&[Creature], &["Insect"])
+        );
+        assert_eq!(
+            removed(&[Planeswalker, Creature], &["Jace", "Human"], Planeswalker),
+            card_type(&[Creature], &["Human"])
+        );
+        assert_eq!(removed(&[Battle], &["Siege"], Battle), card_type(&[], &[]));
+        assert_eq!(
+            removed(&[Instant, Sorcery], &["Adventure"], Instant),
+            card_type(&[Sorcery], &["Adventure"])
+        );
+        assert_eq!(
+            removed(&[Artifact, Creature], &["Equipment", "Cat"], Artifact),
+            card_type(&[Creature], &["Cat"])
+        );
     }
 
     fn make_creature(

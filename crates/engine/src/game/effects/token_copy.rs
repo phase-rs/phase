@@ -1,6 +1,6 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-use crate::game::layers::{compute_current_copiable_values, remove_subtype_set};
+use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
@@ -1577,10 +1577,13 @@ fn apply_token_modifications(
                     }
                 }
             }
+            // CR 205.1a: removing a card type removes its correlated subtypes too;
+            // applied to both live and base types so the loss is part of the
+            // token's copiable values (CR 707.9b).
             ContinuousModification::RemoveType { core_type } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.card_types.core_types.retain(|t| t != core_type);
-                    token.base_card_types.core_types.retain(|t| t != core_type);
+                    remove_core_type(&mut token.card_types, *core_type);
+                    remove_core_type(&mut token.base_card_types, *core_type);
                 }
             }
             ContinuousModification::AddSubtype { subtype } => {
@@ -1624,17 +1627,11 @@ fn apply_token_modifications(
             // Stamped into both live and base card types so the override is part
             // of the token's copiable values (CR 707.9b).
             ContinuousModification::SetCardTypes { core_types } => {
-                let all_creature_types = &state.all_creature_types;
-                let objects = &mut state.objects;
-                if let Some(token) = objects.get_mut(&token_id) {
+                if let Some(token) = state.objects.get_mut(&token_id) {
                     token.card_types.core_types = core_types.clone();
                     token.base_card_types.core_types = core_types.clone();
                     let keep = |subtype: &String| {
-                        crate::game::layers::subtype_matches_core_types(
-                            subtype,
-                            core_types,
-                            all_creature_types,
-                        )
+                        crate::game::layers::subtype_matches_core_types(subtype, core_types)
                     };
                     token.card_types.subtypes.retain(|s| keep(s));
                     token.base_card_types.subtypes.retain(|s| keep(s));
@@ -1860,9 +1857,10 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                     token.base_card_types.core_types.push(*core_type);
                 }
             }
+            // CR 205.1a + CR 707.9b: same as the layered `RemoveType` arm.
             ContinuousModification::RemoveType { core_type } => {
-                token.card_types.core_types.retain(|t| t != core_type);
-                token.base_card_types.core_types.retain(|t| t != core_type);
+                remove_core_type(&mut token.card_types, *core_type);
+                remove_core_type(&mut token.base_card_types, *core_type);
             }
             ContinuousModification::AddSubtype { subtype } => {
                 if !token.card_types.subtypes.iter().any(|s| s == subtype) {
@@ -1888,11 +1886,7 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                 token.card_types.core_types = core_types.clone();
                 token.base_card_types.core_types = core_types.clone();
                 let keep = |subtype: &String| {
-                    crate::game::layers::subtype_matches_core_types(
-                        subtype,
-                        core_types,
-                        all_creature_types,
-                    )
+                    crate::game::layers::subtype_matches_core_types(subtype, core_types)
                 };
                 token.card_types.subtypes.retain(|s| keep(s));
                 token.base_card_types.subtypes.retain(|s| keep(s));
@@ -2171,6 +2165,128 @@ mod tests {
             .base_card_types
             .supertypes
             .contains(&Supertype::Legendary));
+    }
+
+    /// CR 205.1a + CR 707.9b: a baked `RemoveType { Creature }` copy exception
+    /// removes the creature types with the Creature type, in both the live and
+    /// the base (copiable) card types. Kindred keeps the creature set
+    /// (CR 308.2).
+    #[test]
+    fn copy_token_remove_type_creature_drops_creature_types_in_card_and_base_types() {
+        for (core_types, subtypes, expected_core, expected_subtypes) in [
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Equipment", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Equipment"],
+            ),
+            (
+                vec![CoreType::Kindred, CoreType::Creature],
+                vec!["Eldrazi"],
+                vec![CoreType::Kindred],
+                vec!["Eldrazi"],
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            state.all_creature_types = vec!["Bear".to_string(), "Eldrazi".to_string()];
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let source = state.objects.get_mut(&source_id).unwrap();
+                source.base_card_types = CardType {
+                    supertypes: vec![],
+                    core_types: core_types.clone(),
+                    subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+                };
+                source.card_types = source.base_card_types.clone();
+            }
+
+            let mut events = Vec::new();
+            let ability = ResolvedAbility::new(
+                Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }],
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            );
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let token = state
+                .objects
+                .get(&ObjectId(state.next_object_id - 1))
+                .unwrap();
+            let expected_subtypes: Vec<String> =
+                expected_subtypes.iter().map(|s| s.to_string()).collect();
+            // Reach guard: the token exists, lost Creature and kept the expected type.
+            assert_eq!(token.card_types.core_types, expected_core);
+            assert_eq!(token.base_card_types.core_types, expected_core);
+            assert_eq!(token.card_types.subtypes, expected_subtypes);
+            assert_eq!(token.base_card_types.subtypes, expected_subtypes);
+        }
+    }
+
+    /// CR 205.1a + CR 707.2 + CR 707.9b: the immediate (liminal token) copy
+    /// exception path removes creature types with the Creature type too.
+    #[test]
+    fn immediate_copy_token_remove_type_creature_drops_creature_types() {
+        for (core_types, subtypes, expected_core, expected_subtypes) in [
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Equipment", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Equipment"],
+            ),
+            (
+                vec![CoreType::Kindred, CoreType::Creature],
+                vec!["Eldrazi"],
+                vec![CoreType::Kindred],
+                vec!["Eldrazi"],
+            ),
+        ] {
+            let mut token = GameObject::new(
+                ObjectId(900),
+                CardId(900),
+                PlayerId(0),
+                "Liminal Token".to_string(),
+                Zone::Battlefield,
+            );
+            token.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: core_types.clone(),
+                subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+            };
+            token.card_types = token.base_card_types.clone();
+
+            apply_immediate_copy_token_modifications_to_object(
+                &mut token,
+                &[ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature,
+                }],
+                &["Bear".to_string(), "Eldrazi".to_string()],
+            );
+
+            let expected_subtypes: Vec<String> =
+                expected_subtypes.iter().map(|s| s.to_string()).collect();
+            assert_eq!(token.card_types.core_types, expected_core);
+            assert_eq!(token.base_card_types.core_types, expected_core);
+            assert_eq!(token.card_types.subtypes, expected_subtypes);
+            assert_eq!(token.base_card_types.subtypes, expected_subtypes);
+        }
     }
 
     #[test]

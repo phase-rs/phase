@@ -15014,20 +15014,35 @@ pub fn handle_prototype_cost_choice_with_payment_mode(
 /// touched by layers, but battlefield re-entry resets are anchored on base
 /// values too).
 ///
-/// `bestow_form` is set to `Some(BestowFormState)` to mark the object as in
-/// bestow form; `revert_bestow_aura_form` is the inverse operation.
+/// `bestow_form` is set to `Some(BestowFormState { .. })` (carrying the removed
+/// creature subtypes, CR 205.1a) to mark the object as in bestow form; `revert_bestow_aura_form` is the inverse operation.
 ///
 /// Idempotent: safe to re-run after printed-face rehydration or layer resets
 /// re-anchor `card_types` from a refreshed `base_card_types`.
 pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
+    use crate::game::layers::remove_core_type;
     use crate::types::card_type::CoreType;
-    // CR 702.103b: Remove the Creature core type while bestowed.
-    obj.card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Creature));
-    obj.base_card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Creature));
+    // CR 702.103b + CR 205.1a: Remove the Creature core type while bestowed;
+    // the creature types of the printed face go with it, because a bestowed
+    // Aura is an Aura enchantment and not a creature.
+    let base_subtypes_before = obj.base_card_types.subtypes.clone();
+    remove_core_type(&mut obj.card_types, CoreType::Creature);
+    remove_core_type(&mut obj.base_card_types, CoreType::Creature);
+    // Record what the base lost so `revert_bestow_aura_form` can restore it.
+    // Union with any existing payload, never overwrite: a re-run on an
+    // already-bestowed object finds nothing left to remove and must keep it.
+    let mut removed_creature_subtypes = obj
+        .bestow_form
+        .take()
+        .map(|form| form.removed_creature_subtypes)
+        .unwrap_or_default();
+    for subtype in base_subtypes_before {
+        if !obj.base_card_types.subtypes.contains(&subtype)
+            && !removed_creature_subtypes.contains(&subtype)
+        {
+            removed_creature_subtypes.push(subtype);
+        }
+    }
     // CR 702.103b: Gain the Aura subtype while bestowed. Idempotent push.
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         obj.card_types.subtypes.push("Aura".to_string());
@@ -15056,14 +15071,17 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
     {
         obj.base_keywords.push(enchant_creature);
     }
-    obj.bestow_form = Some(crate::game::game_object::BestowFormState);
+    obj.bestow_form = Some(crate::game::game_object::BestowFormState {
+        removed_creature_subtypes,
+    });
     // Bestow form rewrites the printed base: restore the derived art baseline.
     obj.restore_token_art_baseline();
 }
 
 /// CR 702.103e + CR 702.103f: Inverse of `apply_bestow_aura_form`. Restores the
-/// Creature core type, removes the synthesized Aura subtype, and removes the
-/// granted `enchant creature` keyword. Called when:
+/// Creature core type and the creature types the form removed (CR 205.1a),
+/// removes the synthesized Aura subtype, and removes the granted
+/// `enchant creature` keyword. Called when:
 ///   * Resolution-time illegal target (CR 702.103e) — revert before the spell
 ///     finishes resolving so it ETBs as a normal creature.
 ///   * Bestow Aura on the battlefield becomes unattached (CR 702.103f) —
@@ -15072,9 +15090,9 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
 ///
 /// Idempotent: a no-op if the object is not in bestow form.
 pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
-    if obj.bestow_form.is_none() {
+    let Some(form) = obj.bestow_form.take() else {
         return;
-    }
+    };
     use crate::types::card_type::CoreType;
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
         obj.card_types.core_types.push(CoreType::Creature);
@@ -15084,10 +15102,21 @@ pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameOb
     }
     obj.card_types.subtypes.retain(|s| s != "Aura");
     obj.base_card_types.subtypes.retain(|s| s != "Aura");
+    // CR 205.1a: the object is a creature again, so it regains the creature
+    // types the bestow form removed. Pushed after the Aura is dropped so the
+    // printed order is the final order. A battlefield object is re-derived by
+    // the layer pass; a stack object (not layered) needs the live fields too.
+    for subtype in form.removed_creature_subtypes {
+        if !obj.card_types.subtypes.contains(&subtype) {
+            obj.card_types.subtypes.push(subtype.clone());
+        }
+        if !obj.base_card_types.subtypes.contains(&subtype) {
+            obj.base_card_types.subtypes.push(subtype);
+        }
+    }
     obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
     obj.base_keywords
         .retain(|k| !matches!(k, Keyword::Enchant(_)));
-    obj.bestow_form = None;
     obj.restore_token_art_baseline();
 }
 

@@ -640,9 +640,10 @@ impl FoldableCopyException<'_> {
             }
             Self::SetCardTypes { core_types } => {
                 values.card_types.core_types = core_types.clone();
-                values.card_types.subtypes.retain(|subtype| {
-                    subtype_matches_core_types(subtype, core_types, all_creature_types)
-                });
+                values
+                    .card_types
+                    .subtypes
+                    .retain(|subtype| subtype_matches_core_types(subtype, core_types));
             }
             Self::RemoveAllSubtypes { set } => {
                 remove_subtype_set(&mut values.card_types.subtypes, *set, all_creature_types);
