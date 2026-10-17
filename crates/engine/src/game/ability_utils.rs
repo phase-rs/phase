@@ -13773,7 +13773,7 @@ mod tests {
                 phase: crate::types::Phase::End,
             },
             effect: Box::new(AbilityDefinition::new(
-                AbilityKind::Triggered,
+                AbilityKind::Spell,
                 declared.effect.clone(),
             )),
             uses_tracked_set: false,
