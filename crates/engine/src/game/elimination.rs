@@ -1371,6 +1371,17 @@ fn do_eliminate(
     // halves are false now that the discharge exists.)
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
+        // CR 616.1: a batch parked earlier, in its replacement pass, has not
+        // computed its gains yet — Phase C derives them from each entry's
+        // lifelink controller. Drop that seat's the same way, per entry; its
+        // damage itself still applies.
+        if let Some(parked) = record.replacement.as_mut() {
+            for entry in &mut parked.entries {
+                if entry.lifelink_controller == Some(player) {
+                    entry.lifelink_controller = None;
+                }
+            }
+        }
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its

@@ -8,17 +8,20 @@ use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
 use crate::game::turns;
+use crate::types::ability::DamageContextSnapshot;
 use crate::types::ability::{ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState, PendingCombatLifelink,
-    PendingLifelinkGain, WaitingFor,
+    CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState,
+    PendingCombatDamageAwait, PendingCombatDamageEntry, PendingCombatDamageReplacement,
+    PendingCombatLifelink, PendingLifelinkGain, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use std::collections::VecDeque;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
@@ -140,7 +143,7 @@ pub fn resolve_combat_damage(
         //
         // `events.len()` folds nothing: no answering action's events are in
         // flight on this path.
-        return resume_pending_combat_lifelink(state, events.len(), events);
+        return resume_pending_combat_lifelink(state, events.len(), None, events);
     }
 
     let combat = state.combat.as_ref()?.clone();
@@ -347,10 +350,20 @@ fn finish_combat_damage_sub_step(
 /// received priority for the CR 616.1 choice, so splitting them would be a rules
 /// regression.
 ///
+/// CR 616.1 + CR 616.1g: a batch parked EARLIER, in its replacement pass
+/// (`PendingCombatLifelink::replacement`), resumes through the same authority.
+/// `choice` is the answer to that pass's own ordering choice, consumed here
+/// rather than by the generic dispatcher (see
+/// [`parked_combat_damage_awaits_replacement_choice`]); a substitute's prompt
+/// (counters, mill) was answered by its own dispatcher before this runs, and
+/// its events fold into the batch exactly like the lifelink answer's. The pass
+/// then finishes, and Phase C and the lifelink tail run once.
+///
 /// Returns `None` when nothing is parked, so callers can keep their own wait.
 pub(crate) fn resume_pending_combat_lifelink(
     state: &mut GameState,
     action_event_start: usize,
+    choice: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let mut record = *state.pending_combat_lifelink.take()?;
@@ -359,14 +372,15 @@ pub(crate) fn resume_pending_combat_lifelink(
         .extend_from_slice(&events[action_event_start..]);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
-    match drain_combat_lifelink(state, record) {
+    match resume_combat_damage_replacements(state, record, choice) {
         CombatDamageBatch::Paused {
             events: batch,
             waiting_for,
         } => {
-            // CR 616.1f: a LATER source needed its own ordering choice. The
-            // still-untouched tail was re-parked with the batch so far, so the
-            // eventual completion still fires ONE CR 603.3b batch.
+            // CR 616.1f + CR 616.1g: a LATER source (or the same event's
+            // substitute, or a second ordering choice on it) needed its own
+            // answer. The still-untouched rest was re-parked with the batch so
+            // far, so the eventual completion still fires ONE CR 603.3b batch.
             events.extend_from_slice(&batch[owed_from..]);
             claim_combat_lifelink_batch_events_for_ordinary_collection(
                 state,
@@ -1498,22 +1512,6 @@ pub fn lethal_damage_needed(
         .unwrap_or(1)
 }
 
-/// CR 510.2: One source's place in a simultaneous combat-damage batch — the
-/// damage context, commander flag, and original assignment, carried alongside
-/// the source's `ProposedEvent` so Phase C can apply the post-replacement
-/// survivor and run combat-only bookkeeping.
-struct BatchEntry<'a> {
-    ctx: DamageContext,
-    source_is_commander: bool,
-    assignment: &'a DamageAssignment,
-    /// CR 119.3 + CR 702.15b: when the source has lifelink, the controller it
-    /// gains life for. `ctx.has_lifelink` is forced off so the per-assignment
-    /// apply path does NOT emit a life-gain event; instead the whole batch from
-    /// one source is summed and gained once (see Phase C) so "whenever you gain
-    /// life" triggers fire once per source, not once per damaged target.
-    lifelink_controller: Option<PlayerId>,
-}
-
 /// Apply all combat damage assignments simultaneously (CR 510.2).
 ///
 /// Combat damage is one simultaneous event batch (CR 510.2). To keep prevention
@@ -1528,6 +1526,8 @@ struct BatchEntry<'a> {
 /// - **Phase B (Batch replace):** pass the whole proposed-event slice through
 ///   `replace_combat_damage_batch`, which runs the replacement pipeline per
 ///   event but aggregates each `Prevention::All` shield's prevented amount.
+///   This pass can park on a CR 616.1 ordering choice or a prompt raised by a
+///   replacement's substitute (CR 616.1g); see [`CombatDamageBatch::Paused`].
 /// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
 ///   event via `apply_damage_after_replacement`, then run the player-batching
 ///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
@@ -1544,11 +1544,17 @@ struct BatchEntry<'a> {
 pub(crate) enum CombatDamageBatch {
     /// Every assignment applied, every lifelink gain completed, and Phase D fired.
     Complete(Vec<GameEvent>),
-    /// CR 616.1: a lifelink life-gain event met two or more co-applicable
-    /// replacement effects and the gaining player must choose which applies
-    /// first. All damage is already dealt. The unfinished tail is parked in
-    /// `state.pending_combat_lifelink`; `state.pending_replacement` holds the
-    /// paused source's own `LifeGain` and is the resume's authority.
+    /// CR 616.1 + CR 616.1g: the batch parked on a choice made while one of its
+    /// events is applied, and the unfinished rest is in
+    /// `state.pending_combat_lifelink`. Two park points:
+    /// * Phase B (`PendingCombatLifelink::replacement` is `Some`): a damage
+    ///   event met two or more co-applicable replacements and the affected
+    ///   player orders them (`state.pending_replacement` holds that event), or
+    ///   a replacement's substitute raised a prompt of its own (counters, mill).
+    ///   No damage has been dealt yet.
+    /// * The lifelink tail: a lifelink life-gain event met two or more
+    ///   co-applicable replacement effects. All damage is already dealt;
+    ///   `state.pending_replacement` holds the paused source's own `LifeGain`.
     Paused {
         events: Vec<GameEvent>,
         /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
@@ -1580,22 +1586,12 @@ pub(crate) fn apply_combat_damage(
     // double-strike attacker must be caught at the first, not only the second. See
     // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
     let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-    // CR 510.2: accumulates per-player, per-source damage for this step only.
-    // `(player, [(source_id, amount)], step_total)`.
-    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
-    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
-    // CR 400.7: each source's incarnation as it dealt combat damage this step.
-    let mut source_incarnations: Vec<crate::types::identifiers::ObjectIncarnationRef> = Vec::new();
-    // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
-    // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
-    // per source after the batch so "whenever you gain life" triggers once.
-    let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
     // and are dropped here; the gate already emitted any required DamagePrevented.
-    let mut entries: Vec<BatchEntry> = Vec::with_capacity(assignments.len());
-    let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(assignments.len());
+    let mut entries: Vec<PendingCombatDamageEntry> = Vec::with_capacity(assignments.len());
+    let mut proposed_events: VecDeque<ProposedEvent> = VecDeque::with_capacity(assignments.len());
     for (source_id, assignment) in assignments {
         // Read commander flag before DamageContext borrows — both are immutable reads.
         let source_is_commander = state
@@ -1639,44 +1635,177 @@ pub(crate) fn apply_combat_damage(
             true,
             &mut events,
         ) {
-            entries.push(BatchEntry {
-                ctx,
+            // CR 510.2: the entry carries the damage context, commander flag and
+            // recipient alongside the source's `ProposedEvent`, so Phase C can
+            // apply the post-replacement survivor and run combat-only bookkeeping
+            // — snapshotted, because a CR 616.1 pause can park the batch.
+            entries.push(PendingCombatDamageEntry {
+                context: DamageContextSnapshot::from(&ctx),
                 source_is_commander,
-                assignment,
+                target: assignment.target.clone(),
                 lifelink_controller,
             });
-            proposed_events.push(proposed);
+            proposed_events.push_back(proposed);
         }
     }
 
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
-    let (survivors, prevention_tally) =
-        replacement::replace_combat_damage_batch(state, &mut events, proposed_events);
+    let record = PendingCombatLifelink {
+        remaining: VecDeque::new(),
+        batch_events: events,
+        damage_to_players: Vec::new(),
+        prevention_tally: Vec::new(),
+        lives_before,
+        sub_step,
+        replacement: None,
+    };
+    let pass = replacement::CombatDamageReplacementPass {
+        unstarted: proposed_events,
+        ..Default::default()
+    };
+    run_combat_damage_replacements(state, record, entries, pass, None)
+}
 
-    // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
+/// CR 510.2 + CR 615.7 + CR 616.1: Phase B of one simultaneous combat-damage
+/// batch — the replacement pass over its damage events — then Phase C and the
+/// completion tail.
+///
+/// The pass parks on a CR 616.1 ordering choice or on a prompt its substitute
+/// raised (CR 616.1g); the whole batch is then parked in
+/// `state.pending_combat_lifelink` with `replacement` set, exactly where a
+/// lifelink pause parks it, and `resume_pending_combat_lifelink` re-enters here
+/// with `resume`. Nothing is dealt before the pass completes, so the resumed
+/// batch applies each event once.
+fn run_combat_damage_replacements(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+    entries: Vec<PendingCombatDamageEntry>,
+    mut pass: replacement::CombatDamageReplacementPass,
+    resume: Option<replacement::CombatDamageReplacementResume>,
+) -> CombatDamageBatch {
+    match replacement::replace_combat_damage_batch(
+        state,
+        &mut record.batch_events,
+        &mut pass,
+        resume,
+    ) {
+        replacement::CombatDamageReplacementOutcome::Complete => {
+            apply_combat_damage_survivors(state, record, entries, pass)
+        }
+        replacement::CombatDamageReplacementOutcome::Paused {
+            awaiting,
+            waiting_for,
+        } => {
+            // CR 616.1: nothing of this batch has been dealt; park all of it.
+            // The tally is carried as a `Vec` (an enum key is not a JSON map key)
+            // and reinstalled on resume.
+            record.prevention_tally = pass.tally.into_iter().collect();
+            record.replacement = Some(PendingCombatDamageReplacement {
+                entries,
+                resolved: pass.resolved,
+                unstarted: pass.unstarted,
+                awaiting,
+            });
+            state.waiting_for = (*waiting_for).clone();
+            let events = record.batch_events.clone();
+            state.pending_combat_lifelink = Some(Box::new(record));
+            CombatDamageBatch::Paused {
+                events,
+                waiting_for,
+            }
+        }
+    }
+}
+
+/// CR 616.1 + CR 616.1g: resume a batch parked in its replacement pass. An
+/// ordering choice is answered here, with `choice`; a substitute's prompt has
+/// already been answered by its own dispatcher, and the pass picks up the
+/// parked entry's settled survivor.
+fn resume_combat_damage_replacements(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+    choice: Option<usize>,
+) -> CombatDamageBatch {
+    let Some(parked) = record.replacement.take() else {
+        return drain_combat_lifelink(state, record);
+    };
+    let resume = match parked.awaiting {
+        PendingCombatDamageAwait::ReplacementChoice => {
+            replacement::CombatDamageReplacementResume::Choice(choice)
+        }
+        PendingCombatDamageAwait::Continuation { survivor } => {
+            replacement::CombatDamageReplacementResume::ContinuationSettled(survivor)
+        }
+    };
+    let pass = replacement::CombatDamageReplacementPass {
+        resolved: parked.resolved,
+        unstarted: parked.unstarted,
+        tally: std::mem::take(&mut record.prevention_tally)
+            .into_iter()
+            .collect(),
+    };
+    run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
+}
+
+/// True when the parked combat-damage batch is waiting on the CR 616.1 ordering
+/// choice for one of its own damage events — the `ChooseReplacement` that
+/// answers it belongs to the batch (`resume_pending_combat_lifelink` with a
+/// choice), not to the generic replacement-choice dispatcher, which would deal
+/// the damage outside the batch.
+pub(crate) fn parked_combat_damage_awaits_replacement_choice(state: &GameState) -> bool {
+    state
+        .pending_combat_lifelink
+        .as_ref()
+        .is_some_and(|record| {
+            record.replacement.as_ref().is_some_and(|parked| {
+                matches!(parked.awaiting, PendingCombatDamageAwait::ReplacementChoice)
+            })
+        })
+}
+
+/// CR 120.3 + CR 510.2: Phase C of a simultaneous combat-damage batch — apply
+/// each surviving post-replacement event and run the combat bookkeeping, then
+/// hand the tail (lifelink gains, per-player aggregate, Phase D riders) to
+/// [`drain_combat_lifelink`]. Runs only once the replacement pass is complete.
+fn apply_combat_damage_survivors(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+    entries: Vec<PendingCombatDamageEntry>,
+    pass: replacement::CombatDamageReplacementPass,
+) -> CombatDamageBatch {
+    let events = &mut record.batch_events;
+    // CR 510.2: accumulates per-player, per-source damage for this step only.
+    // `(player, [(source_id, amount)], step_total)`.
+    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
+    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
+    // CR 400.7: each source's incarnation as it dealt combat damage this step.
+    let mut source_incarnations: Vec<crate::types::identifiers::ObjectIncarnationRef> = Vec::new();
+    // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
+    // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
+    // per source after the batch so "whenever you gain life" triggers once.
+    let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
+
+    let survivors = pass.resolved;
     debug_assert_eq!(
         entries.len(),
         survivors.len(),
         "batch survivor count must align with collected entries"
     );
     for (entry, survivor) in entries.iter().zip(survivors) {
+        let ctx = DamageContext::from(entry.context);
         let actual_amount = match survivor {
             // CR 120.3 + CR 120.4b: Apply the post-replacement event WITHOUT
             // re-running the replacement pipeline.
-            Some(survivor_event) => match apply_damage_after_replacement(
-                state,
-                &entry.ctx,
-                survivor_event,
-                true,
-                &mut events,
-            ) {
-                DamageResult::Applied(amt) => amt,
-                // CR 510.2: Life-loss/lifelink replacement needs a choice, but no
-                // player gets priority between combat damage being assigned and
-                // dealt — combat cannot pause, so the deferred portion is dropped
-                // (mirrors the legacy `apply_damage_to_target` combat behavior).
-                DamageResult::NeedsChoice => 0,
-            },
+            Some(survivor_event) => {
+                match apply_damage_after_replacement(state, &ctx, survivor_event, true, events) {
+                    DamageResult::Applied(amt) => amt,
+                    // CR 510.2: Life-loss/lifelink replacement needs a choice, but no
+                    // player gets priority between combat damage being assigned and
+                    // dealt — combat cannot pause, so the deferred portion is dropped
+                    // (mirrors the legacy `apply_damage_to_target` combat behavior).
+                    DamageResult::NeedsChoice => 0,
+                }
+            }
             // Fully prevented or skipped — no damage applied.
             None => 0,
         };
@@ -1687,7 +1816,7 @@ pub(crate) fn apply_combat_damage(
         // separate events while one source hitting many targets is summed.
         if let Some(controller) = entry.lifelink_controller {
             if actual_amount > 0 {
-                let source_id = entry.ctx.source_id;
+                let source_id = ctx.source_id;
                 if let Some((_, _, total)) = lifelink_by_source
                     .iter_mut()
                     .find(|(id, _, _)| *id == source_id)
@@ -1700,12 +1829,12 @@ pub(crate) fn apply_combat_damage(
         }
 
         // Combat-only bookkeeping (not part of the shared damage pipeline):
-        if let DamageTarget::Player(player_id) = &entry.assignment.target {
-            let source_id = entry.ctx.source_id;
+        if let DamageTarget::Player(player_id) = &entry.target {
+            let source_id = ctx.source_id;
             // CR 510.2: Track per-source amounts for this step. Each source
             // appears at most once per player per step; dedup guards any edge
             // where the same source is re-applied (e.g. split-damage riders).
-            if let Some(incarnation) = entry.ctx.source_incarnation {
+            if let Some(incarnation) = ctx.source_incarnation {
                 let source =
                     crate::types::identifiers::ObjectIncarnationRef::of(source_id, incarnation);
                 if !source_incarnations.contains(&source) {
@@ -1784,8 +1913,7 @@ pub(crate) fn apply_combat_damage(
     // would let the same batch serialize — and emit its rider events —
     // differently across saves and AI clones. The ids are not `Ord`, so sort on
     // their inner integers, exactly as `blocker_ids` is sorted above.
-    let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> =
-        prevention_tally.into_iter().collect();
+    let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> = pass.tally.into_iter().collect();
     prevention_tally.sort_by_key(|(key, _)| match key {
         AppliedReplacementKey::Object { source, index } => (0u8, source.0, *index, 0u8),
         AppliedReplacementKey::Floating { index } => (1, 0, *index, 0),
@@ -1797,20 +1925,13 @@ pub(crate) fn apply_combat_damage(
         } => (3, source.0, *index, controller.0),
     });
 
-    drain_combat_lifelink(
-        state,
-        PendingCombatLifelink {
-            remaining: lifelink_by_source
-                .into_iter()
-                .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
-                .collect(),
-            batch_events: events,
-            damage_to_players,
-            prevention_tally,
-            lives_before,
-            sub_step,
-        },
-    )
+    record.remaining = lifelink_by_source
+        .into_iter()
+        .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
+        .collect();
+    record.damage_to_players = damage_to_players;
+    record.prevention_tally = prevention_tally;
+    drain_combat_lifelink(state, record)
 }
 
 /// CR 616.1 + CR 702.15e + CR 615.5 + CR 732.2a: finish one simultaneous
