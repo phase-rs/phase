@@ -1049,7 +1049,7 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
         events.extend(
             runner
                 .act(GameAction::ChooseTarget {
-                    target: TargetRef::Object(victim),
+                    target: Some(TargetRef::Object(victim)),
                 })
                 .unwrap()
                 .events,

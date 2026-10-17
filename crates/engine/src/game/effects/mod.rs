@@ -4930,17 +4930,18 @@ fn declined_search_property_dependency(property: &FilterProp) -> bool {
 // CR 608.2c: explicit action/event populations are independent of this search.
 fn declined_search_population_dependency(source: &CardTypeSetSource) -> bool {
     let mut dependent = false;
-    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |member| {
-        dependent |= match member {
-            CardTypeSetSource::TrackedSet {
-                set: TrackedAnaphorSource::ChainSet,
-                caused_by: None,
-            } => true,
-            CardTypeSetSource::Objects { filter } => declined_search_filter_dependency(filter),
-            _ => false,
-        };
-    });
-    dependent
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |member| {
+            dependent |= match member {
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                } => true,
+                CardTypeSetSource::Objects { filter } => declined_search_filter_dependency(filter),
+                _ => false,
+            };
+        });
+    dependent || !complete
 }
 
 // CR 608.2c + CR 608.2h: classify the quantity's operand authority without evaluating it.
@@ -21957,7 +21958,7 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::types::ability::{
         ChooseOneOfKind, LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
-        SearchSelectionConstraint, SpentColor,
+        SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
 
     // Structural controls for C6; printed runtime coverage lives in the
@@ -21988,6 +21989,108 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
         })
+    }
+
+    // Structural contract control, not a claim about a printed card reaching
+    // the population walk's depth budget.
+    #[test]
+    fn declined_search_population_dependency_respects_walk_completion() {
+        for leaf in [
+            CardTypeSetSource::ExiledBySource,
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: Some(ThisWayCause::Destroyed),
+            },
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            },
+            CardTypeSetSource::Objects {
+                filter: TargetFilter::ParentTarget,
+            },
+        ] {
+            let leaf_dependent = declined_search_population_dependency(&leaf);
+            assert_eq!(
+                leaf_dependent,
+                matches!(
+                    &leaf,
+                    CardTypeSetSource::TrackedSet {
+                        caused_by: None,
+                        ..
+                    } | CardTypeSetSource::Objects { .. }
+                )
+            );
+            for nesting in [0, UNION_DEPTH_BUDGET - 1, UNION_DEPTH_BUDGET] {
+                let mut population = leaf.clone();
+                for _ in 0..nesting {
+                    population = CardTypeSetSource::any_of(vec![
+                        population,
+                        CardTypeSetSource::ExiledBySource,
+                    ])
+                    .unwrap();
+                }
+                let mut seen = 0;
+                let mut seen_dependent = false;
+                let complete = population.try_for_each_member(UNION_DEPTH_BUDGET, &mut |member| {
+                    seen += 1;
+                    seen_dependent |= declined_search_population_dependency(member);
+                });
+                assert_eq!(complete, nesting < UNION_DEPTH_BUDGET);
+                assert!(seen > 0, "truncation is not an empty population");
+                assert_eq!(
+                    seen_dependent,
+                    leaf_dependent && complete,
+                    "the dependent leaf is unseen when the budget is exhausted"
+                );
+                let dependent = leaf_dependent || !complete;
+                assert_eq!(
+                    declined_search_population_dependency(&population),
+                    dependent
+                );
+
+                for quantity in [
+                    QuantityRef::DistinctCardTypes {
+                        source: population.clone(),
+                    },
+                    QuantityRef::SharedCardTypes {
+                        source: population.clone(),
+                    },
+                    QuantityRef::DistinctSubtypes {
+                        source: population.clone(),
+                        exclude: Default::default(),
+                    },
+                    QuantityRef::DistinctColorsAmong {
+                        source: population.clone(),
+                    },
+                ] {
+                    let mut independent = declined_search_test_ability(Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::ParentTarget,
+                    });
+                    independent.targets = vec![TargetRef::Player(PlayerId(1))];
+                    let mut consumer = independent.clone();
+                    consumer.effect = Effect::GainLife {
+                        amount: QuantityExpr::Ref { qty: quantity },
+                        player: TargetFilter::ParentTarget,
+                    };
+                    consumer.sub_ability = Some(Box::new(independent.clone()));
+                    assert_eq!(declined_search_node_dependency(&consumer), dependent);
+                    let mut root = declined_search_test_search();
+                    root.sub_ability = Some(Box::new(consumer.clone()));
+                    let branch = optional_decline_branch(&root).unwrap();
+                    assert_eq!(matches!(branch, Cow::Owned(_)), dependent);
+                    let expected = if dependent { &independent } else { &consumer };
+                    assert_eq!(branch.effect, expected.effect);
+                    assert_eq!(branch.targets, expected.targets);
+                    assert_eq!(branch.sub_ability.is_some(), !dependent);
+                    if let Some(sibling) = &branch.sub_ability {
+                        assert_eq!(sibling.effect, independent.effect);
+                        assert_eq!(sibling.targets, independent.targets);
+                        assert!(sibling.sub_ability.is_none());
+                    }
+                }
+            }
+        }
     }
 
     /// Structural — CR 608.2c + CR 609.3: remove the whole nonexistent-object
