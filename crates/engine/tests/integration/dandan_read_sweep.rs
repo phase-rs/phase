@@ -1345,6 +1345,7 @@ fn clash_reveals(
         player,
         card,
         remaining,
+        ..
     } = runner.state().waiting_for.clone()
     else {
         panic!(

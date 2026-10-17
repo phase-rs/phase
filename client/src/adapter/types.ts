@@ -2848,7 +2848,7 @@ export type WaitingFor =
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
-  | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
+  | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
   // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
   // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
   // engine's state machine. See `ContestState`.

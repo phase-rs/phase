@@ -2123,6 +2123,7 @@ mod tests {
                     player,
                     card: source,
                     remaining: vec![],
+                    bottom_cards: vec![],
                 },
                 Mandatory,
             ),

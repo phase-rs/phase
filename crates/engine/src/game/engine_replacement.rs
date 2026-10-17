@@ -971,8 +971,13 @@ fn handle_replacement_choice_inner(
                     match effects::roll_die::resume_roll_dice_after_replacement(
                         state, event, events,
                     ) {
-                        Ok(Some(waiting)) => return Ok(waiting),
-                        Ok(None) => {}
+                        Ok(effects::ResolutionProgress::Waiting) => {
+                            return Ok(state.waiting_for.clone())
+                        }
+                        Ok(effects::ResolutionProgress::Complete) => {
+                            effects::roll_die::publish_completed_result_to_parent(state);
+                        }
+                        Ok(effects::ResolutionProgress::Queued) => {}
                         Err(error) => return Err(EngineError::InvalidAction(format!("{error}"))),
                     }
                 }
@@ -6144,6 +6149,7 @@ mod tests {
         state.push_repeat_until(PendingRepeatUntil {
             ability: Box::new(repeat_ability),
             stop_progress: None,
+            iteration_progress: None,
         });
         // Simulate the moment the review describes: a paused repeat-until
         // frame re-entering from priority.

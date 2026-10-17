@@ -4734,9 +4734,61 @@ pub struct RepeatUntilStopWitness {
     pub linked: Vec<ExiledStopInput>,
 }
 
+/// CR 104.4b: whether one `UntilStopConditions` iteration gave a player any
+/// decision — the carve-out separating a loop of mandatory actions (a draw)
+/// from a loop that contains an optional action (not a draw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepeatIterationChoice {
+    /// The iteration has offered no player decision, and its chain
+    /// carries no may-trigger key a stored "may" answer could have used in
+    /// place of a prompt. Every action in it was mandatory: an optional
+    /// instruction that could not be performed was never offered
+    /// (CR 608.2d — `optional_effect_is_infeasible` auto-declines it).
+    ///
+    /// A parked iteration retains this evidence until all child work settles.
+    MandatoryOnly(RepeatIterationMovement),
+    /// The iteration paused for a player decision, or a stored "may" answer
+    /// (CR 603.5, keyed by `may_trigger_origin`) could have stood in for one.
+    OptionalOffered,
+}
+
+/// Whether a mandatory-only `UntilStopConditions` iteration moved any object.
+///
+/// The stop witness (`exile_links::repeat_until_stop_witness`) is not a
+/// complete progress measure. It counts only linked-exile rows, which are
+/// written only when `exile_links::should_track_exiled_by_source` holds, while
+/// the repeat accepts any body. A body with no linked-exile consumer can exile a
+/// card with the witness unchanged. A stalled witness therefore proves the loop
+/// is repeating itself only when nothing else moved either.
+///
+/// COUPLING, recorded: zone movement is a COMPLETE progress measure only
+/// because every stop predicate `should_stop_repeat_until` reads is itself
+/// driven by a zone change — a card exiled by this source reaching its
+/// controller's hand, or two cards exiled by it sharing a name. An iteration
+/// that instead changes a life total or a counter therefore moves the loop no
+/// closer to stopping, so classing it `Stationary` is right: CR 104.4b asks
+/// whether a loop has "no way to stop", not whether the game state changed.
+/// A stop predicate reading anything but a zone would break that argument, and
+/// this witness would have to gain the matching event kind in the same change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepeatIterationMovement {
+    /// The iteration emitted no `GameEvent::ZoneChanged`: no object changed
+    /// zones and no token was created.
+    Stationary,
+    /// The iteration emitted at least one `GameEvent::ZoneChanged`.
+    ObjectsMoved,
+}
+
+/// CR 104.4b + CR 608.2c: whole-iteration evidence retained across queued work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatUntilIterationWitness {
+    pub choice: RepeatIterationChoice,
+    pub zone_changes_before: usize,
+}
+
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
-/// (`RepeatContinuation`) paused when an iteration's process entered an
-/// interactive `WaitingFor` state.
+/// (`RepeatContinuation`) paused while its current iteration has queued work
+/// or a live player decision.
 ///
 /// The loop in `resolve_ability_chain` cannot set the repeat prompt while a
 /// player choice from the iteration is still unresolved. It stashes this
@@ -4760,6 +4812,8 @@ pub struct PendingRepeatUntil {
     /// safe direction to fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_progress: Option<RepeatUntilStopWitness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_progress: Option<RepeatUntilIterationWitness>,
 }
 
 /// CR 400.7 + CR 608.2c: a parent's target OCCURRENCES carried outside any
@@ -16702,6 +16756,9 @@ pub enum WaitingFor {
         player: PlayerId,
         card: ObjectId,
         remaining: Vec<(PlayerId, ObjectId)>,
+        /// CR 701.30c: selected bottoms wait until every participant has chosen.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bottom_cards: Vec<ObjectId>,
     },
     /// Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest between
     /// the resolving ability's controller (contestant 0) and `contest.contestants[1]`.
@@ -26907,8 +26964,8 @@ impl GameState {
     /// It is NOT the frame's whole lifecycle: past the ignore choice, a
     /// results-table branch can suspend mid-loop on its own prompt
     /// (CR 706.3a + CR 608.2c), and the owner is then re-parked by
-    /// `park_die_roll_frame_for_resume` to carry the remaining dice. See that
-    /// method for which stack slot each case parks into.
+    /// the die driver outside the complete child stack captured before that
+    /// branch, carrying the remaining dice until it settles.
     pub fn push_die_roll_frame(&mut self, pending: PendingDieRoll) {
         self.resolution_stack.push_die_roll(pending);
     }
@@ -26928,41 +26985,6 @@ impl GameState {
         pending: PendingDieRoll,
     ) -> Result<(), ResolutionStackError> {
         self.resolution_stack.replace_active_die_roll(pending)
-    }
-
-    /// CR 706.3a + CR 608.2c: Parks the die-roll owner for a mid-loop resume,
-    /// choosing the structurally valid slot instead of assuming one.
-    ///
-    /// Three cases, and collapsing them is a stack-invariant bug:
-    ///
-    /// * the owner is already on top (this pass came from a keep choice) — swap
-    ///   it in place, keeping the stack top stable;
-    /// * the stack is empty (a first pass that never parked one) — push;
-    /// * something else owns the top. Past cursor 0 this frame is an
-    ///   `AfterChild` owner (see `ResolutionFrame::gate`), so a results-table
-    ///   branch that suspended on its OWN prompt is above us. Pushing there
-    ///   would bury that child's `DirectChoice`, which `validate` rejects
-    ///   (`buried_direct_choice`) because a direct-choice owner must be the top
-    ///   frame. Insert BELOW the active child instead — the frame waits on it,
-    ///   exactly like every other `AfterChild` owner.
-    pub fn park_die_roll_frame_for_resume(
-        &mut self,
-        pending: PendingDieRoll,
-    ) -> Result<(), ResolutionStackError> {
-        match self
-            .resolution_stack
-            .replace_active_die_roll(pending.clone())
-        {
-            Ok(()) => Ok(()),
-            Err(ResolutionStackError::Empty) => {
-                self.resolution_stack.push_die_roll(pending);
-                Ok(())
-            }
-            Err(ResolutionStackError::UnexpectedTop { .. }) => self
-                .resolution_stack
-                .insert_parent_of_active(ResolutionFrame::DieRoll(Box::new(pending))),
-            Err(error) => Err(error),
-        }
     }
 
     /// Re-parks the active coin-flip owner after it suspends for another keep

@@ -59,6 +59,7 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow`, `raw_decode_quota` and `quota_refusal_overflow` |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -127,6 +128,25 @@ Under `scaleOut`, logs are per-replica (each ordinal owns its own `data` PVC),
 so port-forward the specific ordinal's Service (`<release>-<ordinal>`) — same
 as reaching that ordinal's games.
 
+## Game CPU admission
+
+Full-mode game computation and state encoding run on blocking workers, not the
+WebSocket/HTTP runtime. `PHASE_GAME_CPU_PERMITS` (native CLI:
+`--game-cpu-permits`) overrides their shared concurrency limit; set it through
+`server.extraEnv` in this chart. The default is one less than the available
+processor count, with a minimum of one, respecting CPU affinity and cgroup
+quotas. Increasing it spends the headroom reserved for socket and HTTP work.
+
+Individual AI decisions release CPU admission between steps so another game's
+action can proceed during a long AI sequence. Background Full-session saves
+serialize one snapshot at a time and do not occupy a game CPU slot while
+waiting for SQLite.
+
+Pending saves coalesce to the latest revision per Full lifetime, retaining at
+most one captured snapshot per game rather than a full snapshot per queued
+action. Capture under the game lease comes first, followed by the I/O-admitted currency check and serialization; the final SQLite
+generation, revision and activation fences still protect the write.
+
 ## Behind Cloudflare
 
 Traefik typically sees a SNAT'd node IP (Service `externalTrafficPolicy: Cluster`),
@@ -141,8 +161,58 @@ if a firewall or Cloudflare Tunnel already guarantees it. Traefik falls back to 
 router serves the same host with different options, so keep all Ingresses for
 the host in this chart.
 
-Cloudflare closes idle WebSockets after ~100 s; the client's 5 s application
-ping keeps game connections alive.
+The server sends a native WebSocket Ping every 10 s, independently of the
+client's JavaScript ping timer. Its 30 s response budget begins only after an
+unanswered Ping has flushed. Any inbound frame clears it; actual in-flight
+writes pause the remaining budget, but later Pings or application writes do
+not renew it.
+
+`ServerHello.heartbeat` optionally advertises a 5,000 ms application Ping
+cadence and a 45,000 ms silence diagnostic budget. This diagnostic contract
+does not replace the native WebSocket response deadline above.
+
+Queued application ingress is limited to 64 commands and 1 MiB of retained
+payload across the raw and decoded queues. Overflow closes the connection with
+WebSocket code 1013 rather than silently discarding a command. Established
+connections may bypass this command budget only through a reader heartbeat
+probe of at most 256 bytes, with a burst allowance of eight heartbeats replenished
+at two per second. Recognized Pings and malformed probes spend this allowance;
+valid non-Ping commands preserve it, so fast play cannot exhaust the heartbeat
+reserve. Replies remain coalesced. Larger frames and excess heartbeats fall
+through to normal ingress admission and the decoder's 30-message/s quota,
+including JSON Pings. Every full JSON parse and malformed-command metadata
+recovery is admitted before inspecting the payload. Binary frames, including
+malformed and compressed envelopes, consume that quota before decompression.
+After text quota is exhausted, frames of at most 1 KiB may spend a separate
+30-inspection/s allowance solely to recover a correlated Action/Interaction
+quota refusal; they cannot dispatch an application command or answer a Pong.
+Larger text, exhausted inspection allowance, and exhausted binary quota close
+with 1013 and record `raw_decode_quota`. Normal client JSON Pings are smaller
+than the 256-byte compression threshold and use the plain/raw form.
+Up to eight correlated quota refusals may remain unflushed per connection;
+that admission is released only after socket flush, so a draining client may
+receive later refusals without a lifetime strike limit. Exhausting it closes
+with 1013 and records `quota_refusal_overflow` rather than retaining an
+unbounded reply backlog.
+
+`ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
+game-command completion. Action/Interaction messages may carry a top-level
+numeric `command_id`; only the originating socket's own StateUpdate,
+ActionRejected, ActionFailed or ActionNoOp echoes it. Ambient updates do not
+acknowledge another command. Older servers without this capability retain the
+legacy completion behavior. These IDs are correlation metadata, not
+idempotency keys: commands are not automatically retried or deduplicated.
+
+Reattachment bootstraps precede updates from the new room, and a successful
+spectator switch stops routing the previous room. If a draft match ends while
+a handoff waits, the server returns `DraftActionRejected` and the current draft
+view instead of an active-game bootstrap. This is an operation refusal, not a
+WebSocket disconnect.
+
+A Full connection installed during a draft handoff takes precedence over that
+older handoff. A database validation error does not leave an unowned seat
+marked connected: reconnect grace is retained or started, without replacing
+another current Full connection or resetting an existing deadline.
 
 ## Announcing to a public directory
 
