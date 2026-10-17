@@ -215,6 +215,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 148 — The cast-this-way gains rider's serialized payload is reshaped: the
+ *      ExileWithAltCost permission's enters_with_modifications becomes a
+ *      PendingEntersModifications object (was a ContinuousModification array) and
+ *      Effect.AddPendingEntersModifications carries its rider object in place of
+ *      the required modifications array — a v147 server or client cannot parse
+ *      either new shape. Full-game peers and P2P move in lockstep (wire 130); see
+ *      PROTOCOL_VERSION's own `/// 148` entry in
+ *      crates/lobby-broker/src/protocol.rs.
  * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
  *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
@@ -898,7 +906,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 147;
+export const PROTOCOL_VERSION = 148;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

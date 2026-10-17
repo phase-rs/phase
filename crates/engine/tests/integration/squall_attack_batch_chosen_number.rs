@@ -265,6 +265,133 @@ fn chosen_number_reads_the_source_object() {
     );
 }
 
+/// CR 508.3d + CR 508.5a (structural review round 4): a declaration against
+/// two opponents fires once per attacked player when both groups satisfy the
+/// chosen-number existential, and each firing damages its OWN defending
+/// player. The aggregate shape produced one firing and damaged only the first
+/// attacker's defender.
+#[test]
+fn both_opponent_groups_fire_with_their_own_defender() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let squall = scenario
+        .add_creature_from_oracle(P0, "Squall, Gunblade Duelist", 3, 2, SQUALL)
+        .id();
+    let first = scenario.add_vanilla(P0, 0, 2);
+    let second = scenario.add_vanilla(P0, 0, 2);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&squall)
+        .expect("Squall source exists")
+        .chosen_attributes
+        .push(ChosenAttribute::Number(2));
+
+    let p1_before = runner.life(P1);
+    let p2_before = runner.life(P2);
+    hand_turn_to(&mut runner, P0);
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P2)),
+        ])
+        .expect("declaring attacks on two opponents must be legal");
+    order_triggers_if_needed(&mut runner);
+
+    assert_eq!(
+        runner.state().combat.as_ref().map(|c| c.attackers.len()),
+        Some(2),
+        "reach guard: both attacks were declared"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == squall)
+            .count(),
+        2,
+        "the batch must fire once per attacked opponent, each with its own event"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.life(P1),
+        p1_before - 3,
+        "P1's own group firing must damage P1"
+    );
+    assert_eq!(
+        runner.life(P2),
+        p2_before - 3,
+        "P2's own group firing must damage P2"
+    );
+}
+
+/// CR 508.3d + CR 508.5a (structural review round 4): a mixed declaration —
+/// the NON-matching attacker declared first, against P2, then the matching
+/// attacker against P1 — fires exactly once, for P1's group. The combined-set
+/// shape read the existential as satisfied and damaged the FIRST defender
+/// (P2), the wrong player.
+#[test]
+fn mixed_match_groups_damage_only_the_matching_opponent() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let squall = scenario
+        .add_creature_from_oracle(P0, "Squall, Gunblade Duelist", 3, 2, SQUALL)
+        .id();
+    let non_matching = scenario.add_vanilla(P0, 1, 1);
+    let matching = scenario.add_vanilla(P0, 0, 2);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&squall)
+        .expect("Squall source exists")
+        .chosen_attributes
+        .push(ChosenAttribute::Number(2));
+
+    let p1_before = runner.life(P1);
+    let p2_before = runner.life(P2);
+    hand_turn_to(&mut runner, P0);
+    runner
+        .declare_attackers(&[
+            (non_matching, AttackTarget::Player(P2)),
+            (matching, AttackTarget::Player(P1)),
+        ])
+        .expect("declaring attacks on two opponents must be legal");
+    order_triggers_if_needed(&mut runner);
+
+    assert_eq!(
+        runner.state().combat.as_ref().map(|c| c.attackers.len()),
+        Some(2),
+        "reach guard: both attacks (including the non-matching one) were declared"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == squall)
+            .count(),
+        1,
+        "only the matching opponent's group may fire"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.life(P1),
+        p1_before - 3,
+        "the qualifying group's defending player must take the damage"
+    );
+    assert_eq!(
+        runner.life(P2),
+        p2_before,
+        "the non-matching group must not fire — the first-declared defender \
+         must not be damaged"
+    );
+}
+
 /// Row 4.3 hostile (3 players): a MATCHING attacker attacking Squall's
 /// controller does not qualify (wrong attacked-player relation), and a
 /// non-matching attacker attacking an opponent cannot satisfy the filter — the

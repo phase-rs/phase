@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  130 — game_setup and state_update carry GameState whose casting permissions may
+ *       carry the reshaped cast-this-way gains rider (the permission's
+ *       enters_with_modifications object and Effect.AddPendingEntersModifications.rider).
+ *       A wire 129 peer cannot parse either shape. Bumped in lockstep with
+ *       full-game protocol 148.
  *  129 — game_setup and state_update carry GameState whose waiting_for may be
  *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
  *       abilities may hold Effect::PhysicalContest; a v128 peer cannot parse
@@ -696,7 +701,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 129 as const;
+export const WIRE_PROTOCOL_VERSION = 130 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

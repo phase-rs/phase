@@ -1383,6 +1383,87 @@ fn matching_counter_added_events_by_recipient(
     groups.into_iter().map(|(_, events)| events).collect()
 }
 
+/// CR 508.3d + CR 508.5a + CR 603.2c: collect one firing per ATTACKED player
+/// from each admitted attack declaration. A batched attack trigger whose head
+/// names the attacked player ("Whenever one or more creatures attack one of
+/// your opponents, if any of those creatures … to defending player") takes its
+/// occurrence granularity from that player — the shared per-attacked-player
+/// expansion (`matching_attack_events_by_defending_player`) supplies each
+/// group's narrowed context, and the intervening-if is checked PER GROUP:
+/// "those creatures" quantifies over the creatures attacking that one player,
+/// never over the combined declaration set. Grouping runs before the
+/// aggregate batching arm, so one declaration against two opponents produces
+/// two firings, each carrying its own defending player ("that player",
+/// `TargetFilter::DefendingPlayer`) and its own event for the CR 603.4
+/// resolution recheck.
+#[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
+fn matching_batched_attack_events_by_defending_player(
+    state: &GameState,
+    event_batch: &[GameEvent],
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    controller: PlayerId,
+    matcher: TriggerMatcher,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    conditions: FiringConditions<'_>,
+) -> Vec<Vec<(usize, GameEvent)>> {
+    let mut groups = Vec::new();
+    for (index, candidate) in event_batch.iter().enumerate() {
+        // The per-candidate prefix of the shared `candidate_passes_batched_filters`
+        // chain (suppression → matcher); the condition is deliberately deferred
+        // to the per-group context below instead of the raw declaration.
+        if event_is_suppressed_by_static_triggers_cached(
+            state,
+            candidate,
+            Some(source_context),
+            active_suppress_triggers,
+        ) {
+            continue;
+        }
+        if !matcher(candidate, trig_def, source_context, state) {
+            continue;
+        }
+        for group_event in super::trigger_matchers::matching_attack_events_by_defending_player(
+            candidate,
+            trig_def,
+            source_context,
+            state,
+        ) {
+            if !conditions.hold(state, controller, source_context, &group_event) {
+                continue;
+            }
+            groups.push(vec![(index, group_event)]);
+        }
+    }
+    groups
+}
+
+/// CR 508.3d + CR 508.5a + CR 603.2c: whether a batched attack trigger's
+/// occurrence grammar is the attacked player, taken from the ACTIVE
+/// "one or more creatures attack <player>" head — whose scope lowers to a
+/// player-scope `valid_target` (`Typed { controller: … }` for "one of your
+/// opponents", `Controller` for "you"). That grammar fires once per defended
+/// player with that player's own attacker set (see
+/// `matching_attack_events_by_defending_player`).
+///
+/// Two neighbouring shapes deliberately stay on the aggregate branch:
+/// the passive "one or more of your opponents are attacked" head lowers its
+/// scope to the bare `TargetFilter::Opponent`, which `is_player_scope()`
+/// rejects — that aggregate phrasing is a single CR 603.2c trigger event even
+/// when two opponents are attacked in one declaration (issue #6643), and its
+/// parse test pins the distinction. An `attack_target_filter` alone (Zurzoth's
+/// "attack one or more players", the Curse cycle's "enchanted player") is not
+/// this gate either: those scopes were never split and keep their existing
+/// firing shape.
+fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
+    trig_def.batched
+        && matches!(trig_def.mode, TriggerMode::Attacks)
+        && trig_def
+            .valid_target
+            .as_ref()
+            .is_some_and(|filter| filter.is_player_scope())
+}
+
 /// CR 603.2c: Whether a `CounterAdded` trigger fires once PER RECIPIENT object
 /// rather than once for the whole simultaneous batch.
 ///
@@ -1636,8 +1717,9 @@ fn singleton_attack_events(
 /// CR 508.1a + CR 603.4: Preserve declaration-time LKI when an attack event is
 /// narrowed for a per-firing trigger context. Object IDs may recur across
 /// distinct declaration records, so filter the records themselves rather than
-/// rebuilding snapshots.
-fn declaration_records_for_attackers(
+/// rebuilding snapshots. Shared with the per-attacked-player expansion in
+/// `trigger_matchers`.
+pub(super) fn declaration_records_for_attackers(
     event: &GameEvent,
     attackers: &[ObjectId],
 ) -> Vec<crate::types::game_state::AttackDeclarationRecord> {
@@ -1788,15 +1870,18 @@ impl FiringGroup {
 /// number of times, with the same narrowed contexts, whichever way it exists.
 ///
 /// The shapes, in precedence order: per-recipient counters, the whole-event
-/// received-damage fold, per-player-recipient damage, batched ("one or more")
-/// subjects, the per-occurrence fan-out, the event-source force-block singleton
-/// fallback, and the single event. The first four read the whole batch, so a
-/// caller asks for them once per batch (`fires_once_per_batch`).
+/// received-damage fold, per-player-recipient damage, per-attacked-player
+/// attack batches ("one or more creatures attack <player>"), batched ("one or
+/// more") subjects, the per-occurrence fan-out, the event-source force-block
+/// singleton fallback, and the single event. The first five read the whole
+/// batch, so a caller asks for them once per batch (`fires_once_per_batch`).
 ///
 /// Conditions are checked where the printed path always checked them: on the
-/// raw event before expansion (except for `Attacks`, whose condition reads the
-/// defending player of each narrowed attack), per candidate inside the batch
-/// shapes, and on each narrowed firing for every non-batched shape.
+/// raw event before expansion (except for `Attacks`-mode triggers, whose
+/// condition reads the attacked-player context of each narrowed firing — for
+/// the per-attacked-player batch shape the check runs once per group against
+/// that group's narrowed event), per candidate inside the batch shapes, and on
+/// each narrowed firing for every non-batched shape.
 /// `admitted` is the raw index of `event` in `event_batch` when the caller
 /// knows it.
 #[allow(clippy::too_many_arguments)] // Each input is an independent collection fact.
@@ -1869,6 +1954,20 @@ fn trigger_firing_groups(
                 conditions,
             ),
         )
+    } else if attack_fires_per_defending_player(trig_def) {
+        // CR 508.3d + CR 508.5a: the "one or more creatures attack <player>"
+        // class fires once per attacked player, with that player's own
+        // attacker set as the firing context.
+        indexed_groups(matching_batched_attack_events_by_defending_player(
+            state,
+            event_batch,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+            conditions,
+        ))
     } else if trig_def.batched {
         let members = matching_batched_trigger_events(
             state,

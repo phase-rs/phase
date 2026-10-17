@@ -5785,6 +5785,125 @@ mod tests {
         );
     }
 
+    /// CR 608.2c (structural review round 4): the during-resolution request
+    /// snapshot may not borrow a rider from a LATER cast. In the synthetic
+    /// admitted chain `Cast A → Draw → Cast B → rider B`, A's offer carries NO
+    /// rider (the independent Draw instruction ends A's metadata run), while a
+    /// chain that opens with its own rider carries exactly that rider — the two
+    /// rows use distinguishable keywords so a borrowed rider cannot hide. The
+    /// independent tail's own resolution is pinned by the integration control
+    /// `rider_then_independent_draw_resolves_on_accept`.
+    #[test]
+    fn request_snapshot_does_not_borrow_a_later_casts_rider() {
+        use crate::types::keywords::Keyword;
+
+        // Row 1 — A's chain: Cast A → Draw → Cast B → rider B.
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(920),
+            PlayerId(0),
+            "Chain Source".to_string(),
+            Zone::Battlefield,
+        );
+        let a_card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(921));
+        let b_card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(922));
+        let mut cast_b = paid_during_resolution_grant(source, b_card);
+        cast_b.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.sub_ability = Some(Box::new(cast_b));
+        let mut cast_a = paid_during_resolution_grant(source, a_card);
+        cast_a.sub_ability = Some(Box::new(draw));
+
+        let mut events = vec![];
+        resolve(&mut state, &cast_a, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => assert!(
+                enters_with_modifications.is_empty(),
+                "A's offer must not borrow the later cast's rider, got {enters_with_modifications:?}"
+            ),
+            other => panic!("expected GraveyardPaidCast, got {other:?}"),
+        }
+
+        // Row 2 — A's chain opens with its own flying rider before the Draw:
+        // the offer carries the flying rider and never B's haste.
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(923),
+            PlayerId(0),
+            "Chain Source".to_string(),
+            Zone::Battlefield,
+        );
+        let a_card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(924));
+        let b_card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(925));
+        let mut cast_b = paid_during_resolution_grant(source, b_card);
+        cast_b.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.sub_ability = Some(Box::new(cast_b));
+        let mut rider_a = ResolvedAbility::new(
+            Effect::AddPendingEntersModifications {
+                rider: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying,
+                        },
+                    ],
+                    cast_filter: None,
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        rider_a.sub_ability = Some(Box::new(draw));
+        let mut cast_a = paid_during_resolution_grant(source, a_card);
+        cast_a.sub_ability = Some(Box::new(rider_a));
+
+        let mut events = vec![];
+        resolve(&mut state, &cast_a, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => assert_eq!(
+                enters_with_modifications.modifications,
+                vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }],
+                "A's offer must carry its own rider only — not the later cast's haste"
+            ),
+            other => panic!("expected GraveyardPaidCast, got {other:?}"),
+        }
+    }
+
     /// CR 608.2c + CR 611.2a (row 6.4): the per-opponent fanout conversion
     /// snapshots the ability's gains rider into the window request, so the
     /// opened window carries it to every cast. Reverting the conversion leaves
