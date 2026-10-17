@@ -1,17 +1,20 @@
 //! Production actions for explicit resolution progress and its persisted owners.
 
+use std::sync::Arc;
+
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
     CastFromZoneDriver, DieResultBranch, Effect, EffectKind, LibraryInstructionActor,
     LibraryPosition, ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, SubAbilityLink, TargetFilter,
+    QuantityRef, SubAbilityLink, TargetFilter, TargetRef,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::{ClashResult, GameEvent};
 use engine::types::game_state::{
-    ManaChoice, ManaChoiceContext, ManaChoicePrompt, PersistedGameState, WaitingFor,
+    CastOfferKind, ManaChoice, ManaChoiceContext, ManaChoicePrompt, PersistedGameState,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType};
@@ -19,6 +22,9 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolution::ResolutionStateWire;
 use engine::types::zones::Zone;
+
+use super::cast_this_way_gate_8721::{accept_offer_and_pay, to_declare_attackers};
+use super::rules::AttackTarget;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -306,6 +312,237 @@ fn answered_mana_color_finishes_each_instead_tail_before_repeating() {
         );
         assert_eq!(r.state().players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_finished(&r);
+    }
+}
+
+#[test]
+fn pending_parent_defers_false_conditional_else_and_sibling_before_repeating() {
+    for sibling in [false, true] {
+        let mut clause = gain(99).condition(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+        });
+        if sibling {
+            let mut tail = gain(7);
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            clause.sub_ability = Some(Box::new(tail));
+        } else {
+            clause.else_ability = Some(Box::new(gain(7)));
+        }
+        let mut root = def(Effect::Scry {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+        })
+        .sub_ability(clause);
+        root.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.with_library_top(P0, &["First", "Second", "Third", "Fourth"]);
+        let spell = s
+            .add_spell_to_hand(P0, "Synthetic conditional scry repeat", true)
+            .with_ability_definition(root)
+            .id();
+        let mut r = s.build();
+        r.cast(spell).commit();
+        pass_stack(&mut r);
+        let mut expected_library = r.state().library_of(P0).clone();
+        for completed in 0..3 {
+            let WaitingFor::ScryChoice { player, cards } = &r.state().waiting_for else {
+                panic!(
+                    "sibling={sibling}, completed={completed}: {:?}",
+                    r.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(
+                cards,
+                &expected_library.iter().take(2).copied().collect::<Vec<_>>()
+            );
+            // CR 608.2c: even a false condition's else/sibling is a later
+            // instruction; none may run before this scry has been answered.
+            assert_eq!(life(&r, P0), 20 + completed * 7, "sibling={sibling}");
+            let kept = cards[1];
+            let bottomed = expected_library.pop_front().unwrap();
+            expected_library.push_back(bottomed);
+            let result = r
+                .act(GameAction::SelectCards { cards: vec![kept] })
+                .unwrap();
+            assert_eq!(r.state().library_of(P0), &expected_library);
+            assert_eq!(life(&r, P0), 20 + (completed + 1) * 7);
+            assert_eq!(
+                result
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::LifeChanged {
+                            player_id: P0,
+                            amount,
+                            ..
+                        } => Some(*amount),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                [7]
+            );
+        }
+        assert_eq!(life(&r, P0), 41);
+        assert_finished(&r);
+    }
+}
+
+#[test]
+fn inline_paid_cast_trigger_keeps_its_offer_pending_through_nested_repeat_and_die() {
+    // Verbatim current MTGJSON Oracle texts supply the paid-cast instructions.
+    // The repeat/die process and TargetOnly -> ParentTarget binding below are
+    // synthetic; the original rider and cast trigger keep their source.
+    const ZEMO: &str = "Whenever Helmut Zemo attacks, you may cast target instant or sorcery card with mana value less than or equal to his power from your graveyard. If that spell would be put into your graveyard, exile it instead. If you cast a spell this way, put a +1/+1 counter on Helmut Zemo.";
+    const OGRE: &str = "First strike\nWhenever this creature attacks, you may cast target instant or sorcery card from your graveyard by paying {R}{R} in addition to its other costs. If that spell would be put into a graveyard, exile it instead. When you cast that spell, this creature gets +X/+0 until end of turn, where X is that spell's mana value.";
+    for (name, oracle, power) in [
+        ("Helmut Zemo, Mastermind", ZEMO, 2),
+        ("Ogre Battlecaster", OGRE, 3),
+    ] {
+        for accept in [false, true] {
+            let mut s = GameScenario::new();
+            s.at_phase(Phase::PreCombatMain);
+            let source = s
+                .add_creature_from_oracle(P0, name, power, power, oracle)
+                .id();
+            for _ in 0..4 {
+                s.add_basic_land(P0, ManaColor::Red);
+            }
+            let card = s
+                .add_spell_to_graveyard(P0, "Synthetic paid instant", true)
+                .with_mana_cost(ManaCost::generic(1))
+                .with_ability_definition(gain(1))
+                .id();
+            let mut r = s.build();
+            let mut printed = *r.state().objects[&source].trigger_definitions[0]
+                .definition
+                .execute
+                .clone()
+                .expect("printed attack instructions");
+            let target = printed
+                .effect
+                .target_filter()
+                .expect("printed cast target")
+                .clone();
+            // The outer TargetOnly announces the printed target. This nested
+            // instruction consumes that same card rather than declaring an
+            // additional unannounced slot inside the die table.
+            *printed
+                .effect
+                .target_filter_mut()
+                .expect("printed cast target") = TargetFilter::ParentTarget;
+            // The paid offer itself retains the may/decline decision. Avoid a
+            // separate optional wrapper so the typed caller directly observes
+            // the CastFromZone -> inline CreateDelayedTrigger return.
+            printed.optional = false;
+            printed.sub_link = SubAbilityLink::ContinuationStep;
+            let mut repeated = gain(1).sub_ability(printed);
+            repeated.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+            let wrapper = def(Effect::TargetOnly { target })
+                .sub_ability(roll(2, Some(repeated)).sub_ability(gain(7)));
+            let object = r.state_mut().objects.get_mut(&source).unwrap();
+            let mut triggers = object.base_trigger_definitions.as_ref().clone();
+            triggers[0].execute = Some(Box::new(wrapper));
+            object
+                .install_trigger_base_definitions(Arc::new(triggers))
+                .unwrap();
+            to_declare_attackers(&mut r, P0);
+            r.declare_attackers(&[(source, AttackTarget::Player(P1))])
+                .unwrap();
+            while matches!(
+                r.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            ) {
+                r.choose_first_legal_target()
+                    .expect("announce the graveyard target");
+            }
+            let entry = r
+                .state()
+                .stack
+                .last()
+                .expect("the attack produced a real stack entry");
+            assert_eq!(entry.source_id, source);
+            let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+                panic!("the attack must produce its triggered ability");
+            };
+            assert!(matches!(ability.effect, Effect::TargetOnly { .. }));
+            assert!(
+                ability.targets.contains(&TargetRef::Object(card)),
+                "announced targets: {:?}",
+                ability.targets
+            );
+            let events = pass_stack(&mut r);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::DieRolled { .. }))
+                    .count(),
+                1,
+                "the first survivor reaches its paid branch before the next die"
+            );
+            let mut offer_ids = Vec::new();
+            for offer in 0..4 {
+                let WaitingFor::CastOffer {
+                    player: P0,
+                    kind:
+                        CastOfferKind::GraveyardPaidCast {
+                            hit_card, cleanup, ..
+                        },
+                } = &r.state().waiting_for
+                else {
+                    panic!(
+                        "{name}, accept={accept}, offer={offer}: {:?}",
+                        r.state().waiting_for
+                    );
+                };
+                assert_eq!(*hit_card, card);
+                let offer_id = cleanup.offer_id.expect("producer-issued offer identity");
+                assert!(!offer_ids.contains(&offer_id));
+                offer_ids.push(offer_id);
+                // CR 603.7a: registration precedes its possible cast event;
+                // the receipt remains owned by this exact unanswered offer.
+                assert_eq!(cleanup.delayed_trigger_receipts.len(), 1);
+                assert_eq!(cleanup.delayed_trigger_receipts[0].offer_id, offer_id);
+                assert_eq!(r.state().delayed_triggers.len(), 1);
+                assert_eq!(
+                    life(&r, P0),
+                    21 + offer,
+                    "{name}, accept={accept}: later work ran before the offer answer"
+                );
+                assert!(
+                    r.state().resolution_stack.len() >= 2,
+                    "both repeat and die remain unfinished"
+                );
+                // Accept the last offer so earlier iterations retain a legal
+                // graveyard target; the all-decline sibling never casts it.
+                if accept && offer == 3 {
+                    accept_offer_and_pay(&mut r);
+                    assert!(r.state().stack.iter().any(|entry| entry.id == card));
+                    r.advance_until_stack_empty();
+                } else {
+                    r.act(GameAction::GraveyardPaidCastChoice {
+                        choice: CastChoice::Decline,
+                    })
+                    .unwrap();
+                }
+            }
+            // CR 608.2c + CR 608.2g: the enclosing later instruction runs once
+            // after every offer settles; accepting also resolves the instant.
+            assert_eq!(life(&r, P0), if accept { 32 } else { 31 });
+            assert_eq!(
+                r.state().objects[&card].zone,
+                if accept { Zone::Exile } else { Zone::Graveyard }
+            );
+            assert!(r.state().objects[&card].casting_permissions.is_empty());
+            assert!(r.state().delayed_triggers.is_empty());
+            engine::game::layers::evaluate_layers(r.state_mut());
+            assert_eq!(
+                r.state().objects[&source].power,
+                Some(power + i32::from(accept))
+            );
+            assert_finished(&r);
+        }
     }
 }
 
