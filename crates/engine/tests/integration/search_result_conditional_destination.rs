@@ -3,16 +3,17 @@ use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, AttachSelection, ContinuousModification, ControllerRef,
-    DoubleTarget, Duration, Effect, EffectKind, FilterProp, QuantityExpr,
-    SearchSelectionConstraint, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, AttachSelection, CardTypeSetSource, ContinuousModification,
+    ControllerRef, CountScope, DoubleTarget, Duration, Effect, EffectKind, FilterProp,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{GameRng, WaitingFor};
-use engine::types::identifiers::{ObjectId, TrackedSetId};
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1268,7 +1269,7 @@ fn declined_search_keeps_described_counter_survivors() {
             let spell = scenario
                 .add_spell_to_hand(P0, "Synthetic search and counters", false)
                 .with_ability_definition(synthetic_optional_search(sibling))
-                .mana_cost(ManaCost::generic(1))
+                .with_mana_cost(ManaCost::generic(1))
                 .id();
             fund(&mut scenario, 1, &[]);
             let mut runner = scenario.build();
@@ -1381,7 +1382,7 @@ fn declined_search_keeps_described_host_choice() {
         let spell = scenario
             .add_spell_to_hand(P0, "Synthetic search and attachment", false)
             .with_ability_definition(synthetic_optional_search(sibling))
-            .mana_cost(ManaCost::generic(1))
+            .with_mana_cost(ManaCost::generic(1))
             .id();
         fund(&mut scenario, 1, &[]);
         let mut runner = scenario.build();
@@ -1503,7 +1504,7 @@ fn declined_search_preserves_own_announced_generic_grant() {
         let spell = scenario
             .add_spell_to_hand(P0, "Synthetic search and announced grant", false)
             .with_ability_definition(synthetic_optional_search(grant))
-            .mana_cost(ManaCost::generic(1))
+            .with_mana_cost(ManaCost::generic(1))
             .id();
         fund(&mut scenario, 1, &[]);
         let mut runner = scenario.build();
@@ -1665,7 +1666,7 @@ fn declined_search_broadcast_binds_alternatives_exclusions_and_properties() {
             let spell = scenario
                 .add_spell_to_hand(P0, "Synthetic reveal search and broadcast", false)
                 .with_ability_definition(root)
-                .mana_cost(ManaCost::generic(1))
+                .with_mana_cost(ManaCost::generic(1))
                 .id();
             fund(&mut scenario, 1, &[]);
             let mut runner = scenario.build();
@@ -1778,7 +1779,7 @@ fn declined_search_impossible_counter_unit_keeps_later_player_work() {
         let spell = scenario
             .add_spell_to_hand(P0, "Synthetic impossible population", false)
             .with_ability_definition(synthetic_optional_search(sibling))
-            .mana_cost(ManaCost::generic(1))
+            .with_mana_cost(ManaCost::generic(1))
             .id();
         fund(&mut scenario, 1, &[]);
         let mut runner = scenario.build();
@@ -1838,7 +1839,7 @@ fn declined_search_keeps_chosen_counter_target_and_player_double_roles() {
         let spell = scenario
             .add_spell_to_hand(P0, "Synthetic preserved double role", false)
             .with_ability_definition(synthetic_optional_search(sibling))
-            .mana_cost(ManaCost::generic(1))
+            .with_mana_cost(ManaCost::generic(1))
             .id();
         fund(&mut scenario, 2, &[]);
         let mut runner = scenario.build();
@@ -1911,7 +1912,7 @@ fn declined_search_empty_described_host_keeps_later_player_work() {
     let spell = scenario
         .add_spell_to_hand(P0, "Synthetic empty described host", false)
         .with_ability_definition(synthetic_optional_search(sibling))
-        .mana_cost(ManaCost::generic(1))
+        .with_mana_cost(ManaCost::generic(1))
         .id();
     fund(&mut scenario, 1, &[]);
     let mut runner = scenario.build();
@@ -1927,4 +1928,245 @@ fn declined_search_empty_described_host_keeps_later_player_work() {
     assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&found].zone, Zone::Library);
     assert_settled(&runner);
+}
+
+// Synthetic API contracts for the residual classifier, not printed-card claims.
+#[test]
+fn declined_search_own_announced_counter_preserves_secondary_parent_authority() {
+    for operand in 0..5 {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario
+            .add_creature(P0, "Same-name recipient", 3, 3)
+            .with_mana_cost(ManaCost::generic(2))
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let twin = scenario
+            .add_creature(P0, "Same-name recipient", 3, 3)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let other = scenario.add_creature(P0, "Different creature", 3, 3).id();
+        let found = scenario
+            .add_spell_to_library_top(P0, "Unchosen creature", false)
+            .as_creature()
+            .id();
+        let same_name = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+        let count = match operand {
+            0 => QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter: same_name },
+            },
+            1 => QuantityExpr::Ref {
+                qty: QuantityRef::TargetObjectManaValue {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            },
+            2 => QuantityExpr::Ref {
+                qty: QuantityRef::DistinctColorsAmong {
+                    source: CardTypeSetSource::Objects { filter: same_name },
+                },
+            },
+            3 => QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            4 => QuantityExpr::Fixed { value: 1 },
+            _ => unreachable!(),
+        };
+        let mut life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        life.sub_link = SubAbilityLink::SequentialSibling;
+        let mut counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(life);
+        if operand == 4 {
+            counter.repeat_for = Some(QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            });
+        }
+        let spell = scenario
+            .add_spell_to_hand(P0, "Distinct search source", false)
+            .with_ability_definition(synthetic_optional_search(counter))
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        fund(&mut scenario, 1, &[]);
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(chosen).commit();
+        assert!(runner.state().players[0].mana_pool.is_empty());
+        let entry = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == spell)
+            .unwrap();
+        let mut announced = entry.ability().expect("cast spell has its resolved chain");
+        while !matches!(announced.effect, Effect::PutCounter { .. }) {
+            announced = announced
+                .sub_ability
+                .as_deref()
+                .expect("counter follows search");
+        }
+        // CR 601.2c + CR 400.7: public announcement records the chosen
+        // occurrence and its actual incarnation, rather than seeded targets.
+        assert_eq!(announced.target_reads, TargetReadOrigin::OwnAnnouncement);
+        assert_eq!(announced.targets, vec![TargetRef::Object(chosen)]);
+        assert_eq!(
+            announced.target_pins,
+            vec![Some(ObjectIncarnationRef::from_object(
+                &runner.state().objects[&chosen]
+            ))]
+        );
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        // CR 608.2c + CR 608.2h: secondary name/population information
+        // reads the instruction's own chosen object; missing current-set
+        // scalars and repeats still remove only that dependent instruction.
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            if operand < 3 { 2 } else { 0 }
+        );
+        for id in [twin, other, found, spell] {
+            assert!(!runner.state().objects[&id]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1));
+        }
+        assert_eq!(runner.state().players[0].life, 23);
+        assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_settled(&runner);
+    }
+}
+
+#[test]
+fn declined_search_refuses_unavailable_nested_names_and_quantity_carriers() {
+    for origin in [
+        TargetReadOrigin::OwnAnnouncement,
+        TargetReadOrigin::ParentAnnouncement,
+    ] {
+        for carrier in 0..5 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_creature(P0, "Named independent creature", 3, 3);
+            scenario.add_creature(P0, "Named independent creature", 3, 3);
+            scenario.add_creature(P0, "Different creature", 3, 3);
+            let first_hand = scenario
+                .add_spell_to_hand(P0, "First hand card", false)
+                .id();
+            let second_hand = scenario
+                .add_spell_to_hand(P0, "Second hand card", false)
+                .id();
+            let found = scenario
+                .add_spell_to_library_top(P0, "Unchosen creature", false)
+                .as_creature()
+                .id();
+            let property = match carrier {
+                0 => FilterProp::SameNameAsParentTarget,
+                1 | 3 => FilterProp::Not {
+                    prop: Box::new(FilterProp::SameNameAsParentTarget),
+                },
+                2 => FilterProp::AnyOf {
+                    props: vec![FilterProp::Not {
+                        prop: Box::new(FilterProp::SameNameAsParentTarget),
+                    }],
+                },
+                4 => FilterProp::Named {
+                    name: "Named independent creature".to_owned(),
+                },
+                _ => unreachable!(),
+            };
+            let filter = TargetFilter::Typed(if carrier == 3 {
+                TypedFilter::card().properties(vec![property])
+            } else {
+                TypedFilter::creature().properties(vec![property])
+            });
+            let quantity = if carrier == 3 {
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    card_types: vec![],
+                    filter: Some(filter),
+                    scope: CountScope::Controller,
+                }
+            } else {
+                QuantityRef::ObjectCount { filter }
+            };
+            let mut life = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            life.sub_link = SubAbilityLink::SequentialSibling;
+            let mut counted_life = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty: quantity },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(life);
+            counted_life.target_reads = origin;
+            let spell = scenario
+                .add_spell_to_hand(P0, "Distinct search source", false)
+                .with_ability_definition(synthetic_optional_search(counted_life))
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            fund(&mut scenario, 1, &[]);
+            let mut runner = scenario.build();
+            runner.cast(spell).commit();
+            assert!(runner.state().players[0].mana_pool.is_empty());
+            let entry = runner
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.source_id == spell)
+                .unwrap();
+            let mut announced = entry.ability().unwrap();
+            while !matches!(announced.effect, Effect::GainLife { .. }) {
+                announced = announced.sub_ability.as_deref().unwrap();
+            }
+            assert_eq!(announced.target_reads, origin);
+            assert!(announced.targets.is_empty());
+            assert!(announced.target_pins.is_empty());
+            assert_eq!(runner.state().players[0].hand.len(), 2);
+            let mut events = Vec::new();
+            let _ = pass_to_pause(&mut runner, &mut events);
+            assert_optional_prompt(&runner);
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap();
+            // CR 608.2c + CR 608.2h: no own declaration or proved parent
+            // announcement supplies this name. The fixed sibling still runs,
+            // while an independently specified name remains a live count.
+            assert_eq!(
+                runner.state().players[0].life,
+                if carrier == 4 { 25 } else { 23 }
+            );
+            for id in [first_hand, second_hand] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
+            }
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert_settled(&runner);
+        }
+    }
 }

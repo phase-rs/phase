@@ -4932,9 +4932,12 @@ pub(crate) fn optional_decline_branch(
 
 // CR 608.2c: only implicit current-result references name this unperformed
 // search. Explicit prior sets and action-qualified sets retain their authority.
-fn declined_search_filter_dependency(filter: &TargetFilter) -> bool {
-    if filter_requires_parent_target_object(filter)
-        || filter_refs_same_name_as_parent_target(filter)
+fn declined_search_filter_dependency(filter: &TargetFilter, owns_object: bool) -> bool {
+    if !owns_object
+        && (filter_requires_parent_target_object(filter)
+            || crate::game::filter::filter_contains_filter_prop(filter, &|property| {
+                matches!(property, FilterProp::SameNameAsParentTarget)
+            }))
     {
         return true;
     }
@@ -4947,32 +4950,38 @@ fn declined_search_filter_dependency(filter: &TargetFilter) -> bool {
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
-            .any(declined_search_property_dependency),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(declined_search_filter_dependency)
-        }
-        TargetFilter::Not { filter } => declined_search_filter_dependency(filter),
+            .any(|property| declined_search_property_dependency(property, owns_object)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| declined_search_filter_dependency(filter, owns_object)),
+        TargetFilter::Not { filter } => declined_search_filter_dependency(filter, owns_object),
         _ => false,
     }
 }
 
 // CR 608.2c: a property keeps the authority of the reference it contains.
-fn declined_search_property_dependency(property: &FilterProp) -> bool {
+fn declined_search_property_dependency(property: &FilterProp, owns_object: bool) -> bool {
     match property {
         FilterProp::InTrackedSet { id } => *id == TrackedSetId(0),
-        FilterProp::DistinctFrom { reference } => declined_search_filter_dependency(reference),
-        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
-            declined_search_quantity_dependency(value, false)
+        FilterProp::DistinctFrom { reference } => {
+            declined_search_filter_dependency(reference, owns_object)
         }
-        FilterProp::Counters { count, .. } => declined_search_quantity_dependency(count, false),
-        FilterProp::Not { prop } => declined_search_property_dependency(prop),
-        FilterProp::AnyOf { props } => props.iter().any(declined_search_property_dependency),
+        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+            declined_search_quantity_dependency(value, owns_object)
+        }
+        FilterProp::Counters { count, .. } => {
+            declined_search_quantity_dependency(count, owns_object)
+        }
+        FilterProp::Not { prop } => declined_search_property_dependency(prop, owns_object),
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|property| declined_search_property_dependency(property, owns_object)),
         _ => false,
     }
 }
 
 // CR 608.2c: explicit action/event populations are independent of this search.
-fn declined_search_population_dependency(source: &CardTypeSetSource) -> bool {
+fn declined_search_population_dependency(source: &CardTypeSetSource, owns_object: bool) -> bool {
     let mut dependent = false;
     let complete =
         source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |member| {
@@ -4981,7 +4990,12 @@ fn declined_search_population_dependency(source: &CardTypeSetSource) -> bool {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
                 } => true,
-                CardTypeSetSource::Objects { filter } => declined_search_filter_dependency(filter),
+                CardTypeSetSource::Objects { filter } => {
+                    declined_search_filter_dependency(filter, owns_object)
+                }
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| declined_search_filter_dependency(filter, owns_object)),
                 _ => false,
             };
         });
@@ -4990,8 +5004,13 @@ fn declined_search_population_dependency(source: &CardTypeSetSource) -> bool {
 
 // CR 608.2c + CR 608.2h: classify the quantity's operand authority without evaluating it.
 fn declined_search_quantity_dependency(quantity: &QuantityExpr, owns_object: bool) -> bool {
-    quantity
-        .any_ref(&mut |reference| declined_search_quantity_ref_dependency(reference, owns_object))
+    (!owns_object
+        && crate::game::filter::quantity_expr_contains_filter_prop(quantity, &|property| {
+            matches!(property, FilterProp::SameNameAsParentTarget)
+        }))
+        || quantity.any_ref(&mut |reference| {
+            declined_search_quantity_ref_dependency(reference, owns_object)
+        })
 }
 
 fn declined_search_quantity_ref_dependency(reference: &QuantityRef, owns_object: bool) -> bool {
@@ -5023,19 +5042,21 @@ fn declined_search_quantity_ref_dependency(reference: &QuantityRef, owns_object:
         | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
-            declined_search_population_dependency(source)
+            declined_search_population_dependency(source, owns_object)
         }
         QuantityRef::PropertyAggregate(aggregate) => {
-            declined_search_population_dependency(aggregate.source())
+            declined_search_population_dependency(aggregate.source(), owns_object)
         }
         QuantityRef::ObjectCount { filter, .. }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => {
-            declined_search_filter_dependency(filter)
+            declined_search_filter_dependency(filter, owns_object)
         }
-        QuantityRef::TargetObjectManaValue { filter } => declined_search_filter_dependency(filter),
+        QuantityRef::TargetObjectManaValue { filter } => {
+            declined_search_filter_dependency(filter, owns_object)
+        }
         _ => false,
     }
 }
@@ -5103,9 +5124,10 @@ fn declined_search_owns_target(ability: &ResolvedAbility) -> bool {
 fn declined_search_static_dependency(
     target: Option<&TargetFilter>,
     static_def: &StaticDefinition,
+    owns_object: bool,
 ) -> bool {
     effect::generic_effect_application_filter(target, static_def.affected.as_ref())
-        .is_some_and(declined_search_filter_dependency)
+        .is_some_and(|filter| declined_search_filter_dependency(filter, owns_object))
 }
 
 // Required scalars cannot be supplied by interpreting an unavailable object or
@@ -5270,10 +5292,10 @@ fn prepare_declined_search_node(ability: &ResolvedAbility) -> Option<Cow<'_, Res
                 };
                 match crate::game::filter::bind_absent_search_predicate(affected) {
                     Some(Some(false)) | None => false,
-                    Some(_) => !declined_search_filter_dependency(affected),
+                    Some(_) => !declined_search_filter_dependency(affected, owns_object),
                 }
             } else {
-                !declined_search_static_dependency(target.as_ref(), static_def)
+                !declined_search_static_dependency(target.as_ref(), static_def, owns_object)
             }
         });
         if static_abilities.is_empty() {
@@ -5286,7 +5308,7 @@ fn prepare_declined_search_node(ability: &ResolvedAbility) -> Option<Cow<'_, Res
                 filter,
             ) {
                 Some(Some(false)) | None => impossible = true,
-                Some(_) => impossible |= declined_search_filter_dependency(filter),
+                Some(_) => impossible |= declined_search_filter_dependency(filter, owns_object),
             };
         if let Some(population) = mass_population_target_mut(&mut prepared.effect) {
             bind(population);
@@ -5363,13 +5385,13 @@ fn prepare_declined_search_node(ability: &ResolvedAbility) -> Option<Cow<'_, Res
                     if let Some(filter) = unless_filter {
                         impossible |= crate::game::filter::bind_absent_search_predicate(filter)
                             .is_none()
-                            || declined_search_filter_dependency(filter);
+                            || declined_search_filter_dependency(filter, owns_object);
                     }
                 }
                 Effect::Attach {
                     attachment, target, ..
                 } if described_host => {
-                    if declined_search_filter_dependency(attachment) {
+                    if declined_search_filter_dependency(attachment, false) {
                         return None;
                     }
                     bind(target);
@@ -5398,7 +5420,7 @@ fn prepare_declined_search_node(ability: &ResolvedAbility) -> Option<Cow<'_, Res
                         .effect
                         .target_filter()
                         .is_some_and(|declared| std::ptr::eq(declared, operand));
-                !owns_operand && declined_search_filter_dependency(operand)
+                !owns_operand && declined_search_filter_dependency(operand, false)
             })
         {
             return None;
@@ -23103,7 +23125,7 @@ mod tests {
                 filter: TargetFilter::ParentTarget,
             },
         ] {
-            let leaf_dependent = declined_search_population_dependency(&leaf);
+            let leaf_dependent = declined_search_population_dependency(&leaf, false);
             assert_eq!(
                 leaf_dependent,
                 matches!(
@@ -23127,7 +23149,7 @@ mod tests {
                 let mut seen_dependent = false;
                 let complete = population.try_for_each_member(UNION_DEPTH_BUDGET, &mut |member| {
                     seen += 1;
-                    seen_dependent |= declined_search_population_dependency(member);
+                    seen_dependent |= declined_search_population_dependency(member, false);
                 });
                 assert_eq!(complete, nesting < UNION_DEPTH_BUDGET);
                 assert!(seen > 0, "truncation is not an empty population");
@@ -23138,7 +23160,7 @@ mod tests {
                 );
                 let dependent = leaf_dependent || !complete;
                 assert_eq!(
-                    declined_search_population_dependency(&population),
+                    declined_search_population_dependency(&population, false),
                     dependent
                 );
 

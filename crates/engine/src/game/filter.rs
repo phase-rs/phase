@@ -2662,7 +2662,7 @@ fn player_filter_contains_filter_prop(
 /// Visits `FilterProp` leaves carried by dynamic quantity thresholds. This is
 /// part of the same filter grammar as the direct property recursion above:
 /// quantities can themselves count filtered object/player populations.
-fn quantity_expr_contains_filter_prop(
+pub(crate) fn quantity_expr_contains_filter_prop(
     expr: &QuantityExpr,
     predicate: &dyn Fn(&FilterProp) -> bool,
 ) -> bool {
