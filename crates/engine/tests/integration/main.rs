@@ -1217,6 +1217,7 @@ mod n_or_more_creatures_attack_any_player;
 mod name_sticker_goblin;
 mod named_choice_free_entry_contract;
 mod named_choice_legal_actions;
+mod naming_screen_shared_name_other_reference;
 mod namor_attacking_that_player;
 mod narci_fable_singer_final_chapter_drain;
 mod narset_jeskai_waymaster_draw_spells_cast;
